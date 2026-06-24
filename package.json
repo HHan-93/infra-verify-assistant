@@ -12,7 +12,7 @@
     "lint": "tsc --noEmit",
     "dist": "npm run build && electron-builder --win",
     "dist:dir": "npm run build && electron-builder --win --dir",
-    "dist:mac": "npm run build && electron-builder --mac --config electron-builder.mac.json"
+    "dist:mac": "npm run build && electron-builder --mac --config electron-builder.mac.json --publish never"
   },
   "build": {
     "appId": "com.okestro.infraverify",
