@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "PowerShell(Get-ExecutionPolicy -List)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('genai',p.dependencies['@google/genai']\\); console.log\\('openai',p.dependencies['openai']\\)\")",
+      "Bash(powershell -NoProfile -Command \"Get-Process electron -ErrorAction SilentlyContinue | Select-Object Id,Path | Format-Table -Auto\")",
+      "Bash(powershell -NoProfile -Command 'try { Add-MpPreference -ExclusionPath '\\\\''C:\\\\Users\\\\Hanho Heo\\\\Claude\\\\01. work'\\\\'' -ErrorAction Stop; '\\\\''exclusion added'\\\\'' } catch { '\\\\''exclusion FAIL: '\\\\'' + $_.Exception.Message }')",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Name electron -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; 'killed'\")",
+      "Bash(powershell -NoProfile -Command 'try { Rename-Item -Path '\\\\''release\\\\win-unpacked.tmp'\\\\'' -NewName '\\\\''win-unpacked'\\\\'' -ErrorAction Stop; '\\\\''rename OK'\\\\'' } catch { '\\\\''rename FAIL: '\\\\'' + $_.Exception.Message }')",
+      "Bash(powershell -NoProfile -Command 'Get-ChildItem release -File | Select-Object Name,@{N='\\\\''MB'\\\\'';E={[math]::Round\\($_.Length/1MB,1\\)}} | Format-Table -Auto')",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\Hanho Heo\\\\Claude\\\\01. work\\\\release\" -File | Select-Object Name,@{N='MB';E={[math]::Round\\($_.Length/1MB,1\\)}} | Format-Table -Auto)",
+      "Bash(node \"C:/Users/HANHOH~1/AppData/Local/Temp/claude/C--Users-Hanho-Heo-Claude-01--work/9a79f4d4-5995-40a6-a59f-02e1e9545be1/scratchpad/gen-cli.cjs\")",
+      "Bash(node -e \"const fs=require\\('fs'\\);const s=fs.readFileSync\\('src/presets.ts','utf8'\\);const i=s.indexOf\\('= [',s.indexOf\\('export const PRESETS'\\)\\)+2;const t=s.slice\\(i\\);const P=eval\\('\\('+t.slice\\(0,t.lastIndexOf\\(']'\\)+1\\)+'\\)'\\);const all=P.flatMap\\(g=>g.subgroups.flatMap\\(sg=>sg.commands\\)\\);const find=l=>all.find\\(c=>c.label===l\\).command;console.log\\('taint:',find\\('노드 테인트\\(Taint\\) 확인'\\)\\);console.log\\('sysctl:',find\\('런타임 커널 변수'\\)\\);console.log\\('mariadb:',find\\('MariaDB 갤러라 상태'\\)\\);console.log\\('find del:',find\\('검색 후 일괄 삭제'\\)\\);\")",
+      "Bash(npm uninstall *)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('node-pty-prebuilt-multiarch' in \\(p.dependencies||{}\\) ? 'STILL LISTED' : 'removed from deps'\\)\")",
+      "Bash(npx electron-rebuild *)",
+      "Bash(npx prebuild-install *)",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Name electron -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; 'cleaned'\")",
+      "Bash(node -e \"const p=require\\('./package.json'\\).dependencies||{}; const d=require\\('./package.json'\\).devDependencies||{}; console.log\\('homebridge:', \\('@homebridge/node-pty-prebuilt-multiarch' in p\\)?'LISTED':'removed'\\); console.log\\('electron/rebuild:', \\('@electron/rebuild' in d\\)?'LISTED':'removed'\\)\")"
+    ]
+  }
+}

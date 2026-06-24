@@ -1,0 +1,362 @@
+1. OpenStack
+[
+  { "title": "[Nova] 컴퓨트 서비스 전체 상태", "command": "openstack compute service list", "description": "Nova 데몬(compute, scheduler, conductor)의 up/down 및 disable 여부 확인" },
+  { "title": "[Nova] 하이퍼바이저 상세 리소스", "command": "openstack hypervisor list --long", "description": "각 물리 노드별 vCPU, RAM, 로컬 디스크 사용량 및 할당량 확인" },
+  { "title": "[Nova] 호스트 어그리게이트 목록", "command": "openstack aggregate list", "description": "가용 영역(AZ) 및 호스트 그룹(Aggregate) 구성 확인" },
+  { "title": "[Nova] 특정 서버(VM) 콘솔 로그", "command": "openstack console log show <SERVER_ID>", "description": "부팅 실패 시 커널 패닉이나 초기화 에러 등 부팅 콘솔 로그 확인" },
+  { "title": "[Nova] 인스턴스 마이그레이션 상태", "command": "openstack server migration list", "description": "Live/Cold 마이그레이션 진행 상태 및 성공 여부 확인" },
+  { "title": "[Nova] 플레이버(Flavor) 상세 목록", "command": "openstack flavor list --long", "description": "생성된 VM 스펙(vCPU, RAM, Disk, Extra Specs) 전체 조회" },
+  { "title": "[Neutron] L3/DHCP 에이전트 상태", "command": "openstack network agent list", "description": "네트워크 에이전트의 alive 상태 및 호스트 매핑 확인" },
+  { "title": "[Neutron] 전체 네트워크 토폴로지", "command": "openstack network list --long", "description": "내부/외부 네트워크, 서브넷 매핑, MTU 설정 및 Provider 정보 조회" },
+  { "title": "[Neutron] 특정 라우터 포트 매핑", "command": "openstack port list --router <ROUTER_ID>", "description": "가상 라우터에 연결된 내부 인터페이스 및 게이트웨이 포트 확인" },
+  { "title": "[Neutron] Floating IP 할당 현황", "command": "openstack floating ip list", "description": "외부 통신용 Public IP의 VM 할당 및 연결 포트 상태 점검" },
+  { "title": "[Neutron] 보안 그룹 룰 상세", "command": "openstack security group rule list", "description": "허용된 Ingress/Egress 포트 및 프로토콜, 타겟 IP 대역 확인" },
+  { "title": "[Neutron] 서브넷 IP 할당 풀", "command": "openstack subnet list --long", "description": "서브넷의 CIDR, Gateway IP, DHCP 활성화 및 할당 범위 확인" },
+  { "title": "[Cinder] 볼륨 서비스 데몬 상태", "command": "openstack volume service list", "description": "Cinder 볼륨, 스케줄러, 백업 서비스의 상태 확인" },
+  { "title": "[Cinder] 생성된 전체 볼륨 상태", "command": "openstack volume list --all-projects --long", "description": "볼륨의 available, in-use, error 상태 및 VM 어태치 여부 조회" },
+  { "title": "[Cinder] 볼륨 스냅샷 현황", "command": "openstack volume snapshot list --all-projects", "description": "볼륨 백업용 스냅샷 리스트 및 생성 완료 상태 점검" },
+  { "title": "[Cinder] 스토리지 풀(백엔드) 상태", "command": "openstack volume pool list --detail", "description": "Cinder와 연결된 스토리지 백엔드(Ceph 등)의 가용 용량 및 상태" },
+  { "title": "[Cinder] 볼륨 타입 매핑 목록", "command": "openstack volume type list --long", "description": "스토리지 백엔드별로 매핑된 볼륨 타입(SSD, HDD 등) 확인" },
+  { "title": "[Glance] 등록된 이미지 목록", "command": "openstack image list --long", "description": "OS 이미지의 상태(active), 포맷(qcow2, raw), 크기 및 가시성 확인" },
+  { "title": "[Glance] 숨겨진(공유) 이미지 포함 조회", "command": "openstack image list --all-projects", "description": "특정 테넌트에 종속되거나 공유된 모든 이미지 전체 조회" },
+  { "title": "[Keystone] 엔드포인트 URL 점검", "command": "openstack endpoint list", "description": "전체 서비스의 public, internal, admin API URL 매핑 확인" },
+  { "title": "[Keystone] 등록된 서비스 카탈로그", "command": "openstack service list", "description": "컴퓨트, 네트워크, 스토리지 등 클러스터에 활성화된 서비스 종류 확인" },
+  { "title": "[Keystone] 프로젝트(테넌트) 목록", "command": "openstack project list", "description": "클러스터 내 구성된 전체 프로젝트와 도메인 상태 확인" },
+  { "title": "[Keystone] 사용자 및 롤(Role) 매핑", "command": "openstack role assignment list --names", "description": "어떤 사용자가 어느 프로젝트에서 admin/member 권한을 갖는지 확인" },
+  { "title": "[System] 전체 리소스 사용량 통계", "command": "openstack usage list", "description": "테넌트별 인스턴스 수, 누적 vCPU/RAM/Disk 사용량 조회" },
+  { "title": "[System] 테넌트 쿼터(Quota) 설정", "command": "openstack quota show --default", "description": "프로젝트별 최대 생성 가능한 VM, 볼륨, IP 등 기본 제한량 확인" }
+]
+[
+  { "title": "[OVS] 가상 스위치 브릿지 상태", "command": "ovs-vsctl show", "description": "Open vSwitch에 구성된 br-int, br-ex, br-tun 등의 브릿지와 포트 매핑 확인" },
+  { "title": "[OVS] 통합 브릿지(br-int) 플로우", "command": "ovs-ofctl dump-flows br-int", "description": "VM 간 통신 및 보안 그룹이 적용된 OVS OpenFlow 룰 덤프 확인" },
+  { "title": "[Libvirt] 호스트 내 구동 중인 VM", "command": "virsh list --all", "description": "Nova를 거치지 않고 컴퓨트 노드 하이퍼바이저(KVM/QEMU) 레벨에서 직접 VM 상태 확인" },
+  { "title": "[Libvirt] VM 블록 디바이스(디스크)", "command": "virsh domblklist <INSTANCE_NAME>", "description": "특정 인스턴스에 매핑된 실제 디스크 경로(Ceph RBD 또는 로컬 파일) 확인" },
+  { "title": "[MQ] RabbitMQ 클러스터 상태", "command": "rabbitmqctl cluster_status", "description": "OpenStack 서비스 간 통신을 담당하는 메시지 큐 노드들의 상태 및 파티션 발생 여부 점검" },
+  { "title": "[MQ] 큐(Queue) 메시지 적체 확인", "command": "rabbitmqctl list_queues | grep -v ' 0'", "description": "처리되지 못하고 쌓여있는(Dead letter 등) 메시지 큐 리스트 확인" },
+  { "title": "[DB] MariaDB/Galera 클러스터 노드", "command": "mysql -u root -e \"SHOW STATUS LIKE 'wsrep_cluster_size';\"", "description": "OpenStack DB 이중화(Galera Cluster) 노드 개수 및 싱크 정상 여부 점검" },
+  { "title": "[Time] NTP 서버 동기화 상태", "command": "chronyc sources -v", "description": "컴퓨트 및 스토리지 노드 간 토큰 만료 에러를 방지하기 위한 시간 동기화(Chrony/NTP) 확인" },
+  { "title": "[Log] Nova API 에러 로그 추적", "command": "tail -n 100 /var/log/nova/nova-api.log | grep -i error", "description": "VM 생성 실패 시 가장 먼저 확인해야 할 Nova API의 최신 에러 로그" },
+  { "title": "[Log] Neutron Server 에러 로그", "command": "tail -n 100 /var/log/neutron/neutron-server.log | grep -i error", "description": "네트워크 생성, 포트 바인딩 실패 시 원인 파악을 위한 에러 로그 조회" }
+]
+
+
+2. Ceph
+[
+  { "title": "[Cluster] 클러스터 헬스 상세", "command": "ceph health detail", "description": "WARN/ERR 상태 시 크래시된 데몬이나 손상된 PG 등 근본 원인 출력" },
+  { "title": "[Cluster] 클러스터 실시간 이벤트", "command": "ceph -w", "description": "클러스터 내에서 발생하는 PG 변경, OSD 다운 등의 실시간 로그 모니터링" },
+  { "title": "[Cluster] 쿼럼(MON) 참여 상태", "command": "ceph quorum_status --format json-pretty", "description": "Monitor 노드들의 선출 상태 및 쿼럼 형성 정상 여부 딥다이브" },
+  { "title": "[Cluster] 매니저(MGR) 모듈 상태", "command": "ceph mgr module ls", "description": "Prometheus, Dashboard 등 활성화된 MGR 모듈 상태 점검" },
+  { "title": "[OSD] OSD 트리 및 가중치", "command": "ceph osd tree", "description": "CRUSH 맵 기반의 물리 노드별 OSD 트리와 weight, up/down 상태 확인" },
+  { "title": "[OSD] 물리 디스크 사용률 현황", "command": "ceph osd df", "description": "각 OSD별 디스크 사용량, 여유 공간, variance(데이터 편차) 점검" },
+  { "title": "[OSD] OSD 데몬 성능 통계", "command": "ceph osd perf", "description": "개별 OSD의 commit/apply 지연 시간(Latency) 추적 (느린 디스크 색출)" },
+  { "title": "[OSD] 최근 OSD 크래시 로그", "command": "ceph crash ls", "description": "최근 비정상 종료되거나 크래시가 발생한 OSD 데몬 이력 확인" },
+  { "title": "[PG] PG 전체 요약 및 I/O", "command": "ceph pg stat", "description": "전체 PG 맵 버전 및 클라이언트 Read/Write IOPS, Throughput 요약" },
+  { "title": "[PG] 비정상(Stuck) PG 목록", "command": "ceph pg dump_stuck inactive", "description": "데이터 I/O가 처리되지 못하고 멈춰있는(stuck) Placement Group 확인" },
+  { "title": "[PG] 복구(Recovery) 중인 PG", "command": "ceph pg dump_stuck degraded", "description": "OSD 장애로 인해 데이터 리플리케이션(복구)이 진행 중인 PG 확인" },
+  { "title": "[Pool] 풀(Pool) 리스트 상세", "command": "ceph osd pool ls detail", "description": "전체 풀의 size, min_size, crush rule, pg_num 등 설정값 확인" },
+  { "title": "[Pool] 풀별 논리적 사용량", "command": "rados df", "description": "풀에 저장된 오브젝트 수, 크기, 그리고 논리/물리 사용량 분석" },
+  { "title": "[Pool] 특정 풀의 IOPS 모니터링", "command": "ceph osd pool stats", "description": "풀 단위로 발생하는 실시간 Client I/O 부하 모니터링" },
+  { "title": "[RBD] 블록 디바이스(RBD) 목록", "command": "rbd ls -p <POOL_NAME>", "description": "Cinder 볼륨 등 특정 풀에 생성된 블록 디바이스 이미지 리스트 조회" },
+  { "title": "[RBD] 삭제 대기 중인 RBD 목록", "command": "rbd trash ls -p <POOL_NAME>", "description": "삭제 명령을 받았으나 백그라운드에서 아직 정리되지 않은 이미지 확인" },
+  { "title": "[CRUSH] CRUSH 룰셋 확인", "command": "ceph osd crush rule ls", "description": "데이터 분산 정책에 사용 중인 CRUSH Rule 리스트 조회" },
+  { "title": "[CRUSH] 데이터 리밸런싱 상태", "command": "ceph osd map <POOL_NAME> <OBJECT>", "description": "특정 오브젝트가 어느 OSD에 매핑되어 저장되는지 추적" },
+  { "title": "[Auth] 인증 키(Keyring) 목록", "command": "ceph auth ls", "description": "클러스터에 등록된 클라이언트 및 데몬의 인증 키 권한 확인" },
+  { "title": "[Perf] 클러스터 전역 성능 덤프", "command": "ceph daemon mon.<MON_ID> perf dump", "description": "모니터 데몬의 소켓을 통해 내부 성능 카운터 딥다이브 추출" },
+  { "title": "[Config] 런타임 설정 덤프", "command": "ceph config dump", "description": "ceph.conf 파일 외에 런타임에 동적으로 적용된 설정값 전체 조회" }
+]
+[
+  { "title": "[CephFS] 파일시스템(MDS) 헬스", "command": "ceph mds stat", "description": "CephFS 메타데이터 서버(MDS)의 Active, Standby 상태 및 랭크 확인" },
+  { "title": "[RGW] 오브젝트 스토리지 사용자", "command": "radosgw-admin user list", "description": "S3/Swift API를 사용하기 위해 등록된 RGW(RADOS Gateway) 유저 리스트 조회" },
+  { "title": "[Orch] 배포된 데몬 컨테이너 목록", "command": "ceph orch ps", "description": "Cephadm 환경에서 각 노드별로 구동 중인 OSD, MON, MGR 컨테이너 데몬 상태 파악" },
+  { "title": "[Orch] 호스트 인벤토리 점검", "command": "ceph orch host ls", "description": "Ceph 클러스터에 편입된 물리 노드 리스트 및 유지보수(Maintenance) 모드 확인" },
+  { "title": "[Scrub] 딥 스크럽(Deep Scrub) 상태", "command": "ceph osd scrub <OSD_ID>", "description": "특정 OSD에 대해 데이터 정합성 검사(Scrubbing) 강제 수행 예약" },
+  { "title": "[Auth] 클라이언트 키링 상세", "command": "ceph auth get client.admin", "description": "특정 클라이언트(admin 등)의 인증 키값 및 허용된 서비스 접근 권한 출력" },
+  { "title": "[MGR] 대시보드 엔드포인트", "command": "ceph mgr services", "description": "Ceph Dashboard 및 Prometheus 메트릭 익스포터의 접속 URL과 포트 확인" }
+]
+
+
+
+3. Kubernetes
+[
+  { "title": "[Node] 노드 상세 및 할당량", "command": "kubectl describe nodes", "description": "노드의 Taint 여부, 할당된 Pod 수, CPU/Mem 요청(Request)/제한(Limit)량 확인" },
+  { "title": "[Node] 노드 리소스(메트릭) 부하", "command": "kubectl top nodes", "description": "각 워커 노드의 현재 CPU 및 메모리 실제 사용량(%) 확인" },
+  { "title": "[Node] 특정 노드 스케줄링 방지", "command": "kubectl cordon <NODE_NAME>", "description": "점검을 위해 해당 노드에 더 이상 Pod가 스케줄링되지 않도록 차단" },
+  { "title": "[Pod] 전체 네임스페이스 파드", "command": "kubectl get pods -A -o wide", "description": "클러스터 내 모든 파드의 상태, 배치된 노드, IP 리스트 출력" },
+  { "title": "[Pod] 비정상 파드 상세 필터링", "command": "kubectl get pods -A --field-selector=status.phase!=Running", "description": "Running 상태가 아닌 모든 에러, Pending, Crash 파드만 정확히 색출" },
+  { "title": "[Pod] 파드 리소스 사용량", "command": "kubectl top pods -A", "description": "CPU나 메모리를 과다하게 점유하여 병목을 일으키는 파드 모니터링" },
+  { "title": "[Pod] 파드 크래시 이전 로그", "command": "kubectl logs <POD_NAME> -n <NAMESPACE> --previous", "description": "CrashLoopBackOff 발생 시 직전에 죽은 컨테이너의 에러 로그 확인" },
+  { "title": "[Pod] 파드 내부 쉘(Shell) 접속", "command": "kubectl exec -it <POD_NAME> -n <NAMESPACE> -- /bin/sh", "description": "컨테이너 내부에 직접 접근하여 네트워크나 설정 파일 디버깅" },
+  { "title": "[Network] 서비스 엔드포인트 연결", "command": "kubectl get endpoints -A", "description": "Service 객체와 실제 Pod IP가 정상적으로 매핑(로드밸런싱)되었는지 점검" },
+  { "title": "[Network] Ingress 라우팅 룰", "command": "kubectl get ingress -A", "description": "외부 트래픽을 내부 서비스로 연결하는 도메인 및 경로(Path) 룰 확인" },
+  { "title": "[Network] DNS 레졸루션 디버그", "command": "kubectl run -i --tty --rm debug --image=busybox --restart=Never -- nslookup kubernetes.default", "description": "임시 파드를 띄워 클러스터 내부 CoreDNS의 정상 동작 여부 테스트" },
+  { "title": "[Network] 특정 포트 로컬 포워딩", "command": "kubectl port-forward svc/<SVC_NAME> <LOCAL_PORT>:<SVC_PORT>", "description": "외부 노출 없는 내부 서비스를 로컬 포트로 바인딩하여 UI 등 확인" },
+  { "title": "[Storage] PV(영구 볼륨) 맵", "command": "kubectl get pv", "description": "스토리지 클래스 기반으로 프로비저닝된 물리 볼륨의 용량 및 상태" },
+  { "title": "[Storage] PVC(볼륨 클레임) 바인드", "command": "kubectl get pvc -A", "description": "파드가 요청한 볼륨 클레임이 정상적으로 PV와 Bound 되었는지 확인" },
+  { "title": "[Storage] 스토리지 클래스 확인", "command": "kubectl get sc", "description": "동적 볼륨 프로비저닝을 담당하는 CSI 프로바이더(Ceph 등) 설정 확인" },
+  { "title": "[Deploy] 디플로이먼트 상태", "command": "kubectl get deployments -A", "description": "요구된 레플리카 수와 실제로 Ready 상태인 파드 수가 일치하는지 점검" },
+  { "title": "[Deploy] 롤아웃(배포) 히스토리", "command": "kubectl rollout history deployment/<NAME> -n <NAMESPACE>", "description": "애플리케이션 버전 업데이트 이력 및 리비전 확인" },
+  { "title": "[Deploy] 롤아웃 재시작(재배포)", "command": "kubectl rollout restart deployment/<NAME> -n <NAMESPACE>", "description": "다운타임 없이 기존 파드를 하나씩 재생성하여 설정 갱신 유도" },
+  { "title": "[Deploy] 레플리카 수 스케일링", "command": "kubectl scale deployment <NAME> --replicas=<NUM> -n <NAMESPACE>", "description": "특정 디플로이먼트의 파드 수를 강제로 늘리거나 줄임" },
+  { "title": "[System] 클러스터 이벤트 추적", "command": "kubectl get events -A --sort-by='.lastTimestamp'", "description": "스케줄링 실패, 이미지 풀 다운 에러 등 시간순으로 발생한 전체 이벤트" },
+  { "title": "[System] 컴포넌트 헬스 체크", "command": "kubectl get componentstatuses", "description": "etcd, 스케줄러, 컨트롤러 매니저 등 컨트롤 플레인 핵심 헬스 체크" },
+  { "title": "[System] 데몬셋 롤아웃 상태", "command": "kubectl get daemonsets -A", "description": "네트워크 플러그인(CNI)이나 로그 수집기가 모든 노드에 잘 배포되었는지 점검" },
+  { "title": "[Config] 컨피그맵(ConfigMap) 조회", "command": "kubectl get cm -A", "description": "파드에 주입되는 환경변수 및 애플리케이션 설정 파일 객체 확인" },
+  { "title": "[Config] 시크릿(Secret) 조회", "command": "kubectl get secret -A", "description": "인증서, 패스워드 등 암호화되어 관리되는 시크릿 객체 리스트 점검" }
+]
+[
+  { "title": "[Admin] 클러스터 인증서 만료일", "command": "kubeadm certs check-expiration", "description": "API Server, etcd 등 핵심 K8s 컴포넌트의 TLS 인증서 만료 기한 점검" },
+  { "title": "[Admin] API 리소스 지원 목록", "command": "kubectl api-resources", "description": "현재 클러스터 버전에 등록된 모든 K8s 객체 타입 및 단축어(Shortnames) 조회" },
+  { "title": "[Admin] Etcd 클러스터 헬스 체크", "command": "ETCDCTL_API=3 etcdctl endpoint health", "description": "K8s 상태 데이터를 저장하는 핵심 DB인 etcd 노드들의 응답 시간 및 정상 동작 검증" },
+  { "title": "[Helm] 설치된 릴리스 목록", "command": "helm list -A", "description": "Helm 차트로 배포된 모든 애플리케이션의 리비전, 상태(deployed/failed) 확인" },
+  { "title": "[Helm] 릴리스 상세 설정값(Values)", "command": "helm get values <RELEASE_NAME> -n <NAMESPACE>", "description": "특정 애플리케이션 배포 시 주입된 사용자 정의 설정값(values.yaml) 덤프" },
+  { "title": "[Node] 특정 노드 스케줄링 허용", "command": "kubectl uncordon <NODE_NAME>", "description": "유지보수(Cordon)가 끝난 노드에 다시 Pod가 스케줄링될 수 있도록 해제" },
+  { "title": "[Pod] 파드 라벨(Label) 기준 조회", "command": "kubectl get pods -l app=<APP_NAME> -n <NAMESPACE>", "description": "특정 라벨(예: app=nginx)을 가진 파드들만 그룹화하여 상태 조회" },
+  { "title": "[Auth] 서비스 어카운트 권한 확인", "command": "kubectl auth can-i create pods --as=system:serviceaccount:<NS>:<SA_NAME>", "description": "특정 서비스 어카운트가 파드 생성 등의 권한(RBAC)을 제대로 가지고 있는지 디버그" }
+]
+
+
+4. 공통
+[
+  { "title": "[System] 프로세스 및 부하 (top)", "command": "top -b -n 1 | head -n 20", "description": "현재 CPU, 메모리를 가장 많이 점유하는 상위 프로세스 스냅샷" },
+  { "title": "[System] 커널 링 버퍼 에러 (dmesg)", "command": "dmesg -T --level=err,crit,alert,emerg", "description": "OOM Killer, 하드웨어 결함, 디스크 I/O 크리티컬 에러만 필터링 조회" },
+  { "title": "[System] 디스크 I/O 통계 (iostat)", "command": "iostat -xz 1 5", "description": "1초 간격 5회 출력. 블록 디바이스별 Read/Write 속도 및 await(지연)율 점검" },
+  { "title": "[System] 가상 메모리 통계 (vmstat)", "command": "vmstat 1 5", "description": "프로세스 대기열(r, b), 메모리 스왑(si, so) 및 CPU IO Wait 병목 확인" },
+  { "title": "[System] 열려있는 파일 추적 (lsof)", "command": "lsof +D /var/log", "description": "특정 디렉토리나 파일을 점유하고 있어 삭제되지 않게 막고 있는 프로세스 추적" },
+  { "title": "[System] 시스템 로그 (journalctl)", "command": "journalctl -p 3 -xb", "description": "현재 부팅 세션(-b)에서 발생한 에러 등급(-p 3) 이상의 시스템 로그 전체 조회" },
+  { "title": "[System] 런타임 커널 변수 (sysctl)", "command": "sysctl -a | grep -i 'net.ipv4\\|vm.swappiness'", "description": "네트워크 튜닝(TCP 백로그 등) 및 메모리 스왑 설정값 적용 여부 확인" },
+  { "title": "[Network] 실시간 트래픽 (tcpdump)", "command": "tcpdump -i any port 80 -n -c 100", "description": "특정 포트로 들어오는 패킷의 헤더 및 IP 주소를 100개 캡처하여 디버깅" },
+  { "title": "[Network] 리슨 포트 상세 (ss)", "command": "ss -tunlpo", "description": "TCP/UDP 리슨 포트, 바인딩된 프로세스명 및 타이머 상태(keepalive 등) 확인" },
+  { "title": "[Network] 라우팅 및 게이트웨이", "command": "ip route show", "description": "디폴트 게이트웨이 및 특정 서브넷으로 빠져나가는 인터페이스 매핑 점검" },
+  { "title": "[Network] 인터페이스 링크 상태", "command": "ip -s link", "description": "인터페이스별 RX/TX 패킷량 및 Drop, Error 등 패킷 손실 카운트 점검" },
+  { "title": "[Network] 본딩(Bonding) 상태", "command": "cat /proc/net/bonding/bond0", "description": "NIC 이중화(LACP 등) 상태, Active 포트 및 MII Polling 정상 여부 확인" },
+  { "title": "[Network] NIC 하드웨어 스펙", "command": "ethtool eth0", "description": "물리 랜카드의 지원 속도(10G/40G 등), Duplex 상태 및 Link up 여부 점검" },
+  { "title": "[Disk] 디스크 파티션 및 마운트", "command": "lsblk -f", "description": "물리 디스크 구조, 파일시스템 타입(XFS, EXT4), UUID 및 마운트 경로" },
+  { "title": "[Disk] 용량 및 Inode 사용률", "command": "df -iTh", "description": "디스크 용량뿐만 아니라 파일 개수 한계(Inode) 도달 여부까지 함께 점검" },
+  { "title": "[Disk] 디렉토리별 용량 추적", "command": "du -sh /var/* | sort -rh | head -10", "description": "/var 내에서 비정상적으로 용량을 많이 차지하는 상위 10개 디렉토리 색출" },
+  { "title": "[Service] 실패한 데몬 리스트", "command": "systemctl --failed", "description": "systemd로 관리되는 서비스 중 시작 실패했거나 크래시된 항목만 출력" },
+  { "title": "[Test] 대역폭 부하 테스트 서버", "command": "iperf3 -s -D", "description": "네트워크 대역폭 한계 및 지연 테스트를 위한 iperf3 서버 모드 백그라운드 구동" },
+  { "title": "[Test] 대역폭 부하 테스트 클라", "command": "iperf3 -c <SERVER_IP> -t 60 -P 4", "description": "60초 동안 4개의 병렬 스레드로 타겟 서버와의 실효 TCP 대역폭 측정" },
+  { "title": "[Test] CPU/메모리 강제 부하", "command": "stress-ng --cpu 8 --vm 4 --vm-bytes 2G --timeout 120s", "description": "임계치 알람(Prometheus 등) 동작 검증을 위한 2분간의 극한 리소스 스파이크 유도" },
+  { "title": "[Test] 디스크 I/O 강제 부하", "command": "stress-ng --hdd 2 --hdd-bytes 10G --timeout 60s", "description": "스토리지 병목 현상 재현을 위해 대용량 파일 Read/Write 작업 인위적 발생" },
+  { "title": "[Info] OS 릴리즈 정보", "command": "cat /etc/os-release", "description": "현재 노드의 리눅스 배포판 종류, 주요 버전 및 코드네임 확인" },
+  { "title": "[Info] CPU 및 아키텍처 스펙", "command": "lscpu", "description": "물리 코어 수, 쓰레드, NUMA 노드 매핑 및 가상화 지원(VT-x) 활성화 여부 확인" },
+  { "title": "[Info] 물리 메모리 스펙 (하드웨어)", "command": "dmidecode -t memory | grep -i 'size\\|speed'", "description": "메인보드에 꽂힌 물리적 램(DIMM)의 개별 용량 및 클럭 속도 확인" }
+]
+[
+  { "title": "[Security] SELinux 적용 상태", "command": "sestatus", "description": "SELinux의 활성화 여부(Enforcing/Permissive) 및 마운트 정책 확인" },
+  { "title": "[Security] Firewalld 방화벽 상태", "command": "firewall-cmd --state", "description": "CentOS/RHEL 환경의 기본 방화벽 데몬 구동 여부 검증" },
+  { "title": "[Security] Iptables 필터 룰 덤프", "command": "iptables -L -n -v | head -n 30", "description": "커널 레벨의 방화벽(Iptables)에 등록된 패킷 드랍/허용 룰 및 카운트 점검" },
+  { "title": "[Debug] 특정 프로세스 시스템 콜", "command": "strace -c -p <PID>", "description": "응답이 없는 특정 데몬(PID)이 어떤 시스템 콜(I/O, Network)에서 병목이 걸렸는지 요약 추적" },
+  { "title": "[Debug] 메모리 누수 및 캐시 비우기", "command": "sync; echo 3 > /proc/sys/vm/drop_caches", "description": "메모리 부족(OOM) 상황 테스트나 정리 시, PageCache, dentry, inode 캐시 강제 반환" },
+  { "title": "[Network] ARP 캐시 테이블", "command": "arp -an", "description": "로컬 네트워크 대역 내 인접한 호스트들의 MAC 주소 캐싱 정상 여부 점검" },
+  { "title": "[Network] 소켓 TIME_WAIT 상태", "command": "netstat -nat | grep TIME_WAIT | wc -l", "description": "네트워크 연결 종료 후 남아있는 TIME_WAIT 소켓 개수를 세어 커널 튜닝 필요 여부 판단" },
+  { "title": "[Hardware] 시스템 물리 하드웨어", "command": "lshw -short", "description": "서버에 장착된 디스크, 네트워크 카드, 프로세서 등의 하드웨어 버스/스펙 요약" },
+  { "title": "[Monitor] Node Exporter 메트릭 점검", "command": "curl -s http://localhost:9100/metrics | grep 'node_cpu_seconds_total' | head -n 5", "description": "Prometheus Node Exporter가 수집하는 메트릭(CPU 등)이 정상적으로 노출되는지 직접 호출" },
+  { "title": "[Monitor] PromQL 수집 테스트 (cURL)", "command": "curl -s http://localhost:9090/api/v1/query?query=up", "description": "로컬 Prometheus API에 'up' 메트릭을 쿼리하여 타겟들의 수집 정상 여부 확인" }
+
+# 단일 프리셋 명령어 통합본 (CLI Reference - v2.0)
+
+> Infra Verify Assistant — "단일 프리셋 명령어" 패널의 전체 명령어 통합 목록입니다.
+> 
+> - `<...>` 가 포함된 명령은 실제 값으로 바꿔서 입력해야 합니다.
+> - 품질 검증(QA), 릴리즈 테스트, 성능 모니터링, 상세 디버깅에 초점을 맞춘 심화 명령어들이 포함되어 있습니다.
+> - `tail -f`, `watch`, `ceph -w` 등 실시간 스트리밍 명령은 **Ctrl+C** 로 종료합니다.
+
+---
+
+## 1. OpenStack (Nova, Neutron, Cinder, 검증 및 제어)
+
+| 항목 | 명령어 | 설명 |
+| :--- | :--- | :--- |
+| **컴퓨트 서비스 상태** | `openstack compute service list` | Nova 데몬(compute, scheduler, conductor) 활성 상태 확인 |
+| **컴퓨트 노드 제어** | `openstack compute service set --disable --disable-reason "QA_Test" <HOST> nova-compute` | 특정 컴퓨트 노드 스케줄링 일시 차단 (유지보수/검증용) |
+| **인스턴스 목록(전체)** | `openstack server list --all-projects --long` | 전체 프로젝트의 VM 상태 및 배치된 물리 호스트 노드 조회 |
+| **ERROR 인스턴스 검색**| `openstack server list --all-projects --status ERROR` | 생성 실패하거나 오류 상태에 빠진 VM만 정확히 필터링 |
+| **인스턴스 상세 정보** | `openstack server show <SERVER_ID>` | VM의 생성 시간, 할당 네트워크, 보안 그룹, 배치 호스트 상세 메타데이터 |
+| **인스턴스 콘솔 로그** | `openstack console log show <SERVER_ID>` | 커널 패닉, 부팅 에러 등 VM 초기화 콘솔 로그 확인 |
+| **인스턴스 액션 기록** | `openstack server event list <SERVER_ID>` | 특정 VM에 수행된 API 요청(생성, 재부팅, 마이그레이션) 이력 추적 |
+| **하이퍼바이저 리소스**| `openstack hypervisor list --long` | 각 물리 노드별 vCPU, RAM, 로컬 디스크 사용량 및 할당량 |
+| **셀(Cell) 호스트 갱신** | `nova-manage cell_v2 discover_hosts` | 신규 노드 증설 직후 컨트롤 플레인에 새 호스트를 즉시 인식시킴 |
+| **라이브 마이그레이션**| `openstack server migrate <SERVER_ID> --live-migration` | 다운타임 없이 VM을 다른 컴퓨트 노드로 실시간 이동 테스트 |
+| **마이그레이션 상태** | `openstack server migration list` | 마이그레이션 진행률 및 성공/실패 여부 확인 |
+| **네트워크 에이전트** | `openstack network agent list` | L3/DHCP 에이전트의 alive 상태 및 호스트 매핑 확인 |
+| **네트워크 토폴로지** | `openstack network list --long` | 내부/외부 네트워크, 서브넷 매핑, MTU 및 Provider 정보 |
+| **가상 포트 상세 확인**| `openstack port show <PORT_ID>` | VM에 할당된 가상 포트의 MAC, 바인딩 호스트, ACTIVE/DOWN 상태 |
+| **Floating IP 할당** | `openstack floating ip list` | 외부 통신용 Public IP의 할당 및 연결 포트 상태 점검 |
+| **보안 그룹 룰 상세** | `openstack security group rule list` | Ingress/Egress 포트, 프로토콜, 타겟 IP 대역 룰 확인 |
+| **OVS 브릿지 상태** | `ovs-vsctl show` | Open vSwitch의 br-int, br-ex, br-tun 브릿지 및 포트 매핑 |
+| **OVS 오픈플로우 룰** | `ovs-ofctl dump-flows br-int` | VM 간 통신 및 보안 룰이 적용된 OVS OpenFlow 플로우 덤프 |
+| **볼륨 목록(전체)** | `openstack volume list --all-projects --long` | 전체 볼륨의 상태(in-use, available, error) 및 연결된 인스턴스 |
+| **볼륨 상세 정보** | `openstack volume show <VOLUME_ID>` | 볼륨 생성 실패 시 백엔드 스토리지 매핑 및 에러 코드 분석 |
+| **볼륨 백업 리스트** | `openstack volume backup list` | Cinder를 통해 생성된 볼륨 백업 이미지 및 상태 확인 |
+| **이미지 목록(전체)** | `openstack image list --long` | OS 이미지 상태, 포맷(qcow2/raw), 크기, 가시성 조회 |
+| **RabbitMQ 클러스터**| `rabbitmqctl cluster_status` | 메시지 큐 노드 상태 및 파티션(네트워크 단절) 발생 여부 |
+| **메시지 큐 적체 확인**| `rabbitmqctl list_queues \| grep -v ' 0'` | 처리되지 못하고 큐에 쌓여있는 데드레터 메시지 목록 확인 |
+| **MariaDB 갤러라 상태**| `mysql -u root -e "SHOW STATUS LIKE 'wsrep_cluster_size';"` | DB 이중화(Galera) 노드 개수 및 클러스터 싱크 정상 여부 |
+| **엔드포인트 URL 점검**| `openstack endpoint list` | 전체 서비스의 public, internal, admin API 엔드포인트 매핑 |
+| **프로젝트/테넌트 목록**| `openstack project list` | 클러스터 내 구성된 전체 프로젝트 및 도메인 확인 |
+| **유저 권한 매핑** | `openstack role assignment list --names` | 특정 유저가 어느 프로젝트에서 admin/member 권한을 가지는지 조회 |
+| **테넌트 리소스 쿼터**| `openstack quota show --default` | 프로젝트별 최대 생성 가능한 VM, 볼륨, IP 제한량 조회 |
+| **Nova 에러 로그** | `tail -n 100 /var/log/nova/nova-api.log \| grep -i error` | VM 생성 실패 시 가장 먼저 확인할 Nova API 최근 에러 로그 |
+| **Neutron 에러 로그** | `tail -n 100 /var/log/neutron/neutron-server.log \| grep -i error` | 네트워크/포트 바인딩 실패 시 원인 파악용 에러 로그 |
+| **Cinder 에러 로그** | `tail -n 100 /var/log/cinder/cinder-volume.log \| grep -i error` | 볼륨 생성 및 연결 실패 시 스토리지 연동 에러 로그 |
+| **호스트 KVM VM 상태**| `virsh list --all` | 컴퓨트 노드 쉘에서 하이퍼바이저 레벨의 실제 VM 구동 상태 조회 |
+| **VM 디스크 매핑 확인**| `virsh domblklist <INSTANCE_NAME>` | VM에 매핑된 실제 블록 디바이스(RBD 경로 등) 식별 |
+
+---
+
+## 2. Ceph (스토리지 헬스, 성능 테스트, 데이터 정합성)
+
+| 항목 | 명령어 | 설명 |
+| :--- | :--- | :--- |
+| **클러스터 요약(s)** | `ceph -s` | HEALTH, MON/OSD, PG, 용량 상태를 확인하는 최우선 점검 명령 |
+| **클러스터 헬스 상세** | `ceph health detail` | WARN/ERR 발생 시 크래시 데몬이나 손상된 PG 등 근본 원인 출력 |
+| **실시간 이벤트(w)** | `ceph -w` | PG 변경, OSD Up/Down, 리밸런싱 등 클러스터 로그 실시간 모니터링 |
+| **MON 쿼럼 상태** | `ceph quorum_status --format json-pretty` | 모니터 노드 선출 상태 및 쿼럼 정상 형성 딥다이브 (JSON) |
+| **OSD 트리 및 가중치** | `ceph osd tree` | CRUSH 맵 기반 호스트 노드별 OSD 트리와 weight, up/down 상태 |
+| **OSD 트리 JSON 출력** | `ceph osd tree -f json-pretty` | OSD 구성도를 JSON으로 출력하여 파싱 및 자동화 스크립트에 연동 |
+| **디스크 사용률(OSD)**| `ceph osd df` | OSD별 물리 디스크 사용량, 여유 공간, 데이터 분산 편차(variance) 점검 |
+| **OSD 데몬 성능 지연**| `ceph osd perf` | 각 OSD의 commit/apply 지연 시간(Latency) 추적 (느린 디스크 색출) |
+| **자동 아웃(Out) 방지**| `ceph osd set noout` | 노드 재부팅/점검 전 OSD가 Out되어 불필요한 리밸런싱이 발생하지 않도록 홀드 |
+| **자동 아웃 방지 해제**| `ceph osd unset noout` | 점검 완료 후 noout 플래그를 해제하여 정상적인 클러스터 관리 복구 |
+| **강제 딥 스크럽** | `ceph osd scrub <OSD_ID>` | 특정 OSD 데이터 정합성 검사(Scrub) 강제 수행 예약 |
+| **OSD 크래시 기록** | `ceph crash ls` | 비정상 종료되거나 크래시된 OSD 데몬 이력 확인 |
+| **크래시 알람 초기화**| `ceph crash archive-all` | 확인이 끝난 크래시 로그를 보관 처리하여 클러스터 경고 알람 해제 |
+| **PG 전체 통계 요약** | `ceph pg stat` | PG 맵 버전 및 클라이언트 Read/Write IOPS, Throughput 요약 |
+| **비정상(Stuck) PG** | `ceph pg dump_stuck inactive` | 데이터 I/O 처리가 멈춰있는(stuck) Placement Group 확인 |
+| **복구 중(Degraded) PG**| `ceph pg dump_stuck degraded` | 노드/OSD 장애로 데이터 리플리케이션이 진행 중인 PG 확인 |
+| **손상된 PG 수동 복구**| `ceph pg repair <PG_ID>` | Inconsistent 에러가 뜬 특정 PG에 대해 수동 복구 커맨드 전송 |
+| **풀 리스트 상세** | `ceph osd pool ls detail` | 전체 풀의 size, min_size, crush rule, pg_num 등 세부 설정값 |
+| **풀별 용량(ceph df)** | `ceph df detail` | 풀별 사용량, 가용량 및 저장된 오브젝트 수 요약 |
+| **논리적 데이터 용량**| `rados df` | 풀에 저장된 객체 수, 크기 및 논리/물리적 데이터 사용률 분석 |
+| **풀 실시간 I/O 부하** | `ceph osd pool stats` | 각 풀에서 발생하는 실시간 Client Read/Write I/O 모니터링 |
+| **RADOS 성능 벤치마크**| `rados bench -p <POOL_NAME> 60 write --no-cleanup` | 특정 풀 대상 60초 쓰기 부하 테스트로 Throughput/IOPS 성능 한계 검증 |
+| **저장된 오브젝트 리스트**| `rados -p <POOL_NAME> ls` | 특정 풀에 저장된 오브젝트 청크 리스트 실제 조회 (데이터 유실 검증) |
+| **RBD 이미지 리스트** | `rbd ls -p <POOL_NAME>` | 풀에 생성된 블록 디바이스(VM 디스크 등) 이미지 조회 |
+| **RBD 이미지 상세** | `rbd info <IMAGE_NAME> -p <POOL_NAME>` | RBD 이미지 실제 크기, 객체 크기(기본 4M), 포맷, Lock 상태 확인 |
+| **삭제 대기 중인 RBD** | `rbd trash ls -p <POOL_NAME>` | 삭제 명령 수신 후 백그라운드 정리 대기 중인 이미지 목록 |
+| **RBD 직접 마운트** | `rbd map <IMAGE_NAME> -p <POOL_NAME>` | 특정 RBD 이미지를 클라이언트(호스트) 블록 디바이스로 직접 맵핑 |
+| **CephFS MDS 상태** | `ceph mds stat` | 파일시스템 메타데이터 서버의 Active/Standby 상태 및 랭크 |
+| **CephFS 상세 상태** | `ceph fs status` | MDS 메모리 사용량, 연결된 클라이언트 수 등 파일시스템 종합 헬스 체크 |
+| **오브젝트 사용자 목록**| `radosgw-admin user list` | S3/Swift용 RADOS Gateway 에 등록된 유저 식별자 리스트 |
+| **MGR 모듈 상태** | `ceph mgr module ls` | Dashboard, Prometheus 익스포터 등 활성화된 MGR 플러그인 상태 |
+| **데몬 컨테이너 목록**| `ceph orch ps` | Cephadm 오케스트레이터로 배포된 OSD/MON/MGR 데몬 컨테이너 상태 |
+| **오브젝트 OSD 추적** | `ceph osd map <POOL_NAME> <OBJECT>` | 특정 파일(오브젝트)이 실제 어느 OSD에 나뉘어 저장되는지 매핑 추적 |
+| **클라이언트 키링 상세**| `ceph auth get client.admin` | admin 등 클라이언트의 인증 키(Keyring) 값 및 접근 권한 출력 |
+| **성능 카운터 덤프** | `ceph daemon osd.<OSD_ID> perf dump` | 데몬 소켓 통신으로 내부 성능 카운터 및 지연 시간 통계 딥다이브 추출 |
+| **런타임 동적 설정 확인**| `ceph config show-with-defaults osd.<OSD_ID>` | 특정 데몬의 메모리에 로드된 현재 런타임 설정값 전체 확인 |
+| **클러스터 에러 로그**| `tail -n 200 /var/log/ceph/ceph.log \| grep -iE 'err\|warn'` | 최근 200줄 로그에서 클러스터 에러와 경고 알람만 필터링 |
+
+---
+
+## 3. Kubernetes (워크로드 롤백, 트러블슈팅, 네트워킹)
+
+| 항목 | 명령어 | 설명 |
+| :--- | :--- | :--- |
+| **노드 상태 및 IP** | `kubectl get nodes -o wide` | 워커/마스터 노드의 Ready 상태, 내부 IP, 커널 및 런타임 버전 조회 |
+| **노드 상세 리소스** | `kubectl describe nodes` | 노드 Taint, 스케줄링된 파드 목록, CPU/Mem 요청(Request) 및 제한량 |
+| **노드 테인트(Taint) 확인**| `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.taints}{"\n"}{end}'` | 파드 스케줄링을 막는 오염(Taint) 설정값만 추출하여 원인 분석 |
+| **노드 안전 퇴출(Drain)**| `kubectl drain <NODE_NAME> --ignore-daemonsets --delete-emptydir-data` | 유지보수 전 실행 중인 파드를 다른 노드로 안전하게 대피(Eviction) |
+| **스케줄링 일시 차단**| `kubectl cordon <NODE_NAME>` | 파드 대피 없이 단순히 해당 노드에 신규 파드가 생성되는 것만 막음 |
+| **전체 파드 목록** | `kubectl get pods -A -o wide` | 모든 네임스페이스 파드의 상태, 배치된 노드, 할당 IP 조회 |
+| **비정상 파드 필터링**| `kubectl get pods -A --field-selector=status.phase!=Running` | Pending, Error, Crash 상태인 결함 파드만 정확하게 필터링 |
+| **파드 상세 분석** | `kubectl describe pod <POD_NAME> -n <NAMESPACE>` | ImagePullBackOff, 스케줄링 실패 사유 등 파드 상세 이벤트 로그 확인 |
+| **라벨 기준 파드 조회**| `kubectl get pods -l app=<APP_NAME> -n <NAMESPACE>` | 특정 라벨(예: 앱 이름)을 가진 파드 그룹만 모아서 조회 |
+| **노드/파드 리소스 부하**| `kubectl top nodes` / `kubectl top pods -A` | 노드나 파드의 현재 CPU/메모리 실제 사용량(Metric Server 기반) 확인 |
+| **크래시 이전 로그** | `kubectl logs <POD_NAME> -n <NAMESPACE> --previous` | 컨테이너가 죽었을 때, 재시작 되기 직전 컨테이너가 남긴 에러 로그 추출 |
+| **파드 내부 쉘 접속** | `kubectl exec -it <POD_NAME> -n <NAMESPACE> -- /bin/sh` | 파드 컨테이너 내부에 직접 접근하여 설정 파일이나 네트워크 상태 검증 |
+| **파드 내부 파일 복사**| `kubectl cp <NAMESPACE>/<POD_NAME>:<PATH> <LOCAL_PATH>` | 컨테이너 안의 힙 덤프, 로그 등 디버깅 파일을 로컬 호스트로 복사 |
+| **전체 리소스 일괄 조회**| `kubectl get all -n <NAMESPACE>` | 특정 네임스페이스의 Pod, Service, Deployment, ReplicaSet 일괄 출력 |
+| **서비스 엔드포인트** | `kubectl get endpoints -A` | Service와 실제 Pod IP 매핑이 정상적으로 엮여 로드밸런싱 되는지 검증 |
+| **Ingress 라우팅 룰** | `kubectl get ingress -A` | 외부 트래픽을 내부 서비스로 연결하는 도메인 및 Path 라우팅 룰 |
+| **DNS 질의 테스트** | `kubectl run -i --tty --rm debug --image=busybox --restart=Never -- nslookup kubernetes.default` | 임시 파드를 생성해 CoreDNS의 클러스터 내부 네임 레졸루션 정상 여부 점검 |
+| **로컬 포트 포워딩** | `kubectl port-forward svc/<SVC_NAME> <LOCAL_PORT>:<SVC_PORT>` | 외부 노출이 없는 백엔드 서비스 UI/API를 로컬 PC 포트로 임시 연결 |
+| **PV/PVC 상태 맵** | `kubectl get pv,pvc -A` | 프로비저닝된 물리 볼륨(PV)과 파드의 볼륨 클레임(PVC) Bound 상태 |
+| **스토리지 클래스** | `kubectl get sc` | CSI 프로바이더(Ceph RBD/CephFS 등) 볼륨 동적 프로비저닝 설정 |
+| **디플로이먼트 상태** | `kubectl get deployments -A` | 요구 레플리카 수와 실제 동작 중인 파드 수가 일치하는지 정합성 확인 |
+| **롤아웃(배포) 히스토리**| `kubectl rollout history deployment/<NAME> -n <NAMESPACE>` | 앱 버전 업데이트 이력 및 리비전 넘버 확인 |
+| **디플로이먼트 롤백** | `kubectl rollout undo deployment/<NAME> -n <NAMESPACE>` | 신규 배포 결함 시 직전의 정상 리비전 파드로 즉시 롤백 처리 |
+| **파드 스케일링(Scale)**| `kubectl scale deployment <NAME> --replicas=<NUM> -n <NAMESPACE>` | 수동으로 파드 개수를 늘리거나 줄여 부하 대응 및 동작 검증 |
+| **재배포 (Restart)** | `kubectl rollout restart deployment/<NAME> -n <NAMESPACE>` | 기존 파드를 하나씩 죽이고 재생성하여 ConfigMap 등 변경 설정 갱신 |
+| **Helm 릴리스 목록** | `helm list -A` | Helm 차트로 배포된 서비스의 버전, 상태(deployed/failed) 확인 |
+| **Helm 주입 변수 덤프**| `helm get values <RELEASE_NAME> -n <NAMESPACE>` | 차트 배포 시 사용자가 주입한 values.yaml 커스텀 설정값 전체 출력 |
+| **API 지원 리소스** | `kubectl api-resources` | 현재 클러스터에 등록된 전체 CRD(Custom Resource) 및 기본 객체 단축어 |
+| **클러스터 컴포넌트 헬스**| `kubectl get componentstatuses` | etcd, 스케줄러, 컨트롤러 등 마스터 노드 핵심 컴포넌트 헬스 체크 |
+| **RBAC 권한 디버깅** | `kubectl auth can-i create pods --as=system:serviceaccount:<NS>:<SA_NAME>` | 특정 서비스 어카운트가 파드 생성 등의 권한을 실제로 보유했는지 테스트 |
+| **컨피그맵/시크릿 조회**| `kubectl get cm,secret -A` | 파드에 주입되는 환경변수, 설정 파일 및 암호화 인증 데이터 목록 |
+| **전체 이벤트 추적** | `kubectl get events -A --sort-by='.lastTimestamp'` | 시간순으로 발생한 클러스터 내 모든 에러/경고/상태 변경 이벤트 로깅 |
+| **kubelet 로그 스트림**| `journalctl -u kubelet -f` | 물리 노드의 kubelet 데몬 로그를 추적하여 파드 생성 실패 원인 파악 |
+| **containerd 로그** | `journalctl -u containerd -n 100 --no-pager` | 컨테이너 런타임의 이미지 풀링 실패나 구동 에러 로그 100줄 출력 |
+
+---
+
+## 4. 시스템 및 부하 테스트 (QA 성능 검증, 메트릭, 네트워크)
+
+| 항목 | 명령어 | 설명 |
+| :--- | :--- | :--- |
+| **CPU/메모리 상위 프로세스**| `top -b -n 1 \| head -n 20` | 시스템 자원을 과다 점유하는 상위 20개 프로세스 스냅샷 |
+| **통합 리소스 실시간 뷰**| `dstat -cdngy 1` | 1초 단위로 CPU, 디스크 I/O, 네트워크 대역폭, 페이징 상태를 종합 출력 |
+| **커널 패닉/OOM 에러**| `dmesg -T --level=err,crit,alert,emerg` | 메모리 부족(OOM Killer), 디스크 배드섹터 등 치명적인 커널 로그만 추출 |
+| **디스크 I/O 병목 추적**| `iostat -xz 1 5` | 블록 디바이스별 Read/Write 처리 속도와 await(대기 지연 시간) 5회 측정 |
+| **시스템 누적 부하 통계**| `sar -u 1 5` / `sar -n DEV 1 5` | sysstat를 활용한 CPU 및 네트워크 누적 사용량 및 실시간 병목 검증 |
+| **페이징 및 CPU IO Wait**| `vmstat 1 5` | 메모리 스왑(si/so) 상태와 디스크 지연으로 인한 프로세스 대기(wa) 추적 |
+| **점유 파일/포트 추적**| `lsof +D /var/log` / `lsof -i :80` | 특정 디렉토리를 쥐고 있거나 포트를 점유 중인 타겟 프로세스 식별 |
+| **부팅 세션 에러 로그**| `journalctl -p 3 -xb` | 현재 부팅된 시스템 세션에서 발생한 Error 등급(-p 3) 이상의 시스템 로그 |
+| **런타임 커널 변수** | `sysctl -a \| grep -i 'net.ipv4\\|vm.swappiness'` | 메모리 스왑 빈도 및 TCP 네트워크 튜닝 설정 적용 여부 |
+| **캐시 강제 반환(테스트)**| `sync; echo 3 > /proc/sys/vm/drop_caches` | 임계치 테스트를 위해 PageCache 및 inode 캐시를 비워 가용 메모리 확보 |
+| **CPU/메모리 부하 유도**| `stress-ng --cpu 8 --vm 4 --vm-bytes 2G --timeout 120s` | 알람 연동 테스트를 위한 2분간의 CPU 코어 점유 및 8GB 램 할당 부하 |
+| **디스크 스토리지 부하**| `stress-ng --hdd 2 --hdd-bytes 10G --timeout 60s` | 60초간 대용량 파일 Read/Write를 발생시켜 스토리지 컨트롤러 병목 유도 |
+| **대역폭 테스트(서버)**| `iperf3 -s -D` | 랙(Rack) 간 대역폭 및 지연율 측정을 위한 iperf3 백그라운드 리슨 대기 |
+| **대역폭 테스트(클라)**| `iperf3 -c <SERVER_IP> -t 60 -P 4` | 60초간 4개 병렬 스레드로 타겟 노드와의 TCP 최대 실효 대역폭 측정 |
+| **패킷 캡처 (디버깅)** | `tcpdump -i any port 80 -n -c 100` | 특정 포트로 인입되는 패킷 헤더와 출발지 IP를 100개 캡처하여 흐름 분석 |
+| **TCP 소켓 및 포트 상세**| `ss -tunlpo` | 서버의 TCP/UDP 리슨 포트, 바인딩 프로세스, 타이머 상태 출력 |
+| **TIME_WAIT 소켓 점검**| `netstat -nat \| grep TIME_WAIT \| wc -l` | 연결 종료 후 남은 잔여 소켓 수를 카운트하여 커널 TCP 백로그 튜닝 판단 |
+| **네트워크 라우팅 테이블**| `ip route show` | 디폴트 게이트웨이 및 대역별 패킷 우회 라우팅 인터페이스 검증 |
+| **NIC 이중화(Bonding)** | `cat /proc/net/bonding/bond0` | LACP 등 본딩 구성 포트의 Active 상태 및 링크 장애 조치(MII) 정상 여부 |
+| **랜카드 하드웨어 스펙**| `ethtool eth0` | 물리 랜카드 지원 속도(10G/40G), Duplex 상태 및 Link up 연결 확인 |
+| **실시간 라우팅 지연율**| `mtr <TARGET_IP>` | Ping과 Traceroute를 결합하여 타겟 목적지까지 구간별 패킷 손실률 실시간 추적 |
+| **DNS 도메인 쿼리** | `dig @<DNS_IP> <DOMAIN> +short` | 특정 네임서버를 지정하여 도메인의 A레코드 또는 CNAME 응답을 직접 검증 |
+| **Node Exporter 확인** | `curl -s http://localhost:9100/metrics \| grep 'node_cpu'` | 모니터링 에이전트 메트릭이 스크래핑 되기 전 정상 노출되는지 직접 호출 |
+| **PromQL API 검증** | `curl -g 'http://localhost:9090/api/v1/query?query=up'` | Prometheus 백엔드 API에 직접 쿼리를 날려 수집 대상 타겟의 정상 유무 테스트 |
+| **물리 디스크 파티션** | `lsblk -f` | 노드 장착 디스크 블록 구조, UUID, 파일시스템 타입(XFS/EXT4) 매핑 확인 |
+| **디스크/Inode 사용률**| `df -iTh` | 디스크 여유 공간뿐 아니라 작은 파일이 과다 생성되어 Inode 고갈 여부 점검 |
+| **대용량 디렉토리 색출**| `du -sh /var/* \| sort -rh \| head -10` | 특정 파티션 용량이 가득 찼을 때, 가장 용량을 많이 차지하는 하위 폴더 10개 추출 |
+| **CPU/NUMA 스펙** | `lscpu` | 물리 코어, 쓰레드, NUMA 노드 매핑 및 가상화(VT-x) 지원 활성화 유무 |
+| **물리 메모리(RAM) 스펙**| `dmidecode -t memory \| grep -i 'size\\|speed'` | 메인보드 뱅크에 장착된 램 모듈의 개별 크기와 동작 클럭 상세 확인 |
+| **방화벽(Iptables) 룰**| `iptables -L -n -v \| head -n 30` | 커널 레벨 패킷 필터링 룰의 Drop/Accept 카운트를 확인하여 트래픽 차단 색출 |
+
+---
+
+## 5. 리눅스 코어 및 텍스트 처리 (프로세스, 로그 파싱, 패키지 관리)
+
+| 항목 | 명령어 | 설명 |
+| :--- | :--- | :--- |
+| **파일/폴더 목록 상세**| `ls -alh` | 숨김 파일을 포함하여 권한, 소유자, 크기를 사람이 읽기 쉬운 단위로 출력 |
+| **하위 파일 전체 검색**| `find /var/log -name "*.log" -type f` | /var/log 경로 아래에 있는 확장자가 .log인 모든 파일을 재귀적으로 검색 |
+| **검색 후 일괄 삭제** | `find /tmp -name "*.tmp" -mtime +7 -exec rm -f {} \;` | 7일 이상 지난 .tmp 오래된 찌꺼기 파일을 찾아내어 일괄 삭제 처리 |
+| **파일 내용 연결 출력**| `cat <파일명>` | 설정 파일이나 스크립트 등 짧은 텍스트 파일의 내용 전체를 화면에 출력 |
+| **대용량 파일 페이징** | `less <파일명>` | 기가바이트 단위 로그를 열 때 시스템 멈춤 없이 위/아래로 스크롤 열람 (q로 종료) |
+| **로그 실시간 모니터링**| `tail -f <파일명>` | 서비스 실행 시 실시간으로 추가되는 에러 로그를 꼬리 물며 확인 |
+| **단어 검색(Grep)** | `grep -i "error" <파일명>` | 대소문자 무시(-i)하고 파일 내에서 "error"가 포함된 모든 줄 필터링 |
+| **로그 텍스트 열 파싱**| `awk '{print $1, $9}' access.log` | 공백 기준으로 로그를 쪼개어, 1번째 열(IP)과 9번째 열(HTTP 상태코드)만 추출 |
+| **특정 라인 구간 출력**| `sed -n '100,200p' server.log` | 수십만 줄의 로그 중 문제가 발생했던 정확히 100번~200번 줄 사이만 잘라내기 |
+| **명령어 파이프 반복** | `cat list.txt \| xargs -I {} rm -rf {}` | 파이프 앞의 목록 결과를 하나씩 뒤 명령어로 넘겨주어 대량 작업 스크립트화 |
+| **폴더 압축(tar.gz)** | `tar -czvf backup.tar.gz /etc/` | 설정 폴더 등을 하나의 파일로 묶고 gzip 알고리즘을 사용해 용량 압축 |
+| **압축 해제** | `tar -xzvf backup.tar.gz -C /tmp/` | 압축된 tar.gz 파일을 지정한 경로(/tmp/)에 원본 구조 그대로 해제 |
+| **웹 파일 다운로드** | `curl -O <URL>` 또는 `wget <URL>` | 외부 인터넷이나 내부 레포지토리에서 쉘 스크립트나 바이너리를 직접 다운로드 |
+| **원격 파일 안전 복사**| `scp <파일명> user@<IP>:<경로>` | SSH 프로토콜을 이용해 다른 리눅스 서버로 설정 파일 등을 안전하게 전송 |
+| **디렉토리 동기화** | `rsync -avz /data/ /backup/` | 변경된 파일만 식별하여 증분 백업을 수행해 스토리지 복제 시간 단축 |
+| **파일 권한(퍼미션) 변경**| `chmod 755 <스크립트.sh>` | 대상 파일에 실행(x) 권한을 부여하여 쉘에서 구동할 수 있도록 속성 변경 |
+| **파일 소유권 갱신** | `chown -R user:group <폴더명>` | 특정 폴더와 그 하위의 모든 파일 소유자를 웹 데몬이나 특정 유저로 변경 |
+| **백그라운드 프로세스**| `nohup <명령어> &` | 터미널 창을 닫아도 백그라운드 스크립트가 죽지 않고 계속 실행되도록 유지 |
+| **프로세스 PID 검색** | `ps aux \| grep <데몬명>` | 실행 중인 서비스의 점유 유저, CPU/메모리율 및 식별 번호(PID) 검색 |
+| **프로세스 강제 종료** | `kill -9 <PID>` | 응답이 멈춘(좀비) 프로세스를 PID 기반으로 운영체제 단에서 강제 Kill |
+| **시스템 서비스 상태** | `systemctl status <서비스명>` | systemd 기반 데몬(sshd, nginx 등)의 활성/에러/중지 상태 상세 확인 |
+| **서비스 자동 시작 등록**| `systemctl enable --now <서비스명>` | 서비스를 즉시 시작함과 동시에 서버 재부팅 시에도 자동으로 올라오게 등록 |
+| **패키지 목록 업데이트**| `apt update` (Ubuntu) / `dnf check-update` (RHEL) | OS 레포지토리에서 설치 가능한 최신 패키지 버전 및 의존성 트리 갱신 |
+| **프로그램 설치/제거**| `apt install -y <패키지>` / `apt remove <패키지>` | 터미널 툴(htop, vim 등) 설치 및 불필요한 패키지 제거 (-y로 묻지 않고 진행) |
+| **설치된 패키지 검색** | `dpkg -l \| grep <이름>` (Ubuntu) / `rpm -qa \| grep <이름>` (RHEL) | 서버에 이미 해당 라이브러리나 툴이 설치되어 있는지 로컬 DB 검색 |
+| **명령어 매뉴얼(도움말)**| `man <명령어>` | 특정 명령어의 가용 옵션 플래그와 사용 예제 공식 매뉴얼 호출 (q로 종료) |
+| **명령어 위치 추적** | `which <명령어>` | 환경변수(PATH)에 등록된 실행 파일의 실제 바이너리 경로 절대 위치 확인 |
+| **이전 명령어 기록** | `history \| grep <키워드>` | 과거에 터미널에서 입력했던 긴 명령어를 다시 찾아서 재사용할 때 활용 |
+]

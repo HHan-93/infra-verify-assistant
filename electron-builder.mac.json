@@ -1,0 +1,28 @@
+{
+  "appId": "com.okestro.infraverify",
+  "productName": "Infra Verify Assistant",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist",
+    "dist-electron"
+  ],
+  "asarUnpack": [
+    "**/node_modules/node-pty/**",
+    "**/node_modules/ssh2/**"
+  ],
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": "universal"
+      },
+      {
+        "target": "zip",
+        "arch": "universal"
+      }
+    ]
+  }
+}

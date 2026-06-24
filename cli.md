@@ -1,0 +1,370 @@
+# 단일 프리셋 명령어 (CLI Reference)
+
+> presets.ts 에서 자동 생성. `<...>`는 실행 대신 입력, 실시간 명령은 Ctrl+C.
+
+## 목차
+
+- **OpenStack** (39) — 컴퓨트 (Nova), 네트워크 (Neutron·OVS), 스토리지 (Cinder), 이미지 (Glance), 메시지큐·DB, 인증·쿼터 (Keystone), 하이퍼바이저 (Libvirt), 로그
+- **Ceph** (39) — 클러스터, OSD, PG, 풀/RADOS, 블록 (RBD), CephFS/RGW, 인증·설정·성능
+- **Kubernetes** (36) — 노드 (Node), 파드 (Pod), 네트워크, 스토리지, 워크로드/배포, 관리·설정, 로그
+- **시스템·부하검증** (31) — 시스템/프로세스, 부하 테스트, 네트워크, 디스크·하드웨어
+- **리눅스 코어** (39) — 이동·파일 기본, 내용·텍스트 처리, 압축·전송, 권한·프로세스, 서비스·패키지, 도움말·기록
+
+총 **184개** 명령어.
+
+---
+
+## OpenStack
+
+### 컴퓨트 (Nova)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 컴퓨트 서비스 상태 | `openstack compute service list` | Nova 데몬(compute, scheduler, conductor) 활성 상태 확인 |
+| 컴퓨트 노드 제어(차단) | `openstack compute service set --disable --disable-reason "QA_Test" <HOST> nova-compute` | 특정 컴퓨트 노드 스케줄링 일시 차단 (유지보수/검증용) |
+| 인스턴스 목록(전체) | `openstack server list --all-projects --long` | 전체 프로젝트의 VM 상태 및 배치된 물리 호스트 노드 조회 |
+| ERROR 인스턴스 검색 | `openstack server list --all-projects --status ERROR` | 생성 실패하거나 오류 상태에 빠진 VM만 정확히 필터링 |
+| 인스턴스 상세 정보 | `openstack server show <SERVER_ID>` | VM의 생성 시간, 네트워크, 보안 그룹, 배치 호스트 상세 메타데이터 |
+| 인스턴스 콘솔 로그 | `openstack console log show <SERVER_ID>` | 커널 패닉, 부팅 에러 등 VM 초기화 콘솔 로그 확인 |
+| 인스턴스 액션 기록 | `openstack server event list <SERVER_ID>` | VM에 수행된 API 요청(생성/재부팅/마이그레이션) 이력 추적 |
+| 하이퍼바이저 리소스 | `openstack hypervisor list --long` | 각 물리 노드별 vCPU, RAM, 로컬 디스크 사용량 및 할당량 |
+| 셀(Cell) 호스트 갱신 | `nova-manage cell_v2 discover_hosts` | 신규 노드 증설 직후 컨트롤 플레인에 새 호스트를 즉시 인식시킴 |
+| 라이브 마이그레이션 | `openstack server migrate <SERVER_ID> --live-migration` | 다운타임 없이 VM을 다른 컴퓨트 노드로 실시간 이동 |
+| 마이그레이션 상태 | `openstack server migration list` | 마이그레이션 진행률 및 성공/실패 여부 확인 |
+
+### 네트워크 (Neutron·OVS)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 네트워크 에이전트 | `openstack network agent list` | L3/DHCP 에이전트의 alive 상태 및 호스트 매핑 확인 |
+| 네트워크 리스트 상세 조회 | `openstack network list --long` | 내부/외부 네트워크, 서브넷 매핑, MTU 및 Provider 정보 |
+| 서브넷 목록 조회 | `openstack subnet list` | 각 네트워크에 종속된 서브넷의 IP 대역(CIDR) 할당 현황 및 DHCP 활성화 여부 확인 |
+| 가상 포트 상세 | `openstack port show <PORT_ID>` | VM 가상 포트의 MAC, 바인딩 호스트, ACTIVE/DOWN 상태 |
+| Floating IP 할당 | `openstack floating ip list` | 외부 통신용 Public IP의 할당 및 연결 포트 상태 점검 |
+| 보안 그룹 룰 상세 | `openstack security group rule list` | Ingress/Egress 포트, 프로토콜, 타겟 IP 대역 룰 확인 |
+| OVS 브릿지 상태 | `ovs-vsctl show` | Open vSwitch의 br-int, br-ex, br-tun 브릿지 및 포트 매핑 |
+| OVS 오픈플로우 룰 | `ovs-ofctl dump-flows br-int` | VM 간 통신 및 보안 룰이 적용된 OVS OpenFlow 플로우 덤프 |
+
+### 스토리지 (Cinder)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 볼륨 목록(전체) | `openstack volume list --all-projects --long` | 전체 볼륨 상태(in-use/available/error) 및 연결된 인스턴스 |
+| 볼륨 상세 정보 | `openstack volume show <VOLUME_ID>` | 볼륨 생성 실패 시 백엔드 스토리지 매핑 및 에러 코드 분석 |
+| 볼륨 백업 리스트 | `openstack volume backup list` | Cinder를 통해 생성된 볼륨 백업 이미지 및 상태 확인 |
+| 볼륨 용량 확장 | `openstack volume extend <VOLUME_ID> <NEW_SIZE>` | 기존에 생성된 Cinder 블록 스토리지 볼륨의 크기를 지정한 용량(GB)으로 온라인 확장 |
+
+### 이미지 (Glance)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 이미지 목록(전체) | `openstack image list --long` | OS 이미지 상태, 포맷(qcow2/raw), 크기, 가시성 조회 |
+| 신규 이미지 업로드 | `openstack image create --file <FILE_PATH> --disk-format qcow2 --container-format bare --public <IMAGE_NAME>` | 로컬에 준비된 qcow2 등 OS 이미지 파일을 Glance 서비스에 신규 등록(public) |
+
+### 메시지큐·DB
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| RabbitMQ 클러스터 | `rabbitmqctl cluster_status` | 메시지 큐 노드 상태 및 파티션(네트워크 단절) 발생 여부 |
+| 메시지 큐 적체 확인 | `rabbitmqctl list_queues \| grep -v ' 0'` | 처리되지 못하고 큐에 쌓여있는 데드레터 메시지 목록 확인 |
+| MariaDB 갤러라 상태 | `mysql -u root -e "SHOW STATUS LIKE 'wsrep_cluster_size';"` | DB 이중화(Galera) 노드 개수 및 클러스터 싱크 정상 여부 |
+
+### 인증·쿼터 (Keystone)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 엔드포인트 URL 점검 | `openstack endpoint list` | 전체 서비스의 public, internal, admin API 엔드포인트 매핑 |
+| 프로젝트/테넌트 목록 | `openstack project list` | 클러스터 내 구성된 전체 프로젝트 및 도메인 확인 |
+| 유저 권한 매핑 | `openstack role assignment list --names` | 특정 유저가 어느 프로젝트에서 admin/member 권한을 가지는지 조회 |
+| 테넌트 리소스 쿼터 | `openstack quota show --default` | 프로젝트별 최대 생성 가능한 VM, 볼륨, IP 제한량 조회 |
+
+### 하이퍼바이저 (Libvirt)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 호스트 KVM VM 상태 | `virsh list --all` | 컴퓨트 노드 쉘에서 하이퍼바이저 레벨의 실제 VM 구동 상태 조회 |
+| 인스턴스 상태 | `virsh dominfo <INSTANCE_ALIAS>` | 인스턴스의 CPU, 메모리, 상태 등을 조회 |
+| VM 디스크 매핑 확인 | `virsh domblklist <INSTANCE_NAME>` | VM에 매핑된 실제 블록 디바이스(RBD 경로 등) 식별 |
+| xml 설정 파일 직접 확인 | `virsh dumpxml <INSTANCE_ALIAS>` | 인스턴스에 적용된 모든 설정(네트워크, 디스크, CPU, 메모리 등)을 원본 XML 형태로 조회 |
+
+### 로그
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| Nova 에러 로그 | `tail -n 100 /var/log/nova/nova-api.log \| grep -i error` | VM 생성 실패 시 가장 먼저 확인할 Nova API 최근 에러 로그 |
+| Neutron 에러 로그 | `tail -n 100 /var/log/neutron/neutron-server.log \| grep -i error` | 네트워크/포트 바인딩 실패 시 원인 파악용 에러 로그 |
+| Cinder 에러 로그 | `tail -n 100 /var/log/cinder/cinder-volume.log \| grep -i error` | 볼륨 생성 및 연결 실패 시 스토리지 연동 에러 로그 |
+
+## Ceph
+
+### 클러스터
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 클러스터 요약(s) | `ceph -s` | HEALTH, MON/OSD, PG, 용량 상태를 확인하는 최우선 점검 명령 |
+| 클러스터 헬스 상세 | `ceph health detail` | WARN/ERR 발생 시 크래시 데몬이나 손상된 PG 등 근본 원인 출력 |
+| 실시간 이벤트(w) | `ceph -w` | PG 변경, OSD Up/Down, 리밸런싱 등 실시간 모니터링 (종료: Ctrl+C) |
+| MON 쿼럼 상태 | `ceph quorum_status --format json-pretty` | 모니터 노드 선출 상태 및 쿼럼 정상 형성 딥다이브 (JSON) |
+| MGR 모듈 상태 | `ceph mgr module ls` | Dashboard, Prometheus 익스포터 등 활성화된 MGR 플러그인 상태 |
+| 데몬 컨테이너 목록 | `ceph orch ps` | Cephadm 오케스트레이터로 배포된 OSD/MON/MGR 데몬 컨테이너 상태 |
+| 클러스터 에러 로그 | `tail -n 200 /var/log/ceph/ceph.log \| grep -iE 'err\|warn'` | 최근 200줄 로그에서 클러스터 에러와 경고 알람만 필터링 |
+
+### OSD
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| OSD 트리/가중치 | `ceph osd tree` | CRUSH 맵 기반 호스트 노드별 OSD 트리와 weight, up/down 상태 |
+| OSD 트리 JSON | `ceph osd tree -f json-pretty` | OSD 구성도를 JSON으로 출력하여 파싱/자동화 스크립트 연동 |
+| 디스크 사용률(OSD) | `ceph osd df` | OSD별 물리 디스크 사용량, 여유 공간, 데이터 분산 편차(variance) |
+| PG 오토스케일 상태 | `ceph osd pool autoscale-status` | 각 풀별 데이터 타겟 사이즈 대비 현재 PG 개수의 적절성 및 자동 확장 데몬의 동작 상태 확인 |
+| OSD 데몬 성능 지연 | `ceph osd perf` | 각 OSD의 commit/apply 지연 시간(Latency) 추적 (느린 디스크 색출) |
+| 자동 아웃(Out) 방지 | `ceph osd set noout` | 노드 재부팅/점검 전 OSD가 Out되어 불필요한 리밸런싱이 발생하지 않도록 홀드 |
+| 자동 아웃 방지 해제 | `ceph osd unset noout` | 점검 완료 후 noout 플래그 해제하여 정상 관리 상태 복구 |
+| 강제 딥 스크럽 | `ceph osd scrub <OSD_ID>` | 특정 OSD 데이터 정합성 검사(Scrub) 강제 수행 예약 |
+| OSD 크래시 기록 | `ceph crash ls` | 비정상 종료되거나 크래시된 OSD 데몬 이력 확인 |
+| 크래시 알람 초기화 | `ceph crash archive-all` | 확인이 끝난 크래시 로그를 보관 처리하여 클러스터 경고 알람 해제 |
+
+### PG
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| PG 통계 요약 | `ceph pg stat` | PG 맵 버전 및 클라이언트 Read/Write IOPS, Throughput 요약 |
+| 비정상(Stuck) PG | `ceph pg dump_stuck inactive` | 데이터 I/O 처리가 멈춰있는(stuck) Placement Group 확인 |
+| 복구중(Degraded) PG | `ceph pg dump_stuck degraded` | 노드/OSD 장애로 데이터 리플리케이션이 진행 중인 PG 확인 |
+| 손상된 PG 수동 복구 | `ceph pg repair <PG_ID>` | Inconsistent 에러가 뜬 특정 PG에 대해 수동 복구 커맨드 전송 |
+
+### 풀/RADOS
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 풀 리스트 상세 | `ceph osd pool ls detail` | 전체 풀의 size, min_size, crush rule, pg_num 등 세부 설정값 |
+| 풀별 용량(ceph df) | `ceph df detail` | 풀별 사용량, 가용량 및 저장된 오브젝트 수 요약 |
+| 논리적 데이터 용량 | `rados df` | 풀에 저장된 객체 수, 크기 및 논리/물리적 데이터 사용률 분석 |
+| 풀 실시간 I/O 부하 | `ceph osd pool stats` | 각 풀에서 발생하는 실시간 Client Read/Write I/O 모니터링 |
+| RADOS 성능 벤치마크 | `rados bench -p <POOL_NAME> 60 write --no-cleanup` | 특정 풀 대상 60초 쓰기 부하 테스트로 Throughput/IOPS 성능 한계 검증 |
+| 저장된 오브젝트 리스트 | `rados -p <POOL_NAME> ls` | 특정 풀에 저장된 오브젝트 청크 리스트 실제 조회 (데이터 유실 검증) |
+| 오브젝트 OSD 추적 | `ceph osd map <POOL_NAME> <OBJECT>` | 특정 파일(오브젝트)이 실제 어느 OSD에 나뉘어 저장되는지 매핑 추적 |
+
+### 블록 (RBD)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| RBD 이미지 리스트 | `rbd ls -p <POOL_NAME>` | 풀에 생성된 블록 디바이스(VM 디스크 등) 이미지 조회 |
+| RBD 이미지 상세 | `rbd info <IMAGE_NAME> -p <POOL_NAME>` | RBD 이미지 실제 크기, 객체 크기(기본 4M), 포맷, Lock 상태 |
+| RBD 스냅샷 생성 | `rbd snap create <POOL_NAME>/<IMAGE_NAME>@<SNAP_NAME>` | 특정 블록 디바이스의 현재 상태를 스냅샷으로 즉각 보존하여 데이터 백업 및 롤백 지점 확보 |
+| 삭제 대기 중인 RBD | `rbd trash ls -p <POOL_NAME>` | 삭제 명령 수신 후 백그라운드 정리 대기 중인 이미지 목록 |
+| RBD 직접 마운트 | `rbd map <IMAGE_NAME> -p <POOL_NAME>` | 특정 RBD 이미지를 클라이언트(호스트) 블록 디바이스로 직접 맵핑 |
+
+### CephFS/RGW
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| CephFS MDS 상태 | `ceph mds stat` | 파일시스템 메타데이터 서버의 Active/Standby 상태 및 랭크 |
+| CephFS 상세 상태 | `ceph fs status` | MDS 메모리 사용량, 연결된 클라이언트 수 등 파일시스템 종합 헬스 |
+| 오브젝트 사용자 목록 | `radosgw-admin user list` | S3/Swift용 RADOS Gateway에 등록된 유저 식별자 리스트 |
+
+### 인증·설정·성능
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 클라이언트 키링 상세 | `ceph auth get client.admin` | admin 등 클라이언트의 인증 키(Keyring) 값 및 접근 권한 출력 |
+| 성능 카운터 덤프 | `ceph daemon osd.<OSD_ID> perf dump` | 데몬 소켓 통신으로 내부 성능 카운터/지연 시간 통계 딥다이브 추출 |
+| 런타임 동적 설정 확인 | `ceph config show-with-defaults osd.<OSD_ID>` | 특정 데몬의 메모리에 로드된 현재 런타임 설정값 전체 확인 |
+
+## Kubernetes
+
+### 노드 (Node)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 노드 상태 및 IP | `kubectl get nodes -o wide` | 워커/마스터 노드의 Ready 상태, 내부 IP, 커널 및 런타임 버전 |
+| 노드 상세 리소스 | `kubectl describe nodes` | 노드 Taint, 스케줄링된 파드, CPU/Mem 요청(Request) 및 제한량 |
+| 노드 테인트(Taint) 확인 | `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.taints}{"\n"}{end}'` | 파드 스케줄링을 막는 오염(Taint) 설정값만 추출하여 원인 분석 |
+| 노드 안전 퇴출(Drain) | `kubectl drain <NODE_NAME> --ignore-daemonsets --delete-emptydir-data` | 유지보수 전 실행 중인 파드를 다른 노드로 안전하게 대피(Eviction) |
+| 스케줄링 일시 차단 | `kubectl cordon <NODE_NAME>` | 파드 대피 없이 해당 노드에 신규 파드가 생성되는 것만 막음 |
+
+### 파드 (Pod)
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 전체 파드 목록 | `kubectl get pods -A -o wide` | 모든 네임스페이스 파드의 상태, 배치된 노드, 할당 IP 조회 |
+| 비정상 파드 필터링 | `kubectl get pods -A --field-selector=status.phase!=Running` | Pending, Error, Crash 상태인 결함 파드만 정확하게 필터링 |
+| 파드 상세 분석 | `kubectl describe pod <POD_NAME> -n <NAMESPACE>` | ImagePullBackOff, 스케줄링 실패 사유 등 파드 상세 이벤트 로그 |
+| 파드 상태 실시간 감시(Watch) | `kubectl get pods -w` | 파드의 생성, 종료, 에러(Crash) 등 상태 변화 이벤트를 실시간 스트림으로 모니터링 |
+| 라벨 기준 파드 조회 | `kubectl get pods -l app=<APP_NAME> -n <NAMESPACE>` | 특정 라벨(예: 앱 이름)을 가진 파드 그룹만 모아서 조회 |
+| 노드 리소스 사용량 | `kubectl top nodes` | 노드의 현재 CPU/메모리 실제 사용량(Metrics Server 기반) |
+| 파드 리소스 사용량 | `kubectl top pods -A` | 파드의 현재 CPU/메모리 실제 사용량(Metrics Server 기반) |
+| 크래시 이전 로그 | `kubectl logs <POD_NAME> -n <NAMESPACE> --previous` | 컨테이너가 죽었을 때 재시작 직전 컨테이너가 남긴 에러 로그 추출 |
+| 파드 내부 쉘 접속 | `kubectl exec -it <POD_NAME> -n <NAMESPACE> -- /bin/sh` | 파드 컨테이너 내부에 직접 접근하여 설정/네트워크 상태 검증 |
+| 파드 내부 파일 복사 | `kubectl cp <NAMESPACE>/<POD_NAME>:<PATH> <LOCAL_PATH>` | 컨테이너 안의 힙 덤프, 로그 등 디버깅 파일을 로컬로 복사 |
+| 전체 리소스 일괄 조회 | `kubectl get all -n <NAMESPACE>` | 특정 네임스페이스의 Pod, Service, Deployment, ReplicaSet 일괄 |
+
+### 네트워크
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 서비스 엔드포인트 | `kubectl get endpoints -A` | Service와 실제 Pod IP 매핑이 정상적으로 로드밸런싱 되는지 검증 |
+| Ingress 라우팅 룰 | `kubectl get ingress -A` | 외부 트래픽을 내부 서비스로 연결하는 도메인 및 Path 라우팅 룰 |
+| DNS 질의 테스트 | `kubectl run -i --tty --rm debug --image=busybox --restart=Never -- nslookup kubernetes.default` | 임시 파드를 생성해 CoreDNS의 클러스터 내부 네임 레졸루션 점검 |
+| 로컬 포트 포워딩 | `kubectl port-forward svc/<SVC_NAME> <LOCAL_PORT>:<SVC_PORT>` | 외부 노출이 없는 백엔드 서비스 UI/API를 로컬 PC 포트로 임시 연결 |
+
+### 스토리지
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| PV/PVC 상태 맵 | `kubectl get pv,pvc -A` | 프로비저닝된 물리 볼륨(PV)과 파드의 볼륨 클레임(PVC) Bound 상태 |
+| 스토리지 클래스 | `kubectl get sc` | CSI 프로바이더(Ceph RBD/CephFS 등) 볼륨 동적 프로비저닝 설정 |
+
+### 워크로드/배포
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 디플로이먼트 상태 | `kubectl get deployments -A` | 요구 레플리카 수와 실제 동작 중인 파드 수가 일치하는지 정합성 확인 |
+| 롤아웃 히스토리 | `kubectl rollout history deployment/<NAME> -n <NAMESPACE>` | 앱 버전 업데이트 이력 및 리비전 넘버 확인 |
+| 디플로이먼트 롤백 | `kubectl rollout undo deployment/<NAME> -n <NAMESPACE>` | 신규 배포 결함 시 직전의 정상 리비전 파드로 즉시 롤백 |
+| 파드 스케일링 | `kubectl scale deployment <NAME> --replicas=<NUM> -n <NAMESPACE>` | 수동으로 파드 개수를 늘리거나 줄여 부하 대응 및 동작 검증 |
+| 재배포(Restart) | `kubectl rollout restart deployment/<NAME> -n <NAMESPACE>` | 기존 파드를 하나씩 재생성하여 ConfigMap 등 변경 설정 갱신 |
+| Helm 릴리스 목록 | `helm list -A` | Helm 차트로 배포된 서비스의 버전, 상태(deployed/failed) 확인 |
+| Helm 주입 변수 덤프 | `helm get values <RELEASE_NAME> -n <NAMESPACE>` | 차트 배포 시 사용자가 주입한 values.yaml 커스텀 설정값 전체 출력 |
+
+### 관리·설정
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| API 지원 리소스 | `kubectl api-resources` | 현재 클러스터에 등록된 전체 CRD 및 기본 객체 단축어(Shortnames) |
+| 컴포넌트 헬스 | `kubectl get componentstatuses` | etcd, 스케줄러, 컨트롤러 등 마스터 노드 핵심 컴포넌트 헬스 체크 |
+| RBAC 권한 디버깅 | `kubectl auth can-i create pods --as=system:serviceaccount:<NS>:<SA_NAME>` | 특정 서비스 어카운트가 파드 생성 등의 권한을 보유했는지 테스트 |
+| 컨피그맵/시크릿 조회 | `kubectl get cm,secret -A` | 파드에 주입되는 환경변수, 설정 파일 및 암호화 인증 데이터 목록 |
+| 전체 이벤트 추적 | `kubectl get events -A --sort-by='.lastTimestamp'` | 시간순으로 발생한 클러스터 내 모든 에러/경고/상태 변경 이벤트 |
+
+### 로그
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| kubelet 로그 스트림 | `journalctl -u kubelet -f` | 물리 노드의 kubelet 데몬 로그 추적 (파드 생성 실패 원인, Ctrl+C) |
+| containerd 로그 | `journalctl -u containerd -n 100 --no-pager` | 컨테이너 런타임의 이미지 풀링 실패나 구동 에러 로그 100줄 |
+
+## 시스템·부하검증
+
+### 시스템/프로세스
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 상위 프로세스(top) | `top -b -n 1 \| head -n 20` | 시스템 자원을 과다 점유하는 상위 20개 프로세스 스냅샷 |
+| 시스템 메모리 사용량 | `free -h` | 전체 RAM 및 Swap 메모리의 총량, 사용량, 그리고 리눅스 캐시(buff/cache) 여유분 조회 |
+| 통합 실시간 뷰(dstat) | `dstat -cdngy 1` | 1초 단위로 CPU, 디스크 I/O, 네트워크 대역폭, 페이징 종합 출력 (Ctrl+C) |
+| 커널 패닉/OOM(dmesg) | `dmesg -T --level=err,crit,alert,emerg` | OOM Killer, 디스크 배드섹터 등 치명적인 커널 로그만 추출 |
+| 디스크 I/O 병목(iostat) | `iostat -xz 1 5` | 블록 디바이스별 Read/Write 속도와 await(지연) 5회 측정 |
+| CPU 누적 부하(sar) | `sar -u 1 5` | sysstat 기반 CPU 사용량 1초 간격 5회 측정 |
+| 네트워크 부하(sar) | `sar -n DEV 1 5` | sysstat 기반 인터페이스별 네트워크 사용량 5회 측정 |
+| 페이징/IO Wait(vmstat) | `vmstat 1 5` | 메모리 스왑(si/so) 상태와 디스크 지연으로 인한 대기(wa) 추적 |
+| 점유 디렉토리 추적(lsof) | `lsof +D /var/log` | 특정 디렉토리를 점유하여 삭제를 막는 프로세스 식별 |
+| 포트 점유 추적(lsof) | `lsof -i :80` | 특정 포트를 점유 중인 프로세스 식별 |
+| 부팅 세션 에러 로그 | `journalctl -p 3 -xb` | 현재 부팅 세션에서 발생한 Error 등급(-p 3) 이상의 시스템 로그 |
+| 런타임 커널 변수 | `sysctl -a \| grep -i 'net.ipv4\\|vm.swappiness'` | 메모리 스왑 빈도 및 TCP 네트워크 튜닝 설정 적용 여부 |
+| 캐시 강제 반환(테스트) | `sync; echo 3 > /proc/sys/vm/drop_caches` | 임계치 테스트를 위해 PageCache/inode 캐시를 비워 가용 메모리 확보 |
+
+### 부하 테스트
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| CPU/메모리 부하 유도 | `stress-ng --cpu 8 --vm 4 --vm-bytes 2G --timeout 120s` | 알람 연동 테스트를 위한 2분간 CPU 점유 및 8GB 램 할당 부하 |
+| 디스크 스토리지 부하 | `stress-ng --hdd 2 --hdd-bytes 10G --timeout 60s` | 60초간 대용량 Read/Write를 발생시켜 스토리지 컨트롤러 병목 유도 |
+| 대역폭 테스트(서버) | `iperf3 -s -D` | 랙 간 대역폭/지연 측정을 위한 iperf3 백그라운드 리슨 대기 |
+| 대역폭 테스트(클라) | `iperf3 -c <SERVER_IP> -t 60 -P 4` | 60초간 4개 병렬 스레드로 타겟 노드와의 TCP 최대 실효 대역폭 측정 |
+
+### 네트워크
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 패킷 캡처(tcpdump) | `tcpdump -i any port 80 -n -c 100` | 특정 포트로 인입되는 패킷 헤더와 출발지 IP 100개 캡처 |
+| TCP 소켓/포트(ss) | `ss -tunlpo` | 서버의 TCP/UDP 리슨 포트, 바인딩 프로세스, 타이머 상태 출력 |
+| TIME_WAIT 소켓 점검 | `netstat -nat \| grep TIME_WAIT \| wc -l` | 연결 종료 후 남은 잔여 소켓 수를 카운트하여 커널 튜닝 판단 |
+| 라우팅 테이블 | `ip route show` | 디폴트 게이트웨이 및 대역별 패킷 우회 라우팅 인터페이스 검증 |
+| NIC 이중화(Bonding) | `cat /proc/net/bonding/bond0` | LACP 등 본딩 포트의 Active 상태 및 링크 장애 조치(MII) 여부 |
+| 랜카드 하드웨어 스펙 | `ethtool eth0` | 물리 랜카드 지원 속도(10G/40G), Duplex 상태 및 Link up 확인 |
+| 실시간 라우팅 지연(mtr) | `mtr <TARGET_IP>` | Ping+Traceroute 결합으로 목적지까지 구간별 패킷 손실률 추적 |
+| DNS 도메인 쿼리(dig) | `dig @<DNS_IP> <DOMAIN> +short` | 특정 네임서버를 지정하여 도메인의 A/CNAME 응답 직접 검증 |
+
+### 디스크·하드웨어
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 물리 디스크 파티션 | `lsblk -f` | 노드 장착 디스크 블록 구조, UUID, 파일시스템 타입(XFS/EXT4) 매핑 |
+| 디스크/Inode 사용률 | `df -iTh` | 디스크 여유 공간 + 작은 파일 과다로 인한 Inode 고갈 여부 점검 |
+| 대용량 디렉토리 색출 | `du -sh /var/* \| sort -rh \| head -10` | 특정 파티션에서 용량을 가장 많이 차지하는 하위 폴더 10개 추출 |
+| CPU/NUMA 스펙 | `lscpu` | 물리 코어, 쓰레드, NUMA 노드 매핑 및 가상화(VT-x) 지원 유무 |
+| 물리 메모리(RAM) 스펙 | `dmidecode -t memory \| grep -i 'size\\|speed'` | 메인보드 뱅크에 장착된 램 모듈의 개별 크기와 동작 클럭 |
+| 방화벽(Iptables) 룰 | `iptables -L -n -v \| head -n 30` | 커널 레벨 패킷 필터링 룰의 Drop/Accept 카운트 확인 |
+
+## 리눅스 코어
+
+### 이동·파일 기본
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 현재 위치 확인 | `pwd` | 지금 내가 있는 디렉토리의 전체 경로 출력 |
+| 폴더 이동 | `cd <경로>` | 지정 폴더로 이동 (.. 상위, ~ 홈) |
+| 파일/폴더 목록 상세 | `ls -alh` | 숨김 파일 포함 권한, 소유자, 크기를 읽기 쉬운 단위로 출력 |
+| 폴더 생성 | `mkdir -p <폴더명>` | 중간 경로(상위 폴더)까지 한 번에 새 폴더 생성 |
+| 하위 파일 전체 검색 | `find /var/log -name "*.log" -type f` | 경로 아래 .log 확장자 파일을 재귀적으로 검색 |
+| 검색 후 일괄 삭제 | `find /tmp -name "*.tmp" -mtime +7 -exec rm -f {} \;` | 7일 이상 지난 .tmp 찌꺼기 파일을 찾아 일괄 삭제 |
+| 파일/폴더 복사 | `cp -r <원본> <대상>` | 파일이나 폴더(-r)를 다른 위치로 복사 |
+| 이동/이름 변경 | `mv <원본> <대상>` | 파일·폴더를 옮기거나 이름 변경 (같은 명령으로 둘 다) |
+| 삭제(주의) | `rm -ri <대상>` | 확인하며(-i) 폴더 포함(-r) 영구 삭제 — 되돌릴 수 없으니 주의 |
+| 심볼릭 링크 생성 | `ln -s <원본_경로> <링크_이름>` | 복잡한 경로나 파일에 대한 바로가기(소프트 링크)를 생성하여 쉘 접근성을 단순화 |
+
+### 내용·텍스트 처리
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 파일 내용 출력 | `cat <파일명>` | 짧은 텍스트 파일 내용 전체를 화면에 출력 |
+| 명령어 주기적 반복 실행 | `watch -n 1 <명령어>` | 특정 명령어(예: ls, df, kubectl get 등)를 1초 주기로 반복 실행하여 결과 변화를 화면에 실시간 갱신 |
+| 대용량 파일 페이징 | `less <파일명>` | 대용량 로그를 멈춤 없이 위/아래로 스크롤 열람 (q 종료) |
+| 로그 실시간 모니터링 | `tail -f <파일명>` | 실시간으로 추가되는 로그를 꼬리 물며 확인 (Ctrl+C 종료) |
+| 단어 검색(grep) | `grep -i "error" <파일명>` | 대소문자 무시(-i)하고 "error"가 포함된 모든 줄 필터링 |
+| 열 파싱(awk) | `awk '{print $1, $9}' access.log` | 공백 기준으로 로그를 쪼개 1번째(IP)·9번째(상태코드) 열만 추출 |
+| 라인 구간 출력(sed) | `sed -n '100,200p' server.log` | 수십만 줄 중 정확히 100~200번 줄 사이만 잘라내기 |
+| 파이프 반복(xargs) | `cat list.txt \| xargs -I {} rm -rf {}` | 앞 명령의 목록 결과를 하나씩 뒤 명령으로 넘겨 대량 작업 |
+
+### 압축·전송
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 폴더 압축(tar.gz) | `tar -czvf backup.tar.gz /etc/` | 폴더를 하나의 파일로 묶고 gzip으로 용량 압축 |
+| 압축 해제 | `tar -xzvf backup.tar.gz -C /tmp/` | tar.gz를 지정 경로(/tmp/)에 원본 구조 그대로 해제 |
+| 웹 파일 다운로드 | `curl -O <URL>` | 외부/내부 레포에서 스크립트·바이너리 다운로드 (또는 wget <URL>) |
+| 원격 안전 복사(scp) | `scp <파일명> user@<IP>:<경로>` | SSH로 다른 서버에 설정 파일 등을 안전하게 전송 |
+| 디렉토리 동기화(rsync) | `rsync -avz /data/ /backup/` | 변경된 파일만 식별해 증분 백업 — 복제 시간 단축 |
+
+### 권한·프로세스
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 권한(퍼미션) 변경 | `chmod 755 <스크립트.sh>` | 실행(x) 권한을 부여하여 쉘에서 구동 가능하게 변경 |
+| 소유권 갱신 | `chown -R user:group <폴더명>` | 폴더와 하위 전체의 소유자/그룹을 일괄 변경 |
+| 백그라운드 실행 | `nohup <명령어> &` | 터미널을 닫아도 백그라운드 스크립트가 죽지 않고 유지 |
+| 프로세스 PID 검색 | `ps aux \| grep <데몬명>` | 실행 중인 서비스의 유저, CPU/메모리율 및 PID 검색 |
+| 프로세스 강제 종료 | `kill -9 <PID>` | 응답이 멈춘(좀비) 프로세스를 PID 기반으로 강제 Kill |
+
+### 서비스·패키지
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 서비스 상태 | `systemctl status <서비스명>` | systemd 데몬(sshd, nginx 등)의 활성/에러/중지 상태 상세 |
+| 서비스 자동 시작 등록 | `systemctl enable --now <서비스명>` | 즉시 시작 + 재부팅 시 자동으로 올라오게 등록 |
+| 패키지 갱신(Ubuntu) | `apt update` | 레포지토리에서 설치 가능한 최신 패키지 정보 갱신 |
+| 패키지 갱신(RHEL) | `dnf check-update` | RHEL 계열 최신 패키지 버전/의존성 갱신 |
+| 프로그램 설치 | `apt install -y <패키지>` | 터미널 툴(htop, vim 등) 설치 (-y로 묻지 않고 진행) |
+| 프로그램 제거 | `apt remove <패키지>` | 불필요한 패키지 제거 |
+| 설치 검색(Ubuntu) | `dpkg -l \| grep <이름>` | 해당 라이브러리/툴이 설치되어 있는지 로컬 DB 검색 |
+| 설치 검색(RHEL) | `rpm -qa \| grep <이름>` | RHEL 계열에서 설치된 패키지 검색 |
+
+### 도움말·기록
+
+| 항목 | 명령어 | 설명 |
+|---|---|---|
+| 명령어 매뉴얼 | `man <명령어>` | 명령어의 옵션 플래그와 사용 예제 공식 매뉴얼 (q 종료) |
+| 명령어 위치 추적 | `which <명령어>` | PATH에 등록된 실행 파일의 실제 바이너리 절대 경로 확인 |
+| 이전 명령어 기록 | `history \| grep <키워드>` | 과거 입력했던 긴 명령어를 다시 찾아서 재사용 |
+
