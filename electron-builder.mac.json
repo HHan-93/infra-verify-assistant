@@ -14,7 +14,7 @@
   ],
   "mac": {
     "category": "public.app-category.developer-tools",
-    "x64ArchFiles": "**/node_modules/node-pty/**",
+    "x64ArchFiles": "**/node_modules/{node-pty,ssh2,cpu-features}/**",
     "target": [
       {
         "target": "dmg",
