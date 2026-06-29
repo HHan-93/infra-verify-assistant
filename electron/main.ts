@@ -1,10 +1,22 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  shell,
+  safeStorage,
+  clipboard,
+  nativeImage,
+} from 'electron'
 import path from 'node:path'
 import os from 'node:os'
-import { writeFile, readFile, unlink } from 'node:fs/promises'
-import { Client, type ClientChannel } from 'ssh2'
+import net from 'node:net'
+import { createWriteStream, type WriteStream } from 'node:fs'
+import { writeFile, readFile, unlink, mkdir } from 'node:fs/promises'
+import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
+import { AGENT_SCRIPT } from './agent-script'
 import {
   PROVIDER_INFO,
   ANALYSIS_STYLES,
@@ -14,6 +26,8 @@ import {
   type AIRequest,
   type SavedProfile,
   type AIProvider,
+  type MetricSample,
+  type MonitorStartOptions,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -35,7 +49,36 @@ interface Session {
   lastPassword?: string
   /** 설정파일 뷰어에서 입력한 sudo 비밀번호 캐시 (키 인증/비번 불일치 대비) */
   sudoPassword?: string
+  /** 파일 탐색기용 SFTP 핸들 (세션당 1개 재사용 → 채널 누수 방지) */
+  sftp?: SFTPWrapper
+  /** 점프 호스트(Bastion) 경유 시의 게이트웨이 클라이언트 */
+  jumpClient?: Client | null
+  /** 활성 포트 포워딩(터널) 목록 */
+  forwards: ForwardEntry[]
+  /** 원격 포워딩 'tcp connection' 핸들러 부착 여부 */
+  remoteHandlerAttached?: boolean
   connecting: boolean // 연결 진행 중에는 로컬 셸 자동 시작 억제
+  /** 세션 로그 파일 스트림 (켜져 있으면 모든 출력 기록) */
+  logStream?: WriteStream
+  // ── 자동 재접속용 ──
+  lastConfig?: SSHConfig // 마지막 접속 설정 (재접속에 재사용)
+  wasConnected?: boolean // 쉘까지 한 번이라도 연결됐는지
+  hadError?: boolean // 연결 중 오류(네트워크/keepalive) 발생 여부
+  userClosed?: boolean // 사용자가 직접 끊었는지 (재접속 안 함)
+  reconnecting?: boolean // 자동 재접속 루프 진행 중
+}
+
+/** 포트 포워딩 항목 */
+interface ForwardEntry {
+  id: string
+  type: 'local' | 'remote'
+  /** 로컬: 바인드 주소 / 원격: 로컬 목적지 주소 */
+  localHost: string
+  localPort: number
+  /** 로컬: 원격 목적지 / 원격: 원격 바인드 주소 */
+  remoteHost: string
+  remotePort: number
+  server?: net.Server // local 포워딩 시 로컬 리스너
 }
 
 const sessions = new Map<string, Session>()
@@ -44,7 +87,7 @@ const sessions = new Map<string, Session>()
 function getSession(id: string): Session {
   let s = sessions.get(id)
   if (!s) {
-    s = { id, client: null, shellStream: null, localPty: null, connecting: false }
+    s = { id, client: null, shellStream: null, localPty: null, forwards: [], connecting: false }
     sessions.set(id, s)
   }
   return s
@@ -53,6 +96,18 @@ function getSession(id: string): Session {
 /** sudo -S 에 시도할 비밀번호 후보 (명시 입력 → 캐시 → 접속 비밀번호 순, 중복/빈값 제거) */
 function sudoPwCandidates(s: Session, explicit?: string): string[] {
   return [...new Set([explicit, s.sudoPassword, s.lastPassword].filter((p): p is string => !!p))]
+}
+
+/** 터미널 출력 → 렌더러 전송 + (로깅 중이면) 파일 기록 */
+function pushOutput(s: Session, data: string) {
+  mainWindow?.webContents.send('terminal:data', { sessionId: s.id, data })
+  if (s.logStream) {
+    try {
+      s.logStream.write(data)
+    } catch {
+      /* 스트림 오류 무시 */
+    }
+  }
 }
 
 // ── 로컬 셸(node-pty) ─────────────────────────────────────────
@@ -71,9 +126,7 @@ function startLocalShell(s: Session) {
       cwd: os.homedir(),
       env: process.env as Record<string, string>,
     })
-    s.localPty.onData((d) =>
-      mainWindow?.webContents.send('terminal:data', { sessionId: s.id, data: d }),
-    )
+    s.localPty.onData((d) => pushOutput(s, d))
     s.localPty.onExit(() => {
       s.localPty = null
     })
@@ -92,8 +145,11 @@ function killLocalShell(s: Session) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
+    // 사이드바 + 터미널 + AI 패널이 줄바꿈 없이 한 번에 보이는 기본 크기
+    width: 1800,
+    height: 1000,
+    minWidth: 1280,
+    minHeight: 720,
     backgroundColor: '#1e1e2e',
     webPreferences: {
       // 프리로드에서 contextBridge 로만 API 를 노출 → 보안 강화
@@ -121,32 +177,99 @@ function sendStatus(sessionId: string, event: Omit<SSHStatusEvent, 'sessionId'>)
   mainWindow?.webContents.send('ssh:status', { sessionId, ...event })
 }
 
+// ── 호스트 키 검증 (TOFU: 최초 접속 시 신뢰·저장, 이후 변경 감지) ──
+const knownHostsPath = () => path.join(app.getPath('userData'), 'known-hosts.dat')
+let knownHosts: Record<string, string> | null = null // "host:port" → sha256 hex
+const pendingHostKey: Record<string, string> = {} // 변경 감지 시 신뢰 대기 중인 새 키
+const hostKeyId = (host: string, port: number) => `${host}:${port}`
+
+async function loadKnownHosts(): Promise<Record<string, string>> {
+  if (knownHosts) return knownHosts
+  try {
+    const json = decryptStr(await readFile(knownHostsPath(), 'utf-8'))
+    knownHosts = json ? (JSON.parse(json) as Record<string, string>) : {}
+  } catch {
+    knownHosts = {}
+  }
+  return knownHosts
+}
+function saveKnownHosts() {
+  if (knownHosts) void writeFile(knownHostsPath(), encryptStr(JSON.stringify(knownHosts)), 'utf-8')
+}
+
+/** SSH 에이전트 소켓/파이프 경로 해석 (없으면 undefined) */
+function agentPath(): string | undefined {
+  if (process.env.SSH_AUTH_SOCK) return process.env.SSH_AUTH_SOCK
+  if (process.platform === 'win32') return '\\\\.\\pipe\\openssh-ssh-agent'
+  return undefined
+}
+
+/** 특정 호스트용 TOFU 검증기 (최초 저장, 이후 변경 시 거부+대기) */
+function makeHostVerifier(host: string, port: number) {
+  const id = hostKeyId(host, port)
+  return (hashedKey: string): boolean => {
+    const known = knownHosts![id]
+    if (!known) {
+      knownHosts![id] = hashedKey
+      saveKnownHosts()
+      return true
+    }
+    if (known === hashedKey) return true
+    pendingHostKey[id] = hashedKey
+    return false
+  }
+}
+
 /** 해당 세션의 SSH 연결 정리 (로컬 셸은 건드리지 않음) */
 function cleanupConnection(s: Session) {
+  // 모니터 리더만 멈춘다(서버 데몬은 그대로 두어 재접속 시 resume). 배포 플래그 리셋.
+  stopMonitorReader(s.id)
+  const mon = monitors.get(s.id)
+  if (mon) mon.deployed = false
   s.shellStream?.end()
   s.shellStream = null
+  // 활성 터널 정리
+  for (const f of s.forwards) {
+    try {
+      f.server?.close()
+    } catch {
+      /* 무시 */
+    }
+  }
+  s.forwards = []
+  s.remoteHandlerAttached = false
+  try {
+    s.sftp?.end()
+  } catch {
+    /* 이미 닫힘 */
+  }
+  s.sftp = undefined
   s.client?.end()
   s.client = null
+  s.jumpClient?.end()
+  s.jumpClient = null
   s.lastPassword = undefined
   s.sudoPassword = undefined
 }
 
-// ── IPC: SSH 연결 요청 ─────────────────────────────────────────
-// 렌더러 → 메인.  접속 후 인터랙티브 쉘(shell)을 열고,
-// 쉘의 출력 데이터를 'terminal:data' 채널로 (sessionId 와 함께) 렌더러에 전달한다.
-ipcMain.handle(
-  'ssh:connect',
-  async (_evt, sessionId: string, config: SSHConfig): Promise<ConnectResult> => {
-    const s = getSession(sessionId)
-    // 연결 진행 중 표시 + 로컬 셸 정리(원격으로 전환)
-    s.connecting = true
-    killLocalShell(s)
-    // 이전 연결이 있으면 정리
-    cleanupConnection(s)
+// ── SSH 연결 (재사용 가능 함수: 최초 접속 + 자동 재접속 공용) ──────
+const RECONNECT_MAX = 5
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-    s.lastPassword = config.password || undefined
+function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectResult> {
+  const s = getSession(sessionId)
+  s.connecting = true
+  s.wasConnected = false
+  s.hadError = false
+  killLocalShell(s)
+  cleanupConnection(s)
+  s.lastConfig = config
+  s.lastPassword = config.password || undefined
+  const targetId = hostKeyId(config.host, config.port)
 
-    return new Promise<ConnectResult>((resolve) => {
+  return new Promise<ConnectResult>((resolve) => {
+    // 대상 서버에 연결 (sock 이 있으면 점프 호스트 경유)
+    const connectTarget = (sock?: ClientChannel) => {
       const conn = new Client()
       s.client = conn
 
@@ -154,72 +277,233 @@ ipcMain.handle(
         .on('ready', () => {
           sendStatus(sessionId, {
             status: 'connected',
-            message: `${config.username}@${config.host} 연결됨`,
+            message: `${config.username}@${config.host} 연결됨${sock ? ' (점프 경유)' : ''}`,
           })
-
-          // 인터랙티브 쉘 오픈 (PTY 포함)
           conn.shell({ term: 'xterm-256color' }, (err, stream) => {
             if (err) {
               sendStatus(sessionId, { status: 'error', message: `쉘 오픈 실패: ${err.message}` })
               resolve({ success: false, message: err.message })
               return
             }
-
             s.shellStream = stream
-
-            // 서버 → 터미널: 쉘 출력 데이터를 렌더러로 전달
-            stream.on('data', (data: Buffer) => {
-              mainWindow?.webContents.send('terminal:data', {
-                sessionId,
-                data: data.toString('utf-8'),
-              })
-            })
-            stream.stderr.on('data', (data: Buffer) => {
-              mainWindow?.webContents.send('terminal:data', {
-                sessionId,
-                data: data.toString('utf-8'),
-              })
-            })
+            s.wasConnected = true
+            stream.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
+            stream.stderr.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
             stream.on('close', () => {
-              sendStatus(sessionId, { status: 'closed', message: '쉘 세션 종료' })
-              cleanupConnection(s)
-              startLocalShell(s) // 원격 종료 → 로컬 셸로 복귀
+              // 채널 종료 → 연결 종료 유도 (나머지 정리/재접속 판단은 client 'close' 가 담당)
+              s.client?.end()
             })
-
+            // 접속 후 자동 실행 명령 (프롬프트가 뜬 뒤 전송)
+            if (config.startup && config.startup.trim()) {
+              setTimeout(() => {
+                for (const c of config.startup!.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
+                  stream.write(c + '\n')
+                }
+              }, 500)
+            }
             s.connecting = false
             resolve({ success: true, message: '연결 성공' })
           })
         })
         .on('error', (err) => {
           s.connecting = false
-          sendStatus(sessionId, { status: 'error', message: err.message })
-          startLocalShell(s) // 연결 실패 → 로컬 셸 복귀
-          resolve({ success: false, message: err.message })
+          s.hadError = true
+          const changed = !!pendingHostKey[targetId]
+          const message = changed
+            ? '⚠ 호스트 키가 이전과 다릅니다 (보안 경고). 서버가 재설치되었거나 중간자 공격일 수 있습니다.'
+            : err.message
+          sendStatus(sessionId, { status: 'error', message })
+          resolve({ success: false, message, hostKeyChanged: changed })
         })
         .on('close', () => {
-          sendStatus(sessionId, { status: 'closed', message: '연결 종료됨' })
-          if (!s.connecting) startLocalShell(s) // 전환 중이 아니면 로컬 복귀
+          if (s.reconnecting) return // 재접속 루프가 제어 중
+          const shouldReconnect = !!(s.wasConnected && s.hadError && !s.userClosed && s.lastConfig)
+          sendStatus(sessionId, {
+            status: 'closed',
+            message: shouldReconnect ? '연결이 끊겼습니다.' : '연결 종료됨',
+          })
+          if (shouldReconnect) {
+            void attemptReconnect(sessionId)
+          } else {
+            cleanupConnection(s)
+            if (!s.connecting) startLocalShell(s)
+          }
         })
 
-      sendStatus(sessionId, { status: 'connecting', message: `${config.host} 연결 시도 중...` })
-
-      // 비밀번호 / 개인키 인증 모두 지원
       conn.connect({
+        sock,
         host: config.host,
         port: config.port,
         username: config.username,
         password: config.password,
         privateKey: config.privateKey,
         passphrase: config.passphrase,
+        agent: config.useAgent ? agentPath() : undefined,
         readyTimeout: 20000,
-        // 죽은 세션(서버측 종료/타임아웃)을 감지하기 위한 keepalive.
-        // 15초마다 probe, 3회 무응답이면 연결을 끊고 'close' 이벤트 발생.
+        hostHash: 'sha256',
+        hostVerifier: makeHostVerifier(config.host, config.port),
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
       })
+    }
+
+    if (config.jump) {
+      // 점프 호스트 먼저 연결 → forwardOut 으로 대상까지 터널 후 connectTarget
+      const jump = config.jump
+      const jumpId = hostKeyId(jump.host, jump.port)
+      const jc = new Client()
+      s.jumpClient = jc
+      sendStatus(sessionId, { status: 'connecting', message: `점프 호스트 ${jump.host} 연결 중...` })
+      jc
+        .on('ready', () => {
+          sendStatus(sessionId, { status: 'connecting', message: `${config.host} 로 터널 생성 중...` })
+          jc.forwardOut('127.0.0.1', 0, config.host, config.port, (err, stream) => {
+            if (err) {
+              s.connecting = false
+              s.hadError = true
+              sendStatus(sessionId, { status: 'error', message: `점프 터널 실패: ${err.message}` })
+              if (!s.reconnecting) startLocalShell(s)
+              resolve({ success: false, message: `점프 터널 실패: ${err.message}` })
+              return
+            }
+            connectTarget(stream)
+          })
+        })
+        .on('error', (err) => {
+          s.connecting = false
+          s.hadError = true
+          const changed = !!pendingHostKey[jumpId]
+          const message = changed
+            ? '⚠ 점프 호스트의 키가 이전과 다릅니다 (보안 경고).'
+            : `점프 호스트 연결 실패: ${err.message}`
+          sendStatus(sessionId, { status: 'error', message })
+          if (!s.reconnecting) startLocalShell(s)
+          resolve({ success: false, message, hostKeyChanged: changed })
+        })
+      jc.connect({
+        host: jump.host,
+        port: jump.port,
+        username: jump.username,
+        password: jump.password,
+        privateKey: jump.privateKey,
+        passphrase: jump.passphrase,
+        agent: jump.useAgent ? agentPath() : undefined,
+        readyTimeout: 20000,
+        hostHash: 'sha256',
+        hostVerifier: makeHostVerifier(jump.host, jump.port),
+        keepaliveInterval: 15000,
+        keepaliveCountMax: 3,
+      })
+    } else {
+      sendStatus(sessionId, { status: 'connecting', message: `${config.host} 연결 시도 중...` })
+      connectTarget()
+    }
+  })
+}
+
+// 예기치 않은 끊김 시 자동 재접속 (백오프, 최대 RECONNECT_MAX 회)
+async function attemptReconnect(sessionId: string) {
+  const s = getSession(sessionId)
+  if (!s.lastConfig || s.reconnecting) return
+  s.reconnecting = true
+  const cfg = s.lastConfig
+  for (let i = 1; i <= RECONNECT_MAX; i++) {
+    if (s.userClosed) break
+    sendStatus(sessionId, {
+      status: 'connecting',
+      message: `연결이 끊겼습니다 — 자동 재접속 ${i}/${RECONNECT_MAX}...`,
     })
+    await delay(Math.min(1500 * i, 6000))
+    if (s.userClosed) break
+    const r = await connectSession(sessionId, cfg)
+    if (r.success) {
+      s.reconnecting = false
+      return
+    }
+  }
+  s.reconnecting = false
+  if (!s.userClosed) {
+    sendStatus(sessionId, { status: 'error', message: '자동 재접속 실패. 수동으로 다시 연결하세요.' })
+    const s2 = getSession(sessionId)
+    cleanupConnection(s2)
+    startLocalShell(s2)
+  }
+}
+
+// ── IPC: SSH 연결 요청 ─────────────────────────────────────────
+ipcMain.handle(
+  'ssh:connect',
+  async (_evt, sessionId: string, config: SSHConfig): Promise<ConnectResult> => {
+    const s = getSession(sessionId)
+    s.userClosed = false // 새 연결 시도 → 사용자 종료 플래그 해제
+    s.reconnecting = false
+    await loadKnownHosts()
+    return connectSession(sessionId, config)
   },
 )
+
+// 변경된 호스트 키를 신뢰(덮어쓰기) — 사용자가 경고 확인 후 재접속할 때.
+// 직전 접속에서 거부된 키(대상/점프 포함)를 모두 커밋한다.
+ipcMain.handle('ssh:trustHost', async () => {
+  const map = await loadKnownHosts()
+  const ids = Object.keys(pendingHostKey)
+  if (ids.length) {
+    for (const id of ids) {
+      map[id] = pendingHostKey[id]
+      delete pendingHostKey[id]
+    }
+    saveKnownHosts()
+  }
+  return { ok: true }
+})
+
+// 세션 로그 기록 시작 (저장 위치 선택)
+ipcMain.handle('log:start', async (_evt, { sessionId }: { sessionId: string }) => {
+  const s = getSession(sessionId)
+  if (s.logStream) return { ok: true, alreadyLogging: true }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+    defaultPath: `session-${sessionId}-${stamp}.log`,
+    title: '세션 로그 저장 위치',
+  })
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+  try {
+    s.logStream = createWriteStream(r.filePath, { flags: 'a' })
+    s.logStream.write(`\n===== 로그 시작 ${new Date().toISOString()} =====\n`)
+    return { ok: true, path: r.filePath }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// 세션 로그 기록 중지
+ipcMain.handle('log:stop', (_evt, { sessionId }: { sessionId: string }) => {
+  const s = getSession(sessionId)
+  if (s.logStream) {
+    try {
+      s.logStream.end(`\n===== 로그 종료 ${new Date().toISOString()} =====\n`)
+    } catch {
+      /* 무시 */
+    }
+    s.logStream = undefined
+  }
+  return { ok: true }
+})
+
+// 개인키 파일 선택 → 내용 반환 (폼/모달에서 붙여넣기 대체)
+ipcMain.handle('ssh:pickKeyFile', async () => {
+  const r = await dialog.showOpenDialog(mainWindow ?? undefined!, {
+    properties: ['openFile'],
+    title: '개인키 파일 선택',
+  })
+  if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true }
+  try {
+    const content = await readFile(r.filePaths[0], 'utf-8')
+    return { ok: true, content, name: r.filePaths[0].split(/[\\/]/).pop() || 'key' }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
 
 // ── IPC: 터미널 입력 — SSH 연결 시 원격 쉘, 아니면 로컬 셸로 ──────
 ipcMain.on('terminal:input', (_evt, sessionId: string, data: string) => {
@@ -244,6 +528,8 @@ ipcMain.on('terminal:ready', (_evt, sessionId: string) => {
 // ── IPC: 연결 종료 요청 ────────────────────────────────────────
 ipcMain.on('ssh:disconnect', (_evt, sessionId: string) => {
   const s = getSession(sessionId)
+  s.userClosed = true // 사용자 종료 → 자동 재접속 안 함
+  s.reconnecting = false
   cleanupConnection(s)
   sendStatus(sessionId, { status: 'closed', message: '사용자 요청으로 연결 종료' })
   startLocalShell(s) // 연결 해제 → 로컬 셸로 복귀
@@ -253,6 +539,14 @@ ipcMain.on('ssh:disconnect', (_evt, sessionId: string) => {
 ipcMain.on('session:close', (_evt, sessionId: string) => {
   const s = sessions.get(sessionId)
   if (!s) return
+  s.userClosed = true // 탭 종료 → 자동 재접속 안 함
+  s.reconnecting = false
+  try {
+    s.logStream?.end()
+  } catch {
+    /* 무시 */
+  }
+  s.logStream = undefined
   cleanupConnection(s)
   killLocalShell(s)
   sessions.delete(sessionId)
@@ -468,13 +762,410 @@ async function writeProfiles(list: SavedProfile[]): Promise<void> {
   await writeFile(profilesPath(), encryptStr(JSON.stringify(list)), 'utf-8')
 }
 
+// 시스템 클립보드 텍스트 읽기 (터미널 Ctrl+V 붙여넣기용)
+ipcMain.handle('clipboard:read', () => clipboard.readText())
+
+// 다중 호스트 실행 — 별도 exec 채널로 명령 1회 실행 후 결과 캡처 (인터랙티브 셸 비오염)
+ipcMain.handle('session:run', async (_evt, { sessionId, cmd }: { sessionId: string; cmd: string }) => {
+  const s = getSession(sessionId)
+  if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+  try {
+    const r = await execCapture(s.client, cmd)
+    return { ok: true, code: r.code, out: r.out, err: r.err }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// ── 파일 탐색기 (SFTP) ─────────────────────────────────────────
+/** 세션당 SFTP 핸들 확보(없으면 열고 캐시, 닫히면 자동 해제) */
+function getSftp(s: Session): Promise<SFTPWrapper> {
+  return new Promise((resolve, reject) => {
+    if (!s.client) return reject(new Error('연결되어 있지 않습니다.'))
+    if (s.sftp) return resolve(s.sftp)
+    s.client.sftp((err, sftp) => {
+      if (err) return reject(err)
+      s.sftp = sftp
+      const drop = () => {
+        if (s.sftp === sftp) s.sftp = undefined
+      }
+      sftp.on('close', drop)
+      sftp.on('error', drop)
+      resolve(sftp)
+    })
+  })
+}
+
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
+// POSIX 경로 결합 (원격은 항상 '/')
+const rjoin = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : dir + '/' + name)
+
+// SFTP 프로미스 헬퍼
+const sftpReaddir = (sftp: SFTPWrapper, p: string) =>
+  new Promise<import('ssh2').FileEntry[]>((res, rej) => sftp.readdir(p, (e, l) => (e ? rej(e) : res(l))))
+
+// 재귀 삭제 (디렉토리/파일)
+async function rmrf(sftp: SFTPWrapper, p: string, isDir: boolean) {
+  if (!isDir) {
+    await new Promise<void>((res, rej) => sftp.unlink(p, (e) => (e ? rej(e) : res())))
+    return
+  }
+  for (const it of await sftpReaddir(sftp, p)) {
+    const child = rjoin(p, it.filename)
+    await rmrf(sftp, child, it.longname?.[0] === 'd')
+  }
+  await new Promise<void>((res, rej) => sftp.rmdir(p, (e) => (e ? rej(e) : res())))
+}
+
+// 재귀 다운로드 (원격 디렉토리 → 로컬)
+async function getDirRecursive(sftp: SFTPWrapper, remote: string, localDir: string) {
+  await mkdir(localDir, { recursive: true })
+  for (const it of await sftpReaddir(sftp, remote)) {
+    const rc = rjoin(remote, it.filename)
+    const lc = path.join(localDir, it.filename)
+    if (it.longname?.[0] === 'd') await getDirRecursive(sftp, rc, lc)
+    else if (it.longname?.[0] === '-')
+      await new Promise<void>((res, rej) => sftp.fastGet(rc, lc, (e) => (e ? rej(e) : res())))
+    // 심볼릭 링크 등은 건너뜀
+  }
+}
+
+// 디렉토리 목록 (path 없으면 홈으로)
+ipcMain.handle('sftp:list', async (_evt, { sessionId, path: dirPath }: { sessionId: string; path?: string }) => {
+  const s = getSession(sessionId)
+  try {
+    const sftp = await getSftp(s)
+    const cwd =
+      dirPath && dirPath.length
+        ? dirPath
+        : await new Promise<string>((res, rej) =>
+            sftp.realpath('.', (e, p) => (e ? rej(e) : res(p))),
+          )
+    const list = await new Promise<import('ssh2').FileEntry[]>((res, rej) =>
+      sftp.readdir(cwd, (e, l) => (e ? rej(e) : res(l))),
+    )
+    const entries = list
+      .map((it) => {
+        const lead = it.longname?.[0]
+        const type = lead === 'd' ? 'dir' : lead === 'l' ? 'link' : 'file'
+        return { name: it.filename, type, size: it.attrs.size, mtime: it.attrs.mtime }
+      })
+      .filter((e) => e.name !== '.' && e.name !== '..')
+      .sort((a, b) => {
+        if (a.type === 'dir' && b.type !== 'dir') return -1
+        if (a.type !== 'dir' && b.type === 'dir') return 1
+        return a.name.localeCompare(b.name)
+      })
+    return { ok: true, path: cwd, entries }
+  } catch (e) {
+    return { ok: false, error: errMsg(e) }
+  }
+})
+
+// 파일 다운로드 (원격 → 로컬, 저장 위치 선택)
+ipcMain.handle(
+  'sftp:download',
+  async (_evt, { sessionId, remotePath, name }: { sessionId: string; remotePath: string; name: string }) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    const r = await dialog.showSaveDialog(mainWindow ?? undefined!, { defaultPath: name })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      const sftp = await getSftp(s)
+      await new Promise<void>((res, rej) =>
+        sftp.fastGet(
+          remotePath,
+          r.filePath as string,
+          { step: (t, _c, tot) => sendProgress(sessionId, name, t, tot) },
+          (e) => (e ? rej(e) : res()),
+        ),
+      )
+      return { ok: true, localPath: r.filePath }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 전송 진행률 전송 헬퍼
+const sendProgress = (sessionId: string, name: string, transferred: number, total: number) =>
+  mainWindow?.webContents.send('sftp:progress', {
+    sessionId,
+    name,
+    pct: total ? Math.round((transferred / total) * 100) : 0,
+  })
+
+// 파일 권한 변경 (chmod)
+ipcMain.handle(
+  'sftp:chmod',
+  async (_evt, { sessionId, path: p, mode }: { sessionId: string; path: string; mode: number }) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    try {
+      const sftp = await getSftp(s)
+      await new Promise<void>((res, rej) => sftp.chmod(p, mode, (e) => (e ? rej(e) : res())))
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 파일 업로드 (로컬 → 원격). localPaths 없으면 파일 선택 대화상자.
+ipcMain.handle(
+  'sftp:upload',
+  async (
+    _evt,
+    { sessionId, remoteDir, localPaths }: { sessionId: string; remoteDir: string; localPaths?: string[] },
+  ) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    let paths = localPaths
+    if (!paths || !paths.length) {
+      const r = await dialog.showOpenDialog(mainWindow ?? undefined!, {
+        properties: ['openFile', 'multiSelections'],
+      })
+      if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true }
+      paths = r.filePaths
+    }
+    try {
+      const sftp = await getSftp(s)
+      const uploaded: string[] = []
+      for (const lp of paths) {
+        const base = lp.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'file'
+        await new Promise<void>((res, rej) =>
+          sftp.fastPut(
+            lp,
+            rjoin(remoteDir, base),
+            { step: (t, _c, tot) => sendProgress(sessionId, base, t, tot) },
+            (e) => (e ? rej(e) : res()),
+          ),
+        )
+        uploaded.push(base)
+      }
+      return { ok: true, uploaded }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// ── 포트 포워딩 (터널링) ───────────────────────────────────────
+const fwView = (f: ForwardEntry) => ({
+  id: f.id,
+  type: f.type,
+  localHost: f.localHost,
+  localPort: f.localPort,
+  remoteHost: f.remoteHost,
+  remotePort: f.remotePort,
+})
+let fwSeq = 0
+
+// 원격 포워딩 연결 라우팅 핸들러 (세션당 1회 부착)
+function ensureRemoteHandler(s: Session) {
+  if (s.remoteHandlerAttached || !s.client) return
+  s.remoteHandlerAttached = true
+  s.client.on('tcp connection', (info, accept) => {
+    const f = s.forwards.find((x) => x.type === 'remote' && x.remotePort === info.destPort)
+    if (!f) return
+    const stream = accept()
+    const socket = net.connect(f.localPort, f.localHost || '127.0.0.1')
+    socket.on('error', () => stream.end())
+    stream.on('error', () => socket.end())
+    socket.pipe(stream).pipe(socket)
+  })
+}
+
+ipcMain.handle('tunnel:list', (_evt, { sessionId }: { sessionId: string }) => {
+  return { ok: true, forwards: getSession(sessionId).forwards.map(fwView) }
+})
+
+ipcMain.handle(
+  'tunnel:add',
+  async (
+    _evt,
+    {
+      sessionId,
+      type,
+      localHost,
+      localPort,
+      remoteHost,
+      remotePort,
+    }: {
+      sessionId: string
+      type: 'local' | 'remote'
+      localHost: string
+      localPort: number
+      remoteHost: string
+      remotePort: number
+    },
+  ) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    const id = `fw${++fwSeq}`
+    if (type === 'local') {
+      // 로컬 포트로 들어온 연결을 원격(remoteHost:remotePort)으로 터널
+      const server = net.createServer((socket) => {
+        s.client!.forwardOut(
+          socket.remoteAddress || '127.0.0.1',
+          socket.remotePort || 0,
+          remoteHost,
+          remotePort,
+          (err, stream) => {
+            if (err) {
+              socket.destroy()
+              return
+            }
+            socket.pipe(stream).pipe(socket)
+          },
+        )
+      })
+      return await new Promise((resolve) => {
+        server.once('error', (e: Error) => resolve({ ok: false, error: e.message }))
+        server.listen(localPort, localHost || '127.0.0.1', () => {
+          s.forwards.push({ id, type, localHost: localHost || '127.0.0.1', localPort, remoteHost, remotePort, server })
+          resolve({ ok: true, id })
+        })
+      })
+    } else {
+      // 원격 포트로 들어온 연결을 로컬(localHost:localPort)으로 전달
+      return await new Promise((resolve) => {
+        s.client!.forwardIn(remoteHost || '127.0.0.1', remotePort, (err) => {
+          if (err) {
+            resolve({ ok: false, error: err.message })
+            return
+          }
+          s.forwards.push({ id, type, localHost: localHost || '127.0.0.1', localPort, remoteHost: remoteHost || '127.0.0.1', remotePort })
+          ensureRemoteHandler(s)
+          resolve({ ok: true, id })
+        })
+      })
+    }
+  },
+)
+
+ipcMain.handle('tunnel:remove', (_evt, { sessionId, id }: { sessionId: string; id: string }) => {
+  const s = getSession(sessionId)
+  const f = s.forwards.find((x) => x.id === id)
+  if (!f) return { ok: true }
+  if (f.type === 'local') {
+    try {
+      f.server?.close()
+    } catch {
+      /* 무시 */
+    }
+  } else {
+    try {
+      s.client?.unforwardIn(f.remoteHost || '127.0.0.1', f.remotePort)
+    } catch {
+      /* 무시 */
+    }
+  }
+  s.forwards = s.forwards.filter((x) => x.id !== id)
+  return { ok: true }
+})
+
+// 드래그-아웃 (원격 → OS): 임시폴더로 내려받은 뒤 네이티브 드래그 시작.
+// dragstart 제스처에서 호출되며, 작은~중간 파일에서 매끄럽게 동작.
+const DRAG_ICON = nativeImage.createFromDataURL(
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOElEQVR42u3OMQEAAAgDoJnc6BpjDyRgcrZ1qkBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWHxWniH7QGB0AXr8gAAAABJRU5ErkJggg==',
+)
+ipcMain.on(
+  'sftp:startDrag',
+  async (evt, { sessionId, remotePath, name }: { sessionId: string; remotePath: string; name: string }) => {
+    const s = getSession(sessionId)
+    if (!s.client) return
+    try {
+      const sftp = await getSftp(s)
+      const tmp = path.join(app.getPath('temp'), `ivf-${Date.now()}-${name}`)
+      await new Promise<void>((res, rej) => sftp.fastGet(remotePath, tmp, (e) => (e ? rej(e) : res())))
+      evt.sender.startDrag({ file: tmp, icon: DRAG_ICON })
+    } catch {
+      /* 드래그-아웃 실패 시 무시 (다운로드 버튼으로 대체 가능) */
+    }
+  },
+)
+
+// 새 폴더
+ipcMain.handle('sftp:mkdir', async (_evt, { sessionId, path: p }: { sessionId: string; path: string }) => {
+  const s = getSession(sessionId)
+  try {
+    const sftp = await getSftp(s)
+    await new Promise<void>((res, rej) => sftp.mkdir(p, (e) => (e ? rej(e) : res())))
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: errMsg(e) }
+  }
+})
+
+// 이름 변경 / 이동
+ipcMain.handle(
+  'sftp:rename',
+  async (_evt, { sessionId, from, to }: { sessionId: string; from: string; to: string }) => {
+    const s = getSession(sessionId)
+    try {
+      const sftp = await getSftp(s)
+      await new Promise<void>((res, rej) => sftp.rename(from, to, (e) => (e ? rej(e) : res())))
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 삭제 (파일/디렉토리 재귀)
+ipcMain.handle(
+  'sftp:delete',
+  async (_evt, { sessionId, path: p, isDir }: { sessionId: string; path: string; isDir: boolean }) => {
+    const s = getSession(sessionId)
+    try {
+      const sftp = await getSftp(s)
+      await rmrf(sftp, p, isDir)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 폴더 통째 다운로드 (저장할 상위 폴더 선택 → 재귀)
+ipcMain.handle(
+  'sftp:downloadDir',
+  async (_evt, { sessionId, remotePath, name }: { sessionId: string; remotePath: string; name: string }) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    const r = await dialog.showOpenDialog(mainWindow ?? undefined!, {
+      properties: ['openDirectory', 'createDirectory'],
+      title: `'${name}' 폴더를 저장할 위치 선택`,
+    })
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true }
+    try {
+      const sftp = await getSftp(s)
+      await getDirRecursive(sftp, remotePath, path.join(r.filePaths[0], name))
+      return { ok: true, localPath: path.join(r.filePaths[0], name) }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
 // 저장된 접속 기록 목록
 ipcMain.handle('profiles:list', async () => readProfiles())
 
-// 프로필 추가/갱신 (최근 사용을 맨 앞으로)
+// 프로필 추가/갱신 (최근 사용을 맨 앞으로).
+// 자동 저장(연결 시)은 label/group 을 안 주므로, 기존에 지정된 값이 있으면 보존한다.
 ipcMain.handle('profiles:upsert', async (_evt, profile: SavedProfile) => {
-  const list = (await readProfiles()).filter((p) => profileKey(p) !== profileKey(profile))
-  list.unshift(profile)
+  const all = await readProfiles()
+  const existing = all.find((p) => profileKey(p) === profileKey(profile))
+  const merged: SavedProfile = {
+    ...profile,
+    label: profile.label ?? existing?.label,
+    group: profile.group ?? existing?.group,
+    jump: profile.jump ?? existing?.jump,
+    startup: profile.startup ?? existing?.startup,
+  }
+  const list = all.filter((p) => profileKey(p) !== profileKey(profile))
+  list.unshift(merged)
   await writeProfiles(list)
   return list
 })
@@ -485,6 +1176,25 @@ ipcMain.handle('profiles:delete', async (_evt, key: string) => {
   await writeProfiles(list)
   return list
 })
+
+// 전체 프로필 순서/그룹 일괄 반영 (사이드바 드래그 재정렬용)
+ipcMain.handle('profiles:reorder', async (_evt, list: SavedProfile[]) => {
+  if (Array.isArray(list)) await writeProfiles(list)
+  return readProfiles()
+})
+
+// 폴더(그룹) 이름 일괄 변경 — 순서 보존, 빈 이름이면 그룹 해제
+ipcMain.handle(
+  'profiles:renameGroup',
+  async (_evt, { from, to }: { from: string; to: string }) => {
+    const target = to.trim() || undefined
+    const list = (await readProfiles()).map((p) =>
+      (p.group?.trim() ?? '') === from ? { ...p, group: target } : p,
+    )
+    await writeProfiles(list)
+    return list
+  },
+)
 
 // 전체 기록 삭제
 ipcMain.handle('profiles:clear', async () => {
@@ -770,7 +1480,11 @@ async function execEscalatedNoStdin(
   return { ok: false, err: lastErr || '권한 부족' }
 }
 
-// 파일 쓰기(저장) — 저장 전 자동 백업(.bak.타임스탬프) → SFTP → sudo tee 폴백
+// 설정파일 백업을 모으는 고정 베이스 경로 (원본 디렉토리를 더럽히지 않도록 분리).
+// 이 아래에 원본 경로 구조를 그대로 미러링해 저장한다. (변경하려면 이 값만 수정)
+const BACKUP_BASE = '/var/tmp/ivk-backups'
+
+// 파일 쓰기(저장) — 저장 전 자동 백업(별도 베이스 경로) → SFTP → sudo tee 폴백
 ipcMain.handle(
   'sftp:write',
   async (
@@ -782,8 +1496,9 @@ ipcMain.handle(
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다. 먼저 연결하세요.' }
     const sudoPw = payload.sudoPassword
 
-    // 0) 저장 전 원본 자동 백업 → 같은 폴더의 .ivk_backups/ 안에 모음 (실패 시 저장 중단)
-    //    파일명 규칙: <원본파일명>_<YYYYMMDDHHMMSS>
+    // 0) 저장 전 원본 자동 백업 → 고정 베이스(BACKUP_BASE) 아래에 원본 경로 구조 미러링
+    //    예: /etc/nova/nova.conf → /var/tmp/ivk-backups/etc/nova/nova.conf_<YYYYMMDDHHMMSS>
+    //    원본 디렉토리(/etc/nova 등)는 건드리지 않는다. (실패 시 저장 중단)
     const d = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
     const ts =
@@ -792,7 +1507,7 @@ ipcMain.handle(
     const slash = payload.path.lastIndexOf('/')
     const dir = slash > 0 ? payload.path.slice(0, slash) : '.'
     const base = payload.path.slice(slash + 1)
-    const backupDir = `${dir}/.ivk_backups`
+    const backupDir = `${BACKUP_BASE}${dir.startsWith('/') ? dir : '/' + dir}`
     const backupPath = `${backupDir}/${base}_${ts}`
 
     const q = shQuote(payload.path)
@@ -885,10 +1600,210 @@ function cleanSudoErr(err: string): string {
   return t.split('\n').slice(-1)[0] || '권한 오류'
 }
 
-// ── 앱 라이프사이클 ────────────────────────────────────────────
-app.whenReady().then(createWindow)
+// ─────────────────────────────────────────────────────────────
+// 서버 모니터링 (상시 데몬 방식, 세션별)
+//  - 에이전트 스크립트를 SFTP 로 업로드 → nohup 으로 데몬 기동(연결 끊겨도 생존)
+//  - 데몬은 metrics.jsonl 에 주기적으로 append. 메인은 tail 로 증분 수거하여
+//    ts 가 새 샘플만 렌더러로 전달(중복 방지). 재접속 시 최근 이력 자동 backfill.
+//  - 세션(터미널 탭)마다 독립적으로 동작한다.
+// ─────────────────────────────────────────────────────────────
 
-app.on('window-all-closed', () => {
+const AGENT_DIR = '/tmp/.ivk-agent'
+const AGENT_PATH = `${AGENT_DIR}/collect.sh`
+const AGENT_PID = `${AGENT_DIR}/agent.pid`
+const DATA_PATH = `${AGENT_DIR}/metrics.jsonl`
+const READ_LINES = 720 // 한 번에 훑을 tail 줄 수 (5초×720 = 1시간치)
+
+interface MonitorState {
+  deployed: boolean
+  active: boolean
+  timer: NodeJS.Timeout | null
+  lastTs: number // 이미 렌더러로 보낸 마지막 샘플 시각(중복 방지)
+}
+const monitors = new Map<string, MonitorState>()
+function getMonitor(id: string): MonitorState {
+  let m = monitors.get(id)
+  if (!m) {
+    m = { deployed: false, active: false, timer: null, lastTs: 0 }
+    monitors.set(id, m)
+  }
+  return m
+}
+
+// 앱 종료 시 서버 데몬을 kill 할지 여부 (렌더러 설정 → 종료 핸들러에서 사용)
+let killDaemonOnExit = false
+
+/** 에이전트 배포: 디렉터리 생성 → SFTP 업로드 → 실행권한 */
+async function deployAgent(client: Client): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await execCapture(client, `mkdir -p ${shQuote(AGENT_DIR)}`)
+    const w = await sftpWriteDirect(client, AGENT_PATH, AGENT_SCRIPT)
+    if (!w.ok) return { ok: false, error: w.error }
+    await execCapture(client, `chmod 0755 ${shQuote(AGENT_PATH)}`)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+}
+
+/** 서버에 데몬이 살아있는지 확인 */
+async function isDaemonRunning(client: Client): Promise<boolean> {
+  try {
+    const r = await execCapture(
+      client,
+      `[ -f ${shQuote(AGENT_PID)} ] && kill -0 $(cat ${shQuote(AGENT_PID)}) 2>/dev/null && echo up || echo down`,
+    )
+    return r.out.trim() === 'up'
+  } catch {
+    return false
+  }
+}
+
+/** 데몬 기동 (nohup 으로 SSH 채널과 분리 → 연결 끊겨도 생존) */
+async function startDaemon(client: Client, intervalSec: number): Promise<void> {
+  await execCapture(
+    client,
+    `nohup bash ${shQuote(AGENT_PATH)} daemon ${intervalSec} </dev/null >/dev/null 2>&1 &`,
+  )
+}
+
+/** 데몬 종료 (PID kill + 잔존 프로세스 정리) */
+async function stopDaemon(client: Client): Promise<void> {
+  await execCapture(
+    client,
+    `bash ${shQuote(AGENT_PATH)} stop 2>/dev/null; pkill -f 'collect.sh daemon' 2>/dev/null; true`,
+  )
+}
+
+
+/** metrics.jsonl 증분 수거 — ts 가 새 것만 렌더러로 전달 */
+async function readNewSamples(sessionId: string) {
+  const m = monitors.get(sessionId)
+  if (!m?.active) return
+  const client = sessions.get(sessionId)?.client
+  if (!client) return
+  try {
+    const r = await execCapture(client, `tail -n ${READ_LINES} ${shQuote(DATA_PATH)} 2>/dev/null`)
+    for (const line of r.out.split('\n')) {
+      const t = line.trim()
+      if (!t) continue
+      let sample: MetricSample
+      try {
+        sample = JSON.parse(t) as MetricSample
+      } catch {
+        continue // 쓰는 도중 잘린 줄은 건너뜀
+      }
+      if (sample.ts > m.lastTs) {
+        m.lastTs = sample.ts
+        mainWindow?.webContents.send('monitor:sample', { sessionId, sample })
+      }
+    }
+  } catch (e) {
+    mainWindow?.webContents.send('monitor:error', { sessionId, error: cleanErrorMessage(e) })
+  }
+}
+
+/** 리더 루프 — 겹침 방지를 위해 setInterval 대신 자기재귀 setTimeout */
+function monitorReaderLoop(sessionId: string, readMs: number) {
+  const m = monitors.get(sessionId)
+  if (!m?.active) return
+  readNewSamples(sessionId).finally(() => {
+    const cur = monitors.get(sessionId)
+    if (cur?.active) cur.timer = setTimeout(() => monitorReaderLoop(sessionId, readMs), readMs)
+  })
+}
+
+function stopMonitorReader(sessionId: string) {
+  const m = monitors.get(sessionId)
+  if (!m) return
+  m.active = false
+  if (m.timer) clearTimeout(m.timer)
+  m.timer = null
+}
+
+// 수집 시작: 배포(필요시) → 데몬 기동(없으면) → 리더 시작
+ipcMain.handle(
+  'monitor:start',
+  async (_evt, { sessionId, opts }: { sessionId: string; opts?: MonitorStartOptions }) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    const m = getMonitor(sessionId)
+    if (!m.deployed) {
+      const d = await deployAgent(client)
+      if (!d.ok) return d
+      m.deployed = true
+    }
+    const intervalSec = Math.max(2, Math.round((opts?.intervalMs ?? 5000) / 1000))
+    const alreadyUp = await isDaemonRunning(client)
+    if (!alreadyUp) await startDaemon(client, intervalSec)
+
+    // 리더 (재)시작 — tail 로 최근 이력 자동 backfill
+    m.lastTs = 0
+    stopMonitorReader(sessionId)
+    m.active = true
+    monitorReaderLoop(sessionId, intervalSec * 1000)
+    return { ok: true, resumed: alreadyUp }
+  },
+)
+
+// 수집 완전 종료 (데몬까지 kill)
+ipcMain.handle('monitor:stop', async (_evt, { sessionId }: { sessionId: string }) => {
+  stopMonitorReader(sessionId)
+  const client = sessions.get(sessionId)?.client
+  if (client) await stopDaemon(client)
+  return { ok: true }
+})
+
+// 특정 프로세스 kill (SIGTERM → 실패 시 SIGKILL)
+ipcMain.handle(
+  'monitor:killProc',
+  async (_evt, { sessionId, pid }: { sessionId: string; pid: number }) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      await execCapture(client, `kill ${pid} 2>/dev/null || kill -9 ${pid} 2>/dev/null; true`)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+// 데몬 생존 여부 (재접속 직후 UI 표시용)
+ipcMain.handle('monitor:status', async (_evt, { sessionId }: { sessionId: string }) => {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { running: false }
+  return { running: await isDaemonRunning(client) }
+})
+
+// 앱 종료 시 데몬 kill 여부 설정 (렌더러에서 토글 변경 시 동기화)
+ipcMain.on('monitor:setKillOnExit', (_evt, value: boolean) => {
+  killDaemonOnExit = !!value
+})
+
+// ── 앱 라이프사이클 ────────────────────────────────────────────
+app.whenReady().then(() => {
+  createWindow()
+  // 패키징된 빌드에서만 자동 업데이트 확인 (GitHub Releases 의 latest.yml 기준)
+  if (app.isPackaged) {
+    import('electron-updater')
+      .then(({ autoUpdater }) => {
+        autoUpdater.autoDownload = true
+        autoUpdater.checkForUpdatesAndNotify().catch(() => {})
+      })
+      .catch(() => {})
+  }
+})
+
+app.on('window-all-closed', async () => {
+  // 옵션이 켜져 있으면, 연결을 정리하기 전에 살아있는 각 세션의 서버 데몬을 종료.
+  if (killDaemonOnExit) {
+    await Promise.all(
+      [...sessions.values()]
+        .filter((s) => s.client)
+        .map((s) => stopDaemon(s.client!).catch(() => {})),
+    )
+  }
   // 모든 세션의 SSH 연결/로컬 셸 정리
   for (const s of sessions.values()) {
     cleanupConnection(s)

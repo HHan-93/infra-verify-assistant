@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import {
   Server,
   Plug,
@@ -6,35 +6,44 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
-  History,
-  X,
-  Trash2,
   Eye,
   EyeOff,
+  FileKey,
 } from 'lucide-react'
-import type { SSHConfig, SavedProfile } from '../../electron/shared-types'
+import type { SSHConfig, SavedProfile, JumpProfile } from '../../electron/shared-types'
 
-/** 같은 서버 식별 키 (메인의 profileKey와 동일 규칙) */
-const profileKey = (p: SavedProfile) => `${p.host}:${p.port}:${p.username}`
+type AuthMethod = 'password' | 'key' | 'agent'
 
-type AuthMethod = 'password' | 'key'
+/** App 에서 ref 로 호출 — 사이드바 더블클릭 등으로 특정 프로필 즉시 연결 */
+export interface SSHFormHandle {
+  connectProfile: (p: SavedProfile) => void
+  /** 빠른 연결: 폼에 host/port/user 채우고 펼침 (인증은 사용자가 완료) */
+  prefill: (v: { host: string; port?: string; user?: string }) => void
+}
 
 interface SSHFormProps {
   /** 이 폼이 제어하는 세션(탭) ID */
   sessionId: string
   /** 'connecting' | 'connected' | 'closed' | 'error' | 'idle' */
   status: string
-  /** 연결 성공 시 호출 (탭 제목 표시용으로 host 전달) */
-  onConnected: (host?: string) => void
+  /** 저장된 프로필 목록 (App 이 소유) — 최초 1회 자동 채움에 사용 */
+  profiles: SavedProfile[]
+  /** 연결 성공 시 호출 (탭 제목/연결표시용으로 프로필 전달) */
+  onConnected: (p: SavedProfile) => void
   onError: (msg: string) => void
+  /** 연결 시 자동 저장으로 프로필 목록이 바뀌면 App 에 알림 */
+  onProfilesChanged: (list: SavedProfile[]) => void
 }
 
 /**
  * 좌측 상단 SSH 접속 정보 입력 폼.
  *  - IP / Port / User / 인증(비밀번호 or 개인키) 입력 후 '연결'
- *  - window.electronAPI.sshConnect 로 메인 프로세스에 접속 요청 (sessionId 별)
+ *  - 저장된 접속 기록 관리는 좌측 세션 사이드바로 이관됨
  */
-export default function SSHForm({ sessionId, status, onConnected, onError }: SSHFormProps) {
+const SSHForm = forwardRef<SSHFormHandle, SSHFormProps>(function SSHForm(
+  { sessionId, status, profiles, onConnected, onError, onProfilesChanged },
+  ref,
+) {
   const [host, setHost] = useState('')
   const [port, setPort] = useState('22')
   const [username, setUsername] = useState('root')
@@ -43,17 +52,16 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
   const [privateKey, setPrivateKey] = useState('')
   const [passphrase, setPassphrase] = useState('')
   const [remember, setRemember] = useState(true)
+  // 점프 호스트(Bastion) — 등록/편집 모달에서 설정, 폼에서는 보존·전달만
+  const [jump, setJump] = useState<JumpProfile | undefined>(undefined)
+  // 접속 후 자동 실행 명령 (등록/편집 모달에서 설정, 폼에서는 보존·전달)
+  const [startup, setStartup] = useState<string | undefined>(undefined)
 
-  // 접속 기록(프로필 히스토리)
-  const [profiles, setProfiles] = useState<SavedProfile[]>([])
-  const [showHistory, setShowHistory] = useState(false)
-  // 실제로 연결된 프로필 (헤더 요약/'연결중' 표시는 폼이 아니라 이 값 기준)
+  // 실제로 연결된 프로필 (헤더 요약 표시용)
   const [connectedProfile, setConnectedProfile] = useState<SavedProfile | null>(null)
-  // 연결 중 다른 프로필로 전환할지 확인할 대상
-  const [switchTarget, setSwitchTarget] = useState<SavedProfile | null>(null)
   // 연결/해제 전 확인(Y/N) 옵션 (기본 ON)
   const [confirmActions, setConfirmActions] = useState(true)
-  // 연결/해제 확인용 일반 다이얼로그
+  // 연결/해제 확인용 다이얼로그
   const [pending, setPending] = useState<{
     message: string
     label: string
@@ -65,7 +73,6 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
 
   const isBusy = status === 'connecting'
   const isConnected = status === 'connected'
-  const connectedKey = connectedProfile ? profileKey(connectedProfile) : null
 
   // 연결되면 접고, 끊기면 펼침 + 실제 연결 프로필 해제
   const [collapsed, setCollapsed] = useState(false)
@@ -76,17 +83,24 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
     }
   }, [status])
 
-  // 저장된 접속 기록 로드 + 가장 최근 프로필로 폼 자동 채움 + 확인옵션 로드 (앱 시작 시 1회)
+  // 확인옵션 로드 (앱 시작 시 1회)
   useEffect(() => {
-    window.electronAPI.profilesList().then((list) => {
-      setProfiles(list)
-      if (list[0]) fillForm(list[0])
-    })
-    // 저장된 값이 있을 때만 반영 (없으면 기본 ON 유지)
     const storedConfirm = localStorage.getItem('ssh_confirm_actions')
     if (storedConfirm !== null) setConfirmActions(storedConfirm === '1')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 최초 1회: 비어있는 폼을 가장 최근 프로필로 자동 채움
+  const initFilledRef = useRef(false)
+  useEffect(() => {
+    if (initFilledRef.current) return
+    if (profiles.length && !host && !isConnected) {
+      fillForm(profiles[0])
+      initFilledRef.current = true
+    } else if (profiles.length === 0) {
+      initFilledRef.current = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profiles])
 
   const toggleConfirmActions = (v: boolean) => {
     setConfirmActions(v)
@@ -102,6 +116,8 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
     setPassword(p.password)
     setPrivateKey(p.privateKey)
     setPassphrase(p.passphrase)
+    setJump(p.jump)
+    setStartup(p.startup)
   }
 
   /** 폼 현재 값 → 프로필 객체 */
@@ -113,6 +129,24 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
     password,
     privateKey,
     passphrase,
+    jump,
+    startup,
+  })
+
+  /** 인증 방식 → config 필드 */
+  const authFields = (m: AuthMethod, password: string, privateKey: string, passphrase: string) =>
+    m === 'password'
+      ? { password }
+      : m === 'key'
+        ? { privateKey, passphrase: passphrase || undefined }
+        : { useAgent: true }
+
+  /** 점프 프로필 → config */
+  const jumpToConfig = (j: JumpProfile): SSHConfig => ({
+    host: j.host.trim(),
+    port: Number(j.port) || 22,
+    username: j.username.trim(),
+    ...authFields(j.authMethod, j.password, j.privateKey, j.passphrase),
   })
 
   /** 프로필 → 접속 config */
@@ -120,22 +154,48 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
     host: p.host.trim(),
     port: Number(p.port) || 22,
     username: p.username.trim(),
-    ...(p.authMethod === 'password'
-      ? { password: p.password }
-      : { privateKey: p.privateKey, passphrase: p.passphrase || undefined }),
+    ...authFields(p.authMethod, p.password, p.privateKey, p.passphrase),
+    ...(p.startup && p.startup.trim() ? { startup: p.startup } : {}),
+    ...(p.jump && p.jump.host.trim() ? { jump: jumpToConfig(p.jump) } : {}),
   })
 
-  /** 실제 연결 (폼/기록 공용). 연결 중이면 메인이 기존 세션을 정리하고 새로 연결 */
+  /** 실제 연결 (폼/사이드바 공용). 연결 중이면 메인이 기존 세션을 정리하고 새로 연결 */
   const connect = async (p: SavedProfile) => {
     const result = await window.electronAPI.sshConnect(sessionId, toConfig(p))
     if (result.success) {
-      if (remember) setProfiles(await window.electronAPI.profilesUpsert(p))
+      if (remember) onProfilesChanged(await window.electronAPI.profilesUpsert(p))
       setConnectedProfile(p)
-      onConnected(p.host)
+      onConnected(p)
+    } else if (result.hostKeyChanged) {
+      // 호스트 키 변경 경고 → 신뢰 후 재접속 확인
+      setPending({
+        message:
+          '⚠ 이 서버의 호스트 키가 이전에 저장된 것과 다릅니다.\n서버 재설치라면 정상이지만, 중간자 공격일 수도 있습니다.\n신뢰하고 다시 접속할까요?',
+        label: '신뢰 후 재접속',
+        danger: true,
+        onYes: async () => {
+          await window.electronAPI.sshTrustHost(p.host.trim(), Number(p.port) || 22)
+          connect(p)
+        },
+      })
     } else {
       onError(result.message)
     }
   }
+
+  // 사이드바 더블클릭 → 폼 채우고 즉시 연결
+  useImperativeHandle(ref, () => ({
+    connectProfile: (p: SavedProfile) => {
+      fillForm(p)
+      connect(p)
+    },
+    prefill: ({ host, port, user }) => {
+      setHost(host)
+      if (port) setPort(port)
+      if (user) setUsername(user)
+      setCollapsed(false)
+    },
+  }))
 
   const handleConnect = () => {
     if (!host.trim()) {
@@ -151,32 +211,6 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
     } else {
       connect(formProfile())
     }
-  }
-
-  // 기록에서 선택
-  const loadProfile = (p: SavedProfile) => {
-    setShowHistory(false)
-    if (!isConnected) {
-      // 미연결: 폼만 채우고 펼침
-      fillForm(p)
-      setCollapsed(false)
-      return
-    }
-    if (connectedKey && profileKey(p) === connectedKey) return // 이미 이 서버에 연결됨
-    setSwitchTarget(p) // 연결 중 + 다른 서버 → 전환 확인
-  }
-
-  // 전환 확정: 현재 연결을 끊고 선택 프로필로 재연결
-  const confirmSwitch = async () => {
-    const p = switchTarget
-    setSwitchTarget(null)
-    if (!p) return
-    fillForm(p)
-    await connect(p)
-  }
-
-  const deleteProfile = async (p: SavedProfile) => {
-    setProfiles(await window.electronAPI.profilesDelete(profileKey(p)))
   }
 
   const handleDisconnect = () => {
@@ -205,86 +239,6 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
       >
         <Server size={16} className="text-blue-400" />
         SSH 접속 정보
-
-        {/* 접속 기록(히스토리) — 타이틀 바로 우측 */}
-        <div className="relative" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => setShowHistory((v) => !v)}
-            title="접속 기록"
-            className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11px] font-normal text-gray-300 hover:bg-white/10"
-          >
-            <History size={13} />
-            기록
-            {profiles.length > 0 && (
-              <span className="rounded-full bg-blue-500/30 px-1 text-[10px] text-blue-100">
-                {profiles.length}
-              </span>
-            )}
-            <ChevronDown size={11} />
-          </button>
-
-          {showHistory && (
-            <div className="absolute left-0 top-full z-30 mt-1 w-72 overflow-hidden rounded-md border border-white/10 bg-panel-light shadow-2xl">
-              <div className="flex items-center border-b border-white/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                접속 기록
-                <button
-                  onClick={() => setShowHistory(false)}
-                  className="ml-auto rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-              {profiles.length === 0 ? (
-                <div className="px-3 py-3 text-xs text-gray-500">
-                  저장된 기록이 없습니다. 연결 시 자동 저장됩니다.
-                </div>
-              ) : (
-                <ul className="max-h-60 overflow-y-auto py-1">
-                  {profiles.map((p) => (
-                    <li
-                      key={profileKey(p)}
-                      className="group flex items-center gap-2 px-2 py-1.5 hover:bg-white/5"
-                    >
-                      <button
-                        onClick={() => loadProfile(p)}
-                        className="min-w-0 flex-1 text-left"
-                        title={
-                          profileKey(p) === connectedKey
-                            ? '현재 연결된 서버'
-                            : isConnected
-                              ? '이 서버로 연결 전환'
-                              : '이 접속 정보 불러오기'
-                        }
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate font-mono text-[12px] text-gray-100">
-                            {p.username}@{p.host}:{p.port}
-                          </span>
-                          {profileKey(p) === connectedKey && (
-                            <span className="shrink-0 rounded-full bg-green-500/20 px-1.5 text-[10px] text-green-300">
-                              ● 연결중
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] text-gray-500">
-                          {p.authMethod === 'key' ? '개인키' : '비밀번호'}
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => deleteProfile(p)}
-                        title="기록 삭제"
-                        className="rounded p-1 text-gray-500 opacity-0 transition hover:bg-white/10 hover:text-red-300 group-hover:opacity-100"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* 접힌 채 연결된 상태면 실제 연결 서버 요약 표시 */}
         {collapsed && isConnected && connectedProfile && (
           <span className="truncate font-mono text-[12px] font-normal text-gray-400">
@@ -321,155 +275,190 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
 
       {/* 본문 (접히면 숨김) */}
       {collapsed ? null : (
-      <div className="px-3 pb-3">
-      <div className="grid grid-cols-12 gap-2">
-        <div className="col-span-7">
-          <label className="mb-0.5 block text-[11px] text-gray-400">IP / 호스트</label>
-          <input
-            className={inputCls}
-            placeholder="192.168.0.10"
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            disabled={isConnected}
-          />
-        </div>
-        <div className="col-span-2">
-          <label className="mb-0.5 block text-[11px] text-gray-400">Port</label>
-          <input
-            className={inputCls}
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-            disabled={isConnected}
-          />
-        </div>
-        <div className="col-span-3">
-          <label className="mb-0.5 block text-[11px] text-gray-400">User</label>
-          <input
-            className={inputCls}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            disabled={isConnected}
-          />
-        </div>
-      </div>
-
-      {/* 인증 방식 선택 */}
-      <div className="mt-2 flex gap-3 text-xs text-gray-300">
-        <label className="flex items-center gap-1">
-          <input
-            type="radio"
-            checked={authMethod === 'password'}
-            onChange={() => setAuthMethod('password')}
-            disabled={isConnected}
-          />
-          비밀번호
-        </label>
-        <label className="flex items-center gap-1">
-          <input
-            type="radio"
-            checked={authMethod === 'key'}
-            onChange={() => setAuthMethod('key')}
-            disabled={isConnected}
-          />
-          개인키(Key)
-        </label>
-      </div>
-
-      <div className="mt-2">
-        {authMethod === 'password' ? (
-          <div className="relative">
-            <input
-              type={showPw ? 'text' : 'password'}
-              className={inputCls + ' pr-9'}
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isConnected}
-            />
-            <button
-              type="button"
-              tabIndex={-1}
-              onClick={() => setShowPw((v) => !v)}
-              title={showPw ? '숨기기' : '표시'}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
-            >
-              {showPw ? <Eye size={15} /> : <EyeOff size={15} />}
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <textarea
-              className={inputCls + ' h-20 resize-none font-mono text-xs'}
-              placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ..."
-              value={privateKey}
-              onChange={(e) => setPrivateKey(e.target.value)}
-              disabled={isConnected}
-            />
-            <div className="relative">
+        <div className="px-3 pb-3">
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-7">
+              <label className="mb-0.5 block text-[11px] text-gray-400">IP / 호스트</label>
               <input
-                type={showPw ? 'text' : 'password'}
-                className={inputCls + ' pr-9'}
-                placeholder="Passphrase (선택)"
-                value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
+                className={inputCls}
+                placeholder="192.168.0.10"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
                 disabled={isConnected}
               />
-              <button
-                type="button"
-                tabIndex={-1}
-                onClick={() => setShowPw((v) => !v)}
-                title={showPw ? '숨기기' : '표시'}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
-              >
-                {showPw ? <Eye size={15} /> : <EyeOff size={15} />}
-              </button>
+            </div>
+            <div className="col-span-2">
+              <label className="mb-0.5 block text-[11px] text-gray-400">Port</label>
+              <input
+                className={inputCls}
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                disabled={isConnected}
+              />
+            </div>
+            <div className="col-span-3">
+              <label className="mb-0.5 block text-[11px] text-gray-400">User</label>
+              <input
+                className={inputCls}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                disabled={isConnected}
+              />
             </div>
           </div>
-        )}
-      </div>
 
-      {/* 접속 정보 기억하기 */}
-      <label className="mt-2 flex items-center gap-1.5 text-xs text-gray-300">
-        <input
-          type="checkbox"
-          checked={remember}
-          onChange={(e) => setRemember(e.target.checked)}
-          disabled={isConnected}
-        />
-        연결 시 접속 기록에 저장 (이 PC, 암호화)
-      </label>
+          {/* 인증 방식 선택 */}
+          <div className="mt-2 flex gap-3 text-xs text-gray-300">
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                checked={authMethod === 'password'}
+                onChange={() => setAuthMethod('password')}
+                disabled={isConnected}
+              />
+              비밀번호
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                checked={authMethod === 'key'}
+                onChange={() => setAuthMethod('key')}
+                disabled={isConnected}
+              />
+              개인키(Key)
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                checked={authMethod === 'agent'}
+                onChange={() => setAuthMethod('agent')}
+                disabled={isConnected}
+              />
+              SSH 에이전트
+            </label>
+          </div>
 
-      {/* 연결/해제 전 확인(Y/N) 옵션 */}
-      <label className="mt-1 flex items-center gap-1.5 text-xs text-gray-300">
-        <input
-          type="checkbox"
-          checked={confirmActions}
-          onChange={(e) => toggleConfirmActions(e.target.checked)}
-        />
-        연결 / 연결 해제 전 확인 묻기
-      </label>
+          <div className="mt-2">
+            {authMethod === 'agent' ? (
+              <div className="rounded-md bg-white/5 px-2.5 py-2 text-[11px] leading-relaxed text-gray-400">
+                OS의 SSH 에이전트(Pageant / OpenSSH agent)에 등록된 키로 인증합니다. 비밀번호·키
+                입력이 필요 없습니다.
+              </div>
+            ) : authMethod === 'password' ? (
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  className={inputCls + ' pr-9'}
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={isConnected}
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => setShowPw((v) => !v)}
+                  title={showPw ? '숨기기' : '표시'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
+                >
+                  {showPw ? <Eye size={15} /> : <EyeOff size={15} />}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const r = await window.electronAPI.sshPickKeyFile()
+                    if (r.ok && r.content) setPrivateKey(r.content)
+                  }}
+                  disabled={isConnected}
+                  className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-50"
+                >
+                  <FileKey size={12} /> 키 파일 불러오기
+                </button>
+                <textarea
+                  className={inputCls + ' h-20 resize-none font-mono text-xs'}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ... (또는 위 버튼으로 파일 선택)"
+                  value={privateKey}
+                  onChange={(e) => setPrivateKey(e.target.value)}
+                  disabled={isConnected}
+                />
+                <div className="relative">
+                  <input
+                    type={showPw ? 'text' : 'password'}
+                    className={inputCls + ' pr-9'}
+                    placeholder="Passphrase (선택)"
+                    value={passphrase}
+                    onChange={(e) => setPassphrase(e.target.value)}
+                    disabled={isConnected}
+                  />
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={() => setShowPw((v) => !v)}
+                    title={showPw ? '숨기기' : '표시'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
+                  >
+                    {showPw ? <Eye size={15} /> : <EyeOff size={15} />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
-      <div className="mt-3">
-        {!isConnected ? (
-          <button
-            onClick={handleConnect}
-            disabled={isBusy}
-            className="flex w-full items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60"
-          >
-            {isBusy ? <Loader2 size={16} className="animate-spin" /> : <Plug size={16} />}
-            {isBusy ? '연결 중...' : '연결'}
-          </button>
-        ) : (
-          <button
-            onClick={handleDisconnect}
-            className="flex w-full items-center justify-center gap-2 rounded-md bg-red-600/80 px-3 py-2 text-sm font-medium text-white hover:bg-red-500"
-          >
-            <PlugZap size={16} />
-            연결 해제
-          </button>
-        )}
-      </div>
-      </div>
+          {/* 점프 호스트 표시 (편집은 세션 등록/편집 모달에서) */}
+          {jump && jump.host.trim() && (
+            <div className="mt-2 flex items-center gap-1.5 rounded-md bg-blue-500/10 px-2 py-1 text-[11px] text-blue-200">
+              <span>↪ 점프 경유:</span>
+              <span className="font-mono">
+                {jump.username}@{jump.host}:{jump.port}
+              </span>
+            </div>
+          )}
+
+          {/* 접속 정보 기억하기 */}
+          <label className="mt-2 flex items-center gap-1.5 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              disabled={isConnected}
+            />
+            연결 시 세션 목록에 저장 (이 PC, 암호화)
+          </label>
+
+          {/* 연결/해제 전 확인(Y/N) 옵션 */}
+          <label className="mt-1 flex items-center gap-1.5 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={confirmActions}
+              onChange={(e) => toggleConfirmActions(e.target.checked)}
+            />
+            연결 / 연결 해제 전 확인 묻기
+          </label>
+
+          <div className="mt-3">
+            {!isConnected ? (
+              <button
+                onClick={handleConnect}
+                disabled={isBusy}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+              >
+                {isBusy ? <Loader2 size={16} className="animate-spin" /> : <Plug size={16} />}
+                {isBusy ? '연결 중...' : '연결'}
+              </button>
+            ) : (
+              <button
+                onClick={handleDisconnect}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-red-600/80 px-3 py-2 text-sm font-medium text-white hover:bg-red-500"
+              >
+                <PlugZap size={16} />
+                연결 해제
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
       {/* 연결/해제 확인 (Y/N 옵션이 켜진 경우) */}
@@ -483,7 +472,7 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-2 text-sm font-semibold text-gray-100">확인</div>
-            <p className="text-[13px] leading-relaxed text-gray-200">{pending.message}</p>
+            <p className="whitespace-pre-line text-[13px] leading-relaxed text-gray-200">{pending.message}</p>
             <div className="mt-3 flex justify-end gap-2">
               <button
                 onClick={() => setPending(null)}
@@ -508,50 +497,11 @@ export default function SSHForm({ sessionId, status, onConnected, onError }: SSH
           </div>
         </div>
       )}
-
-      {/* 연결 전환 확인 (앱 내부 다이얼로그) */}
-      {switchTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setSwitchTarget(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-2 text-sm font-semibold text-gray-100">연결 전환</div>
-            <p className="text-[12px] leading-relaxed text-gray-300">
-              현재{' '}
-              <span className="font-mono text-gray-100">
-                {connectedProfile
-                  ? `${connectedProfile.username}@${connectedProfile.host}:${connectedProfile.port}`
-                  : '서버'}
-              </span>{' '}
-              에 연결되어 있습니다. 이 연결을 끊고 아래 서버로 전환할까요?
-            </p>
-            <p className="mt-2 rounded bg-blue-500/10 px-2 py-1.5 font-mono text-[12px] text-blue-100">
-              {switchTarget.username}@{switchTarget.host}:{switchTarget.port}
-            </p>
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                onClick={() => setSwitchTarget(null)}
-                className="rounded-md border border-white/10 bg-panel-light px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10"
-              >
-                취소
-              </button>
-              <button
-                onClick={confirmSwitch}
-                className="rounded-md bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
-              >
-                전환
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
-}
+})
+
+export default SSHForm
 
 function statusLabel(status: string): string {
   switch (status) {

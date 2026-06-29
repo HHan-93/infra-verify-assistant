@@ -133,6 +133,15 @@ export default function FileViewer({
   const RISKY = [/\/etc\/fstab/, /\/etc\/netplan\//, /sshd_config/, /\/etc\/sudoers/, /grub/, /\/boot\//]
   const isRisky = (p: string) => RISKY.some((r) => r.test(p))
 
+  // 백업 경로 미리보기 (메인의 BACKUP_BASE 규칙과 동일하게 표시)
+  const BACKUP_BASE = '/var/tmp/ivk-backups'
+  const backupPreview = (p: string) => {
+    const slash = p.lastIndexOf('/')
+    const dir = slash > 0 ? p.slice(0, slash) : ''
+    const base = slash >= 0 ? p.slice(slash + 1) : p
+    return `${BACKUP_BASE}${dir.startsWith('/') ? dir : '/' + dir}/${base}_<날짜시각>`
+  }
+
   const load = async (p: string, pw?: string) => {
     if (!p.trim()) return
     if (!connected) {
@@ -389,9 +398,13 @@ export default function FileViewer({
                 </p>
               )}
               <p className="text-[12px] leading-relaxed text-gray-300">
-                원격 파일을 덮어씁니다. 저장 직전 같은 폴더의 <b>.ivk_backups</b> 에 자동 백업됩니다.
+                원격 파일을 덮어씁니다. <b>원본 폴더는 건드리지 않고</b>, 저장 직전 원본을 아래 별도
+                경로로 자동 백업합니다. (원본 디렉토리 구조를 그대로 미러링)
               </p>
-              <p className="mt-1 break-all font-mono text-[11px] text-gray-400">{path.trim()}</p>
+              <div className="mt-1.5 break-all font-mono text-[11px] leading-relaxed">
+                <div className="text-gray-400">원본: {path.trim()}</div>
+                <div className="text-blue-300/90">백업: {backupPreview(path.trim())}</div>
+              </div>
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   onClick={() => setConfirmOpen(false)}

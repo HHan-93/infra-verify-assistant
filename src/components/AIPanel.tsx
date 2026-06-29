@@ -16,6 +16,7 @@ import {
   Copy,
   Check,
   RefreshCw,
+  PanelRightClose,
 } from 'lucide-react'
 import {
   PROVIDER_INFO,
@@ -59,7 +60,7 @@ const emptyConfigs = (): ConfigMap => ({
  *  - 메인 프로세스를 통해 선택한 프로바이더로 스트리밍 호출
  *  - 터미널 출력(선택/최근)을 받아 분석하거나, 자유 질문 가능
  */
-const AIPanel = forwardRef<AIPanelHandle>((_props, ref) => {
+const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }, ref) => {
   const [messages, setMessages] = useState<ChatItem[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -309,6 +310,15 @@ const AIPanel = forwardRef<AIPanelHandle>((_props, ref) => {
     <div className="flex h-full flex-col bg-[#181825] text-gray-200">
       {/* 헤더 */}
       <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
+        {onClose && (
+          <button
+            onClick={onClose}
+            title="AI 패널 닫기"
+            className="-ml-1 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+          >
+            <PanelRightClose size={16} />
+          </button>
+        )}
         <Sparkles size={18} className="text-purple-400" />
         <span className="text-sm font-semibold">AI 분석 패널</span>
         <span className="truncate text-[11px] text-gray-500">

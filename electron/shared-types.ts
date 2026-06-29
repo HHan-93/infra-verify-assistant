@@ -11,12 +11,20 @@ export interface SSHConfig {
   privateKey?: string
   /** 개인키 암호화 시 사용하는 passphrase */
   passphrase?: string
+  /** SSH 에이전트(Pageant/OpenSSH agent) 사용 — 백엔드가 경로 해석 */
+  useAgent?: boolean
+  /** 접속(쉘 오픈) 후 자동 실행할 명령 (줄 단위) */
+  startup?: string
+  /** 점프 호스트(Bastion) 경유 접속. 먼저 jump 에 연결한 뒤 그 위로 target 에 연결 */
+  jump?: SSHConfig
 }
 
 /** ssh:connect 호출 결과 */
 export interface ConnectResult {
   success: boolean
   message: string
+  /** 저장된 호스트 키와 달라 거부됨 (사용자가 신뢰 후 재접속 필요) */
+  hostKeyChanged?: boolean
 }
 
 /** 연결 상태 변화 이벤트 (메인 → 렌더러) */
@@ -157,6 +165,57 @@ export interface AIStreamEvent {
   error?: string
 }
 
+// ── 모니터링(서버 메트릭) ──────────────────────────────────────
+
+/** 마운트 포인트 디스크 정보 */
+export interface DiskInfo {
+  mount: string
+  total: number  // GB
+  used: number   // GB
+  pct: number    // 0~100
+}
+
+/** 상위 프로세스 1개 */
+export interface ProcInfo {
+  pid: number
+  name: string
+  cpu: number // %
+  mem: number // %
+}
+
+/** 에이전트가 한 번 출력하는 시스템 메트릭 스냅샷 (JSON 한 줄) */
+export interface MetricSample {
+  ts: number // epoch seconds
+  host: string
+  uptime: number // seconds
+  cpu: number // 0~100 (%)
+  load: [number, number, number] // 1/5/15분 load average
+  mem: { total: number; used: number; avail: number; pct: number } // MB, pct=%
+  disk: { total: number; used: number; pct: string } // GB, pct="83"
+  procs: ProcInfo[]
+  net?: { rxMBs: number; txMBs: number } // 네트워크 rx/tx MB/s (에이전트 v3+)
+  svcFailed?: string[]                   // failed 상태 systemd 서비스 목록 (에이전트 v4+)
+  disks?: DiskInfo[]                     // 전체 마운트 포인트 (에이전트 v6+)
+}
+
+/** monitor:start 옵션 */
+export interface MonitorStartOptions {
+  /** 데몬 수집 주기(ms). 기본 5000, 최소 2000 */
+  intervalMs?: number
+}
+
+/** monitor:sample 이벤트 (메인 → 렌더러) — sessionId 로 해당 탭 대시보드에 라우팅 */
+export interface MonitorSampleEvent {
+  sessionId: string
+  sample: MetricSample
+}
+
+/** monitor:error 이벤트 (메인 → 렌더러) */
+export interface MonitorErrorEvent {
+  sessionId: string
+  error: string
+}
+
 // ── 접속 정보 저장(암호화) ─────────────────────────────────────
 
 /** 다음 실행 시 자동 채움을 위해 저장하는 SSH 접속 프로필 */
@@ -164,7 +223,28 @@ export interface SavedProfile {
   host: string
   port: string
   username: string
-  authMethod: 'password' | 'key'
+  authMethod: 'password' | 'key' | 'agent'
+  password: string
+  privateKey: string
+  passphrase: string
+  /** 사이드바 표시용 별칭 (예: con2). 없으면 host 로 표시 */
+  label?: string
+  /** 폴더(그룹)명 — 2단계 트리 구조용. 미지정 시 평면 목록 */
+  group?: string
+  /** 접속 후 자동 실행할 명령 (줄 단위) */
+  startup?: string
+  /** 점프 호스트(Bastion) 경유 설정. 미지정 시 직접 접속 */
+  jump?: JumpProfile
+  /** 탭 색상 키 (rose/orange/amber/emerald/sky/blue/violet). 미지정 시 기본 */
+  color?: string
+}
+
+/** 점프 호스트(Bastion) 접속 정보 */
+export interface JumpProfile {
+  host: string
+  port: string
+  username: string
+  authMethod: 'password' | 'key' | 'agent'
   password: string
   privateKey: string
   passphrase: string
