@@ -22,7 +22,22 @@ import {
   Eye,
   EyeOff,
   Lock,
+  AlertCircle,
 } from 'lucide-react'
+
+const BINARY_EXTENSIONS = new Set([
+  'xlsx', 'xls', 'xlsm', 'docx', 'doc', 'pptx', 'ppt',
+  'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'svg',
+  'zip', 'tar', 'gz', 'bz2', 'xz', '7z', 'rar',
+  'bin', 'exe', 'so', 'dylib', 'dll', 'pkg', 'deb', 'rpm',
+  'mp3', 'mp4', 'mkv', 'avi', 'mov', 'wav',
+  'ttf', 'otf', 'woff', 'woff2',
+])
+
+const isBinaryFile = (name: string) => {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+  return BINARY_EXTENSIONS.has(ext)
+}
 
 interface FileExplorerProps {
   sessionId: string
@@ -98,6 +113,7 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
   const [chmodTarget, setChmodTarget] = useState<Node | null>(null)
   const [chmodMode, setChmodMode] = useState(0o644)
   const [editFile, setEditFile] = useState<{ path: string; name: string } | null>(null)
+  const [binaryWarnFile, setBinaryWarnFile] = useState<{ path: string; name: string } | null>(null)
   const [progress, setProgress] = useState<{ name: string; pct: number } | null>(null)
 
   // 전송 진행률 구독
@@ -339,16 +355,23 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
             {n.type === 'link' && <span className="text-[10px] text-gray-500">↪</span>}
             <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
               {!isDir && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setEditFile({ path: n.path, name: n.name })
-                  }}
-                  title="편집"
-                  className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-blue-300"
-                >
-                  <SquarePen size={13} />
-                </button>
+                isBinaryFile(n.name) ? (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setBinaryWarnFile({ path: n.path, name: n.name }) }}
+                    title="텍스트 편집 불가 — 클릭하여 안내 보기"
+                    className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-amber-400"
+                  >
+                    <AlertCircle size={13} />
+                  </button>
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setEditFile({ path: n.path, name: n.name }) }}
+                    title="편집"
+                    className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-blue-300"
+                  >
+                    <SquarePen size={13} />
+                  </button>
+                )
               )}
               <button
                 onClick={(e) => {
@@ -522,6 +545,41 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
         <div className="border-t border-white/10 px-4 py-1.5 text-[10px] text-gray-500">
           폴더 클릭=펼치기 · 파일 더블클릭/드래그=다운로드 · OS→폴더 드롭=업로드 · 상단 경로 입력으로 이동
         </div>
+
+        {/* 바이너리 파일 편집 불가 안내 모달 */}
+        {binaryWarnFile && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+            <div className="w-80 rounded-xl border border-amber-500/30 bg-[#1e1e2e] shadow-2xl">
+              <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
+                <AlertCircle size={15} className="shrink-0 text-amber-400" />
+                <span className="text-[13px] font-semibold text-gray-100">텍스트 편집 불가</span>
+                <button onClick={() => setBinaryWarnFile(null)} className="ml-auto text-gray-500 hover:text-gray-300">
+                  <X size={15} />
+                </button>
+              </div>
+              <div className="px-4 py-4 text-[12px] leading-relaxed text-gray-300">
+                <span className="font-mono text-amber-300">{binaryWarnFile.name}</span> 파일은
+                바이너리 형식이라 텍스트 편집기로 열 수 없습니다.
+                <br /><br />
+                파일을 다운로드한 뒤 로컬에서 수정하고 다시 업로드하세요.
+              </div>
+              <div className="flex justify-end gap-2 border-t border-white/10 px-4 py-3">
+                <button
+                  onClick={() => setBinaryWarnFile(null)}
+                  className="rounded-md px-3 py-1.5 text-[12px] text-gray-400 hover:bg-white/10"
+                >
+                  닫기
+                </button>
+                <button
+                  onClick={() => { download({ path: binaryWarnFile.path, name: binaryWarnFile.name, type: 'file' }); setBinaryWarnFile(null) }}
+                  className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-blue-500"
+                >
+                  <Download size={12} /> 다운로드
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* 원격 파일 편집 모달 */}
         {editFile && (
@@ -743,6 +801,14 @@ function FileEditModal({
   const [needSudo, setNeedSudo] = useState(false)
   const [sudoPw, setSudoPw] = useState('')
   const [showPw, setShowPw] = useState(false)
+  const [applyNotice, setApplyNotice] = useState<{ command: string; desc: string } | null>(null)
+
+  const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
+    { pattern: /\/etc\/netplan\//,      command: 'sudo netplan apply',                        desc: '저장만으로는 적용되지 않습니다. 터미널에서 netplan apply를 실행해야 네트워크 설정이 반영됩니다.' },
+    { pattern: /\/etc\/sysctl\.conf$/,  command: 'sudo sysctl -p',                            desc: '저장만으로는 적용되지 않습니다. 터미널에서 sysctl -p를 실행해야 커널 파라미터가 반영됩니다.' },
+    { pattern: /\/etc\/fstab$/,         command: 'sudo mount -a',                             desc: '저장만으로는 적용되지 않습니다. 터미널에서 mount -a를 실행하거나 재부팅해야 마운트 설정이 반영됩니다.' },
+    { pattern: /\/etc\/resolv\.conf$/,  command: 'sudo systemctl restart systemd-resolved',   desc: '저장만으로는 적용되지 않습니다. 터미널에서 systemd-resolved를 재시작해야 DNS 설정이 반영됩니다.' },
+  ]
 
   const load = useCallback(
     async (pw?: string) => {
@@ -774,7 +840,12 @@ function FileEditModal({
     setSaving(false)
     if (r.ok) {
       setOriginal(content)
-      onClose()
+      const match = APPLY_REQUIRED.find(a => a.pattern.test(path))
+      if (match) {
+        setApplyNotice({ command: match.command, desc: match.desc })
+      } else {
+        onClose()
+      }
     } else if (r.needSudoPassword) {
       setNeedSudo(true)
     } else {
@@ -806,6 +877,24 @@ function FileEditModal({
           </button>
         </div>
 
+        {applyNotice && (
+          <div className="flex flex-col gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <div className="flex items-start gap-2">
+              <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-400" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[12px] font-medium text-amber-200">저장 완료 — 추가 적용 명령이 필요합니다</p>
+                <p className="mt-0.5 text-[11px] text-amber-300/80">{applyNotice.desc}</p>
+                <code className="mt-1.5 block rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-amber-100">{applyNotice.command}</code>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="self-end rounded-md bg-amber-500/20 px-3 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-500/30"
+            >
+              확인 후 닫기
+            </button>
+          </div>
+        )}
         {error && <div className="bg-red-500/10 px-4 py-1 text-[11px] text-red-300">{error}</div>}
 
         {needSudo ? (

@@ -51,7 +51,7 @@ export type AIProvider = 'anthropic' | 'gemini' | 'openai'
 /** 프로바이더별 메타데이터 (렌더러 UI 기본값/모델목록/안내 및 메인 환경변수 폴백에 사용) */
 export const PROVIDER_INFO: Record<
   AIProvider,
-  { label: string; defaultModel: string; models: string[]; keyHint: string; envVar: string }
+  { label: string; defaultModel: string; models: string[]; keyHint: string; envVar: string; apiKeyUrl: string }
 > = {
   anthropic: {
     label: 'Claude (Anthropic)',
@@ -59,6 +59,7 @@ export const PROVIDER_INFO: Record<
     models: ['claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
     keyHint: 'sk-ant-...',
     envVar: 'ANTHROPIC_API_KEY',
+    apiKeyUrl: 'https://console.anthropic.com/settings/keys',
   },
   gemini: {
     // gemini-2.5-pro 는 무료 등급(free tier) 미지원(limit 0). 무료 키로 쓰려면 flash 계열 사용.
@@ -73,6 +74,7 @@ export const PROVIDER_INFO: Record<
     ],
     keyHint: 'AIza... (Google AI Studio 키)',
     envVar: 'GEMINI_API_KEY',
+    apiKeyUrl: 'https://aistudio.google.com/app/apikey',
   },
   openai: {
     label: 'OpenAI (GPT)',
@@ -80,6 +82,7 @@ export const PROVIDER_INFO: Record<
     models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini', 'o3'],
     keyHint: 'sk-...',
     envVar: 'OPENAI_API_KEY',
+    apiKeyUrl: 'https://platform.openai.com/api-keys',
   },
 }
 

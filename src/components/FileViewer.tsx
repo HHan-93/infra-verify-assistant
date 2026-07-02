@@ -11,7 +11,15 @@ import {
   Lock,
   Eye,
   EyeOff,
+  AlertCircle,
 } from 'lucide-react'
+
+const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
+  { pattern: /\/etc\/netplan\//,     command: 'sudo netplan apply',                      desc: '저장만으로는 네트워크 설정이 반영되지 않습니다. 터미널에서 netplan apply를 실행해야 적용됩니다.' },
+  { pattern: /\/etc\/sysctl\.conf$/, command: 'sudo sysctl -p',                          desc: '저장만으로는 커널 파라미터가 반영되지 않습니다. 터미널에서 sysctl -p를 실행해야 적용됩니다.' },
+  { pattern: /\/etc\/fstab$/,        command: 'sudo mount -a',                           desc: '저장만으로는 마운트 설정이 반영되지 않습니다. 터미널에서 mount -a를 실행하거나 재부팅해야 적용됩니다.' },
+  { pattern: /\/etc\/resolv\.conf$/, command: 'sudo systemctl restart systemd-resolved', desc: '저장만으로는 DNS 설정이 반영되지 않습니다. 터미널에서 systemd-resolved를 재시작해야 적용됩니다.' },
+]
 
 interface FileViewerProps {
   /** SFTP 대상 세션(활성 탭) ID */
@@ -128,6 +136,7 @@ export default function FileViewer({
   const [pwInput, setPwInput] = useState('')
   const [pwAction, setPwAction] = useState<'read' | 'write' | null>(null)
   const [showPw, setShowPw] = useState(false) // 비밀번호 표시(눈금) 토글
+  const [applyNotice, setApplyNotice] = useState<{ command: string; desc: string } | null>(null)
 
   // 잘못 저장하면 시스템에 치명적인 파일 (강한 경고 대상)
   const RISKY = [/\/etc\/fstab/, /\/etc\/netplan\//, /sshd_config/, /\/etc\/sudoers/, /grub/, /\/boot\//]
@@ -207,6 +216,8 @@ export default function FileViewer({
       setEditing(false) // 저장 후 읽기 전용으로 복귀
       const bak = res.backupPath ? ` · 백업: ${res.backupPath}` : ''
       setMsg(`${res.viaSudo ? '저장됨 (sudo)' : '저장됨'}: ${p}${bak}`)
+      const match = APPLY_REQUIRED.find(a => a.pattern.test(p))
+      if (match) setApplyNotice(match)
     } else if (res.needSudoPassword) {
       setPwAction('write')
       setPwInput('')
@@ -417,6 +428,30 @@ export default function FileViewer({
                   className="rounded-md bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
                 >
                   저장 진행
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* apply 필요 안내 */}
+        {applyNotice && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-6">
+            <div className="w-full max-w-md rounded-lg border border-amber-500/30 bg-panel p-4 shadow-2xl">
+              <div className="mb-3 flex items-center gap-2">
+                <AlertCircle size={16} className="shrink-0 text-amber-400" />
+                <span className="text-sm font-semibold text-amber-200">저장 완료 — 추가 적용 필요</span>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-amber-300/80">{applyNotice.desc}</p>
+              <code className="block rounded bg-black/40 px-3 py-2 font-mono text-[12px] text-amber-100">
+                {applyNotice.command}
+              </code>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={() => setApplyNotice(null)}
+                  className="rounded-md bg-amber-500/20 px-4 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-500/30"
+                >
+                  확인
                 </button>
               </div>
             </div>

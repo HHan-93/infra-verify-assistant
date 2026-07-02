@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.okestro.infraverify",
-    "productName": "Infra Verify Assistant",
+    "productName": "QA SSH Assistant Tool",
     "npmRebuild": false,
     "publish": [
       {

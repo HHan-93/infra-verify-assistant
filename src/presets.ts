@@ -237,6 +237,26 @@ export const PRESETS: PresetGroup[] = [
         ]
       },
       {
+        "name": "컨트롤러 HA (Pacemaker)",
+        "commands": [
+          {
+            "label": "클러스터 전체 상태",
+            "command": "pcs status",
+            "desc": "노드·리소스 상태와 VIP가 어느 노드에서 running 중인지 한눈에 확인"
+          },
+          {
+            "label": "리소스 상태만 압축 조회",
+            "command": "pcs status resources",
+            "desc": "VIP 등 각 리소스별 현재 실행 노드만 간결하게 확인"
+          },
+          {
+            "label": "클러스터 상세 상태",
+            "command": "pcs status --full",
+            "desc": "fail count 등을 포함한 노드·리소스 상세 상태 확인"
+          }
+        ]
+      },
+      {
         "name": "로그",
         "commands": [
           {

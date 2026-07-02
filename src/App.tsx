@@ -92,6 +92,10 @@ export default function App() {
   const [showTunnels, setShowTunnels] = useState(false)
   const [showMultiRun, setShowMultiRun] = useState(false)
   const [diffSources, setDiffSources] = useState<DiffSource[] | null>(null)
+  // 선택/전체 세션 AI 분석 — 질문 입력 모달 (공용)
+  const [analysisPending, setAnalysisPending] = useState<string | null>(null)
+  const [analysisLabel, setAnalysisLabel] = useState('선택 AI 분석')
+  const [analysisQuestion, setAnalysisQuestion] = useState('')
   // 우측 AI 패널 표시 여부 (기본 열림, 사용자가 토글 가능)
   const [showAI, setShowAI] = useState(true)
   // 우측 패널 탭 (AI 분석 / 대시보드 모니터링)
@@ -613,12 +617,21 @@ export default function App() {
 
   // 터미널 출력 → AI 분석 (공용 — 활성 세션 기준). 패널이 닫혀 있으면 자동으로 연다.
   const analyzeSelection = () => {
+    const text = activeTerm()?.getSelection() ?? ''
+    setAnalysisPending(text)
+    setAnalysisLabel('선택 AI 분석')
+    setAnalysisQuestion('')
+  }
+
+  const submitAnalysis = () => {
+    if (analysisPending === null) return
     setShowAI(true)
-    aiPanelRef.current?.analyze(activeTerm()?.getSelection() ?? '')
+    aiPanelRef.current?.analyze(analysisPending, analysisQuestion.trim() || undefined)
+    setAnalysisPending(null)
+    setAnalysisQuestion('')
   }
   // 연결된 모든 세션 출력을 라벨과 함께 묶어 한 번에 AI 분석
   const analyzeAll = () => {
-    setShowAI(true)
     const parts = tabs
       .filter((t) => statuses[t.id]?.status === 'connected')
       .map((t) => {
@@ -629,7 +642,9 @@ export default function App() {
     const ctx = parts.length
       ? `다음은 여러 노드(세션)의 최근 터미널 출력입니다. 노드 간 차이/이상 징후를 비교 분석해 주세요.\n\n${parts.join('\n\n')}`
       : (activeTerm()?.getRecentOutput() ?? '')
-    aiPanelRef.current?.analyze(ctx)
+    setAnalysisPending(ctx)
+    setAnalysisLabel('전체 세션 AI 분석')
+    setAnalysisQuestion('')
   }
 
   // 노드 간 출력 비교 — 연결된 세션들의 선택영역(없으면 최근 출력)을 모아 diff
@@ -1209,6 +1224,47 @@ export default function App() {
 
       {/* 노드 간 출력 비교 모달 */}
       {diffSources && <NodeDiff sources={diffSources} onClose={() => setDiffSources(null)} />}
+
+      {/* 선택 AI 분석 — 질문 입력 모달 */}
+      {analysisPending !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setAnalysisPending(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setAnalysisPending(null)
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAnalysis() }
+            }}
+          >
+            <div className="mb-3 text-sm font-semibold text-gray-100">{analysisLabel}</div>
+            <textarea
+              autoFocus
+              rows={3}
+              value={analysisQuestion}
+              onChange={(e) => setAnalysisQuestion(e.target.value)}
+              placeholder="질문을 입력하세요... (비우면 기본 분석 스타일 적용)"
+              className="w-full resize-none rounded-md border border-white/10 bg-panel-light px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setAnalysisPending(null)}
+                className="rounded px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+              >
+                취소
+              </button>
+              <button
+                onClick={submitAnalysis}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+              >
+                분석
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 외형 설정 모달 */}
       {showSettings && (

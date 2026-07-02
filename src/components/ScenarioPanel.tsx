@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Play, CornerDownLeft, Copy, Check, X, ListChecks, Search } from 'lucide-react'
+import { useMemo, useRef, useState, useEffect } from 'react'
+import { Play, CornerDownLeft, Copy, Check, X, ListChecks, Search, ChevronDown, AlertTriangle } from 'lucide-react'
 import { SCENARIOS, type Scenario } from '../scenarios'
 
 interface ScenarioPanelProps {
@@ -8,7 +8,28 @@ interface ScenarioPanelProps {
   onClose: () => void
 }
 
-const hasPlaceholder = (cmd: string) => /<[^>]+>/.test(cmd)
+// [^<>\n]: heredoc(<< 'EOF')의 << 를 placeholder 시작으로 오인하지 않도록 중첩 < 와 개행을 제외
+const PLACEHOLDER_RE = /<([^<>\n]+)>/g
+const hasPlaceholder = (cmd: string) => /<[^<>\n]+>/.test(cmd)
+
+/** 명령어에서 <플레이스홀더> 목록을 등장 순서대로 중복 없이 추출 */
+const extractPlaceholders = (cmd: string): string[] => {
+  const found: string[] = []
+  for (const m of cmd.matchAll(PLACEHOLDER_RE)) {
+    if (!found.includes(m[1])) found.push(m[1])
+  }
+  return found
+}
+
+/** 명령어의 모든 <플레이스홀더>를 입력값으로 치환 */
+const fillPlaceholders = (cmd: string, values: Record<string, string>) =>
+  cmd.replace(PLACEHOLDER_RE, (full, key) => values[key]?.trim() || full)
+
+/** 여러 줄 명령어(heredoc 등)는 배지에 첫 줄만 요약 표시 — 전체를 넣으면 truncate가 깨져 패널이 가로로 늘어남 */
+const commandPreview = (cmd: string) => {
+  const firstLine = cmd.split('\n')[0]
+  return cmd.includes('\n') ? firstLine + ' …' : firstLine
+}
 
 function Highlight({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>
@@ -43,6 +64,36 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
   const [selectedId, setSelectedId] = useState(SCENARIOS[0].id)
   const [copied, setCopied] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [phModal, setPhModal] = useState<{ command: string; placeholders: string[] } | null>(null)
+  const [phValues, setPhValues] = useState<Record<string, string>>({})
+  const stepsRef = useRef<HTMLDivElement>(null)
+
+  const openPlaceholderModal = (command: string) => {
+    const placeholders = extractPlaceholders(command)
+    setPhModal({ command, placeholders })
+    setPhValues(Object.fromEntries(placeholders.map((p) => [p, ''])))
+  }
+
+  const submitPlaceholders = () => {
+    if (!phModal) return
+    const filled = fillPlaceholders(phModal.command, phValues)
+    onRun(filled, true)
+    setPhModal(null)
+  }
+
+  const allPhFilled = phModal
+    ? phModal.placeholders.every((p) => phValues[p]?.trim())
+    : false
+
+  const toggleGroup = (solution: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(solution)) next.delete(solution)
+      else next.add(solution)
+      return next
+    })
+  }
 
   const trimmed = query.trim()
 
@@ -77,11 +128,15 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
 
   const scenario = SCENARIOS.find((s) => s.id === effectiveId) ?? SCENARIOS[0]
 
-  const copy = async (cmd: string) => {
+  useEffect(() => {
+    stepsRef.current?.scrollTo({ top: 0 })
+  }, [effectiveId])
+
+  const copy = async (key: string, text?: string) => {
     try {
-      await navigator.clipboard.writeText(cmd)
-      setCopied(cmd)
-      setTimeout(() => setCopied((c) => (c === cmd ? null : c)), 1500)
+      await navigator.clipboard.writeText(text ?? key)
+      setCopied(key)
+      setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500)
     } catch { /* 무시 */ }
   }
 
@@ -121,12 +176,21 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
           {filteredGroups.length === 0 ? (
             <p className="px-3 py-4 text-center text-[11px] text-gray-500">일치 없음</p>
           ) : (
-            filteredGroups.map((g) => (
+            filteredGroups.map((g) => {
+              const collapsed = !trimmed && collapsedGroups.has(g.solution)
+              return (
               <div key={g.solution} className="mb-1">
-                <div className="px-3 py-1 text-[10px] font-semibold text-blue-300/80">
+                <button
+                  onClick={() => toggleGroup(g.solution)}
+                  className="flex w-full items-center gap-1 px-3 py-1 text-left text-[10px] font-semibold text-blue-300/80 hover:text-blue-200"
+                >
+                  <ChevronDown
+                    size={11}
+                    className={'shrink-0 transition-transform ' + (collapsed ? '-rotate-90' : '')}
+                  />
                   {g.solution}
-                </div>
-                {g.scenarios.map((s) => {
+                </button>
+                {!collapsed && g.scenarios.map((s) => {
                   const { stepCount } = trimmed ? matchScenario(s, trimmed) : { stepCount: 0 }
                   return (
                     <button
@@ -149,7 +213,8 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                   )
                 })}
               </div>
-            ))
+              )
+            })
           )}
         </div>
 
@@ -169,7 +234,7 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
             </div>
           )}
 
-          <div className="flex-1 space-y-2 overflow-y-auto p-2.5">
+          <div ref={stepsRef} className="flex-1 space-y-2 overflow-y-auto p-2.5">
             {scenario.steps.map((step, idx) => {
               const ph = hasPlaceholder(step.command)
               // 검색 중일 때 해당 스텝이 일치하는지
@@ -196,8 +261,11 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                       </span>
                       {step.command && (
                         <>
-                          <code className="min-w-0 flex-1 truncate rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-pink-200">
-                            <Highlight text={step.command} query={trimmed} />
+                          <code
+                            title={step.command}
+                            className="min-w-0 flex-1 truncate rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-pink-200"
+                          >
+                            <Highlight text={commandPreview(step.command)} query={trimmed} />
                           </code>
                           <div className="flex shrink-0 items-center gap-1">
                             <button
@@ -212,13 +280,15 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                               )}
                             </button>
                             <button
-                              onClick={() => onRun(step.command, !ph)}
+                              onClick={() =>
+                                ph ? openPlaceholderModal(step.command) : onRun(step.command, true)
+                              }
                               disabled={!connected}
                               title={
                                 !connected
                                   ? 'SSH 연결 필요'
                                   : ph
-                                    ? '<...> 부분을 채운 뒤 Enter (실행 없이 입력만)'
+                                    ? '<...> 값을 입력받아 치환 후 실행'
                                     : '터미널에서 실행'
                               }
                               className={
@@ -241,12 +311,27 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                         {step.info}
                       </p>
                     )}
+                    {step.warn && (
+                      <p className="mt-1 flex items-start gap-1.5 whitespace-pre-line rounded border border-red-500/30 bg-red-500/15 px-1.5 py-1 text-[11px] font-medium leading-relaxed text-red-300">
+                        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                        <span>{step.warn}</span>
+                      </p>
+                    )}
                     {step.code && (
                       <details className="group mt-1.5 overflow-hidden rounded border border-emerald-500/25">
                         <summary className="flex cursor-pointer select-none list-none items-center gap-1.5 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-400/80 hover:bg-emerald-500/15 hover:text-emerald-300 group-open:border-b group-open:border-emerald-500/20">
                           <span>입력 예시</span>
-                          <span className="ml-auto font-mono text-[9px] text-emerald-500/60 group-open:hidden">펼치기 ▾</span>
-                          <span className="ml-auto hidden font-mono text-[9px] text-emerald-500/60 group-open:inline">접기 ▴</span>
+                          <button
+                            onClick={(e) => { e.preventDefault(); copy('code-' + idx, step.code) }}
+                            title="내용 복사"
+                            className="ml-auto rounded p-0.5 text-emerald-500/60 hover:bg-emerald-500/20 hover:text-emerald-300"
+                          >
+                            {copied === 'code-' + idx
+                              ? <Check size={11} className="text-green-400" />
+                              : <Copy size={11} />}
+                          </button>
+                          <span className="font-mono text-[9px] text-emerald-500/60 group-open:hidden">펼치기 ▾</span>
+                          <span className="hidden font-mono text-[9px] text-emerald-500/60 group-open:inline">접기 ▴</span>
                         </summary>
                         <pre className="overflow-x-auto whitespace-pre bg-black/40 px-3 py-2 font-mono text-[10px] leading-relaxed text-green-300/85">
                           {step.code}
@@ -265,6 +350,53 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
           </div>
         </div>
       </div>
+
+      {/* 플레이스홀더 값 입력 후 치환 실행 모달 */}
+      {phModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setPhModal(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setPhModal(null)
+              if (e.key === 'Enter' && allPhFilled) submitPlaceholders()
+            }}
+          >
+            <div className="mb-3 text-sm font-semibold text-gray-100">값 입력</div>
+            <div className="space-y-2">
+              {phModal.placeholders.map((p, i) => (
+                <div key={p}>
+                  <label className="mb-1 block text-[11px] text-gray-400">{p}</label>
+                  <input
+                    autoFocus={i === 0}
+                    value={phValues[p] ?? ''}
+                    onChange={(e) => setPhValues((v) => ({ ...v, [p]: e.target.value }))}
+                    className="w-full rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-[12px] text-gray-200 outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setPhModal(null)}
+                className="rounded px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+              >
+                취소
+              </button>
+              <button
+                onClick={submitPlaceholders}
+                disabled={!allPhFilled}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-40 hover:bg-blue-500"
+              >
+                치환 후 실행
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

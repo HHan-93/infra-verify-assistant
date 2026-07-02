@@ -159,7 +159,7 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>((props, ref) 
     term.open(containerRef.current)
     fitAddon.fit()
 
-    term.writeln('\x1b[1;34m=== Infra Verify Assistant Terminal ===\x1b[0m')
+    term.writeln('\x1b[1;34m=== QA SSH Assistant Tool Terminal ===\x1b[0m')
     term.writeln('로컬 셸입니다. 좌측 상단에서 SSH 접속 시 원격으로 전환됩니다.\r\n')
 
     // 입력 전송 (브로드캐스트 위임 있으면 그쪽, 없으면 자기 세션)

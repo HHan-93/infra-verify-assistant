@@ -1,6 +1,6 @@
 {
   "appId": "com.okestro.infraverify",
-  "productName": "Infra Verify Assistant",
+  "productName": "QA SSH Assistant Tool",
   "directories": {
     "output": "release"
   },

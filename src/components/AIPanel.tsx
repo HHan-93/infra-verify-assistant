@@ -28,7 +28,7 @@ import Markdown from './Markdown'
 
 /** App 에서 ref 로 호출: 터미널 출력 텍스트를 분석 요청 */
 export interface AIPanelHandle {
-  analyze: (context: string) => void
+  analyze: (context: string, question?: string) => void
 }
 
 interface ChatItem {
@@ -162,7 +162,7 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
   }, [])
 
   // 대화 히스토리를 메인으로 보내 스트리밍 시작
-  const startStream = (history: ChatItem[]) => {
+  const startStream = (history: ChatItem[], styleOverride?: AnalysisStyle) => {
     const { provider: p, configs: c, analysisStyle: style } = configRef.current
     const requestId = crypto.randomUUID()
     const assistantId = crypto.randomUUID()
@@ -174,7 +174,7 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
       requestId,
       provider: p,
       model: c[p].model || undefined, // 비우면 메인에서 프로바이더 기본 모델 사용
-      style,
+      style: styleOverride ?? style,
       apiKey: c[p].key || undefined,
       messages: history.map((m) => ({ role: m.role, content: m.content })),
     })
@@ -189,13 +189,22 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
 
   // App(터미널 도구막대)에서 호출
   useImperativeHandle(ref, () => ({
-    analyze: (context: string) => {
+    analyze: (context: string, question?: string) => {
       const ctx = context.trim()
       if (!ctx) {
         submit('터미널 출력이 비어 있습니다. (선택 영역이 없거나 출력이 없음)')
         return
       }
-      submit(`다음 터미널 출력을 분석해 주세요:\n\n\`\`\`\n${ctx}\n\`\`\``)
+      if (question) {
+        const userMsg: ChatItem = {
+          id: crypto.randomUUID(),
+          role: 'user',
+          content: `다음 터미널 출력에 대해 답해 주세요.\n\n질문: ${question}\n\n\`\`\`\n${ctx}\n\`\`\``,
+        }
+        startStream([...messagesRef.current, userMsg], 'free')
+      } else {
+        submit(`다음 터미널 출력을 분석해 주세요:\n\n\`\`\`\n${ctx}\n\`\`\``)
+      }
     },
   }))
 
@@ -385,6 +394,14 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
               placeholder={curInfo.keyHint}
               className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
+            <a
+              href={curInfo.apiKeyUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 block text-right text-[10px] text-blue-400/70 hover:text-blue-300"
+            >
+              API 키 발급 →
+            </a>
           </div>
 
           <div>
