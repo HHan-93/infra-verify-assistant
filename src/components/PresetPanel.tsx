@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Play, CornerDownLeft, Copy, Check, X, Search } from 'lucide-react'
 import { PRESETS } from '../presets'
 
@@ -37,6 +37,35 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
   const [subName, setSubName] = useState(PRESETS[0].subgroups[0].name)
   const [copied, setCopied] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  // 카테고리 목록(좌측) 너비 — 드래그로 조절, localStorage 보존
+  const [catWidth, setCatWidth] = useState(() => Number(localStorage.getItem('preset_cat_width')) || 128)
+  const catWidthRef = useRef(catWidth)
+  const catDragRef = useRef(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!catDragRef.current) return
+      const el = bodyRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const w = Math.max(100, Math.min(320, e.clientX - r.left))
+      catWidthRef.current = w
+      setCatWidth(w)
+    }
+    const onUp = () => {
+      if (!catDragRef.current) return
+      catDragRef.current = false
+      document.body.style.cursor = ''
+      localStorage.setItem('preset_cat_width', String(Math.round(catWidthRef.current)))
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
 
   const trimmed = query.trim()
 
@@ -140,7 +169,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
   }
 
   return (
-    <div className="flex h-80 flex-col border-b border-white/10 bg-panel">
+    <div className="flex h-full flex-col border-b border-white/10 bg-panel">
       {/* 검색 바 */}
       <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-1.5">
         <Search size={13} className="shrink-0 text-gray-500" />
@@ -188,9 +217,9 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
         </div>
       ) : (
         /* 일반 탐색 모드 */
-        <div className="flex min-w-0 flex-1 overflow-hidden">
+        <div ref={bodyRef} className="flex min-w-0 flex-1 overflow-hidden">
           {/* 1단계: 카테고리 */}
-          <div className="flex w-32 shrink-0 flex-col border-r border-white/10 py-2">
+          <div style={{ width: catWidth }} className="flex shrink-0 flex-col py-2">
             <div className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
               카테고리
             </div>
@@ -209,6 +238,15 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               </button>
             ))}
           </div>
+
+          <div
+            onMouseDown={() => {
+              catDragRef.current = true
+              document.body.style.cursor = 'col-resize'
+            }}
+            title="드래그하여 카테고리 너비 조절"
+            className="w-1 shrink-0 cursor-col-resize bg-white/10 hover:bg-blue-400/50"
+          />
 
           {/* 2·3단계: 하위분류 + 명령어 */}
           <div className="flex min-w-0 flex-1 flex-col">

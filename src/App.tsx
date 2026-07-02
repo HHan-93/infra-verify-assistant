@@ -143,6 +143,11 @@ export default function App() {
   const rowFracRef = useRef(rowFrac)
   const termAreaRef = useRef<HTMLDivElement>(null)
   const splitDragRef = useRef<null | 'col' | 'row'>(null)
+  // 프리셋/시나리오 패널 높이(px) — 드래그로 조절, localStorage 보존
+  const [panelHeight, setPanelHeight] = useState(() => Number(localStorage.getItem('panel_height')) || 320)
+  const panelHeightRef = useRef(panelHeight)
+  const panelDragRef = useRef(false)
+  const panelWrapRef = useRef<HTMLDivElement>(null)
 
   // 세션ID 생성용 카운터 (s1 은 초기값으로 이미 사용)
   const idCounter = useRef(1)
@@ -257,6 +262,31 @@ export default function App() {
       aiDragRef.current = false
       document.body.style.cursor = ''
       localStorage.setItem('ai_width', String(Math.round(aiWidthRef.current)))
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  // 프리셋/시나리오 패널 높이 드래그 리사이즈
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!panelDragRef.current) return
+      const el = panelWrapRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const h = Math.max(160, Math.min(window.innerHeight * 0.7, e.clientY - r.top))
+      panelHeightRef.current = h
+      setPanelHeight(h)
+    }
+    const onUp = () => {
+      if (!panelDragRef.current) return
+      panelDragRef.current = false
+      document.body.style.cursor = ''
+      localStorage.setItem('panel_height', String(Math.round(panelHeightRef.current)))
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -760,7 +790,7 @@ export default function App() {
       )}
 
       {/* ── 중앙 : 터미널 영역 (AI 패널 닫히면 전체 폭으로 확장) ─── */}
-      <div className="relative flex flex-1 flex-col border-r border-white/10">
+      <div className="relative flex min-w-0 flex-1 flex-col border-r border-white/10">
         <Mascot active={idle} />
 
         {/* 터미널 검색바 (Ctrl+F) */}
@@ -898,11 +928,25 @@ export default function App() {
           onAnalyzeSelection={analyzeSelection}
           onAnalyzeAll={analyzeAll}
         />
-        {panel === 'presets' && (
-          <PresetPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
-        )}
-        {panel === 'scenarios' && (
-          <ScenarioPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
+        {(panel === 'presets' || panel === 'scenarios') && (
+          <>
+            <div ref={panelWrapRef} style={{ height: panelHeight }} className="shrink-0 overflow-hidden">
+              {panel === 'presets' && (
+                <PresetPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
+              )}
+              {panel === 'scenarios' && (
+                <ScenarioPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
+              )}
+            </div>
+            <div
+              onMouseDown={() => {
+                panelDragRef.current = true
+                document.body.style.cursor = 'row-resize'
+              }}
+              title="드래그하여 패널 높이 조절"
+              className="h-1 shrink-0 cursor-row-resize bg-white/10 hover:bg-blue-400/50"
+            />
+          </>
         )}
 
         {isSplit && broadcast && (

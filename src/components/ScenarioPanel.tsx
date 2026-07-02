@@ -68,6 +68,35 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
   const [phModal, setPhModal] = useState<{ command: string; placeholders: string[] } | null>(null)
   const [phValues, setPhValues] = useState<Record<string, string>>({})
   const stepsRef = useRef<HTMLDivElement>(null)
+  // 시나리오 목록(좌측) 너비 — 드래그로 조절, localStorage 보존
+  const [listWidth, setListWidth] = useState(() => Number(localStorage.getItem('scenario_list_width')) || 208)
+  const listWidthRef = useRef(listWidth)
+  const listDragRef = useRef(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!listDragRef.current) return
+      const el = bodyRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const w = Math.max(140, Math.min(420, e.clientX - r.left))
+      listWidthRef.current = w
+      setListWidth(w)
+    }
+    const onUp = () => {
+      if (!listDragRef.current) return
+      listDragRef.current = false
+      document.body.style.cursor = ''
+      localStorage.setItem('scenario_list_width', String(Math.round(listWidthRef.current)))
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
 
   const openPlaceholderModal = (command: string) => {
     const placeholders = extractPlaceholders(command)
@@ -141,7 +170,7 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
   }
 
   return (
-    <div className="flex h-80 flex-col border-b border-white/10 bg-panel">
+    <div className="flex h-full flex-col border-b border-white/10 bg-panel">
       {/* 검색 바 */}
       <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-1.5">
         <Search size={13} className="shrink-0 text-gray-500" />
@@ -170,9 +199,9 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
       </div>
 
       {/* 본문: 좌측 목록 + 우측 상세 */}
-      <div className="flex min-w-0 flex-1 overflow-hidden">
+      <div ref={bodyRef} className="flex min-w-0 flex-1 overflow-hidden">
         {/* 시나리오 목록 */}
-        <div className="w-52 shrink-0 overflow-y-auto border-r border-white/10 py-2">
+        <div style={{ width: listWidth }} className="shrink-0 overflow-y-auto py-2">
           {filteredGroups.length === 0 ? (
             <p className="px-3 py-4 text-center text-[11px] text-gray-500">일치 없음</p>
           ) : (
@@ -217,6 +246,15 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
             })
           )}
         </div>
+
+        <div
+          onMouseDown={() => {
+            listDragRef.current = true
+            document.body.style.cursor = 'col-resize'
+          }}
+          title="드래그하여 목록 너비 조절"
+          className="w-1 shrink-0 cursor-col-resize bg-white/10 hover:bg-blue-400/50"
+        />
 
         {/* 선택한 시나리오의 단계 */}
         <div className="flex min-w-0 flex-1 flex-col">
