@@ -10,6 +10,12 @@ import type {
   MonitorStartOptions,
   MonitorSampleEvent,
   MonitorErrorEvent,
+  ProfileImportResult,
+  CustomPresetCommand,
+  CustomScenario,
+  LogIndexEntry,
+  LogRetentionSettings,
+  MetricSample,
 } from './shared-types'
 
 /** 활성 포트 포워딩 항목 (렌더러 표시용) */
@@ -51,12 +57,26 @@ const electronAPI = {
   ): Promise<{ ok: boolean; code?: number; out?: string; err?: string; error?: string }> =>
     ipcRenderer.invoke('session:run', { sessionId, cmd }),
 
-  // 세션 로그 기록 시작/중지
+  // 세션 로그 기록 시작/중지 (host/label 은 로그 목록 표시용 메타데이터)
   logStart: (
     sessionId: string,
+    meta?: { host?: string; label?: string },
   ): Promise<{ ok: boolean; path?: string; alreadyLogging?: boolean; canceled?: boolean; error?: string }> =>
-    ipcRenderer.invoke('log:start', { sessionId }),
+    ipcRenderer.invoke('log:start', { sessionId, host: meta?.host, label: meta?.label }),
   logStop: (sessionId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('log:stop', { sessionId }),
+
+  // ── 세션 로그 뷰어(목록/검색/리플레이) ───────────────────────
+  logsList: (): Promise<LogIndexEntry[]> => ipcRenderer.invoke('logs:list'),
+  logsRead: (id: string): Promise<{ ok: boolean; content?: string; truncated?: boolean; error?: string }> =>
+    ipcRenderer.invoke('logs:read', id),
+  logsReadCast: (
+    id: string,
+  ): Promise<{ ok: boolean; frames?: { t: number; d: string }[]; error?: string }> =>
+    ipcRenderer.invoke('logs:readCast', id),
+  logsDelete: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('logs:delete', id),
+  logsGetRetentionSettings: (): Promise<LogRetentionSettings> => ipcRenderer.invoke('logs:getRetentionSettings'),
+  logsSetRetentionSettings: (settings: LogRetentionSettings): Promise<LogRetentionSettings> =>
+    ipcRenderer.invoke('logs:setRetentionSettings', settings),
 
   // 세션(탭) 완전 종료 — 연결/로컬셸 정리 후 세션 제거
   sessionClose: (sessionId: string): void => ipcRenderer.send('session:close', sessionId),
@@ -126,6 +146,11 @@ const electronAPI = {
     content: string
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:save', payload),
+  saveReportPdf: (payload: {
+    html: string
+    defaultName: string
+  }): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('report:savePdf', payload),
 
   // 링크를 기본 브라우저로 열기
   openExternal: (url: string): void => ipcRenderer.send('shell:openExternal', url),
@@ -166,6 +191,27 @@ const electronAPI = {
     ipcRenderer.invoke('profiles:renameGroup', { from, to }),
   profilesReorder: (list: SavedProfile[]): Promise<SavedProfile[]> =>
     ipcRenderer.invoke('profiles:reorder', list),
+  profilesImport: (): Promise<ProfileImportResult> => ipcRenderer.invoke('profiles:import'),
+  profilesSaveTemplate: (
+    format: 'csv' | 'json',
+  ): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('profiles:saveTemplate', format),
+  profilesExport: (
+    format: 'csv' | 'json',
+  ): Promise<{ saved: boolean; path?: string; count?: number; error?: string }> =>
+    ipcRenderer.invoke('profiles:export', format),
+
+  // ── 사용자 정의 프리셋 / 시나리오 (런타임 추가·편집) ─────────
+  customPresetsList: (): Promise<CustomPresetCommand[]> => ipcRenderer.invoke('customPresets:list'),
+  customPresetsUpsert: (item: CustomPresetCommand): Promise<CustomPresetCommand[]> =>
+    ipcRenderer.invoke('customPresets:upsert', item),
+  customPresetsDelete: (id: string): Promise<CustomPresetCommand[]> =>
+    ipcRenderer.invoke('customPresets:delete', id),
+  customScenariosList: (): Promise<CustomScenario[]> => ipcRenderer.invoke('customScenarios:list'),
+  customScenariosUpsert: (item: CustomScenario): Promise<CustomScenario[]> =>
+    ipcRenderer.invoke('customScenarios:upsert', item),
+  customScenariosDelete: (id: string): Promise<CustomScenario[]> =>
+    ipcRenderer.invoke('customScenarios:delete', id),
 
   // ── 클립보드 ─────────────────────────────────────────────
   /** 시스템 클립보드 텍스트 읽기 (터미널 Ctrl+V 붙여넣기용) */
@@ -181,6 +227,17 @@ const electronAPI = {
     entries?: { name: string; type: 'dir' | 'file' | 'link'; size: number; mtime: number }[]
     error?: string
   }> => ipcRenderer.invoke('sftp:list', { sessionId, path }),
+  /** 원격 디렉토리 트리 전체에서 파일명 재귀 검색(대소문자 무시 부분일치) */
+  sftpSearch: (
+    sessionId: string,
+    root: string,
+    query: string,
+  ): Promise<{
+    ok: boolean
+    results?: { path: string; name: string; type: 'dir' | 'file' | 'link' }[]
+    truncated?: boolean
+    error?: string
+  }> => ipcRenderer.invoke('sftp:search', { sessionId, root, query }),
   sftpDownload: (
     sessionId: string,
     remotePath: string,
@@ -198,6 +255,36 @@ const electronAPI = {
   /** 원격 파일을 OS로 드래그-아웃 시작 (dragstart 에서 호출) */
   startFileDrag: (sessionId: string, remotePath: string, name: string): void =>
     ipcRenderer.send('sftp:startDrag', { sessionId, remotePath, name }),
+  /** 로컬 디렉토리 목록 (파일 탐색기 듀얼패인 좌측) */
+  localList: (
+    path?: string,
+  ): Promise<{
+    ok: boolean
+    path?: string
+    parent?: string
+    entries?: { name: string; path: string; type: 'dir' | 'file' | 'link'; size: number; mtime: number }[]
+    error?: string
+  }> => ipcRenderer.invoke('local:list', { path }),
+  /** 다중 선택 일괄 다운로드 — 대화상자 없이 지정된 로컬 폴더로 바로 받음(듀얼패인용) */
+  sftpDownloadPaths: (
+    sessionId: string,
+    items: { path: string; name: string; isDir: boolean }[],
+    localDir: string,
+  ): Promise<{ ok: boolean; downloaded?: string[]; error?: string }> =>
+    ipcRenderer.invoke('sftp:downloadPaths', { sessionId, items, localDir }),
+  /** 다중 선택 일괄 삭제(원격) */
+  sftpDeletePaths: (
+    sessionId: string,
+    items: { path: string; isDir: boolean }[],
+  ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('sftp:deletePaths', { sessionId, items }),
+  /** 세션 간(원격→원격) 직접 전송 — 앱이 임시 로컬 폴더를 경유해 중계 */
+  sftpRelayTransfer: (
+    fromSessionId: string,
+    toSessionId: string,
+    items: { path: string; name: string; isDir: boolean }[],
+    toDir: string,
+  ): Promise<{ ok: boolean; transferred?: string[]; error?: string }> =>
+    ipcRenderer.invoke('sftp:relayTransfer', { fromSessionId, toSessionId, items, toDir }),
 
   // ── 포트 포워딩 (터널링) ─────────────────────────────────
   tunnelList: (
@@ -243,6 +330,25 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('sftp:progress', h)
   },
 
+  // ── 실시간 로그 뷰어 (tail -f) ───────────────────────────────
+  logtailStart: (
+    sessionId: string,
+    path: string,
+    sudoPassword?: string,
+  ): Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }> =>
+    ipcRenderer.invoke('logtail:start', { sessionId, path, sudoPassword }),
+  logtailStop: (sessionId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('logtail:stop', { sessionId }),
+  onLogtailData: (cb: (d: { sessionId: string; tailId: string; data: string }) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, d: { sessionId: string; tailId: string; data: string }) => cb(d)
+    ipcRenderer.on('logtail:data', h)
+    return () => ipcRenderer.removeListener('logtail:data', h)
+  },
+  onLogtailClosed: (cb: (d: { sessionId: string; tailId: string }) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, d: { sessionId: string; tailId: string }) => cb(d)
+    ipcRenderer.on('logtail:closed', h)
+    return () => ipcRenderer.removeListener('logtail:closed', h)
+  },
+
   // ── 서버 모니터링(상시 데몬, 세션별) ─────────────────────────
   // 수집 시작: 에이전트 배포(필요시) + 데몬 기동 + 증분 리더 시작
   monitorStart: (
@@ -262,6 +368,17 @@ const electronAPI = {
   // 원격 프로세스 kill (SIGTERM → SIGKILL)
   monitorKillProc: (sessionId: string, pid: number): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('monitor:killProc', { sessionId, pid }),
+  /** 전체 프로세스 목록(온디맨드, ps 전체 재조회) — 상시 폴링과 별개 */
+  monitorListProcesses: (
+    sessionId: string,
+  ): Promise<{
+    ok: boolean
+    procs?: { pid: number; name: string; cpu: number; mem: number; command: string }[]
+    error?: string
+  }> => ipcRenderer.invoke('monitor:listProcesses', { sessionId }),
+  // 로컬에 장기 보관된 이력 조회 (호스트명 기준, 6h/24h/7d 등 실시간 버퍼보다 긴 범위용)
+  monitorHistory: (host: string, sinceMs: number): Promise<{ ok: boolean; samples?: MetricSample[] }> =>
+    ipcRenderer.invoke('monitor:history', { host, sinceMs }),
 
   // 새 메트릭 샘플 수신 (sessionId 포함). 해제 함수 반환.
   onMonitorSample: (callback: (e: MonitorSampleEvent) => void): (() => void) => {

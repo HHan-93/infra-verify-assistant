@@ -8,20 +8,38 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts'
-import { Play, Square, FileText, Save, Loader2, Info, X, Download } from 'lucide-react'
+import { Play, Square, FileText, Save, FileDown, Loader2, Info, X, Download } from 'lucide-react'
 import Markdown from './Markdown'
+import ProcessListModal from './ProcessListModal'
 import { useMonitor, formatForReport } from '../hooks/useMonitor'
-import type { AIProvider, AnalysisStyle } from '../../electron/shared-types'
+import { buildReportHtml } from '../lib/reportHtml'
+import type { AIProvider, AnalysisStyle, MetricSample } from '../../electron/shared-types'
 
 interface Props {
   sessionId: string
   connected: boolean
 }
 
-type ChartRange = '5m' | '30m' | '1h'
-const CHART_RANGES: ChartRange[] = ['5m', '30m', '1h']
-const RANGE_SEC: Record<ChartRange, number> = { '5m': 300, '30m': 1800, '1h': 3600 }
-const RANGE_LABEL: Record<ChartRange, string> = { '5m': '5분', '30m': '30분', '1h': '1시간' }
+type ChartRange = '5m' | '30m' | '1h' | '6h' | '24h' | '7d'
+const CHART_RANGES: ChartRange[] = ['5m', '30m', '1h', '6h', '24h', '7d']
+const RANGE_SEC: Record<ChartRange, number> = {
+  '5m': 300,
+  '30m': 1800,
+  '1h': 3600,
+  '6h': 6 * 3600,
+  '24h': 24 * 3600,
+  '7d': 7 * 24 * 3600,
+}
+const RANGE_LABEL: Record<ChartRange, string> = {
+  '5m': '5분',
+  '30m': '30분',
+  '1h': '1시간',
+  '6h': '6시간',
+  '24h': '24시간',
+  '7d': '7일',
+}
+// 실시간 버퍼(최근 최대 1시간)로는 부족한 범위 — 로컬에 장기 보관된 이력을 추가로 불러와야 함
+const LONG_RANGES = new Set<ChartRange>(['6h', '24h', '7d'])
 
 /** 업타임(초)을 "N일 N시간" 또는 "N시간 N분" 형태로 변환 */
 function fmtUptime(sec: number): string {
@@ -59,7 +77,7 @@ function readAiConfig(): {
   } catch {
     /* 손상된 설정 무시 */
   }
-  return { provider: 'anthropic', style: 'detailed' }
+  return { provider: 'gemini', style: 'detailed' }
 }
 
 const KILL_ON_EXIT_KEY = 'monitor_kill_on_exit'
@@ -106,9 +124,42 @@ export default function Dashboard({ sessionId, connected }: Props) {
   const [chartRange, setChartRange] = useState<ChartRange>('5m')
   const [intervalMs, setIntervalMs] = useState(5000)
   const [showAllProcs, setShowAllProcs] = useState(false)
-  const nowMs = Date.now()
+  const [showProcessModal, setShowProcessModal] = useState(false)
+  // 원격 서버 시각(ts) 기준 — 로컬 PC와 서버 시계가 어긋나 있어도(NTP 미동기화 등)
+  // "최근 N분" 창이 실제 수집 데이터를 기준으로 맞춰지도록 함 (Date.now() 사용 시 시계 어긋나면 차트가 비어보임)
+  const nowMs = latest ? latest.ts * 1000 : Date.now()
   const cutoffMs = nowMs - RANGE_SEC[chartRange] * 1000
-  const visibleHistory = history.filter((s) => s.ts * 1000 >= cutoffMs)
+
+  // 6h/24h/7d 처럼 실시간 버퍼(최근 최대 1시간)를 넘어서는 범위는 로컬에 장기 보관된 이력을 추가로 불러옴
+  const [longHistory, setLongHistory] = useState<MetricSample[]>([])
+  const [loadingLongHistory, setLoadingLongHistory] = useState(false)
+  useEffect(() => {
+    if (!LONG_RANGES.has(chartRange) || !latest?.host) {
+      setLongHistory([])
+      return
+    }
+    let cancelled = false
+    setLoadingLongHistory(true)
+    window.electronAPI.monitorHistory(latest.host, cutoffMs).then((r) => {
+      if (!cancelled) {
+        setLongHistory(r.ok && r.samples ? r.samples : [])
+        setLoadingLongHistory(false)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartRange, latest?.host])
+
+  // 장기 이력 + 실시간 버퍼 병합 (ts 기준 중복 제거, 오름차순)
+  const combinedHistory =
+    LONG_RANGES.has(chartRange) && longHistory.length
+      ? Array.from(new Map([...longHistory, ...history].map((s) => [s.ts, s])).values()).sort(
+          (a, b) => a.ts - b.ts,
+        )
+      : history
+  const visibleHistory = combinedHistory.filter((s) => s.ts * 1000 >= cutoffMs)
 
   const chartData = visibleHistory.map((s) => ({
     ts: s.ts * 1000, // epoch ms (X축 시간 도메인)
@@ -118,14 +169,24 @@ export default function Dashboard({ sessionId, connected }: Props) {
     tx: s.net?.txMBs ?? null,
   }))
 
-  // 5분 범위면 초까지, 그 이상은 시:분만 표시
-  const fmtClock = (v: number) =>
-    new Date(v).toLocaleTimeString('ko-KR', {
+  // 5분 범위면 초까지, 24h/7d 처럼 하루를 넘어가는 범위는 날짜도 함께 표시(날짜 구분 위해)
+  const fmtClock = (v: number) => {
+    if (chartRange === '24h' || chartRange === '7d') {
+      return new Date(v).toLocaleString('ko-KR', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    }
+    return new Date(v).toLocaleTimeString('ko-KR', {
       hour: '2-digit',
       minute: '2-digit',
       ...(chartRange === '5m' ? { second: '2-digit' } : {}),
       hour12: false,
     })
+  }
   // 모든 차트가 공유하는 X축(시간) 설정
   const xAxisProps = {
     dataKey: 'ts',
@@ -184,6 +245,17 @@ export default function Dashboard({ sessionId, connected }: Props) {
     const res = await window.electronAPI.saveReport({
       defaultName: `server-report-${latest?.host ?? 'host'}-${fileStamp()}.md`,
       content: report,
+    })
+    if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
+    else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
+    if (res.saved) setTimeout(() => setSaveMsg(''), 4000)
+  }
+
+  const savePdfReport = async () => {
+    const html = buildReportHtml(report, `서버 상태 리포트 - ${latest?.host ?? ''}`)
+    const res = await window.electronAPI.saveReportPdf({
+      html,
+      defaultName: `server-report-${latest?.host ?? 'host'}-${fileStamp()}.pdf`,
     })
     if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
     else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
@@ -364,6 +436,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
         </div>
         <div className="mb-1 text-[10px] text-gray-500">
           가로축: 시각 · 최근 {RANGE_LABEL[chartRange]} 구간
+          {loadingLongHistory && <span className="ml-1 text-blue-400">불러오는 중...</span>}
         </div>
         <ResponsiveContainer width="100%" height={160}>
           <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
@@ -412,6 +485,12 @@ export default function Dashboard({ sessionId, connected }: Props) {
             {connected ? '"수집 시작"을 누르면 그래프가 그려집니다.' : 'SSH 연결 후 사용하세요.'}
           </div>
         )}
+        {!!history.length && !visibleHistory.length && (
+          <div className="py-6 text-center text-xs text-gray-500">
+            수집된 데이터는 있지만 선택한 범위({RANGE_LABEL[chartRange]}) 안에 없습니다. 서버-로컬
+            시계가 어긋나 있을 수 있으니 범위를 늘려보거나 서버 시간 동기화를 확인하세요.
+          </div>
+        )}
       </div>
 
 
@@ -452,6 +531,12 @@ export default function Dashboard({ sessionId, connected }: Props) {
               {showAllProcs ? '접기' : `더보기 (${latest!.procs.length}개)`}
             </button>
           )}
+          <button
+            onClick={() => setShowProcessModal(true)}
+            className={(latest?.procs.length ?? 0) > 5 ? 'text-[11px] text-blue-300 hover:text-blue-200' : 'ml-auto text-[11px] text-blue-300 hover:text-blue-200'}
+          >
+            전체 프로세스 보기
+          </button>
         </div>
         <table className="w-full text-xs">
           <thead className="text-gray-500">
@@ -508,12 +593,21 @@ export default function Dashboard({ sessionId, connected }: Props) {
             {reporting ? '분석 중…' : '리포트 생성'}
           </button>
           {report && !reporting && (
-            <button
-              onClick={saveReport}
-              className="flex items-center gap-1 rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
-            >
-              <Save size={14} /> .md 저장
-            </button>
+            <>
+              <button
+                onClick={saveReport}
+                className="flex items-center gap-1 rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
+              >
+                <Save size={14} /> .md 저장
+              </button>
+              <button
+                onClick={savePdfReport}
+                title="정리된 문서 형태(PDF)로 저장 — 공유·인쇄에 적합"
+                className="flex items-center gap-1 rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
+              >
+                <FileDown size={14} /> PDF 저장
+              </button>
+            </>
           )}
         </div>
         {saveMsg && <div className="mb-1 truncate text-[11px] text-gray-400">{saveMsg}</div>}
@@ -523,6 +617,10 @@ export default function Dashboard({ sessionId, connected }: Props) {
           </div>
         )}
       </div>
+
+      {showProcessModal && (
+        <ProcessListModal sessionId={sessionId} onClose={() => setShowProcessModal(false)} />
+      )}
     </div>
   )
 }

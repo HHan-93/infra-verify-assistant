@@ -88,7 +88,7 @@ export const PROVIDER_INFO: Record<
 
 // ── 분석 스타일 (시스템 프롬프트 프리셋) ──────────────────────
 
-export type AnalysisStyle = 'standard' | 'detailed' | 'simple' | 'free'
+export type AnalysisStyle = 'standard' | 'detailed' | 'simple' | 'free' | 'shellgen'
 
 const PERSONA =
   '당신은 OpenStack, Ceph, Kubernetes 등 클라우드 인프라의 품질 검증과 트러블슈팅을 돕는 시니어 인프라 엔지니어입니다. 사용자는 터미널 명령어 출력이나 질문을 전달합니다. 한국어로 답하세요.'
@@ -134,6 +134,17 @@ export const ANALYSIS_STYLES: Record<
     hint: '형식 강제 없이 자연스럽게',
     system: `${PERSONA}
 정해진 형식 없이, 주어진 출력/질문에 가장 도움이 되는 방식으로 자연스럽게 분석·설명하세요. 핵심부터 말하고, 근거는 출력에서 인용하며, 추측은 추측이라고 밝히세요.`,
+  },
+  // UI 셀렉트 목록에는 노출하지 않고, "명령어 생성" 모드에서만 내부적으로 사용하는 스타일.
+  // 파싱 가능하도록 반드시 고정된 형식으로만 답하게 강제한다.
+  shellgen: {
+    label: '명령어 생성 (내부용)',
+    hint: '자연어 요청을 쉘 명령어로 변환',
+    system: `당신은 리눅스/유닉스 쉘 명령어 전문가입니다. 사용자의 자연어 요청을 실행 가능한 쉘 명령어 한 줄로 변환하세요.
+반드시 아래 형식으로만 답하고, 다른 텍스트·코드블록·마크다운은 절대 추가하지 마세요.
+COMMAND: <명령어>
+설명: <한국어로 한 줄 설명>
+명령어를 확신할 수 없거나 파괴적인 작업(rm -rf, dd, mkfs 등)이 필요하면, COMMAND 에는 요청을 만족하는 가장 안전한 형태의 명령어를 적고 설명에 주의사항을 반드시 포함하세요.`,
   },
 }
 
@@ -251,4 +262,75 @@ export interface JumpProfile {
   password: string
   privateKey: string
   passphrase: string
+}
+
+/** CSV/JSON 파일에서 세션 프로필을 일괄 가져온 결과 */
+export interface ProfileImportResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  addedCount?: number
+  skippedCount?: number
+  errorCount?: number
+  warnings?: string[]
+  errors?: string[]
+  list?: SavedProfile[]
+}
+
+/** 세션 로그 한 건의 메타데이터 (실제 내용은 별도 파일에 있고, 이 인덱스는 목록/검색용) */
+export interface LogIndexEntry {
+  id: string
+  host: string
+  label?: string
+  /** 사용자가 선택한 저장 위치의 평문 로그 파일 (ANSI 코드 포함, 외부 뷰어로도 열람 가능) */
+  path: string
+  /** 리플레이용 타이밍 포함 JSONL — 앱 관리 폴더(userData/session-logs)에 저장 */
+  castPath: string
+  startedAt: number
+  endedAt?: number
+  sizeBytes?: number
+}
+
+/** 세션 로그(.cast.jsonl) 자동 정리 기준 — 렌더러(로그뷰어)에서 조회/변경 가능 */
+export interface LogRetentionSettings {
+  retentionDays: number
+  maxEntries: number
+}
+
+/** 사용자가 앱 내에서 직접 추가한 단일 명령어 프리셋 (내장 PRESETS 와 병합되어 표시됨) */
+export interface CustomPresetCommand {
+  id: string
+  /** 카테고리 — 기존 내장 카테고리와 같은 이름이면 그 카테고리에 합쳐짐 */
+  solution: string
+  /** 하위분류 — 기존과 같은 이름이면 그 하위분류에 합쳐짐 */
+  subgroup: string
+  label: string
+  command: string
+  desc: string
+  /**
+   * 같은 하위분류 안에서의 표시 순서. 내장 명령어는 배열 인덱스(0,1,2..)를 암묵적 순서로 쓰고,
+   * 사용자 정의 항목은 이 값으로 그 사이 어디든 끼워 넣을 수 있음(소수점 사용, 두 이웃의 중간값).
+   * 미지정 시 생성 시각(ms)을 사용해 내장 항목들보다 항상 뒤로 감.
+   */
+  order?: number
+}
+
+/** 사용자가 앱 내에서 직접 추가한 시나리오(순서가 있는 여러 단계) */
+export interface CustomScenarioStep {
+  title: string
+  command: string
+  desc: string
+  note?: string
+  info?: string
+  warn?: string
+  code?: string
+}
+export interface CustomScenario {
+  id: string
+  solution: string
+  title: string
+  summary: string
+  steps: CustomScenarioStep[]
+  /** 같은 카테고리 안에서의 표시 순서 — CustomPresetCommand.order 와 동일한 규칙 */
+  order?: number
 }

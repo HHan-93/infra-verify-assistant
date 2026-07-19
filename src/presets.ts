@@ -60,6 +60,21 @@ export const PRESETS: PresetGroup[] = [
             "desc": "VM에 수행된 API 요청(생성/재부팅/마이그레이션) 이력 추적"
           },
           {
+            "label": "VM 상태 ACTIVE 변경",
+            "command": "openstack server set --state active <VM_ID>",
+            "desc": "ERROR 등 비정상 상태로 멈춘 VM의 DB 상태값만 ACTIVE로 강제 수정 (실제 동작 이상 시 하드 리부트 병행)"
+          },
+          {
+            "label": "VM 하드 리부트 진행",
+            "command": "openstack server reboot --hard <VM_ID>",
+            "desc": "하이퍼바이저 레벨에서 강제 전원 재투입(콜드 리부트). 소프트 리부트로 응답 없는 VM 복구용"
+          },
+          {
+            "label": "VM 소프트 리부트 진행",
+            "command": "openstack server reboot --soft <VM_ID>",
+            "desc": "OS에 정상 종료 신호를 보내는 일반 재부팅 (게스트 OS가 응답 가능할 때)"
+          },
+          {
             "label": "하이퍼바이저 리소스",
             "command": "openstack hypervisor list --long",
             "desc": "각 물리 노드별 vCPU, RAM, 로컬 디스크 사용량 및 할당량"
@@ -520,6 +535,11 @@ export const PRESETS: PresetGroup[] = [
         "name": "노드 (Node)",
         "commands": [
           {
+            "label": "노드 목록",
+            "command": "kubectl get nodes",
+            "desc": "클러스터에 등록된 전체 노드명과 Ready 상태만 간략히 확인"
+          },
+          {
             "label": "노드 상태 및 IP",
             "command": "kubectl get nodes -o wide",
             "desc": "워커/마스터 노드의 Ready 상태, 내부 IP, 커널 및 런타임 버전"
@@ -550,6 +570,16 @@ export const PRESETS: PresetGroup[] = [
         "name": "파드 (Pod)",
         "commands": [
           {
+            "label": "네임스페이스 목록",
+            "command": "kubectl get namespaces",
+            "desc": "클러스터에 생성된 전체 네임스페이스와 상태(Active/Terminating) 확인"
+          },
+          {
+            "label": "전체 파드 목록(요약)",
+            "command": "kubectl get pods -A",
+            "desc": "모든 네임스페이스의 파드명과 상태(STATUS)만 간략히 조회"
+          },
+          {
             "label": "전체 파드 목록",
             "command": "kubectl get pods -A -o wide",
             "desc": "모든 네임스페이스 파드의 상태, 배치된 노드, 할당 IP 조회"
@@ -565,9 +595,19 @@ export const PRESETS: PresetGroup[] = [
             "desc": "ImagePullBackOff, 스케줄링 실패 사유 등 파드 상세 이벤트 로그"
           },
           {
+            "label": "파드 강제 삭제(재생성 유도)",
+            "command": "kubectl delete pod -n <NAMESPACE> <POD_NAME>",
+            "desc": "문제 있는 파드를 삭제해 컨트롤러(Deployment/ReplicaSet)가 새 파드로 즉시 재생성하도록 유도 (강제 재시작 용도)"
+          },
+          {
             "label": "파드 상태 실시간 감시(Watch)",
             "command": "kubectl get pods -w",
             "desc": "파드의 생성, 종료, 에러(Crash) 등 상태 변화 이벤트를 실시간 스트림으로 모니터링"
+          },
+          {
+            "label": "특정 네임스페이스 파드 감시(watch)",
+            "command": "watch kubectl get pod -n <NAMESPACE> -o wide",
+            "desc": "watch 명령으로 지정 네임스페이스의 파드 상태·배치 노드를 주기적으로 갱신하며 관찰"
           },
           {
             "label": "라벨 기준 파드 조회",
@@ -583,6 +623,21 @@ export const PRESETS: PresetGroup[] = [
             "label": "파드 리소스 사용량",
             "command": "kubectl top pods -A",
             "desc": "파드의 현재 CPU/메모리 실제 사용량(Metrics Server 기반)"
+          },
+          {
+            "label": "파드 로그 조회",
+            "command": "kubectl logs -n <NAMESPACE> <POD_NAME>",
+            "desc": "파드(컨테이너) 표준출력 로그 스냅샷 조회 — 애플리케이션 에러 확인 1순위"
+          },
+          {
+            "label": "파드 로그 실시간 스트리밍",
+            "command": "kubectl logs -f -n <NAMESPACE> <POD_NAME>",
+            "desc": "tail -f 방식으로 로그를 실시간 스트리밍 (Ctrl+C 종료)"
+          },
+          {
+            "label": "컨테이너 지정 로그 조회",
+            "command": "kubectl logs -n <NAMESPACE> <POD_NAME> -c <CONTAINER_NAME>",
+            "desc": "사이드카 등 파드 내 컨테이너가 여러 개일 때 특정 컨테이너의 로그만 지정 조회"
           },
           {
             "label": "크래시 이전 로그",

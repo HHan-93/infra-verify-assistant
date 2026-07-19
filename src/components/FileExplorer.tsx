@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   HardDrive,
   Folder,
@@ -23,6 +23,13 @@ import {
   EyeOff,
   Lock,
   AlertCircle,
+  CheckSquare,
+  Square,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Laptop,
+  Search,
+  Activity,
 } from 'lucide-react'
 
 const BINARY_EXTENSIONS = new Set([
@@ -43,6 +50,10 @@ interface FileExplorerProps {
   sessionId: string
   connected: boolean
   onClose: () => void
+  /** 파일 행의 "실시간 보기" 아이콘 클릭 시 — 경로를 넘겨 실시간 로그 뷰어를 프리필로 연다 */
+  onOpenLiveTail?: (path: string) => void
+  /** 연결된 다른 세션 목록 — 좌측 패널을 "로컬" 대신 다른 세션의 원격 트리로 전환할 때 사용 */
+  otherSessions?: { id: string; label: string }[]
 }
 
 interface Node {
@@ -64,6 +75,18 @@ function patchNode(nodes: Node[], path: string, patch: Partial<Node>): Node[] {
     if (n.children) return { ...n, children: patchNode(n.children, path, patch) }
     return n
   })
+}
+
+/** 트리에서 path 로 노드 찾기 (다중선택 → 실제 배치 작업 대상 조회용) */
+function findNode(nodes: Node[], path: string): Node | null {
+  for (const n of nodes) {
+    if (n.path === path) return n
+    if (n.children) {
+      const found = findNode(n.children, path)
+      if (found) return found
+    }
+  }
+  return null
 }
 
 // ── 권한(chmod) 다이얼로그용 메타 ──────────────────────────────
@@ -97,13 +120,29 @@ const toSymbolic = (m: number) =>
  *  - 연결된 세션의 디렉토리를 계층 트리로 지연 로딩
  *  - 파일 더블클릭/버튼 → 다운로드, 폴더에 OS 파일 드롭/버튼 → 업로드
  */
-export default function FileExplorer({ sessionId, connected, onClose }: FileExplorerProps) {
+export default function FileExplorer({
+  sessionId,
+  connected,
+  onClose,
+  onOpenLiveTail,
+  otherSessions = [],
+}: FileExplorerProps) {
   const [root, setRoot] = useState('')
   const [nodes, setNodes] = useState<Node[]>([])
   const [selectedDir, setSelectedDir] = useState('')
   const [pathInput, setPathInput] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  // 원격 디렉토리 재귀 파일명 검색 — null 이면 검색 모드 아님(평소 트리 표시), 배열이면 검색 결과 표시
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [searchResults, setSearchResults] = useState<
+    { path: string; name: string; type: 'dir' | 'file' | 'link' }[] | null
+  >(null)
+  const [searchTruncated, setSearchTruncated] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  // 검색 요청 토큰 — 응답이 온 시점에 더 이상 최신 요청이 아니면(그 사이 새 검색/다른 폴더 이동) 결과를 버림
+  const searchTokenRef = useRef(0)
   const [dragOver, setDragOver] = useState<string | null>(null)
   // 이름 입력 다이얼로그(새 폴더/이름변경) + 삭제 확인
   const [prompt, setPrompt] = useState<{ title: string; ok: (v: string) => void } | null>(null)
@@ -115,6 +154,32 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
   const [editFile, setEditFile] = useState<{ path: string; name: string } | null>(null)
   const [binaryWarnFile, setBinaryWarnFile] = useState<{ path: string; name: string } | null>(null)
   const [progress, setProgress] = useState<{ name: string; pct: number } | null>(null)
+  // 다중선택(체크박스) — 원격/로컬 각각 별도 집합. 배치 다운로드/업로드/삭제 대상.
+  const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set())
+  const [localSelected, setLocalSelected] = useState<Set<string>>(new Set())
+  // 로컬 패널(듀얼패인 좌측) — 파일 업로드 대상을 눈으로 보고 여러 개 골라 옮기기 위함.
+  // leftMode==='session' 이면 로컬 대신 다른 연결된 세션의 원격 트리를 보여줘서 세션 간 직접 전송 가능.
+  const [showLocalPane, setShowLocalPane] = useState(true)
+  const [leftMode, setLeftMode] = useState<'local' | 'session'>('local')
+  const [leftSessionId, setLeftSessionId] = useState<string | null>(null)
+  // 이 창이 대상으로 하는 주 세션(sessionId) 자체가 바뀌면(활성 탭 전환 등) 좌측의 "다른 세션"
+  // 선택은 더 이상 유효하지 않을 수 있으니 로컬로 되돌림 — 그대로 두면 자기자신 전송 등 혼란 방지
+  useEffect(() => {
+    setLeftMode('local')
+    setLeftSessionId(null)
+  }, [sessionId])
+  const [localRoot, setLocalRoot] = useState('')
+  const [localParent, setLocalParent] = useState('')
+  const [localNodes, setLocalNodes] = useState<Node[]>([])
+  const [localSelectedDir, setLocalSelectedDir] = useState('')
+  const [localPathInput, setLocalPathInput] = useState('')
+  const [localError, setLocalError] = useState('')
+  const [confirmBatchDel, setConfirmBatchDel] = useState(false)
+  // 좌측(로컬) 패널 너비 — 드래그로 조절
+  const [localWidth, setLocalWidth] = useState(280)
+  const localWidthRef = useRef(localWidth)
+  const localDragRef = useRef(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   // 전송 진행률 구독
   useEffect(() => {
@@ -147,6 +212,14 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
       setSelectedDir(r.path!)
       setPathInput(r.path!)
       setNodes(r.entries!.map((e) => ({ name: e.name, path: rjoin(r.path!, e.name), type: e.type })))
+      // 위치가 바뀌면 이전 위치 기준 검색 결과/다중선택은 더 이상 유효하지 않으니 초기화.
+      // 진행 중인 검색 요청도 무효화(토큰 증가) — 나중에 응답이 와도 이동한 뒤 화면을 덮어쓰지 않게.
+      searchTokenRef.current++
+      setSearchQuery('')
+      setSearchResults(null)
+      setSearchTruncated(false)
+      setSearchError('')
+      setRemoteSelected(new Set())
     },
     [listDir],
   )
@@ -197,11 +270,203 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
     setNodes((prev) => patchNode(prev, dirPath, { expanded: true, children }))
   }
 
+  // ── 좌측 패널(듀얼패인) — 읽기 전용 탐색 + 다중선택, 업로드/전송 소스로만 사용.
+  // leftMode==='local' 이면 local:list, 'session' 이면 다른 세션의 sftp:list 로 조회하되
+  // 반환 형태(path/parent/entries)는 동일하게 맞춰서 이후 로직(toggle/refresh)은 공용으로 쓴다.
+  const listLocalDir = useCallback(
+    async (dirPath?: string) => {
+      if (leftMode === 'session') {
+        if (!leftSessionId) return null
+        const r = await window.electronAPI.sftpList(leftSessionId, dirPath)
+        if (!r.ok) {
+          setLocalError(r.error || '목록을 불러오지 못했습니다.')
+          return null
+        }
+        setLocalError('')
+        const cwd = r.path!
+        return {
+          path: cwd,
+          parent: parentOf(cwd),
+          entries: (r.entries ?? []).map((e) => ({ name: e.name, path: rjoin(cwd, e.name), type: e.type })),
+        }
+      }
+      const r = await window.electronAPI.localList(dirPath)
+      if (!r.ok) {
+        setLocalError(r.error || '목록을 불러오지 못했습니다.')
+        return null
+      }
+      setLocalError('')
+      return { path: r.path!, parent: r.parent!, entries: r.entries! }
+    },
+    [leftMode, leftSessionId],
+  )
+
+  const openLocalDir = useCallback(
+    async (dirPath?: string) => {
+      const r = await listLocalDir(dirPath)
+      if (!r) return
+      setLocalRoot(r.path!)
+      setLocalParent(r.parent!)
+      setLocalSelectedDir(r.path!)
+      setLocalPathInput(r.path!)
+      setLocalNodes(r.entries!.map((e) => ({ name: e.name, path: e.path, type: e.type })))
+      setLocalSelected(new Set())
+    },
+    [listLocalDir],
+  )
+
+  // 최초 로드(로컬 홈 디렉토리) + leftMode/leftSessionId 전환 시 그 위치를 새로 염
+  useEffect(() => {
+    if (leftMode === 'session' && !leftSessionId) return
+    openLocalDir()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leftMode, leftSessionId])
+
+  const toggleLocal = async (node: Node) => {
+    if (node.type === 'file') return
+    if (node.expanded) {
+      setLocalNodes((prev) => patchNode(prev, node.path, { expanded: false }))
+      return
+    }
+    setLocalSelectedDir(node.path)
+    setLocalNodes((prev) => patchNode(prev, node.path, { loading: true }))
+    const r = await listLocalDir(node.path)
+    const children = (r?.entries ?? []).map((e) => ({ name: e.name, path: e.path, type: e.type }))
+    setLocalNodes((prev) => patchNode(prev, node.path, { expanded: true, loading: false, children }))
+  }
+
+  const refreshLocalDir = async (dirPath: string) => {
+    if (dirPath === localRoot) {
+      const r = await listLocalDir(localRoot)
+      if (r) setLocalNodes(r.entries!.map((e) => ({ name: e.name, path: e.path, type: e.type })))
+      return
+    }
+    const r = await listLocalDir(dirPath)
+    const children = (r?.entries ?? []).map((e) => ({ name: e.name, path: e.path, type: e.type }))
+    setLocalNodes((prev) => patchNode(prev, dirPath, { expanded: true, children }))
+  }
+
+  const toggleRemoteSelect = (p: string) =>
+    setRemoteSelected((prev) => {
+      const n = new Set(prev)
+      n.has(p) ? n.delete(p) : n.add(p)
+      return n
+    })
+  const toggleLocalSelect = (p: string) =>
+    setLocalSelected((prev) => {
+      const n = new Set(prev)
+      n.has(p) ? n.delete(p) : n.add(p)
+      return n
+    })
+
+  // 로컬에서 선택한 항목들을 현재 원격 선택 폴더로 업로드 (파일/폴더 모두 지원, 재귀)
+  const batchUpload = async () => {
+    if (!localSelected.size) return
+    const dir = selectedDir || root
+    if (leftMode === 'session' && leftSessionId) {
+      if (leftSessionId === sessionId) return // 안전장치 — 자기 자신에게는 전송하지 않음
+      // 세션 간(원격→원격) 직접 전송 — 앱이 임시 로컬 폴더를 경유해 중계
+      const items = [...localSelected]
+        .map((p) => findNode(localNodes, p))
+        .filter((n): n is Node => !!n)
+        .map((n) => ({ path: n.path, name: n.name, isDir: n.type !== 'file' }))
+      if (!items.length) return
+      setBusy(`전송 중... (${items.length}개)`)
+      const r = await window.electronAPI.sftpRelayTransfer(leftSessionId, sessionId, items, dir)
+      setBusy('')
+      if (r.ok) {
+        setLocalSelected(new Set())
+        refreshDir(dir)
+      } else if (r.error) setError(r.error)
+      return
+    }
+    const paths = [...localSelected]
+    setBusy(`업로드 중... (${paths.length}개)`)
+    const r = await window.electronAPI.sftpUpload(sessionId, dir, paths)
+    setBusy('')
+    if (r.ok) {
+      setLocalSelected(new Set())
+      refreshDir(dir)
+    } else if (!r.canceled) setError(r.error || '업로드 실패')
+  }
+
+  // 원격에서 선택한 항목들을 현재 로컬 선택 폴더로 다운로드 (대화상자 없이 바로)
+  const batchDownload = async () => {
+    if (!remoteSelected.size) return
+    const items = [...remoteSelected]
+      .map((p) => findNode(nodes, p))
+      .filter((n): n is Node => !!n)
+      .map((n) => ({ path: n.path, name: n.name, isDir: n.type !== 'file' }))
+    if (!items.length) return
+    const targetDir = localSelectedDir || localRoot
+    setBusy(`다운로드 중... (${items.length}개)`)
+    const r = await window.electronAPI.sftpDownloadPaths(sessionId, items, targetDir)
+    setBusy('')
+    if (r.ok) {
+      setRemoteSelected(new Set())
+      refreshLocalDir(targetDir)
+    } else setError(r.error || '다운로드 실패')
+  }
+
+  // 원격에서 선택한 항목들을 한 번에 삭제
+  const batchDelete = async () => {
+    setConfirmBatchDel(false)
+    const targets = [...remoteSelected]
+      .map((p) => findNode(nodes, p))
+      .filter((n): n is Node => !!n)
+    if (!targets.length) return
+    const items = targets.map((n) => ({ path: n.path, isDir: n.type !== 'file' }))
+    setBusy(`삭제 중... (${items.length}개)`)
+    const r = await window.electronAPI.sftpDeletePaths(sessionId, items)
+    setBusy('')
+    if (r.ok) {
+      setRemoteSelected(new Set())
+      const parents = new Set(targets.map((n) => parentOf(n.path)))
+      for (const p of parents) refreshDir(p)
+    } else setError(r.error || '삭제 실패')
+  }
+
   const download = async (node: Node) => {
     setBusy(`다운로드: ${node.name}`)
     const r = await window.electronAPI.sftpDownload(sessionId, node.path, node.name)
     setBusy('')
     if (!r.ok && !r.canceled) setError(r.error || '다운로드 실패')
+  }
+
+  // 현재 열려있는 루트(root) 아래 전체를 재귀로 파일명 검색 — 트리 대신 결과 목록 표시로 전환
+  const runSearch = async () => {
+    const q = searchQuery.trim()
+    if (!q) {
+      setSearchResults(null)
+      return
+    }
+    const token = ++searchTokenRef.current
+    setSearching(true)
+    setSearchError('')
+    const r = await window.electronAPI.sftpSearch(sessionId, root, q)
+    // 응답 오는 사이 새 검색을 시작했거나 다른 폴더로 이동했으면 이 결과는 이제 유효하지 않으니 버림
+    if (searchTokenRef.current !== token) return
+    setSearching(false)
+    if (r.ok) {
+      setSearchResults(r.results ?? [])
+      setSearchTruncated(!!r.truncated)
+    } else {
+      setSearchError(r.error || '검색 실패')
+      setSearchResults([])
+    }
+  }
+  const clearSearch = () => {
+    searchTokenRef.current++
+    setSearchQuery('')
+    setSearchResults(null)
+    setSearchTruncated(false)
+    setSearchError('')
+  }
+  // 검색 결과 클릭 — 폴더면 그 위치로 이동(검색 모드 종료), 파일이면 바로 다운로드
+  const openSearchResult = (r: { path: string; name: string; type: 'dir' | 'file' | 'link' }) => {
+    // 폴더면 그 위치로 이동(openDir 이 검색 모드도 함께 종료), 파일이면 바로 다운로드
+    if (r.type === 'dir') openDir(r.path)
+    else download({ path: r.path, name: r.name, type: r.type })
   }
 
   // 로컬 경로 배열을 원격 dir 로 업로드
@@ -300,11 +565,89 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
     if (dragOver !== key) setDragOver(key)
   }
 
+  // 로컬 패널 너비 드래그 조절
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!localDragRef.current) return
+      const el = bodyRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const w = Math.max(180, Math.min(480, e.clientX - r.left))
+      localWidthRef.current = w
+      setLocalWidth(w)
+    }
+    const onUp = () => {
+      localDragRef.current = false
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  // 로컬 패널 트리 렌더 (재귀) — 읽기 전용 + 체크박스 다중선택만
+  const renderLocalNodes = (list: Node[], depth: number) =>
+    list.map((n) => {
+      const isDir = n.type !== 'file'
+      const checked = localSelected.has(n.path)
+      return (
+        <div key={n.path}>
+          <div
+            onClick={() => (isDir ? toggleLocal(n) : toggleLocalSelect(n.path))}
+            style={{ paddingLeft: depth * 14 + 8 }}
+            className={
+              'group flex cursor-pointer items-center gap-1 py-1 pr-2 text-[13px] hover:bg-white/5 ' +
+              (checked ? ' bg-blue-600/10' : '') +
+              (localSelectedDir === n.path && isDir ? ' bg-white/5' : '')
+            }
+            title={n.path}
+          >
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                toggleLocalSelect(n.path)
+              }}
+              className="shrink-0 rounded p-0.5 text-gray-500 hover:text-gray-300"
+            >
+              {checked ? <CheckSquare size={12} className="text-blue-400" /> : <Square size={12} />}
+            </button>
+            {isDir ? (
+              n.loading ? (
+                <Loader2 size={13} className="shrink-0 animate-spin text-gray-400" />
+              ) : n.expanded ? (
+                <ChevronDown size={13} className="shrink-0 text-gray-400" />
+              ) : (
+                <ChevronRight size={13} className="shrink-0 text-gray-400" />
+              )
+            ) : (
+              <span className="w-[13px] shrink-0" />
+            )}
+            {isDir ? (
+              n.expanded ? (
+                <FolderOpen size={14} className="shrink-0 text-amber-300/90" />
+              ) : (
+                <Folder size={14} className="shrink-0 text-amber-300/90" />
+              )
+            ) : (
+              <FileIcon size={14} className="shrink-0 text-gray-400" />
+            )}
+            <span className="min-w-0 flex-1 truncate text-gray-100">{n.name}</span>
+            {n.type === 'link' && <span className="text-[10px] text-gray-500">↪</span>}
+          </div>
+          {isDir && n.expanded && n.children && renderLocalNodes(n.children, depth + 1)}
+        </div>
+      )
+    })
+
   // 트리 렌더 (재귀)
   const renderNodes = (list: Node[], depth: number) =>
     list.map((n) => {
       const isDir = n.type !== 'file'
       const over = dragOver === n.path
+      const checked = remoteSelected.has(n.path)
       return (
         <div key={n.path}>
           <div
@@ -327,10 +670,20 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
             className={
               'group flex cursor-pointer items-center gap-1 py-1 pr-2 text-[13px] hover:bg-white/5 ' +
               (over ? 'bg-blue-600/30 ring-1 ring-inset ring-blue-400' : '') +
+              (checked ? ' bg-blue-600/10' : '') +
               (selectedDir === n.path && isDir ? ' bg-white/5' : '')
             }
             title={n.path}
           >
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                toggleRemoteSelect(n.path)
+              }}
+              className="shrink-0 rounded p-0.5 text-gray-500 hover:text-gray-300"
+            >
+              {checked ? <CheckSquare size={12} className="text-blue-400" /> : <Square size={12} />}
+            </button>
             {isDir ? (
               n.loading ? (
                 <Loader2 size={13} className="shrink-0 animate-spin text-gray-400" />
@@ -383,6 +736,18 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
               >
                 <Download size={13} />
               </button>
+              {!isDir && onOpenLiveTail && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenLiveTail(n.path)
+                  }}
+                  title="실시간 보기 (tail -f)"
+                  className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-emerald-300"
+                >
+                  <Activity size={13} />
+                </button>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation()
@@ -423,15 +788,42 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
       <div
-        className="relative flex h-[80vh] w-[640px] max-w-[92vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
+        className="relative flex h-[80vh] w-[1040px] max-w-[95vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 헤더 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <HardDrive size={16} className="text-blue-400" />
-          <span className="text-sm font-semibold text-gray-100">원격 파일 탐색기</span>
+          <span className="text-sm font-semibold text-gray-100">파일 탐색기</span>
           <span className="truncate font-mono text-[11px] text-gray-500">{root}</span>
           <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => setShowLocalPane((v) => !v)}
+              title={showLocalPane ? '로컬 패널 숨기기' : '로컬 패널 보이기'}
+              className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+            >
+              {showLocalPane ? <PanelLeftClose size={13} /> : <PanelLeftOpen size={13} />} 로컬 패널
+            </button>
+            {remoteSelected.size > 0 && (
+              <>
+                <button
+                  onClick={batchDownload}
+                  disabled={!connected}
+                  title="선택 항목을 로컬 패널의 현재 폴더로 다운로드"
+                  className="flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/15 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-600/25 disabled:opacity-40"
+                >
+                  <Download size={13} /> 선택 다운로드 ({remoteSelected.size})
+                </button>
+                <button
+                  onClick={() => setConfirmBatchDel(true)}
+                  disabled={!connected}
+                  title="선택 항목 일괄 삭제"
+                  className="flex items-center gap-1 rounded-md border border-red-500/30 bg-red-600/15 px-2 py-1 text-xs text-red-200 hover:bg-red-600/25 disabled:opacity-40"
+                >
+                  <Trash2 size={13} /> 선택 삭제 ({remoteSelected.size})
+                </button>
+              </>
+            )}
             <button
               onClick={() => mkdirIn(selectedDir || root)}
               disabled={!connected}
@@ -465,45 +857,6 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
           </div>
         </div>
 
-        {/* 주소 표시줄 (경로 직접 입력 / 상위·홈·루트 이동) */}
-        {connected && (
-          <div className="flex items-center gap-1 border-b border-white/10 px-3 py-1.5">
-            <button
-              onClick={() => openDir(parentOf(root))}
-              title="상위 폴더"
-              className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
-            >
-              <ArrowUp size={14} />
-            </button>
-            <button
-              onClick={() => openDir()}
-              title="홈 디렉토리"
-              className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
-            >
-              <Home size={14} />
-            </button>
-            <button
-              onClick={() => openDir('/')}
-              title="루트(/)"
-              className="rounded px-1.5 py-1 font-mono text-xs text-gray-400 hover:bg-white/10 hover:text-gray-200"
-            >
-              /
-            </button>
-            <div className="relative flex-1">
-              <input
-                value={pathInput}
-                onChange={(e) => setPathInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') openDir(pathInput.trim() || '/')
-                }}
-                placeholder="경로 입력 후 Enter (예: /etc, /var/log)"
-                className="w-full rounded-md border border-white/10 bg-panel-light px-2.5 py-1 pr-7 font-mono text-xs text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-              <CornerDownLeft size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500" />
-            </div>
-          </div>
-        )}
-
         {error && <div className="bg-red-500/10 px-4 py-1 text-[11px] text-red-300">{error}</div>}
         {busy && (
           <div className="flex items-center gap-1.5 bg-blue-500/10 px-4 py-1 text-[11px] text-blue-200">
@@ -523,27 +876,235 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
           </div>
         )}
 
-        {/* 본문 */}
-        {!connected ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
-            세션에 SSH 연결 후 사용할 수 있습니다.
-          </div>
-        ) : (
-          <div
-            className={
-              'min-h-0 flex-1 overflow-auto py-1 ' +
-              (dragOver === root ? 'bg-blue-600/10 ring-1 ring-inset ring-blue-400/50' : '')
-            }
-            onDragOver={(e) => allowDrop(e, root)}
-            onDragLeave={() => setDragOver((c) => (c === root ? null : c))}
-            onDrop={(e) => onDropTo(e, root)}
-          >
-            {renderNodes(nodes, 0)}
-          </div>
-        )}
+        {/* 본문 — 좌: 로컬 패널(선택) / 우: 원격 패널 */}
+        <div ref={bodyRef} className="flex min-h-0 flex-1 overflow-hidden">
+          {showLocalPane && (
+            <>
+              <div style={{ width: localWidth }} className="flex shrink-0 flex-col overflow-hidden border-r border-white/10">
+                <div className="flex items-center gap-1.5 border-b border-white/10 px-2.5 py-1.5">
+                  <Laptop size={13} className="shrink-0 text-gray-400" />
+                  {otherSessions.length > 0 ? (
+                    <select
+                      value={leftMode === 'local' ? 'local' : leftSessionId ?? ''}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        if (v === 'local') {
+                          setLeftMode('local')
+                          setLeftSessionId(null)
+                        } else {
+                          setLeftMode('session')
+                          setLeftSessionId(v)
+                        }
+                      }}
+                      title="좌측 패널에서 볼 대상 — 로컬 또는 다른 연결된 세션"
+                      className="rounded border border-white/10 bg-panel-light px-1 py-0.5 text-[11px] font-semibold text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="local">로컬</option>
+                      {otherSessions.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-gray-300">로컬</span>
+                  )}
+                  {localSelected.size > 0 && (
+                    <button
+                      onClick={batchUpload}
+                      disabled={!connected}
+                      title={
+                        leftMode === 'session'
+                          ? '선택 항목을 이 세션의 현재 폴더로 직접 전송(임시 파일 경유)'
+                          : '선택 항목을 원격 현재 폴더로 업로드'
+                      }
+                      className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-blue-500/30 bg-blue-600/20 px-1.5 py-0.5 text-[10px] text-blue-200 hover:bg-blue-600/30 disabled:opacity-40"
+                    >
+                      <Upload size={11} />
+                      {leftMode === 'session' ? '선택 전송' : '선택 업로드'} ({localSelected.size})
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 border-b border-white/10 px-2 py-1">
+                  <button
+                    onClick={() => openLocalDir(localParent)}
+                    title="상위 폴더"
+                    className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                  >
+                    <ArrowUp size={13} />
+                  </button>
+                  <button
+                    onClick={() => openLocalDir()}
+                    title="홈 디렉토리"
+                    className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                  >
+                    <Home size={13} />
+                  </button>
+                  <button
+                    onClick={() => refreshLocalDir(localRoot)}
+                    title="새로고침"
+                    className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                  <div className="relative flex-1">
+                    <input
+                      value={localPathInput}
+                      onChange={(e) => setLocalPathInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') openLocalDir(localPathInput.trim())
+                      }}
+                      placeholder={leftMode === 'session' ? '원격 경로 입력...' : '로컬 경로 입력...'}
+                      className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-0.5 pr-6 font-mono text-[11px] text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <CornerDownLeft size={11} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                  </div>
+                </div>
+                {localError && <div className="bg-red-500/10 px-2.5 py-1 text-[10px] text-red-300">{localError}</div>}
+                <div className="min-h-0 flex-1 overflow-auto py-1">{renderLocalNodes(localNodes, 0)}</div>
+                <div className="border-t border-white/10 px-2.5 py-1 text-[9px] text-gray-500">
+                  {leftMode === 'session'
+                    ? '체크박스로 다중선택 후 "선택 전송" (세션 간 직접 전송)'
+                    : '체크박스로 다중선택 후 "선택 업로드"'}
+                </div>
+              </div>
+              <div
+                onMouseDown={() => {
+                  localDragRef.current = true
+                  document.body.style.cursor = 'col-resize'
+                }}
+                title="드래그하여 로컬 패널 너비 조절"
+                className="w-1 shrink-0 cursor-col-resize bg-white/10 hover:bg-blue-400/50"
+              />
+            </>
+          )}
 
-        <div className="border-t border-white/10 px-4 py-1.5 text-[10px] text-gray-500">
-          폴더 클릭=펼치기 · 파일 더블클릭/드래그=다운로드 · OS→폴더 드롭=업로드 · 상단 경로 입력으로 이동
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            {/* 주소 표시줄 (경로 직접 입력 / 상위·홈·루트 이동) */}
+            {connected && (
+              <div className="flex items-center gap-1 border-b border-white/10 px-3 py-1.5">
+                <button
+                  onClick={() => openDir(parentOf(root))}
+                  title="상위 폴더"
+                  className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                >
+                  <ArrowUp size={14} />
+                </button>
+                <button
+                  onClick={() => openDir()}
+                  title="홈 디렉토리"
+                  className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                >
+                  <Home size={14} />
+                </button>
+                <button
+                  onClick={() => openDir('/')}
+                  title="루트(/)"
+                  className="rounded px-1.5 py-1 font-mono text-xs text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                >
+                  /
+                </button>
+                <div className="relative flex-1">
+                  <input
+                    value={pathInput}
+                    onChange={(e) => setPathInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') openDir(pathInput.trim() || '/')
+                    }}
+                    placeholder="경로 입력 후 Enter (예: /etc, /var/log)"
+                    className="w-full rounded-md border border-white/10 bg-panel-light px-2.5 py-1 pr-7 font-mono text-xs text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <CornerDownLeft size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                </div>
+              </div>
+            )}
+
+            {/* 파일명 재귀 검색 — 현재 위치(root) 아래 전체를 대상으로, 결과는 트리 대신 플랫 목록으로 표시 */}
+            {connected && (
+              <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1.5">
+                <Search size={12} className="shrink-0 text-gray-500" />
+                <input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') runSearch()
+                    if (e.key === 'Escape') clearSearch()
+                  }}
+                  placeholder={`"${root}" 아래 전체에서 파일명 검색...`}
+                  className="min-w-0 flex-1 bg-transparent text-xs text-gray-200 outline-none placeholder:text-gray-600"
+                />
+                {searching && <Loader2 size={12} className="shrink-0 animate-spin text-gray-400" />}
+                {searchResults !== null && (
+                  <>
+                    <span className="shrink-0 text-[11px] text-gray-500">{searchResults.length}개</span>
+                    <button
+                      onClick={clearSearch}
+                      title="검색 종료"
+                      className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                    >
+                      <X size={13} />
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {!connected ? (
+              <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
+                세션에 SSH 연결 후 사용할 수 있습니다.
+              </div>
+            ) : searchResults !== null ? (
+              <div className="min-h-0 flex-1 overflow-auto py-1">
+                {searchError ? (
+                  <p className="px-3 py-6 text-center text-xs text-red-400">{searchError}</p>
+                ) : searchResults.length === 0 ? (
+                  <p className="px-3 py-6 text-center text-xs text-gray-500">일치하는 항목이 없습니다.</p>
+                ) : (
+                  <>
+                    {searchTruncated && (
+                      <div className="bg-amber-500/10 px-3 py-1 text-[10px] text-amber-300">
+                        결과가 많아 일부만 표시합니다 — 검색어를 더 구체적으로 입력해보세요.
+                      </div>
+                    )}
+                    {searchResults.map((r) => (
+                      <div
+                        key={r.path}
+                        onClick={() => openSearchResult(r)}
+                        title={r.path}
+                        className="flex cursor-pointer items-center gap-1.5 px-3 py-1 text-[13px] hover:bg-white/5"
+                      >
+                        {r.type === 'dir' ? (
+                          <Folder size={14} className="shrink-0 text-amber-300/90" />
+                        ) : (
+                          <FileIcon size={14} className="shrink-0 text-gray-400" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate text-gray-100">{r.name}</span>
+                        <span className="min-w-0 max-w-[45%] shrink truncate text-[10px] text-gray-500">
+                          {r.path}
+                        </span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            ) : (
+              <div
+                className={
+                  'min-h-0 flex-1 overflow-auto py-1 ' +
+                  (dragOver === root ? 'bg-blue-600/10 ring-1 ring-inset ring-blue-400/50' : '')
+                }
+                onDragOver={(e) => allowDrop(e, root)}
+                onDragLeave={() => setDragOver((c) => (c === root ? null : c))}
+                onDrop={(e) => onDropTo(e, root)}
+              >
+                {renderNodes(nodes, 0)}
+              </div>
+            )}
+
+            <div className="border-t border-white/10 px-4 py-1.5 text-[10px] text-gray-500">
+              체크박스=다중선택 · 폴더 클릭=펼치기 · 파일 더블클릭/드래그=다운로드 · OS→폴더 드롭=업로드
+            </div>
+          </div>
         </div>
 
         {/* 바이너리 파일 편집 불가 안내 모달 */}
@@ -659,6 +1220,39 @@ export default function FileExplorer({ sessionId, connected, onClose }: FileExpl
                 </button>
                 <button
                   onClick={() => removeNode(confirmDel)}
+                  className="rounded-md bg-red-600/80 px-3 py-1.5 text-xs text-white hover:bg-red-500"
+                >
+                  삭제
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 다중선택 일괄 삭제 확인 */}
+        {confirmBatchDel && (
+          <div
+            className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+            onClick={() => setConfirmBatchDel(false)}
+          >
+            <div
+              className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-2 text-sm font-semibold text-gray-100">일괄 삭제 확인</div>
+              <p className="text-[13px] leading-relaxed text-gray-200">
+                선택한 <span className="font-mono text-gray-100">{remoteSelected.size}개</span> 항목(폴더는 안의
+                모든 내용 포함)을 삭제할까요?
+              </p>
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  onClick={() => setConfirmBatchDel(false)}
+                  className="rounded-md border border-white/10 bg-panel-light px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10"
+                >
+                  취소
+                </button>
+                <button
+                  onClick={batchDelete}
                   className="rounded-md bg-red-600/80 px-3 py-1.5 text-xs text-white hover:bg-red-500"
                 >
                   삭제

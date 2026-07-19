@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Circle,
   CheckSquare,
@@ -9,6 +9,7 @@ import {
   ChevronUp,
   ChevronDown,
   X,
+  Plug,
 } from 'lucide-react'
 import SSHForm, { type SSHFormHandle } from './components/SSHForm'
 import Toolbar from './components/Toolbar'
@@ -18,15 +19,29 @@ import TerminalView, { type TerminalHandle } from './components/TerminalView'
 import AIPanel, { type AIPanelHandle } from './components/AIPanel'
 import Dashboard from './components/Dashboard'
 import MonitorOverview from './components/MonitorOverview'
+import LogViewer from './components/LogViewer'
 import FileViewer from './components/FileViewer'
 import FileExplorer from './components/FileExplorer'
+import LiveLogViewer from './components/LiveLogViewer'
 import TunnelManager from './components/TunnelManager'
 import MultiRun from './components/MultiRun'
 import NodeDiff, { type DiffSource } from './components/NodeDiff'
 import TabBar, { type TabInfo, type LayoutMode } from './components/TabBar'
 import SessionSidebar, { profileKey } from './components/SessionSidebar'
 import Mascot from './components/Mascot'
-import type { SavedProfile } from '../electron/shared-types'
+import type { SavedProfile, ProfileImportResult } from '../electron/shared-types'
+import {
+  type PaneNode,
+  collectLeafTabIds,
+  findLeaf,
+  splitLeaf,
+  closeLeaf,
+  removeTabId,
+  patchRatio,
+  reassignTab,
+  layoutTree,
+  buildBalancedTree,
+} from './lib/paneTree'
 
 /** 터미널 색상 테마 프리셋 */
 const THEMES: Record<string, { name: string; background: string; foreground: string; cursor: string }> = {
@@ -91,11 +106,19 @@ export default function App() {
   const [showExplorer, setShowExplorer] = useState(false)
   const [showTunnels, setShowTunnels] = useState(false)
   const [showMultiRun, setShowMultiRun] = useState(false)
+  const [showLogViewer, setShowLogViewer] = useState(false)
+  // 실시간 로그(tail -f) 뷰어 — 파일탐색기의 "실시간 보기"로 열면 prefillPath 가 채워짐
+  const [showLiveLog, setShowLiveLog] = useState(false)
+  const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
   const [diffSources, setDiffSources] = useState<DiffSource[] | null>(null)
   // 선택/전체 세션 AI 분석 — 질문 입력 모달 (공용)
   const [analysisPending, setAnalysisPending] = useState<string | null>(null)
   const [analysisLabel, setAnalysisLabel] = useState('선택 AI 분석')
   const [analysisQuestion, setAnalysisQuestion] = useState('')
+  // 세션 프로필 가져오기(CSV/JSON) 결과 — 완료 후 요약 모달에 표시
+  const [importResult, setImportResult] = useState<ProfileImportResult | null>(null)
+  // 가져오기 전 형식 안내 + 템플릿 다운로드 모달
+  const [showImportGuide, setShowImportGuide] = useState(false)
   // 우측 AI 패널 표시 여부 (기본 열림, 사용자가 토글 가능)
   const [showAI, setShowAI] = useState(true)
   // 우측 패널 탭 (AI 분석 / 대시보드 모니터링)
@@ -116,8 +139,33 @@ export default function App() {
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   // 탭을 그리드 칸으로 드래그 중인 탭 id
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null)
+  // 그리드 모드에서 인라인 SSH 연결 폼이 열려있는 셀의 세션 id — 상단 공용 폼과 분리되어
+  // 이 칸을 선택(클릭)한다고 해서 자동으로 열리거나 닫히지 않는다(레이아웃 흔들림 방지).
+  const [openConnectCellId, setOpenConnectCellId] = useState<string | null>(null)
   // 유휴 마스코트 표시 여부 (입력/출력/마우스 없을 때 등장)
   const [idle, setIdle] = useState(false)
+  // 마스코트 리액션(놀람/슬픔) 트리거 — 마스코트가 이미 나와있을 때(idle)만 반영됨
+  const [mascotReaction, setMascotReaction] = useState<{ type: 'surprised' | 'sad'; nonce: number } | null>(null)
+  const triggerMascotReaction = (type: 'surprised' | 'sad') => {
+    if (!idle) return
+    setMascotReaction({ type, nonce: Date.now() })
+  }
+  // SSH 폼(상단 공용 / 그리드 셀 인라인) 공통 연결 성공 처리
+  const handleSessionConnected = (tabId: string, p: SavedProfile) => {
+    setStatuses((m) => ({
+      ...m,
+      [tabId]: {
+        status: 'connected',
+        msg: m[tabId]?.msg ?? '',
+        host: p.host,
+        key: profileKey(p),
+        since: m[tabId]?.since ?? Date.now(),
+      },
+    }))
+    if (p.color) {
+      setTabs((ts) => ts.map((tab) => (tab.id === tabId ? { ...tab, color: p.color } : tab)))
+    }
+  }
   // 터미널 검색바 (Ctrl+F)
   const [showFind, setShowFind] = useState(false)
   const [findTerm, setFindTerm] = useState('')
@@ -136,13 +184,14 @@ export default function App() {
   const [restoreOnLaunch, setRestoreOnLaunch] = useState(
     () => localStorage.getItem('restore_sessions') === '1',
   )
-  // 분할 화면 크기 비율 (드래그 리사이즈, localStorage 보존)
-  const [colFrac, setColFrac] = useState(() => Number(localStorage.getItem('split_col')) || 0.5)
-  const [rowFrac, setRowFrac] = useState(() => Number(localStorage.getItem('split_row')) || 0.5)
-  const colFracRef = useRef(colFrac)
-  const rowFracRef = useRef(rowFrac)
+  // 임의 재귀 분할 레이아웃(tmux 스타일) — null 이면 탭 보기와 동일(단일 리프로 취급)
+  const [splitTree, setSplitTree] = useState<PaneNode | null>(null)
   const termAreaRef = useRef<HTMLDivElement>(null)
-  const splitDragRef = useRef<null | 'col' | 'row'>(null)
+  // 분할선 드래그 리사이즈 대상 — 어느 분할(split) 노드의 비율을 조정 중인지
+  const resizeDragRef = useRef<{ nodeId: string; dir: 'row' | 'col' } | null>(null)
+  // 분할 트리 노드 id 채번용
+  const paneIdCounter = useRef(0)
+  const nextPaneId = () => `p${++paneIdCounter.current}`
   // 프리셋/시나리오 패널 높이(px) — 드래그로 조절, localStorage 보존
   const [panelHeight, setPanelHeight] = useState(() => Number(localStorage.getItem('panel_height')) || 320)
   const panelHeightRef = useRef(panelHeight)
@@ -169,15 +218,18 @@ export default function App() {
   const connected = activeStatus === 'connected'
   const activeTerm = () => terminalRefs.current[activeId] ?? null
 
-  // 레이아웃별 분할 패널 수 / 분할 여부
-  const paneCount = layout === '4' ? 4 : layout === 'tabs' ? 1 : 2
-  const isSplit = layout !== 'tabs'
-  // 분할에 표시되는 세션 ID (앞 paneCount 개)
-  const gridIds = tabs.slice(0, paneCount).map((t) => t.id)
+  // 분할 모드 여부 — 트리 렌더/브로드캐스트 대상 계산 등에서 공용으로 사용
+  const isSplit = layout === 'split'
+  // 분할 트리가 현재 화면에 보여주는 세션 id 목록 (중복 가능 — 스페어 탭 없이 분할한 경우)
+  const gridIds = isSplit && splitTree ? collectLeafTabIds(splitTree) : []
   // 동시입력 실제 대상 = 선택된 세션 ∩ 현재 분할 (닫힌/분할 밖 세션 자동 제외)
   const effectiveTargets = gridIds.filter((id) => broadcastTargets.includes(id))
   // 실제 브로드캐스트 활성 여부 (분할 모드 + 동시입력 ON + 대상 1개 이상)
   const broadcasting = isSplit && broadcast && effectiveTargets.length > 0
+  // 분할 가능 여부 — 아직 트리에 없는 스페어 탭이 있거나, 세션을 더 만들 여유가 있으면 항상 분할 가능
+  const canSplit = new Set(gridIds).size < MAX_SESSIONS
+  // 활성 세션이 분할 트리 안에 있고, 트리에 칸이 2개 이상일 때만 "칸 닫기" 가능
+  const canClosePane = isSplit && !!splitTree && splitTree.type === 'split' && !!findLeaf(splitTree, activeId)
 
   // 현재 연결되어 있는 프로필 키 집합 (사이드바 '연결중' 표시)
   const connectedKeys = new Set(
@@ -185,6 +237,16 @@ export default function App() {
       .filter((t) => statuses[t.id]?.status === 'connected' && statuses[t.id]?.key)
       .map((t) => statuses[t.id]!.key as string),
   )
+
+  // 그리드(다중 세션) 셀 헤더용 — 여러 세션이 동시에 보일 땐 어떤 세션인지 구분되도록 "별칭 (IP)" 형태로 표시
+  const gridCellLabel = (t: TabInfo) => {
+    if (t.custom) return t.title
+    const host = statuses[t.id]?.host
+    if (!host) return t.title
+    const key = statuses[t.id]?.key
+    const label = key ? profiles.find((p) => profileKey(p) === key)?.label?.trim() : undefined
+    return label ? `${label} (${host})` : host
+  }
 
   // 저장된 세션 프로필 로드 (앱 시작 시 1회)
   useEffect(() => {
@@ -296,28 +358,29 @@ export default function App() {
     }
   }, [])
 
-  // 분할 경계 드래그 리사이즈
+  // 분할선 드래그 리사이즈 — 어느 분할 노드를 조정 중인지는 resizeDragRef, 최신 트리는 ref로 미러링
+  const splitTreeRef = useRef(splitTree)
   useEffect(() => {
-    const clamp = (v: number) => Math.max(0.15, Math.min(0.85, v))
+    splitTreeRef.current = splitTree
+  }, [splitTree])
+  useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const el = termAreaRef.current
-      if (!el || !splitDragRef.current) return
-      const r = el.getBoundingClientRect()
-      if (splitDragRef.current === 'col') {
-        const v = clamp((e.clientX - r.left) / r.width)
-        colFracRef.current = v
-        setColFrac(v)
-      } else {
-        const v = clamp((e.clientY - r.top) / r.height)
-        rowFracRef.current = v
-        setRowFrac(v)
-      }
+      const drag = resizeDragRef.current
+      const tree = splitTreeRef.current
+      if (!el || !drag || !tree) return
+      const areaRect = el.getBoundingClientRect()
+      const { nodeRects } = layoutTree(tree)
+      const rect = nodeRects[drag.nodeId]
+      if (!rect) return
+      const mxPct = ((e.clientX - areaRect.left) / areaRect.width) * 100
+      const myPct = ((e.clientY - areaRect.top) / areaRect.height) * 100
+      const ratio = drag.dir === 'row' ? (mxPct - rect.left) / rect.width : (myPct - rect.top) / rect.height
+      setSplitTree((t) => (t ? patchRatio(t, drag.nodeId, ratio) : t))
     }
     const onUp = () => {
-      splitDragRef.current = null
+      resizeDragRef.current = null
       document.body.style.cursor = ''
-      localStorage.setItem('split_col', String(colFracRef.current))
-      localStorage.setItem('split_row', String(rowFracRef.current))
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -426,11 +489,22 @@ export default function App() {
       prevStatuses.current[t.id] = cur
       const term = terminalRefs.current[t.id]
       if (cur === 'connecting') term?.reset()
-      else if (cur === 'closed' && prev === 'connected')
+      else if (cur === 'closed' && prev === 'connected') {
         term?.writeNotice('연결이 종료되었습니다. 다시 연결하려면 SSH 정보를 입력하세요.')
-      else if (cur === 'error' && prev === 'connected') term?.writeNotice('연결이 끊겼습니다 (오류).')
+        triggerMascotReaction('sad')
+      } else if (cur === 'error' && prev === 'connected') {
+        term?.writeNotice('연결이 끊겼습니다 (오류).')
+        triggerMascotReaction('sad')
+      }
     }
   }, [statuses, tabs])
+
+  // 그리드 셀 인라인 연결 폼 — 연결에 성공하면 자동으로 닫고 터미널을 보여준다
+  useEffect(() => {
+    if (openConnectCellId && statuses[openConnectCellId]?.status === 'connected') {
+      setOpenConnectCellId(null)
+    }
+  }, [openConnectCellId, statuses])
 
   // ── 탭 추가/닫기 / 보기 모드 ──────────────────────────────────
   // 새 탭 생성 (활성 전환은 호출부에서). 생성된 id 반환
@@ -446,34 +520,82 @@ export default function App() {
     setActiveId(createTab())
   }
 
-  // 세션이 n개 미만이면 부족한 만큼 새로 만들어 채운다 (분할 모드 진입 시)
-  const ensureTabs = (n: number) => {
-    if (tabs.length >= n) return
-    const add: TabInfo[] = []
-    let count = tabs.length
-    while (count < n) {
-      const id = `s${++idCounter.current}`
-      add.push({ id, title: `세션 ${count + 1}` })
-      count++
-    }
-    setTabs((t) => [...t, ...add])
-    setStatuses((m) => {
-      const c = { ...m }
-      add.forEach((x) => {
-        c[x.id] = { status: 'idle', msg: '' }
-      })
-      return c
-    })
-  }
 
-  // 분할 레이아웃 변경 — 분할 모드면 필요한 패널 수만큼 세션 자동 생성
+  // 레이아웃 전환 — 탭(단일) 보기로 가면 동시입력 해제(오작동 방지) 하고, 분할용으로 자동
+  // 추가됐다가 한 번도 연결 안 해본(idle) 빈 세션 탭은 정리한다 — 연결됐거나 연결 시도/오류
+  // 이력이 있는 세션(closed/error/connecting)은 다시 쓸 수 있어야 하니 그대로 둔다.
   const setLayout = (l: LayoutMode) => {
     setLayoutMode(l)
-    if (l === 'tabs') {
-      setBroadcast(false) // 단일 보기로 가면 동시입력 해제(오작동 방지)
+    if (l !== 'tabs') return
+    setBroadcast(false)
+    const idleIds = tabs.filter((t) => t.id !== activeId && (statuses[t.id]?.status ?? 'idle') === 'idle').map((t) => t.id)
+    if (!idleIds.length) return
+    idleIds.forEach((id) => window.electronAPI.sessionClose(id))
+    setTabs((ts) => ts.filter((t) => !idleIds.includes(t.id)))
+    setStatuses((m) => {
+      const c = { ...m }
+      idleIds.forEach((id) => delete c[id])
+      return c
+    })
+    setOpenConnectCellId((cur) => (cur && idleIds.includes(cur) ? null : cur))
+    setBroadcastTargets((bt) => bt.filter((id) => !idleIds.includes(id)))
+    // 트리에 빈 세션이 남아있으면 다음에 분할 보기로 돌아왔을 때 존재하지 않는 탭을 가리키는
+    // 빈 칸이 생기므로, 이번에 정리한 이상 트리도 함께 비운다(다음 분할은 새로 구성됨).
+    setSplitTree(null)
+  }
+
+  // 기본 제공 프리셋(좌우2분할/상하2분할/4분할) — 활성 세션을 포함해 원클릭으로 균형 트리를 새로 구성.
+  // 기존 트리는 버리고 처음부터 다시 짜므로 항상 예측 가능한 결과가 나온다(임의분할은 이후 보조로 계속 다듬을 수 있음).
+  const applyPresetLayout = (preset: '2v' | '2h' | '4') => {
+    const n = preset === '4' ? 4 : 2
+    const dir: 'row' | 'col' = preset === '2h' ? 'col' : 'row'
+    const ids = [activeId]
+    for (const t of tabs) {
+      if (ids.length >= n) break
+      if (!ids.includes(t.id)) ids.push(t.id)
+    }
+    let total = tabs.length
+    while (ids.length < n && total < MAX_SESSIONS) {
+      ids.push(createTab())
+      total++
+    }
+    setSplitTree(buildBalancedTree(ids, nextPaneId, dir))
+    setLayoutMode('split')
+  }
+
+  // 활성 세션이 있는 칸을 dir 방향으로 분할 — 아직 트리에 없는 스페어 탭이 있으면 그걸, 없으면 새 세션을 만들어 채운다.
+  // 탭 보기로 갔다가 트리에 없는 다른 세션으로 바꾼 뒤 분할하면, 기존 트리는 버리고 그 세션 하나부터 새로 시작한다.
+  const baseTreeFor = (activeTabId: string): PaneNode =>
+    splitTree && findLeaf(splitTree, activeTabId) ? splitTree : { type: 'leaf', id: nextPaneId(), tabId: activeTabId }
+  const splitActivePane = (dir: 'row' | 'col') => {
+    const baseTree = baseTreeFor(activeId)
+    const activeLeaf = findLeaf(baseTree, activeId)
+    const leafId = activeLeaf?.id ?? (baseTree.type === 'leaf' ? baseTree.id : null)
+    if (!leafId) return
+    const usedIds = new Set(collectLeafTabIds(baseTree))
+    const spare = tabs.find((t) => !usedIds.has(t.id))?.id
+    const newTabId = spare ?? (tabs.length < MAX_SESSIONS ? createTab() : null)
+    if (!newTabId) return // 스페어도 없고 더 만들 여유도 없으면(세션 한도) 분할하지 않음
+    setSplitTree(splitLeaf(baseTree, leafId, dir, nextPaneId(), nextPaneId(), newTabId))
+    setLayoutMode('split')
+  }
+
+  // 활성 세션이 있는 칸을 닫는다(세션 자체는 유지) — 형제 칸이 그 자리로 승격, 칸이 하나만 남으면 탭 보기로 전환
+  const closeActivePane = () => {
+    if (!splitTree) return
+    const activeLeaf = findLeaf(splitTree, activeId)
+    if (!activeLeaf) return
+    const next = closeLeaf(splitTree, activeLeaf.id)
+    if (!next || next.type === 'leaf') {
+      // 칸이 하나만 남으면 트리를 비우고 탭 보기로 — 남겨두면 다음 분할 시작점이 이 오래된
+      // 단일 리프(다른 세션을 가리킬 수 있음)가 되어 버려서 엉뚱한 세션이 분할되는 문제 방지
+      setSplitTree(null)
+      setLayoutMode('tabs')
+      if (next) setActiveId(next.tabId)
       return
     }
-    ensureTabs(l === '4' ? 4 : 2)
+    setSplitTree(next)
+    setActiveId(collectLeafTabIds(next)[0])
   }
 
   // 사이드바 더블클릭 → 스마트 대상 선택 후 연결
@@ -509,11 +631,11 @@ export default function App() {
     })
     setActiveId(newIds[0])
     setPendingConnects((q) => [...q, ...newIds.map((id, i) => ({ id, p: sel[i] }))])
-    const n = newIds.length
-    if (n >= 2) {
-      setLayout(n === 2 ? '2v' : '4')
+    if (newIds.length >= 2) {
+      setSplitTree(buildBalancedTree(newIds, nextPaneId))
+      setLayoutMode('split')
       setBroadcast(true)
-      setBroadcastTargets(newIds.slice(0, n === 2 ? 2 : 4))
+      setBroadcastTargets(newIds)
     }
   }
 
@@ -527,6 +649,27 @@ export default function App() {
 
   const deleteProfile = async (p: SavedProfile) => {
     setProfiles(await window.electronAPI.profilesDelete(profileKey(p)))
+  }
+
+  // CSV/JSON 파일에서 세션 프로필 가져오기 — 사이드바에 추가만 하며 연결은 하지 않음 (수동으로 그리드 열기)
+  const importProfiles = async () => {
+    const result = await window.electronAPI.profilesImport()
+    if (result.canceled) return
+    if (result.list) setProfiles(result.list)
+    setImportResult(result)
+  }
+
+  // 가져오기 양식 예시 파일 저장 (사용자가 값을 채워 넣을 수 있도록)
+  const saveImportTemplate = (format: 'csv' | 'json') => {
+    window.electronAPI.profilesSaveTemplate(format)
+  }
+
+  // 현재 저장된 전체 프로필을 파일로 내보내기 (백업/이관용) — 가져오기와 같은 형식이라 재가져오기 가능
+  const [exportMsg, setExportMsg] = useState<string | null>(null)
+  const exportProfiles = async (format: 'csv' | 'json') => {
+    const r = await window.electronAPI.profilesExport(format)
+    if (r.saved) setExportMsg(`${r.count}개 세션 프로필을 내보냈습니다.\n${r.path}`)
+    else if (r.error) setExportMsg(`내보내기 실패: ${r.error}`)
   }
 
   // ── 탭 이름변경 / 순서변경 / 복제 ──
@@ -544,19 +687,6 @@ export default function App() {
       return next
     })
   }
-  // 탭을 특정 그리드 칸(index)으로 이동 (탭→칸 드래그 배치)
-  const reorderTabToIndex = (id: string, index: number) => {
-    setTabs((ts) => {
-      const from = ts.findIndex((t) => t.id === id)
-      if (from < 0 || from === index) return ts
-      const next = [...ts]
-      const [m] = next.splice(from, 1)
-      next.splice(Math.min(index, next.length), 0, m)
-      return next
-    })
-    setActiveId(id)
-  }
-
   const duplicateTab = (id: string) => {
     if (tabs.length >= MAX_SESSIONS) return
     const key = statuses[id]?.key
@@ -601,15 +731,32 @@ export default function App() {
       setTabs([{ id: nid, title: '세션 1' }])
       setStatuses({ [nid]: { status: 'idle', msg: '' } })
       setActiveId(nid)
+      setSplitTree(null)
+      setLayoutMode('tabs')
       return
     }
-    if (id === activeId) setActiveId(remaining[remaining.length - 1].id)
+    setOpenConnectCellId((cur) => (cur === id ? null : cur))
     setTabs(remaining)
     setStatuses((m) => {
       const c = { ...m }
       delete c[id]
       return c
     })
+    // 닫는 탭이 분할 트리 안에 있었다면 그 칸을 제거(안 그러면 존재하지 않는 탭을 가리키는 빈 칸이 남음).
+    // 활성 탭을 닫은 경우, 분할 트리에 남은 칸이 있으면 그쪽을 먼저 활성화(보고 있던 그리드 안에서 포커스 유지).
+    let nextActive: string | null = null
+    if (splitTree) {
+      const next = removeTabId(splitTree, id)
+      if (!next || next.type === 'leaf') {
+        setSplitTree(null)
+        setLayoutMode('tabs')
+        if (next) nextActive = next.tabId
+      } else {
+        setSplitTree(next)
+        if (id === activeId) nextActive = collectLeafTabIds(next)[0]
+      }
+    }
+    if (id === activeId) setActiveId(nextActive ?? remaining[remaining.length - 1].id)
   }
 
   // 동시입력 토글 — 켤 때 기본값으로 분할 전체를 대상에 포함
@@ -749,14 +896,19 @@ export default function App() {
         return n
       })
     } else {
-      const r = await window.electronAPI.logStart(id)
+      const host = statuses[id]?.host
+      const key = statuses[id]?.key
+      const label = key ? profiles.find((p) => profileKey(p) === key)?.label?.trim() : undefined
+      const r = await window.electronAPI.logStart(id, { host, label })
       if (r.ok) setLoggingSessions((s) => new Set(s).add(id))
     }
   }
 
-  // 분할 그리드 행/열 — 세로2분할(좌우)=2열1행, 가로2분할(상하)=1열2행, 4분할=2열2행
-  const gridCols = layout === '2h' ? 1 : 2
-  const gridRows = layout === '2v' ? 1 : 2
+  // 분할 트리 → 화면 좌표(%) 리프 사각형 + 분할선(리사이즈 핸들) 목록
+  const { leaves: paneLeaves, dividers: paneDividers } = useMemo(
+    () => (isSplit && splitTree ? layoutTree(splitTree) : { leaves: [], dividers: [] }),
+    [isSplit, splitTree],
+  )
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-panel text-gray-100">
@@ -772,6 +924,7 @@ export default function App() {
           onRenameFolder={renameFolder}
           onReorder={reorderProfiles}
           onOpenMulti={openCluster}
+          onImport={() => setShowImportGuide(true)}
           onCollapse={() => setShowSidebar(false)}
           onDragProfileStart={(p) => setDraggingProfile(p)}
           onDragProfileEnd={() => {
@@ -791,7 +944,7 @@ export default function App() {
 
       {/* ── 중앙 : 터미널 영역 (AI 패널 닫히면 전체 폭으로 확장) ─── */}
       <div className="relative flex min-w-0 flex-1 flex-col border-r border-white/10">
-        <Mascot active={idle} />
+        <Mascot active={idle} reaction={mascotReaction} />
 
         {/* 터미널 검색바 (Ctrl+F) */}
         {showFind && (
@@ -857,6 +1010,11 @@ export default function App() {
           }}
           layout={layout}
           onSetLayout={setLayout}
+          onApplyPreset={applyPresetLayout}
+          onSplitPane={splitActivePane}
+          canSplit={canSplit}
+          onClosePane={closeActivePane}
+          canClosePane={canClosePane}
           broadcast={broadcast}
           onToggleBroadcast={toggleBroadcast}
         />
@@ -881,9 +1039,11 @@ export default function App() {
           </button>
         </div>
 
-        {/* 세션별 SSH 폼 (활성 탭만 표시 — 비활성은 상태 보존 위해 hidden) */}
+        {/* 세션별 SSH 폼 — 탭(겹침) 보기에서만 여기 표시(활성 탭만, 비활성은 상태 보존 위해 hidden).
+            그리드 보기에서는 셀을 선택한다고 이 폼이 열렸다 닫혔다 하지 않도록 아예 숨기고,
+            대신 각 그리드 셀 안에서 필요할 때만 인라인으로 연다(아래 그리드 렌더링부 참고). */}
         {tabs.map((t) => (
-          <div key={t.id} className={t.id === activeId ? '' : 'hidden'}>
+          <div key={t.id} className={!isSplit && t.id === activeId ? '' : 'hidden'}>
             <SSHForm
               ref={(h) => {
                 sshFormRefs.current[t.id] = h
@@ -891,21 +1051,7 @@ export default function App() {
               sessionId={t.id}
               status={statuses[t.id]?.status ?? 'idle'}
               profiles={profiles}
-              onConnected={(p) => {
-                setStatuses((m) => ({
-                  ...m,
-                  [t.id]: {
-                    status: 'connected',
-                    msg: m[t.id]?.msg ?? '',
-                    host: p.host,
-                    key: profileKey(p),
-                    since: m[t.id]?.since ?? Date.now(),
-                  },
-                }))
-                if (p.color) {
-                  setTabs((ts) => ts.map((tab) => tab.id === t.id ? { ...tab, color: p.color } : tab))
-                }
-              }}
+              onConnected={(p) => handleSessionConnected(t.id, p)}
               onError={(msg) => setStatuses((m) => ({ ...m, [t.id]: { status: 'error', msg } }))}
               onProfilesChanged={setProfiles}
             />
@@ -921,6 +1067,11 @@ export default function App() {
           onOpenExplorer={() => setShowExplorer(true)}
           onOpenTunnels={() => setShowTunnels(true)}
           onOpenMultiRun={() => setShowMultiRun(true)}
+          onOpenLogViewer={() => setShowLogViewer(true)}
+          onOpenLiveLog={() => {
+            setLiveLogPrefill(undefined)
+            setShowLiveLog(true)
+          }}
           logging={loggingSessions.has(activeId)}
           onToggleLog={toggleLog}
           onOpenSettings={() => setShowSettings(true)}
@@ -932,7 +1083,11 @@ export default function App() {
           <>
             <div ref={panelWrapRef} style={{ height: panelHeight }} className="shrink-0 overflow-hidden">
               {panel === 'presets' && (
-                <PresetPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
+                <PresetPanel
+                  connected={connected}
+                  onRun={runOnActive}
+                  onClose={() => setPanel(null)}
+                />
               )}
               {panel === 'scenarios' && (
                 <ScenarioPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
@@ -956,74 +1111,98 @@ export default function App() {
               : '동시입력 ON — 대상 세션을 선택하세요 (셀 헤더의 체크박스)'}
           </div>
         )}
-        {isSplit && tabs.length > paneCount && (
+        {isSplit && tabs.length > new Set(gridIds).size && (
           <div className="bg-amber-500/10 px-3 py-0.5 text-[11px] text-amber-300">
-            분할에는 앞 {paneCount}개 세션만 표시합니다 (나머지는 단일 보기 탭에서 확인).
+            분할 화면에 표시되지 않는 세션이 있습니다 (나머지는 단일 보기 탭에서 확인, 분할 버튼으로 칸 추가 가능).
           </div>
         )}
 
-        {/* 터미널 영역 — 탭 보기(겹침) / 그리드 보기(격자). 인스턴스는 항상 마운트 유지 */}
-        <div
-          ref={termAreaRef}
-          className="relative min-h-0 flex-1 overflow-hidden"
-          style={
-            isSplit
-              ? {
-                  display: 'grid',
-                  gridTemplateColumns:
-                    gridCols === 2 ? `${colFrac}fr ${1 - colFrac}fr` : '1fr',
-                  gridTemplateRows: gridRows === 2 ? `${rowFrac}fr ${1 - rowFrac}fr` : '1fr',
-                  gap: '2px',
+        {/* 터미널 영역 — 탭 보기(겹침) / 분할 보기(임의 재귀 분할 트리, % 좌표로 절대배치). 인스턴스는 항상 마운트 유지 */}
+        <div ref={termAreaRef} className="relative min-h-0 flex-1 overflow-hidden">
+          {/* 분할선 드래그 핸들 — 트리의 각 split 노드마다 하나씩 */}
+          {isSplit &&
+            paneDividers.map((d) => (
+              <div
+                key={d.nodeId}
+                onMouseDown={() => {
+                  resizeDragRef.current = { nodeId: d.nodeId, dir: d.dir }
+                  document.body.style.cursor = d.dir === 'row' ? 'col-resize' : 'row-resize'
+                }}
+                style={
+                  d.dir === 'row'
+                    ? { left: `calc(${d.left}% - 3px)`, top: `${d.top}%`, height: `${d.height}%` }
+                    : { top: `calc(${d.top}% - 3px)`, left: `${d.left}%`, width: `${d.width}%` }
                 }
-              : {}
-          }
-        >
-          {/* 분할 경계 드래그 핸들 */}
-          {isSplit && gridCols === 2 && (
-            <div
-              onMouseDown={() => {
-                splitDragRef.current = 'col'
-                document.body.style.cursor = 'col-resize'
-              }}
-              style={{ left: `calc(${colFrac * 100}% - 3px)` }}
-              className="absolute bottom-0 top-0 z-20 w-1.5 cursor-col-resize bg-white/5 hover:bg-blue-400/50"
-            />
-          )}
-          {isSplit && gridRows === 2 && (
-            <div
-              onMouseDown={() => {
-                splitDragRef.current = 'row'
-                document.body.style.cursor = 'row-resize'
-              }}
-              style={{ top: `calc(${rowFrac * 100}% - 3px)` }}
-              className="absolute left-0 right-0 z-20 h-1.5 cursor-row-resize bg-white/5 hover:bg-blue-400/50"
-            />
-          )}
-          {tabs.map((t, i) => {
-            const inGrid = i < paneCount
+                className={
+                  'absolute z-20 ' +
+                  (d.dir === 'row'
+                    ? 'w-1.5 cursor-col-resize bg-white/5 hover:bg-blue-400/50'
+                    : 'h-1.5 cursor-row-resize bg-white/5 hover:bg-blue-400/50')
+                }
+              />
+            ))}
+          {tabs.map((t) => {
+            const leaf = isSplit && splitTree ? paneLeaves.find((l) => l.tabId === t.id) : undefined
             // 이 셀이 동시입력 대상으로 선택되어 있는지
             const isTarget = broadcast && isSplit && broadcastTargets.includes(t.id)
             let cls: string
+            let posStyle: React.CSSProperties | undefined
             if (!isSplit) {
               cls = t.id === activeId ? 'absolute inset-0' : 'hidden'
-            } else if (inGrid) {
+            } else if (leaf) {
               cls =
-                'relative min-h-0 min-w-0 overflow-hidden ' +
+                'absolute overflow-hidden ' +
                 (isTarget
                   ? 'ring-1 ring-red-500/70'
                   : t.id === activeId
                     ? 'ring-1 ring-blue-400'
                     : 'ring-1 ring-white/10')
+              posStyle = {
+                left: `${leaf.left}%`,
+                top: `${leaf.top}%`,
+                width: `${leaf.width}%`,
+                height: `${leaf.height}%`,
+              }
             } else {
               cls = 'hidden'
             }
             return (
-              <div key={t.id} className={cls} onMouseDown={() => setActiveId(t.id)}>
+              <div
+                key={t.id}
+                className={cls}
+                style={posStyle}
+                onMouseDown={() => {
+                  setActiveId(t.id)
+                  // 클릭 즉시 해당 터미널로 포커스 이동 — React 이펙트 반영 전 짧은 순간
+                  // 이전 활성 터미널이 여전히 포커스를 쥐고 있어 키 입력이 다른 세션으로 새는 것 방지
+                  terminalRefs.current[t.id]?.focus()
+                  triggerMascotReaction('surprised')
+                }}
+              >
                 {/* 그리드 셀 헤더 바 (터미널을 가리지 않도록 상단에 분리 배치) */}
-                {isSplit && inGrid && (
+                {isSplit && leaf && (
                   <div className="absolute left-0 right-0 top-0 z-10 flex h-[19px] items-center gap-1 border-b border-white/10 bg-panel-light px-1.5 text-[10px] text-gray-300">
                     <Circle size={7} className={dotColor(statuses[t.id]?.status) + ' fill-current'} />
-                    <span className="truncate">{t.custom ? t.title : (statuses[t.id]?.host ?? t.title)}</span>
+                    <span className="truncate">{gridCellLabel(t)}</span>
+                    {statuses[t.id]?.status !== 'connected' && (
+                      <button
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setOpenConnectCellId((cur) => (cur === t.id ? null : t.id))
+                        }}
+                        title="SSH 연결 정보 입력"
+                        className={
+                          'flex shrink-0 items-center gap-0.5 rounded border px-1.5 py-[1px] text-[10px] font-medium transition ' +
+                          (openConnectCellId === t.id
+                            ? 'border-blue-400 bg-blue-600 text-white'
+                            : 'border-blue-500/40 bg-blue-500/20 text-blue-200 hover:border-blue-400 hover:bg-blue-500/40')
+                        }
+                      >
+                        <Plug size={9} />
+                        연결
+                      </button>
+                    )}
                     {broadcast && (
                       <button
                         onMouseDown={(e) => e.stopPropagation()}
@@ -1043,8 +1222,8 @@ export default function App() {
                     )}
                   </div>
                 )}
-                {/* 탭을 이 칸으로 드래그 배치 (그리드 모드) */}
-                {draggingTabId && isSplit && inGrid && (
+                {/* 탭을 이 칸으로 드래그 배치 (분할 모드 — 원래 있던 탭과 서로 자리를 맞바꿈) */}
+                {draggingTabId && isSplit && leaf && (
                   <div
                     onDragOver={(e) => {
                       e.preventDefault()
@@ -1054,7 +1233,8 @@ export default function App() {
                     onDragLeave={() => setDragOverId((cur) => (cur === t.id ? null : cur))}
                     onDrop={(e) => {
                       e.preventDefault()
-                      if (draggingTabId) reorderTabToIndex(draggingTabId, i)
+                      if (draggingTabId)
+                        setSplitTree((tree) => (tree ? reassignTab(tree, leaf.leafId, draggingTabId) : tree))
                       setDraggingTabId(null)
                       setDragOverId(null)
                     }}
@@ -1072,7 +1252,7 @@ export default function App() {
                 )}
                 {/* 사이드바에서 드래그 중일 때 드롭 오버레이 (xterm 위에 덮어 드롭 캡처)
                     drag가 터미널 위에 올라오기 전까지는 invisible 유지 — 사이드바 폴더 이동 시 딤 방지 */}
-                {draggingProfile && (!isSplit ? t.id === activeId : inGrid) && (
+                {draggingProfile && (!isSplit ? t.id === activeId : !!leaf) && (
                   <div
                     onDragOver={(e) => {
                       e.preventDefault()
@@ -1105,7 +1285,7 @@ export default function App() {
                   sessionId={t.id}
                   onData={handleInput}
                   onFind={() => setShowFind(true)}
-                  headerSpace={isSplit && inGrid}
+                  headerSpace={isSplit && !!leaf}
                   fontSize={fontSize}
                   highlight={highlight}
                   theme={{
@@ -1114,6 +1294,33 @@ export default function App() {
                     cursor: theme.cursor,
                   }}
                 />
+                {/* 그리드 셀 인라인 SSH 연결 폼 — 이 칸에서만 열리고 닫히며, 다른 칸/상단 레이아웃에는 영향 없음 */}
+                {isSplit && leaf && openConnectCellId === t.id && (
+                  <div
+                    className="absolute inset-x-0 bottom-0 z-20 overflow-y-auto bg-panel"
+                    style={{ top: 19 }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-between border-b border-white/10 px-2 py-1">
+                      <span className="text-[11px] font-medium text-gray-300">SSH 연결</span>
+                      <button
+                        onClick={() => setOpenConnectCellId(null)}
+                        title="닫기"
+                        className="rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                    <SSHForm
+                      sessionId={t.id}
+                      status={statuses[t.id]?.status ?? 'idle'}
+                      profiles={profiles}
+                      onConnected={(p) => handleSessionConnected(t.id, p)}
+                      onError={(msg) => setStatuses((m) => ({ ...m, [t.id]: { status: 'error', msg } }))}
+                      onProfilesChanged={setProfiles}
+                    />
+                  </div>
+                )}
               </div>
             )
           })}
@@ -1208,7 +1415,7 @@ export default function App() {
         <div className="min-h-0 flex-1">
           {/* AIPanel 은 언마운트하면 대화/스트림이 끊기므로 hidden 으로 유지 */}
           <div className={rightTab === 'ai' ? 'h-full' : 'hidden'}>
-            <AIPanel ref={aiPanelRef} onClose={() => setShowAI(false)} />
+            <AIPanel ref={aiPanelRef} onClose={() => setShowAI(false)} onRunCommand={runOnActive} />
           </div>
           {rightTab === 'dashboard' && (
             <div className="h-full">
@@ -1248,7 +1455,31 @@ export default function App() {
 
       {/* 원격 파일 탐색기 (SFTP) 모달 — 활성 세션 대상 */}
       {showExplorer && (
-        <FileExplorer sessionId={activeId} connected={connected} onClose={() => setShowExplorer(false)} />
+        <FileExplorer
+          sessionId={activeId}
+          connected={connected}
+          onClose={() => setShowExplorer(false)}
+          onOpenLiveTail={(path) => {
+            setLiveLogPrefill(path)
+            setShowLiveLog(true)
+          }}
+          otherSessions={tabs
+            .filter((t) => t.id !== activeId && statuses[t.id]?.status === 'connected')
+            .map((t) => ({ id: t.id, label: gridCellLabel(t) }))}
+        />
+      )}
+
+      {/* 실시간 로그(tail -f) 뷰어 — 활성 세션 대상. key 로 세션/경로가 바뀌면 완전히 새로 시작 */}
+      {showLiveLog && (
+        <LiveLogViewer
+          key={`${activeId}-${liveLogPrefill ?? ''}`}
+          sessionId={activeId}
+          initialPath={liveLogPrefill}
+          onClose={() => {
+            setShowLiveLog(false)
+            setLiveLogPrefill(undefined)
+          }}
+        />
       )}
 
       {/* 포트 포워딩(터널) 관리 모달 — 활성 세션 대상 */}
@@ -1265,6 +1496,9 @@ export default function App() {
           onClose={() => setShowMultiRun(false)}
         />
       )}
+
+      {/* 세션 로그 뷰어(목록/검색/리플레이) */}
+      {showLogViewer && <LogViewer onClose={() => setShowLogViewer(false)} />}
 
       {/* 노드 간 출력 비교 모달 */}
       {diffSources && <NodeDiff sources={diffSources} onClose={() => setDiffSources(null)} />}
@@ -1304,6 +1538,168 @@ export default function App() {
                 className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
               >
                 분석
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 세션 프로필 가져오기 전 형식 안내 + 템플릿 다운로드 모달 */}
+      {showImportGuide && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setShowImportGuide(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.key === 'Escape' && setShowImportGuide(false)}
+          >
+            <div className="mb-2 text-sm font-semibold text-gray-100">세션 프로필 가져오기 / 내보내기</div>
+            <div className="space-y-1.5 text-[12px] leading-relaxed text-gray-300">
+              <p>
+                CSV 또는 JSON 파일로 여러 세션을 한 번에 사이드바에 등록할 수 있습니다. 필수 항목은{' '}
+                <code className="rounded bg-black/30 px-1 py-0.5 text-[11px] text-blue-300">host</code>,{' '}
+                <code className="rounded bg-black/30 px-1 py-0.5 text-[11px] text-blue-300">port</code>,{' '}
+                <code className="rounded bg-black/30 px-1 py-0.5 text-[11px] text-blue-300">username</code>{' '}
+                세 가지뿐이며, 나머지는 비워도 됩니다.
+              </p>
+              <p className="text-gray-400">
+                선택 항목: authMethod, password, keyPath(개인키 파일 경로), passphrase, label, group, startup, color.
+                authMethod를 안 적으면 password/keyPath 유무로 자동 판별합니다.
+              </p>
+              <p className="text-gray-400">
+                같은 host:port:username 조합이 이미 있으면 자동으로 건너뜁니다. 아래에서 예시 파일을 받아 형식을 확인한 뒤 값을 채워 넣으세요.
+              </p>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => saveImportTemplate('csv')}
+                className="flex-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[12px] text-gray-200 hover:bg-white/10"
+              >
+                CSV 템플릿 저장
+              </button>
+              <button
+                onClick={() => saveImportTemplate('json')}
+                className="flex-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[12px] text-gray-200 hover:bg-white/10"
+              >
+                JSON 템플릿 저장
+              </button>
+            </div>
+
+            <div className="mt-3 border-t border-white/10 pt-3">
+              <div className="mb-1.5 text-[12px] font-medium text-gray-200">현재 목록 내보내기 (백업)</div>
+              <p className="mb-2 text-[11px] leading-relaxed text-amber-300/90">
+                내보낸 파일에는 비밀번호·개인키가 평문으로 포함됩니다. 보관/공유 시 주의하세요.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => exportProfiles('csv')}
+                  className="flex-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[12px] text-gray-200 hover:bg-white/10"
+                >
+                  CSV로 내보내기
+                </button>
+                <button
+                  onClick={() => exportProfiles('json')}
+                  className="flex-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[12px] text-gray-200 hover:bg-white/10"
+                >
+                  JSON으로 내보내기
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 flex justify-end gap-2 border-t border-white/10 pt-3">
+              <button
+                onClick={() => setShowImportGuide(false)}
+                className="rounded px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+              >
+                취소
+              </button>
+              <button
+                autoFocus
+                onClick={() => {
+                  setShowImportGuide(false)
+                  importProfiles()
+                }}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+              >
+                파일 선택해서 가져오기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 세션 프로필 내보내기 결과 모달 */}
+      {exportMsg && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setExportMsg(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' || e.key === 'Enter') setExportMsg(null)
+            }}
+          >
+            <div className="mb-2 text-sm font-semibold text-gray-100">내보내기 결과</div>
+            <p className="whitespace-pre-line text-[13px] leading-relaxed text-gray-300">{exportMsg}</p>
+            <div className="mt-3 flex justify-end">
+              <button
+                autoFocus
+                onClick={() => setExportMsg(null)}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+              >
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 세션 프로필 가져오기 결과 모달 */}
+      {importResult && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setImportResult(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' || e.key === 'Enter') setImportResult(null)
+            }}
+          >
+            <div className="mb-3 text-sm font-semibold text-gray-100">가져오기 결과</div>
+            {importResult.ok ? (
+              <>
+                <p className="text-[13px] text-gray-300">
+                  추가 <span className="font-semibold text-emerald-400">{importResult.addedCount ?? 0}</span>건 ·
+                  스킵(중복) <span className="font-semibold text-amber-400">{importResult.skippedCount ?? 0}</span>건 ·
+                  오류 <span className="font-semibold text-red-400">{importResult.errorCount ?? 0}</span>건
+                </p>
+                {(!!importResult.warnings?.length || !!importResult.errors?.length) && (
+                  <div className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded border border-white/10 bg-black/20 p-2">
+                    {importResult.errors?.map((e, i) => (
+                      <p key={'e' + i} className="text-[11px] text-red-300">{e}</p>
+                    ))}
+                    {importResult.warnings?.map((w, i) => (
+                      <p key={'w' + i} className="text-[11px] text-gray-400">{w}</p>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-[13px] text-red-300">{importResult.error ?? '가져오기에 실패했습니다.'}</p>
+            )}
+            <div className="mt-3 flex justify-end">
+              <button
+                autoFocus
+                onClick={() => setImportResult(null)}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+              >
+                확인
               </button>
             </div>
           </div>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Radio, Copy, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Minus, Radio, Copy, ChevronLeft, ChevronRight } from 'lucide-react'
 
 export interface TabInfo {
   id: string
@@ -10,8 +10,8 @@ export interface TabInfo {
   color?: string
 }
 
-/** 터미널 배치 레이아웃 — 단일(탭) / 세로2분할(좌우) / 가로2분할(상하) / 4분할 */
-export type LayoutMode = 'tabs' | '2v' | '2h' | '4'
+/** 터미널 배치 레이아웃 — 단일(탭 전환) / 임의 재귀 분할(tmux 스타일, PaneNode 트리로 구성) */
+export type LayoutMode = 'tabs' | 'split'
 
 interface TabBarProps {
   tabs: TabInfo[]
@@ -34,6 +34,15 @@ interface TabBarProps {
   /** 현재 레이아웃 */
   layout: LayoutMode
   onSetLayout: (m: LayoutMode) => void
+  /** 기본 제공 프리셋 — 좌우2분할/상하2분할/4분할을 원클릭으로 (기존 트리는 버리고 새로 구성) */
+  onApplyPreset: (preset: '2v' | '2h' | '4') => void
+  /** 현재 활성 세션이 있는 칸을 가로(좌우)/세로(상하)로 분할 — 프리셋을 넘어선 임의분할(옵션) */
+  onSplitPane: (dir: 'row' | 'col') => void
+  /** 더 분할할 여유(세션 한도)가 있는지 — 없으면 분할 버튼 비활성화 */
+  canSplit: boolean
+  /** 활성 세션이 있는 칸을 닫고(탭 자체는 유지) 형제 칸을 그 자리로 승격 — 분할 모드 + 칸이 2개 이상일 때만 */
+  onClosePane: () => void
+  canClosePane: boolean
   /** 분할 동시 입력(브로드캐스트) 토글 — 분할 모드에서만 노출 */
   broadcast: boolean
   onToggleBroadcast: () => void
@@ -64,14 +73,6 @@ const TAB_COLORS: Record<string, string> = {
   violet:  '#a78bfa',
 }
 
-/** 분할 레이아웃 옵션 (MobaXterm 스타일) */
-const LAYOUTS: { mode: LayoutMode; Icon: typeof Square; title: string }[] = [
-  { mode: 'tabs', Icon: Square, title: '단일 터미널 (탭 전환)' },
-  { mode: '2v', Icon: Columns2, title: '세로 2분할 (좌우)' },
-  { mode: '2h', Icon: Rows2, title: '가로 2분할 (상하)' },
-  { mode: '4', Icon: Grid2x2, title: '4분할' },
-]
-
 /**
  * 다중 세션 탭바.
  *  - 탭 클릭으로 전환, × 로 닫기, + 로 추가(최대 max개)
@@ -94,6 +95,11 @@ export default function TabBar({
   onTabDragEnd,
   layout,
   onSetLayout,
+  onApplyPreset,
+  onSplitPane,
+  canSplit,
+  onClosePane,
+  canClosePane,
   broadcast,
   onToggleBroadcast,
 }: TabBarProps) {
@@ -281,24 +287,74 @@ export default function TabBar({
         </button>
       )}
 
-      {/* 분할 레이아웃 선택 (단일 / 세로2 / 가로2 / 4분할) */}
+      {/* 분할 레이아웃 프리셋 (기본) — 원클릭으로 단일/좌우2분할/상하2분할/4분할 */}
       <div className="ml-1 flex items-center rounded-md border border-white/10">
-        {LAYOUTS.map(({ mode, Icon, title }, i) => (
-          <button
-            key={mode}
-            type="button"
-            onClick={() => onSetLayout(mode)}
-            title={title}
-            className={
-              'flex items-center px-2 py-1 ' +
-              (i === 0 ? 'rounded-l-md ' : '') +
-              (i === LAYOUTS.length - 1 ? 'rounded-r-md ' : '') +
-              (layout === mode ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/10')
-            }
-          >
-            <Icon size={14} />
-          </button>
-        ))}
+        <button
+          type="button"
+          onClick={() => onSetLayout('tabs')}
+          title="단일 터미널 (탭 전환)"
+          className={
+            'flex items-center rounded-l-md px-2 py-1 ' +
+            (layout === 'tabs' ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/10')
+          }
+        >
+          <Square size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onApplyPreset('2v')}
+          title="좌우 2분할"
+          className="flex items-center px-2 py-1 text-gray-400 hover:bg-white/10"
+        >
+          <Columns2 size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onApplyPreset('2h')}
+          title="상하 2분할"
+          className="flex items-center px-2 py-1 text-gray-400 hover:bg-white/10"
+        >
+          <Rows2 size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onApplyPreset('4')}
+          title="4분할"
+          className="flex items-center rounded-r-md px-2 py-1 text-gray-400 hover:bg-white/10"
+        >
+          <Grid2x2 size={14} />
+        </button>
+      </div>
+
+      {/* 임의 분할(옵션) — 프리셋을 넘어서 활성 칸을 더 세밀하게 나누거나 닫기 */}
+      <div className="ml-1 flex items-center rounded-md border border-white/10 opacity-80">
+        <button
+          type="button"
+          onClick={() => onSplitPane('row')}
+          disabled={!canSplit}
+          title={canSplit ? '활성 칸을 좌우로 추가 분할 (임의분할)' : '최대 세션 개수에 도달했습니다'}
+          className="flex items-center rounded-l-md px-1.5 py-1 text-gray-500 hover:bg-white/10 hover:text-gray-300 disabled:opacity-30"
+        >
+          <Columns2 size={11} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSplitPane('col')}
+          disabled={!canSplit}
+          title={canSplit ? '활성 칸을 상하로 추가 분할 (임의분할)' : '최대 세션 개수에 도달했습니다'}
+          className="flex items-center px-1.5 py-1 text-gray-500 hover:bg-white/10 hover:text-gray-300 disabled:opacity-30"
+        >
+          <Rows2 size={11} />
+        </button>
+        <button
+          type="button"
+          onClick={onClosePane}
+          disabled={!canClosePane}
+          title={canClosePane ? '활성 칸 닫기 (세션 자체는 유지)' : undefined}
+          className="flex items-center rounded-r-md px-1.5 py-1 text-gray-500 hover:bg-white/10 hover:text-gray-300 disabled:opacity-30"
+        >
+          <Minus size={11} />
+        </button>
       </div>
     </div>
   )

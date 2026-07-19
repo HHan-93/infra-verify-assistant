@@ -13,10 +13,14 @@ import {
   Loader2,
   Trash2,
   FileDown,
+  FileText,
   Copy,
   Check,
   RefreshCw,
   PanelRightClose,
+  Terminal,
+  CornerDownLeft,
+  Play,
 } from 'lucide-react'
 import {
   PROVIDER_INFO,
@@ -25,6 +29,7 @@ import {
   type AnalysisStyle,
 } from '../../electron/shared-types'
 import Markdown from './Markdown'
+import { buildReportHtml } from '../lib/reportHtml'
 
 /** App 에서 ref 로 호출: 터미널 출력 텍스트를 분석 요청 */
 export interface AIPanelHandle {
@@ -35,6 +40,16 @@ interface ChatItem {
   id: string
   role: 'user' | 'assistant'
   content: string
+  /** 'command' 면 명령어 생성 모드의 응답 — 일반 markdown 대신 명령어 카드로 렌더링 */
+  mode?: 'command'
+}
+
+/** "명령어 생성" 모드 응답을 COMMAND:/설명: 고정 형식에서 파싱 (스트리밍 도중에도 부분 매치 허용) */
+function parseCommandCard(content: string): { command: string; explain: string } | null {
+  const m = content.match(/COMMAND:\s*(.+)/)
+  if (!m) return null
+  const explainMatch = content.match(/설명:\s*([\s\S]*)/)
+  return { command: m[1].trim(), explain: explainMatch ? explainMatch[1].trim() : '' }
 }
 
 /** 프로바이더별 사용자 설정 (키 + 모델) */
@@ -47,6 +62,23 @@ type ConfigMap = Record<AIProvider, ProviderConfig>
 const PROVIDERS: AIProvider[] = ['anthropic', 'gemini', 'openai']
 const CONFIG_STORAGE = 'ai_config'
 const LEGACY_KEY_STORAGE = 'anthropic_api_key' // 구버전 단일 키 마이그레이션용
+const MESSAGES_STORAGE = 'ai_chat_history'
+// localStorage 용량 제한을 고려해 최근 N개까지만 보관 (그 이전은 자연스럽게 잘려나감)
+const MAX_STORED_MESSAGES = 200
+
+/** 앱 재시작 후에도 대화가 이어지도록, 초기 상태 자체를 localStorage 에서 복원 */
+function loadStoredMessages(): ChatItem[] {
+  try {
+    const raw = localStorage.getItem(MESSAGES_STORAGE)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) return arr as ChatItem[]
+    }
+  } catch {
+    /* 손상된 기록 무시 */
+  }
+  return []
+}
 
 const emptyConfigs = (): ConfigMap => ({
   anthropic: { key: '', model: '' },
@@ -60,13 +92,21 @@ const emptyConfigs = (): ConfigMap => ({
  *  - 메인 프로세스를 통해 선택한 프로바이더로 스트리밍 호출
  *  - 터미널 출력(선택/최근)을 받아 분석하거나, 자유 질문 가능
  */
-const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }, ref) => {
-  const [messages, setMessages] = useState<ChatItem[]>([])
+interface AIPanelProps {
+  onClose?: () => void
+  /** 명령어 생성 모드 카드의 "입력"/"실행" 버튼 — 활성 세션(또는 브로드캐스트 대상)에 전달 */
+  onRunCommand?: (cmd: string, execute: boolean) => void
+}
+
+const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand }, ref) => {
+  const [messages, setMessages] = useState<ChatItem[]>(loadStoredMessages)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  // 일반 대화 / 명령어 생성 모드 — 명령어 생성은 analysisStyle 설정과 무관하게 'shellgen' 스타일 강제
+  const [chatMode, setChatMode] = useState<'chat' | 'command'>('chat')
 
-  const [provider, setProvider] = useState<AIProvider>('anthropic')
+  const [provider, setProvider] = useState<AIProvider>('gemini')
   const [configs, setConfigs] = useState<ConfigMap>(emptyConfigs)
   const [analysisStyle, setAnalysisStyle] = useState<AnalysisStyle>('detailed')
   const [showCustomModel, setShowCustomModel] = useState(false)
@@ -91,6 +131,16 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
     messagesRef.current = messages
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [messages])
+
+  // 대화 히스토리 자동 저장 — 스트리밍 도중 토큰마다 쓰지 않도록 완료 후에만 반영
+  useEffect(() => {
+    if (streaming) return
+    try {
+      localStorage.setItem(MESSAGES_STORAGE, JSON.stringify(messages.slice(-MAX_STORED_MESSAGES)))
+    } catch {
+      /* 저장 공간 부족 등은 무시 — 대화는 계속 가능 */
+    }
+  }, [messages, streaming])
 
   useEffect(() => {
     configRef.current = { provider, configs, analysisStyle }
@@ -162,13 +212,17 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
   }, [])
 
   // 대화 히스토리를 메인으로 보내 스트리밍 시작
-  const startStream = (history: ChatItem[], styleOverride?: AnalysisStyle) => {
+  const startStream = (
+    history: ChatItem[],
+    styleOverride?: AnalysisStyle,
+    assistantMode?: 'command',
+  ) => {
     const { provider: p, configs: c, analysisStyle: style } = configRef.current
     const requestId = crypto.randomUUID()
     const assistantId = crypto.randomUUID()
     activeReqRef.current = requestId
     activeAssistantRef.current = assistantId
-    setMessages([...history, { id: assistantId, role: 'assistant', content: '' }])
+    setMessages([...history, { id: assistantId, role: 'assistant', content: '', mode: assistantMode }])
     setStreaming(true)
     window.electronAPI.aiSend({
       requestId,
@@ -180,16 +234,23 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
     })
   }
 
-  const submit = (text: string) => {
+  const submit = (text: string, mode: 'chat' | 'command' = 'chat') => {
     const trimmed = text.trim()
     if (!trimmed || streaming) return
     const userMsg: ChatItem = { id: crypto.randomUUID(), role: 'user', content: trimmed }
-    startStream([...messagesRef.current, userMsg])
+    if (mode === 'command') startStream([...messagesRef.current, userMsg], 'shellgen', 'command')
+    else startStream([...messagesRef.current, userMsg])
   }
 
-  // App(터미널 도구막대)에서 호출
+  // App(터미널 도구막대)에서 호출 — submit() 과 동일하게 이미 스트리밍 중이면 무시.
+  // (없으면 이전 요청의 activeReqRef/activeAssistantRef 를 덮어써서 이전 메시지가
+  // 응답을 영영 못 받고 "…"/"명령어 생성 중" 상태로 멈춰버림)
   useImperativeHandle(ref, () => ({
     analyze: (context: string, question?: string) => {
+      if (streaming) return
+      // 이 핸들은 항상 '일반 대화' 형식(자유 서술)으로 응답을 생성한다 — 명령어 생성
+      // 탭이 켜진 채로 호출되면 탭 표시와 실제 응답 형식이 어긋나 보이므로 탭도 맞춰준다.
+      setChatMode('chat')
       const ctx = context.trim()
       if (!ctx) {
         submit('터미널 출력이 비어 있습니다. (선택 영역이 없거나 출력이 없음)')
@@ -211,7 +272,7 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      submit(input)
+      submit(input, chatMode)
       setInput('')
     }
   }
@@ -245,8 +306,8 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
       '# 인프라 검증 분석 리포트',
       '',
       `- 생성 시각: ${stamp}`,
-      `- 프로바이더: ${PROVIDER_INFO[provider].label}`,
-      `- 모델: ${configs[provider].model || PROVIDER_INFO[provider].defaultModel}`,
+      `- AI 모델: ${PROVIDER_INFO[provider].label}`,
+      `- 모델 버전: ${configs[provider].model || PROVIDER_INFO[provider].defaultModel}`,
       '',
       '---',
       '',
@@ -280,6 +341,23 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
     if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
     else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
     else setSaveMsg('') // 취소
+    if (res.saved) setTimeout(() => setSaveMsg(''), 4000)
+  }
+
+  const handleSavePdfReport = async () => {
+    if (messages.length === 0) {
+      setSaveMsg('저장할 대화가 없습니다.')
+      setTimeout(() => setSaveMsg(''), 2000)
+      return
+    }
+    const html = buildReportHtml(buildReport(), '인프라 검증 분석 리포트')
+    const res = await window.electronAPI.saveReportPdf({
+      html,
+      defaultName: `infra-report-${fileStamp()}.pdf`,
+    })
+    if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
+    else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
+    else setSaveMsg('')
     if (res.saved) setTimeout(() => setSaveMsg(''), 4000)
   }
 
@@ -328,18 +406,25 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
             <PanelRightClose size={16} />
           </button>
         )}
-        <Sparkles size={18} className="text-purple-400" />
-        <span className="text-sm font-semibold">AI 분석 패널</span>
-        <span className="truncate text-[11px] text-gray-500">
+        <Sparkles size={18} className="shrink-0 text-purple-400" />
+        <span className="shrink-0 text-sm font-semibold">AI 분석 패널</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-gray-500">
           {curInfo.label} · {cur.model || curInfo.defaultModel}
         </span>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <button
             onClick={handleSaveReport}
             title="대화를 Markdown 리포트로 저장"
             className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
           >
             <FileDown size={15} />
+          </button>
+          <button
+            onClick={handleSavePdfReport}
+            title="대화를 PDF 리포트로 저장"
+            className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+          >
+            <FileText size={15} />
           </button>
           <button
             onClick={() => setMessages([])}
@@ -350,7 +435,7 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
           </button>
           <button
             onClick={() => setShowSettings((v) => !v)}
-            title="프로바이더 / API 키 설정"
+            title="AI 모델 / API 키 설정"
             className={
               'rounded p-1 hover:bg-white/10 ' +
               (cur.key ? 'text-gray-400 hover:text-gray-200' : 'text-amber-400')
@@ -361,11 +446,33 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
         </div>
       </div>
 
+      {/* 일반 대화 / 명령어 생성 모드 */}
+      <div className="flex items-center gap-1 border-b border-white/10 bg-panel px-2 py-1.5">
+        <button
+          onClick={() => setChatMode('chat')}
+          className={
+            'flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ' +
+            (chatMode === 'chat' ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/5')
+          }
+        >
+          <Sparkles size={12} /> 일반 대화
+        </button>
+        <button
+          onClick={() => setChatMode('command')}
+          className={
+            'flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ' +
+            (chatMode === 'command' ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/5')
+          }
+        >
+          <Terminal size={12} /> 명령어 생성
+        </button>
+      </div>
+
       {/* 프로바이더 / API 키 설정 */}
       {showSettings && (
         <div className="space-y-2 border-b border-white/10 bg-panel p-3">
           <div>
-            <label className="mb-1 block text-[11px] text-gray-400">프로바이더</label>
+            <label className="mb-1 block text-[11px] text-gray-400">AI 모델</label>
             <select
               value={provider}
               onChange={(e) => {
@@ -406,7 +513,7 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
 
           <div>
             <label className="mb-1 flex items-center gap-1 text-[11px] text-gray-400">
-              모델
+              모델 버전
               {fetchedModels[provider] && (
                 <span className="text-green-400">· 키로 확인됨</span>
               )}
@@ -468,18 +575,20 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
               onChange={(e) => setAnalysisStyle(e.target.value as AnalysisStyle)}
               className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
-              {(Object.keys(ANALYSIS_STYLES) as AnalysisStyle[]).map((k) => (
-                <option key={k} value={k}>
-                  {ANALYSIS_STYLES[k].label}
-                </option>
-              ))}
+              {(Object.keys(ANALYSIS_STYLES) as AnalysisStyle[])
+                .filter((k) => k !== 'shellgen') // 명령어 생성 모드 전용 내부 스타일 — 일반 설정에는 노출 안 함
+                .map((k) => (
+                  <option key={k} value={k}>
+                    {ANALYSIS_STYLES[k].label}
+                  </option>
+                ))}
             </select>
             <p className="mt-1 text-[10px] text-gray-500">{ANALYSIS_STYLES[analysisStyle].hint}</p>
           </div>
 
           <p className="text-[10px] text-gray-500">
             키·모델은 이 PC 의 localStorage 에 자동 저장되며, 요청 시에만 메인 프로세스로 전달됩니다.
-            프로바이더별로 키를 따로 보관합니다.
+            AI 모델별로 키를 따로 보관합니다.
           </p>
         </div>
       )}
@@ -523,7 +632,44 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
               )}
             </div>
             <div className="break-words">
-              {m.role === 'assistant' ? (
+              {m.role === 'assistant' && m.mode === 'command' ? (
+                // 명령어 생성 모드: COMMAND:/설명: 고정 형식을 파싱해 카드로 표시
+                (() => {
+                  const card = parseCommandCard(m.content)
+                  if (!card) {
+                    return <span className="text-gray-500">{streaming ? '명령어 생성 중…' : m.content}</span>
+                  }
+                  const stillStreaming = streaming && activeAssistantRef.current === m.id
+                  return (
+                    <div className="space-y-2">
+                      <code className="block break-all rounded-md bg-black/40 px-2.5 py-1.5 font-mono text-[12px] text-pink-200">
+                        {card.command}
+                      </code>
+                      {card.explain && <p className="text-[12px] text-gray-400">{card.explain}</p>}
+                      {!stillStreaming && (
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => onRunCommand?.(card.command, false)}
+                            disabled={!onRunCommand}
+                            title="터미널에 입력만(실행 안 함) — 확인 후 직접 Enter"
+                            className="flex items-center gap-1 rounded bg-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
+                          >
+                            <CornerDownLeft size={12} /> 입력
+                          </button>
+                          <button
+                            onClick={() => onRunCommand?.(card.command, true)}
+                            disabled={!onRunCommand}
+                            title="터미널에서 바로 실행"
+                            className="flex items-center gap-1 rounded bg-blue-600/80 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                          >
+                            <Play size={11} /> 실행
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()
+              ) : m.role === 'assistant' ? (
                 // AI 답변: 높이 제한 없이 전체 표시 (패널 전체 스크롤만 사용)
                 m.content ? (
                   <Markdown content={m.content} />
@@ -577,13 +723,19 @@ const AIPanel = forwardRef<AIPanelHandle, { onClose?: () => void }>(({ onClose }
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={streaming ? '응답 생성 중…' : '질문 입력 후 Enter (Shift+Enter 줄바꿈)'}
+            placeholder={
+              streaming
+                ? '응답 생성 중…'
+                : chatMode === 'command'
+                  ? '예: 디스크 공간 확인해줘 (Enter)'
+                  : '질문 입력 후 Enter (Shift+Enter 줄바꿈)'
+            }
             disabled={streaming}
             className="max-h-28 flex-1 resize-none bg-transparent text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none disabled:opacity-50"
           />
           <button
             onClick={() => {
-              submit(input)
+              submit(input, chatMode)
               setInput('')
             }}
             disabled={streaming || !input.trim()}

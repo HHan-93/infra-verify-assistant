@@ -13,6 +13,8 @@ import {
   GitCompare,
   Layers,
   SquareTerminal,
+  ScrollText,
+  Activity,
 } from 'lucide-react'
 
 interface ToolbarProps {
@@ -28,6 +30,10 @@ interface ToolbarProps {
   onOpenTunnels: () => void
   /** 다중 호스트 실행 열기 */
   onOpenMultiRun: () => void
+  /** 세션 로그 뷰어(목록/검색/리플레이) 열기 */
+  onOpenLogViewer: () => void
+  /** 실시간 로그(tail -f) 뷰어 열기 */
+  onOpenLiveLog: () => void
   /** 활성 세션 로그 기록 여부 */
   logging: boolean
   /** 로그 기록 토글 */
@@ -56,6 +62,8 @@ export default function Toolbar({
   onOpenExplorer,
   onOpenTunnels,
   onOpenMultiRun,
+  onOpenLogViewer,
+  onOpenLiveLog,
   logging,
   onToggleLog,
   onOpenSettings,
@@ -160,6 +168,12 @@ export default function Toolbar({
           <Circle size={10} className={logging ? 'fill-current text-red-400' : ''} />
           {logging ? '기록 중' : '로깅'}
         </button>
+        <IconBtn onClick={onOpenLiveLog} title="실시간 로그 (tail -f)">
+          <Activity size={15} />
+        </IconBtn>
+        <IconBtn onClick={onOpenLogViewer} title="세션 로그 뷰어 (검색/리플레이)">
+          <ScrollText size={15} />
+        </IconBtn>
         <IconBtn onClick={onOpenSettings} title="외형 설정 (글꼴/테마)">
           <Settings size={15} />
         </IconBtn>

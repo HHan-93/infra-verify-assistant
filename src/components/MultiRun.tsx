@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { SquareTerminal, X, Play, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { SquareTerminal, X, Play, Loader2, ChevronDown, ChevronRight, Search } from 'lucide-react'
 
 export interface RunTarget {
   id: string
@@ -19,6 +19,22 @@ interface Result {
   error?: string
 }
 
+/** 대소문자 구분 없이 일치하는 부분을 <mark>로 감싸 하이라이트 (특수문자 이스케이프 포함) */
+function highlight(text: string, query: string) {
+  if (!query) return text
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase() ? (
+      <mark key={i} className="rounded bg-yellow-500/40 text-inherit">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  )
+}
+
 /**
  * 다중 호스트 명령 실행 — 명령 1개를 선택한 세션들에 동시 실행하고
  * 호스트별 종료코드/출력을 표 형태로 수집(인터랙티브 셸과 분리된 exec 채널).
@@ -29,6 +45,8 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
   const [results, setResults] = useState<Record<string, Result>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState('')
+  const [onlyFailed, setOnlyFailed] = useState(false)
 
   const toggleTarget = (id: string) =>
     setTargets((s) => {
@@ -66,6 +84,27 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
   }
 
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name ?? id
+
+  const trimmedQuery = query.trim()
+  const isFailed = (r: Result) => r.status === 'error' || (r.status === 'done' && r.code !== 0)
+  const matchesQuery = (id: string, r: Result) => {
+    if (!trimmedQuery) return true
+    const q = trimmedQuery.toLowerCase()
+    return (
+      nameOf(id).toLowerCase().includes(q) ||
+      (r.out ?? '').toLowerCase().includes(q) ||
+      (r.err ?? '').toLowerCase().includes(q) ||
+      (r.error ?? '').toLowerCase().includes(q)
+    )
+  }
+  const filteredEntries = useMemo(
+    () =>
+      Object.entries(results).filter(
+        ([id, r]) => (!onlyFailed || isFailed(r)) && matchesQuery(id, r),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [results, onlyFailed, trimmedQuery, sessions],
+  )
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
@@ -128,16 +167,43 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
               </div>
             </div>
 
+            {/* 결과 검색/필터 */}
+            {Object.keys(results).length > 0 && (
+              <div className="flex items-center gap-2 border-b border-white/10 px-3 py-1.5">
+                <Search size={12} className="shrink-0 text-gray-500" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="호스트명, 출력 내용 검색..."
+                  className="min-w-0 flex-1 bg-transparent text-xs text-gray-200 outline-none placeholder:text-gray-600"
+                />
+                <button
+                  onClick={() => setOnlyFailed((v) => !v)}
+                  className={
+                    'shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ' +
+                    (onlyFailed ? 'bg-amber-500/30 text-amber-200' : 'text-gray-400 hover:bg-white/10')
+                  }
+                >
+                  실패만
+                </button>
+                <span className="shrink-0 text-[11px] text-gray-500">
+                  {filteredEntries.length}/{Object.keys(results).length}
+                </span>
+              </div>
+            )}
+
             {/* 결과 표 */}
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {Object.keys(results).length === 0 ? (
                 <div className="px-2 py-6 text-center text-xs text-gray-500">
                   명령을 입력하고 실행하면 호스트별 결과가 표시됩니다.
                 </div>
+              ) : filteredEntries.length === 0 ? (
+                <div className="px-2 py-6 text-center text-xs text-gray-500">일치하는 결과가 없습니다.</div>
               ) : (
                 <ul className="space-y-1">
-                  {Object.entries(results).map(([id, r]) => {
-                    const open = expanded.has(id)
+                  {filteredEntries.map(([id, r]) => {
+                    const open = expanded.has(id) || !!trimmedQuery
                     return (
                       <li key={id} className="overflow-hidden rounded-md border border-white/10">
                         <div
@@ -145,7 +211,9 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
                           className="flex cursor-pointer items-center gap-2 bg-panel-light px-2.5 py-1.5 text-xs hover:bg-white/5"
                         >
                           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                          <span className="flex-1 truncate font-medium text-gray-100">{nameOf(id)}</span>
+                          <span className="flex-1 truncate font-medium text-gray-100">
+                            {highlight(nameOf(id), trimmedQuery)}
+                          </span>
                           {r.status === 'running' ? (
                             <Loader2 size={13} className="animate-spin text-gray-400" />
                           ) : r.status === 'error' ? (
@@ -165,9 +233,12 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
                         </div>
                         {open && r.status !== 'running' && (
                           <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all bg-[#1e1e2e] px-3 py-2 font-mono text-[11px] text-gray-200">
-                            {r.error
-                              ? `⚠ ${r.error}`
-                              : (r.out || '') + (r.err ? `\n[stderr]\n${r.err}` : '') || '(출력 없음)'}
+                            {highlight(
+                              r.error
+                                ? `⚠ ${r.error}`
+                                : (r.out || '') + (r.err ? `\n[stderr]\n${r.err}` : '') || '(출력 없음)',
+                              trimmedQuery,
+                            )}
                           </pre>
                         )}
                       </li>

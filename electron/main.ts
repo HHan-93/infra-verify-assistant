@@ -11,8 +11,9 @@ import {
 import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
+import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { writeFile, readFile, unlink, mkdir } from 'node:fs/promises'
+import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm } from 'node:fs/promises'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
@@ -28,6 +29,11 @@ import {
   type AIProvider,
   type MetricSample,
   type MonitorStartOptions,
+  type ProfileImportResult,
+  type CustomPresetCommand,
+  type CustomScenario,
+  type LogIndexEntry,
+  type LogRetentionSettings,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -60,12 +66,19 @@ interface Session {
   connecting: boolean // 연결 진행 중에는 로컬 셸 자동 시작 억제
   /** 세션 로그 파일 스트림 (켜져 있으면 모든 출력 기록) */
   logStream?: WriteStream
+  /** 리플레이용 타이밍 기록 스트림 (log:start 와 함께 시작/종료, 앱 관리 폴더에 저장) */
+  logCastStream?: WriteStream
+  logId?: string
+  logStartedAt?: number
   // ── 자동 재접속용 ──
   lastConfig?: SSHConfig // 마지막 접속 설정 (재접속에 재사용)
   wasConnected?: boolean // 쉘까지 한 번이라도 연결됐는지
   hadError?: boolean // 연결 중 오류(네트워크/keepalive) 발생 여부
   userClosed?: boolean // 사용자가 직접 끊었는지 (재접속 안 함)
   reconnecting?: boolean // 자동 재접속 루프 진행 중
+  /** 실시간 로그 뷰어(tail -f) 채널 — 세션당 1개만 유지, 새로 시작하면 기존 것을 닫는다 */
+  logTailStream?: ClientChannel
+  logTailId?: string
 }
 
 /** 포트 포워딩 항목 */
@@ -98,12 +111,19 @@ function sudoPwCandidates(s: Session, explicit?: string): string[] {
   return [...new Set([explicit, s.sudoPassword, s.lastPassword].filter((p): p is string => !!p))]
 }
 
-/** 터미널 출력 → 렌더러 전송 + (로깅 중이면) 파일 기록 */
+/** 터미널 출력 → 렌더러 전송 + (로깅 중이면) 파일 기록 + (리플레이 녹화 중이면) 타이밍 포함 JSONL 기록 */
 function pushOutput(s: Session, data: string) {
   mainWindow?.webContents.send('terminal:data', { sessionId: s.id, data })
   if (s.logStream) {
     try {
       s.logStream.write(data)
+    } catch {
+      /* 스트림 오류 무시 */
+    }
+  }
+  if (s.logCastStream && s.logStartedAt !== undefined) {
+    try {
+      s.logCastStream.write(JSON.stringify({ t: Date.now() - s.logStartedAt, d: data }) + '\n')
     } catch {
       /* 스트림 오류 무시 */
     }
@@ -457,27 +477,152 @@ ipcMain.handle('ssh:trustHost', async () => {
   return { ok: true }
 })
 
-// 세션 로그 기록 시작 (저장 위치 선택)
-ipcMain.handle('log:start', async (_evt, { sessionId }: { sessionId: string }) => {
-  const s = getSession(sessionId)
-  if (s.logStream) return { ok: true, alreadyLogging: true }
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
-    defaultPath: `session-${sessionId}-${stamp}.log`,
-    title: '세션 로그 저장 위치',
-  })
-  if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+// ─────────────────────────────────────────────────────────────
+// 세션 로그 인덱스 — 로그 뷰어(목록/검색/리플레이)를 위한 메타데이터.
+// 실제 평문 로그는 사용자가 고른 위치에, 리플레이용 타이밍 기록(.jsonl)은
+// userData/session-logs 에 앱이 직접 관리한다.
+// ─────────────────────────────────────────────────────────────
+const logIndexPath = () => path.join(app.getPath('userData'), 'session-logs-index.json')
+const logCastDir = () => path.join(app.getPath('userData'), 'session-logs')
+
+async function readLogIndex(): Promise<LogIndexEntry[]> {
   try {
-    s.logStream = createWriteStream(r.filePath, { flags: 'a' })
-    s.logStream.write(`\n===== 로그 시작 ${new Date().toISOString()} =====\n`)
-    return { ok: true, path: r.filePath }
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    const arr = JSON.parse(await readFile(logIndexPath(), 'utf-8'))
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
   }
+}
+async function writeLogIndex(list: LogIndexEntry[]): Promise<void> {
+  await writeFile(logIndexPath(), JSON.stringify(list, null, 2), 'utf-8')
+}
+async function upsertLogIndex(entry: LogIndexEntry): Promise<void> {
+  const list = await readLogIndex()
+  const idx = list.findIndex((e) => e.id === entry.id)
+  if (idx >= 0) list[idx] = entry
+  else list.unshift(entry)
+  await writeLogIndex(list)
+}
+
+// 세션 로그(.cast.jsonl)는 세션마다 하나씩 계속 쌓이므로, 보관기간과 개수 상한을 둘 다 넘는
+// 항목은 자동으로 정리한다 — 기록 중인(아직 endedAt 없는) 세션은 건드리지 않는다.
+// (평문 로그 파일은 사용자가 직접 고른 위치에 저장되므로 앱이 자동 삭제하지 않는다.)
+// 기본값은 로그뷰어에서 사용자가 조회/변경 가능(logRetentionSettingsPath 에 저장).
+const DEFAULT_LOG_RETENTION_DAYS = 30
+const DEFAULT_LOG_MAX_ENTRIES = 50
+const logRetentionSettingsPath = () => path.join(app.getPath('userData'), 'log-retention-settings.json')
+
+async function readLogRetentionSettings(): Promise<LogRetentionSettings> {
+  try {
+    const raw = JSON.parse(await readFile(logRetentionSettingsPath(), 'utf-8'))
+    const retentionDays = Number(raw.retentionDays)
+    const maxEntries = Number(raw.maxEntries)
+    return {
+      retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : DEFAULT_LOG_RETENTION_DAYS,
+      maxEntries: Number.isFinite(maxEntries) && maxEntries > 0 ? maxEntries : DEFAULT_LOG_MAX_ENTRIES,
+    }
+  } catch {
+    return { retentionDays: DEFAULT_LOG_RETENTION_DAYS, maxEntries: DEFAULT_LOG_MAX_ENTRIES }
+  }
+}
+async function writeLogRetentionSettings(settings: LogRetentionSettings): Promise<void> {
+  await writeFile(logRetentionSettingsPath(), JSON.stringify(settings, null, 2), 'utf-8')
+}
+
+ipcMain.handle('logs:getRetentionSettings', () => readLogRetentionSettings())
+ipcMain.handle('logs:setRetentionSettings', async (_evt, settings: LogRetentionSettings) => {
+  const clamped: LogRetentionSettings = {
+    retentionDays: Math.max(1, Math.round(settings.retentionDays)),
+    maxEntries: Math.max(1, Math.round(settings.maxEntries)),
+  }
+  await writeLogRetentionSettings(clamped)
+  await trimSessionLogs()
+  return clamped
 })
 
+async function trimSessionLogs(): Promise<void> {
+  const { retentionDays, maxEntries } = await readLogRetentionSettings()
+  const list = await readLogIndex()
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+  const active = list.filter((e) => !e.endedAt)
+  const finished = [...list.filter((e) => e.endedAt)].sort((a, b) => b.startedAt - a.startedAt)
+  const kept: LogIndexEntry[] = []
+  const dropped: LogIndexEntry[] = []
+  finished.forEach((e, idx) => {
+    if (idx < maxEntries && e.startedAt >= cutoff) kept.push(e)
+    else dropped.push(e)
+  })
+  if (!dropped.length) return
+  await Promise.all(dropped.map((e) => unlink(e.castPath).catch(() => {})))
+  await writeLogIndex([...active, ...kept])
+}
+
+/** 스트림 종료 + 인덱스에 종료시각/파일크기 반영 (best-effort, 실패해도 세션 종료를 막지 않음) */
+async function finalizeLogSession(s: Session): Promise<void> {
+  const id = s.logId
+  s.logCastStream?.end()
+  s.logCastStream = undefined
+  if (!id) return
+  try {
+    const list = await readLogIndex()
+    const entry = list.find((e) => e.id === id)
+    if (entry) {
+      entry.endedAt = Date.now()
+      try {
+        entry.sizeBytes = (await stat(entry.castPath)).size
+      } catch {
+        /* 무시 */
+      }
+      await writeLogIndex(list)
+    }
+  } catch {
+    /* 무시 */
+  }
+  void trimSessionLogs()
+  s.logId = undefined
+  s.logStartedAt = undefined
+}
+
+// 세션 로그 기록 시작 (저장 위치 선택) — 평문 로그 + 리플레이용 타이밍 기록을 함께 시작
+ipcMain.handle(
+  'log:start',
+  async (_evt, { sessionId, host, label }: { sessionId: string; host?: string; label?: string }) => {
+    const s = getSession(sessionId)
+    if (s.logStream) return { ok: true, alreadyLogging: true }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+      defaultPath: `session-${sessionId}-${stamp}.log`,
+      title: '세션 로그 저장 위치',
+    })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      s.logStream = createWriteStream(r.filePath, { flags: 'a' })
+      s.logStream.write(`\n===== 로그 시작 ${new Date().toISOString()} =====\n`)
+
+      const id = randomUUID()
+      await mkdir(logCastDir(), { recursive: true })
+      const castPath = path.join(logCastDir(), `${id}.cast.jsonl`)
+      s.logCastStream = createWriteStream(castPath, { flags: 'a' })
+      s.logId = id
+      s.logStartedAt = Date.now()
+      await upsertLogIndex({
+        id,
+        host: host || sessionId,
+        label,
+        path: r.filePath,
+        castPath,
+        startedAt: s.logStartedAt,
+      })
+
+      return { ok: true, path: r.filePath }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+)
+
 // 세션 로그 기록 중지
-ipcMain.handle('log:stop', (_evt, { sessionId }: { sessionId: string }) => {
+ipcMain.handle('log:stop', async (_evt, { sessionId }: { sessionId: string }) => {
   const s = getSession(sessionId)
   if (s.logStream) {
     try {
@@ -487,6 +632,65 @@ ipcMain.handle('log:stop', (_evt, { sessionId }: { sessionId: string }) => {
     }
     s.logStream = undefined
   }
+  await finalizeLogSession(s)
+  return { ok: true }
+})
+
+// 저장된 세션 로그 목록 (최신순)
+ipcMain.handle('logs:list', async () => {
+  const list = await readLogIndex()
+  return [...list].sort((a, b) => b.startedAt - a.startedAt)
+})
+
+// 평문 로그 내용 읽기 (뷰어/검색용) — 너무 크면 앞부분만 잘라 반환
+ipcMain.handle('logs:read', async (_evt, id: string) => {
+  const entry = (await readLogIndex()).find((e) => e.id === id)
+  if (!entry) return { ok: false, error: '로그를 찾을 수 없습니다.' }
+  try {
+    const MAX = 5 * 1024 * 1024 // 5MB
+    const buf = await readFile(entry.path, 'utf-8')
+    const truncated = buf.length > MAX
+    return { ok: true, content: truncated ? buf.slice(0, MAX) : buf, truncated }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// 리플레이용 타이밍 기록(JSONL) 읽기
+ipcMain.handle('logs:readCast', async (_evt, id: string) => {
+  const entry = (await readLogIndex()).find((e) => e.id === id)
+  if (!entry) return { ok: false, error: '로그를 찾을 수 없습니다.' }
+  try {
+    const raw = await readFile(entry.castPath, 'utf-8')
+    const frames = raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as { t: number; d: string }
+        } catch {
+          return null
+        }
+      })
+      .filter((f): f is { t: number; d: string } => f !== null)
+    return { ok: true, frames }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// 세션 로그 삭제 (인덱스 + 리플레이 기록 파일. 사용자가 고른 평문 로그 원본은 남겨둠)
+ipcMain.handle('logs:delete', async (_evt, id: string) => {
+  const list = await readLogIndex()
+  const entry = list.find((e) => e.id === id)
+  if (entry) {
+    try {
+      await unlink(entry.castPath)
+    } catch {
+      /* 무시 */
+    }
+  }
+  await writeLogIndex(list.filter((e) => e.id !== id))
   return { ok: true }
 })
 
@@ -547,6 +751,7 @@ ipcMain.on('session:close', (_evt, sessionId: string) => {
     /* 무시 */
   }
   s.logStream = undefined
+  void finalizeLogSession(s)
   cleanupConnection(s)
   killLocalShell(s)
   sessions.delete(sessionId)
@@ -705,6 +910,32 @@ ipcMain.handle(
   },
 )
 
+// 분석 리포트를 PDF로 저장 — 렌더러가 만든 정적 HTML을 숨김 창에 로드 후 printToPDF (새 의존성 불필요)
+ipcMain.handle(
+  'report:savePdf',
+  async (_evt, payload: { html: string; defaultName: string }) => {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '분석 리포트 PDF로 저장',
+      defaultPath: payload.defaultName,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    })
+    if (result.canceled || !result.filePath) {
+      return { saved: false }
+    }
+    const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true } })
+    try {
+      await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(payload.html))
+      const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' })
+      await writeFile(result.filePath, pdf)
+      return { saved: true, path: result.filePath }
+    } catch (err) {
+      return { saved: false, error: err instanceof Error ? err.message : String(err) }
+    } finally {
+      win.destroy()
+    }
+  },
+)
+
 // 링크를 기본 브라우저로 열기 (앱 창 네비게이션 방지)
 ipcMain.on('shell:openExternal', (_evt, url: string) => {
   if (/^https?:\/\//i.test(url)) shell.openExternal(url)
@@ -760,6 +991,167 @@ async function readProfiles(): Promise<SavedProfile[]> {
 
 async function writeProfiles(list: SavedProfile[]): Promise<void> {
   await writeFile(profilesPath(), encryptStr(JSON.stringify(list)), 'utf-8')
+}
+
+// ── 프로필 가져오기(CSV/JSON) ────────────────────────────────────
+//  - 업로드된 파일은 메모리에서만 파싱하며 어디에도 복사/로그하지 않는다.
+//  - 결과로 반환되는 오류/경고 메시지에는 값이 아닌 필드명/행 번호만 담는다.
+
+/** RFC4180 스타일 CSV 파서. 따옴표로 감싼 필드 내 콤마·줄바꿈·이스케이프된 큰따옴표("")를 지원 */
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  let i = 0
+  const pushField = () => {
+    row.push(field)
+    field = ''
+  }
+  const pushRow = () => {
+    pushField()
+    rows.push(row)
+    row = []
+  }
+  while (i < text.length) {
+    const c = text[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"'
+          i += 2
+          continue
+        }
+        inQuotes = false
+        i++
+        continue
+      }
+      field += c
+      i++
+      continue
+    }
+    if (c === '"') {
+      inQuotes = true
+      i++
+      continue
+    }
+    if (c === ',') {
+      pushField()
+      i++
+      continue
+    }
+    if (c === '\r') {
+      i++
+      continue
+    }
+    if (c === '\n') {
+      pushRow()
+      i++
+      continue
+    }
+    field += c
+    i++
+  }
+  if (field.length > 0 || row.length > 0) pushRow()
+  return rows.filter((r) => !(r.length === 1 && r[0] === ''))
+}
+
+/** CSV 헤더 + 한 행을 소문자 컬럼명 → 값 레코드로 변환 (컬럼 순서 무관) */
+function csvRecordFromRow(header: string[], row: string[]): Record<string, string> {
+  const rec: Record<string, string> = {}
+  header.forEach((h, idx) => {
+    const key = h.trim().toLowerCase()
+    if (key) rec[key] = (row[idx] ?? '').trim()
+  })
+  return rec
+}
+
+/**
+ * CSV/JSON 공통 검증·보정 — 필수 필드(host/port/username) 누락 시 error 반환.
+ * authMethod 가 없거나 유효하지 않으면 privateKey/password 유무로 추론한다.
+ */
+function normalizeImportedProfile(
+  raw: Record<string, unknown>,
+  rowLabel: string,
+): { profile?: SavedProfile; error?: string } {
+  const host = typeof raw.host === 'string' ? raw.host.trim() : ''
+  const port = raw.port === undefined || raw.port === null ? '' : String(raw.port).trim()
+  const username = typeof raw.username === 'string' ? raw.username.trim() : ''
+  if (!host || !port || !username) {
+    return { error: `${rowLabel}: host/port/username 중 누락된 값이 있습니다.` }
+  }
+  const password = typeof raw.password === 'string' ? raw.password : ''
+  const privateKey = typeof raw.privateKey === 'string' ? raw.privateKey : ''
+  let authMethod = raw.authMethod
+  if (authMethod !== 'password' && authMethod !== 'key' && authMethod !== 'agent') {
+    authMethod = privateKey ? 'key' : password ? 'password' : 'agent'
+  }
+  const profile: SavedProfile = {
+    host,
+    port,
+    username,
+    authMethod: authMethod as SavedProfile['authMethod'],
+    password,
+    privateKey,
+    passphrase: typeof raw.passphrase === 'string' ? raw.passphrase : '',
+    label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined,
+    group: typeof raw.group === 'string' && raw.group.trim() ? raw.group.trim() : undefined,
+    startup: typeof raw.startup === 'string' && raw.startup ? raw.startup : undefined,
+    color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : undefined,
+    jump: raw.jump && typeof raw.jump === 'object' ? (raw.jump as SavedProfile['jump']) : undefined,
+  }
+  return { profile }
+}
+
+/** CSV 전용: keyPath 컬럼이 있으면 파일을 읽어 privateKey 로 채운다 (읽기 실패는 경고로만 처리) */
+async function csvRowToProfile(
+  rec: Record<string, string>,
+  rowLabel: string,
+): Promise<{ profile?: SavedProfile; error?: string; warning?: string }> {
+  let privateKey = ''
+  let warning: string | undefined
+  // 앱이 내보낸 CSV 는 키 내용이 privateKey 컬럼에 그대로 들어있음 — 파일 경로(keyPath)보다 우선
+  if (rec['privatekey']) {
+    privateKey = rec['privatekey']
+  } else {
+    const keyPath = rec['keypath']
+    if (keyPath) {
+      try {
+        privateKey = await readFile(keyPath, 'utf-8')
+      } catch {
+        warning = `${rowLabel}: 키 파일을 읽을 수 없습니다 (${keyPath}) — 개인키 없이 가져왔습니다.`
+      }
+    }
+  }
+  const { profile, error } = normalizeImportedProfile(
+    {
+      host: rec['host'],
+      port: rec['port'],
+      username: rec['username'],
+      authMethod: rec['authmethod'],
+      password: rec['password'],
+      privateKey,
+      passphrase: rec['passphrase'],
+      label: rec['label'],
+      group: rec['group'],
+      startup: rec['startup'],
+      color: rec['color'],
+    },
+    rowLabel,
+  )
+  return { profile, error, warning }
+}
+
+/** JSON 전용: 원소가 SavedProfile 필드와 1:1 대응한다고 가정, port 숫자값만 문자열로 보정 */
+function jsonElementToProfile(raw: unknown, rowLabel: string): { profile?: SavedProfile; error?: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: `${rowLabel}: 객체가 아닙니다.` }
+  }
+  const r = raw as Record<string, unknown>
+  return normalizeImportedProfile(
+    { ...r, port: r.port === undefined || r.port === null ? '' : String(r.port) },
+    rowLabel,
+  )
 }
 
 // 시스템 클립보드 텍스트 읽기 (터미널 Ctrl+V 붙여넣기용)
@@ -830,6 +1222,50 @@ async function getDirRecursive(sftp: SFTPWrapper, remote: string, localDir: stri
   }
 }
 
+// 로컬 디렉토리 재귀 업로드 (로컬 → 원격) — 원격에 같은 이름의 하위 트리를 그대로 재현
+async function putDirRecursive(sftp: SFTPWrapper, localDir: string, remoteDir: string, sessionId: string) {
+  await new Promise<void>((res) => sftp.mkdir(remoteDir, () => res())) // 이미 있으면 실패하지만 best-effort 로 무시
+  for (const ent of await readdir(localDir, { withFileTypes: true })) {
+    const lp = path.join(localDir, ent.name)
+    const rp = rjoin(remoteDir, ent.name)
+    if (ent.isDirectory()) await putDirRecursive(sftp, lp, rp, sessionId)
+    else if (ent.isFile())
+      await new Promise<void>((res, rej) =>
+        sftp.fastPut(lp, rp, { step: (t, _c, tot) => sendProgress(sessionId, ent.name, t, tot) }, (e) =>
+          e ? rej(e) : res(),
+        ),
+      )
+  }
+}
+
+// 로컬 파일 탐색기(듀얼패인 좌측) — 지정 경로 목록, 없으면 홈 디렉토리
+ipcMain.handle('local:list', async (_evt, { path: dirPath }: { path?: string }) => {
+  try {
+    const cwd = dirPath && dirPath.length ? dirPath : os.homedir()
+    const list = await readdir(cwd, { withFileTypes: true })
+    const entries = await Promise.all(
+      list.map(async (ent) => {
+        const full = path.join(cwd, ent.name)
+        const type = ent.isDirectory() ? ('dir' as const) : ent.isSymbolicLink() ? ('link' as const) : ('file' as const)
+        try {
+          const st = await stat(full)
+          return { name: ent.name, path: full, type, size: st.size, mtime: Math.floor(st.mtimeMs / 1000) }
+        } catch {
+          return { name: ent.name, path: full, type, size: 0, mtime: 0 }
+        }
+      }),
+    )
+    entries.sort((a, b) => {
+      if (a.type === 'dir' && b.type !== 'dir') return -1
+      if (a.type !== 'dir' && b.type === 'dir') return 1
+      return a.name.localeCompare(b.name)
+    })
+    return { ok: true, path: cwd, parent: path.dirname(cwd), entries }
+  } catch (e) {
+    return { ok: false, error: errMsg(e) }
+  }
+})
+
 // 디렉토리 목록 (path 없으면 홈으로)
 ipcMain.handle('sftp:list', async (_evt, { sessionId, path: dirPath }: { sessionId: string; path?: string }) => {
   const s = getSession(sessionId)
@@ -861,6 +1297,59 @@ ipcMain.handle('sftp:list', async (_evt, { sessionId, path: dirPath }: { session
     return { ok: false, error: errMsg(e) }
   }
 })
+
+// 원격 디렉토리 트리 전체에서 파일명 재귀 검색(대소문자 무시 부분일치) — 너무 커지면 멈추도록
+// 스캔 개수/결과 개수 모두 상한을 둔다. 권한 없어 못 여는 하위 폴더는 건너뛰고 계속 진행.
+const SFTP_SEARCH_SCAN_LIMIT = 20000
+const SFTP_SEARCH_MAX_RESULTS = 500
+ipcMain.handle(
+  'sftp:search',
+  async (_evt, { sessionId, root, query }: { sessionId: string; root: string; query: string }) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    const q = query.trim().toLowerCase()
+    if (!q) return { ok: true, results: [], truncated: false }
+    try {
+      const sftp = await getSftp(s)
+      const results: { path: string; name: string; type: 'dir' | 'file' | 'link' }[] = []
+      let scanned = 0
+      let truncated = false
+      const walk = async (dir: string): Promise<void> => {
+        if (truncated) return
+        let entries: import('ssh2').FileEntry[]
+        try {
+          entries = await sftpReaddir(sftp, dir)
+        } catch {
+          return // 권한 없음 등은 건너뜀
+        }
+        for (const it of entries) {
+          if (truncated) return
+          if (it.filename === '.' || it.filename === '..') continue
+          scanned++
+          if (scanned > SFTP_SEARCH_SCAN_LIMIT) {
+            truncated = true
+            return
+          }
+          const lead = it.longname?.[0]
+          const type = lead === 'd' ? ('dir' as const) : lead === 'l' ? ('link' as const) : ('file' as const)
+          const full = rjoin(dir, it.filename)
+          if (it.filename.toLowerCase().includes(q)) {
+            results.push({ path: full, name: it.filename, type })
+            if (results.length >= SFTP_SEARCH_MAX_RESULTS) {
+              truncated = true
+              return
+            }
+          }
+          if (type === 'dir') await walk(full)
+        }
+      }
+      await walk(root)
+      return { ok: true, results, truncated }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
 
 // 파일 다운로드 (원격 → 로컬, 저장 위치 선택)
 ipcMain.handle(
@@ -933,19 +1422,133 @@ ipcMain.handle(
       const uploaded: string[] = []
       for (const lp of paths) {
         const base = lp.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'file'
-        await new Promise<void>((res, rej) =>
-          sftp.fastPut(
-            lp,
-            rjoin(remoteDir, base),
-            { step: (t, _c, tot) => sendProgress(sessionId, base, t, tot) },
-            (e) => (e ? rej(e) : res()),
-          ),
-        )
+        const st = await stat(lp)
+        if (st.isDirectory()) await putDirRecursive(sftp, lp, rjoin(remoteDir, base), sessionId)
+        else
+          await new Promise<void>((res, rej) =>
+            sftp.fastPut(
+              lp,
+              rjoin(remoteDir, base),
+              { step: (t, _c, tot) => sendProgress(sessionId, base, t, tot) },
+              (e) => (e ? rej(e) : res()),
+            ),
+          )
         uploaded.push(base)
       }
       return { ok: true, uploaded }
     } catch (e) {
       return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 다중 선택 일괄 다운로드 (원격 → 지정된 로컬 폴더, 대화상자 없음 — 듀얼패인에서 사용)
+ipcMain.handle(
+  'sftp:downloadPaths',
+  async (
+    _evt,
+    {
+      sessionId,
+      items,
+      localDir,
+    }: { sessionId: string; items: { path: string; name: string; isDir: boolean }[]; localDir: string },
+  ) => {
+    const s = getSession(sessionId)
+    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    try {
+      const sftp = await getSftp(s)
+      const downloaded: string[] = []
+      for (const it of items) {
+        const lc = path.join(localDir, it.name)
+        if (it.isDir) await getDirRecursive(sftp, it.path, lc)
+        else
+          await new Promise<void>((res, rej) =>
+            sftp.fastGet(it.path, lc, { step: (t, _c, tot) => sendProgress(sessionId, it.name, t, tot) }, (e) =>
+              e ? rej(e) : res(),
+            ),
+          )
+        downloaded.push(it.name)
+      }
+      return { ok: true, downloaded }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 다중 선택 일괄 삭제 (원격)
+ipcMain.handle(
+  'sftp:deletePaths',
+  async (_evt, { sessionId, items }: { sessionId: string; items: { path: string; isDir: boolean }[] }) => {
+    const s = getSession(sessionId)
+    try {
+      const sftp = await getSftp(s)
+      for (const it of items) await rmrf(sftp, it.path, it.isDir)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    }
+  },
+)
+
+// 세션 간(원격→원격) 직접 전송 — 진짜 SFTP-to-SFTP 스트리밍 primitive 는 없어서, OS 임시 폴더를
+// 경유해 "원본에서 다운로드 → 대상에 업로드" 두 단계로 처리한다(기존 fastGet/fastPut·재귀 함수 재사용).
+ipcMain.handle(
+  'sftp:relayTransfer',
+  async (
+    _evt,
+    {
+      fromSessionId,
+      toSessionId,
+      items,
+      toDir,
+    }: {
+      fromSessionId: string
+      toSessionId: string
+      items: { path: string; name: string; isDir: boolean }[]
+      toDir: string
+    },
+  ) => {
+    const fromS = getSession(fromSessionId)
+    const toS = getSession(toSessionId)
+    if (!fromS.client) return { ok: false, error: '원본 세션이 연결되어 있지 않습니다.' }
+    if (!toS.client) return { ok: false, error: '대상 세션이 연결되어 있지 않습니다.' }
+    const tmpRoot = path.join(os.tmpdir(), `ivk-relay-${randomUUID()}`)
+    try {
+      await mkdir(tmpRoot, { recursive: true })
+      const fromSftp = await getSftp(fromS)
+      const toSftp = await getSftp(toS)
+      const transferred: string[] = []
+      for (const it of items) {
+        const tmpLocal = path.join(tmpRoot, it.name)
+        if (it.isDir) {
+          await getDirRecursive(fromSftp, it.path, tmpLocal)
+          await putDirRecursive(toSftp, tmpLocal, rjoin(toDir, it.name), toSessionId)
+        } else {
+          await new Promise<void>((res, rej) =>
+            fromSftp.fastGet(
+              it.path,
+              tmpLocal,
+              { step: (t, _c, tot) => sendProgress(fromSessionId, `${it.name} (받는 중)`, t, tot) },
+              (e) => (e ? rej(e) : res()),
+            ),
+          )
+          await new Promise<void>((res, rej) =>
+            toSftp.fastPut(
+              tmpLocal,
+              rjoin(toDir, it.name),
+              { step: (t, _c, tot) => sendProgress(toSessionId, `${it.name} (보내는 중)`, t, tot) },
+              (e) => (e ? rej(e) : res()),
+            ),
+          )
+        }
+        transferred.push(it.name)
+      }
+      return { ok: true, transferred }
+    } catch (e) {
+      return { ok: false, error: errMsg(e) }
+    } finally {
+      rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
     }
   },
 )
@@ -1156,7 +1759,8 @@ ipcMain.handle('profiles:list', async () => readProfiles())
 // 자동 저장(연결 시)은 label/group 을 안 주므로, 기존에 지정된 값이 있으면 보존한다.
 ipcMain.handle('profiles:upsert', async (_evt, profile: SavedProfile) => {
   const all = await readProfiles()
-  const existing = all.find((p) => profileKey(p) === profileKey(profile))
+  const idx = all.findIndex((p) => profileKey(p) === profileKey(profile))
+  const existing = idx >= 0 ? all[idx] : undefined
   const merged: SavedProfile = {
     ...profile,
     label: profile.label ?? existing?.label,
@@ -1164,8 +1768,10 @@ ipcMain.handle('profiles:upsert', async (_evt, profile: SavedProfile) => {
     jump: profile.jump ?? existing?.jump,
     startup: profile.startup ?? existing?.startup,
   }
-  const list = all.filter((p) => profileKey(p) !== profileKey(profile))
-  list.unshift(merged)
+  // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
+  const list = [...all]
+  if (idx >= 0) list[idx] = merged
+  else list.unshift(merged) // 신규 프로필만 맨 앞에 추가
   await writeProfiles(list)
   return list
 })
@@ -1209,6 +1815,281 @@ ipcMain.handle('profiles:clear', async () => {
     /* 없음 */
   }
   return []
+})
+
+// ─────────────────────────────────────────────────────────────
+// 사용자 정의 프리셋 / 시나리오
+//  - 내장 PRESETS/SCENARIOS(src/presets.ts, src/scenarios.ts)는 코드에 하드코딩되어
+//    빌드 없이는 추가할 수 없음 → 런타임에 추가/편집 가능한 목록을 별도 JSON 파일로 관리하고,
+//    렌더러에서 내장 목록과 병합해 표시한다. 비밀정보가 아니므로 암호화하지 않음.
+// ─────────────────────────────────────────────────────────────
+
+const customPresetsPath = () => path.join(app.getPath('userData'), 'custom-presets.json')
+const customScenariosPath = () => path.join(app.getPath('userData'), 'custom-scenarios.json')
+
+async function readCustomPresets(): Promise<CustomPresetCommand[]> {
+  try {
+    const arr = JSON.parse(await readFile(customPresetsPath(), 'utf-8'))
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+async function writeCustomPresets(list: CustomPresetCommand[]): Promise<void> {
+  await writeFile(customPresetsPath(), JSON.stringify(list, null, 2), 'utf-8')
+}
+async function readCustomScenarios(): Promise<CustomScenario[]> {
+  try {
+    const arr = JSON.parse(await readFile(customScenariosPath(), 'utf-8'))
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+async function writeCustomScenarios(list: CustomScenario[]): Promise<void> {
+  await writeFile(customScenariosPath(), JSON.stringify(list, null, 2), 'utf-8')
+}
+
+ipcMain.handle('customPresets:list', async () => readCustomPresets())
+ipcMain.handle('customPresets:upsert', async (_evt, item: CustomPresetCommand) => {
+  const list = await readCustomPresets()
+  const isNew = !item.id || !list.some((p) => p.id === item.id)
+  // 신규 항목은 생성 시각을 기본 순서로 사용 — 내장 명령어는 배열 인덱스(작은 정수)를 암묵적
+  // 순서로 쓰므로, 훨씬 큰 타임스탬프 값이면 자연히 맨 뒤로 붙는다. 위치 이동은 order 값을
+  // 직접 지정해서 다시 upsert 하는 방식으로 처리(별도 재정렬 API 불필요).
+  const withId: CustomPresetCommand = {
+    ...item,
+    id: item.id || randomUUID(),
+    order: item.order ?? (isNew ? Date.now() : undefined),
+  }
+  const idx = list.findIndex((p) => p.id === withId.id)
+  if (idx >= 0) list[idx] = withId
+  else list.push(withId)
+  await writeCustomPresets(list)
+  return list
+})
+ipcMain.handle('customPresets:delete', async (_evt, id: string) => {
+  const list = (await readCustomPresets()).filter((p) => p.id !== id)
+  await writeCustomPresets(list)
+  return list
+})
+
+ipcMain.handle('customScenarios:list', async () => readCustomScenarios())
+ipcMain.handle('customScenarios:upsert', async (_evt, item: CustomScenario) => {
+  const list = await readCustomScenarios()
+  const isNew = !item.id || !list.some((s) => s.id === item.id)
+  const withId: CustomScenario = {
+    ...item,
+    id: item.id || randomUUID(),
+    order: item.order ?? (isNew ? Date.now() : undefined),
+  }
+  const idx = list.findIndex((s) => s.id === withId.id)
+  if (idx >= 0) list[idx] = withId
+  else list.push(withId)
+  await writeCustomScenarios(list)
+  return list
+})
+ipcMain.handle('customScenarios:delete', async (_evt, id: string) => {
+  const list = (await readCustomScenarios()).filter((s) => s.id !== id)
+  await writeCustomScenarios(list)
+  return list
+})
+
+// CSV/JSON 파일에서 세션 프로필 일괄 가져오기 — 사이드바 목록에 추가만 하며 자동 연결은 하지 않는다.
+// 기존 프로필과 host:port:username 이 겹치거나 같은 파일 내에서 중복되면 건너뛴다.
+ipcMain.handle('profiles:import', async (): Promise<ProfileImportResult> => {
+  const r = await dialog.showOpenDialog(mainWindow ?? undefined!, {
+    properties: ['openFile'],
+    title: '세션 프로필 가져오기 (CSV/JSON)',
+    filters: [{ name: 'CSV/JSON', extensions: ['csv', 'json'] }],
+  })
+  if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true }
+  const filePath = r.filePaths[0]
+
+  let text: string
+  try {
+    text = await readFile(filePath, 'utf-8')
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+
+  const errors: string[] = []
+  const warnings: string[] = []
+  const candidates: SavedProfile[] = []
+  const ext = filePath.toLowerCase().split('.').pop()
+
+  if (ext === 'json') {
+    let arr: unknown
+    try {
+      arr = JSON.parse(text)
+    } catch (e) {
+      return { ok: false, error: `JSON 파싱 실패: ${e instanceof Error ? e.message : String(e)}` }
+    }
+    if (!Array.isArray(arr)) return { ok: false, error: 'JSON 최상위 값은 배열이어야 합니다.' }
+    arr.forEach((el, idx) => {
+      const host = el && typeof el === 'object' ? (el as Record<string, unknown>).host : undefined
+      if (typeof host === 'string' && host.startsWith('#')) return // 안내용 예시 항목은 건너뜀
+      const { profile, error } = jsonElementToProfile(el, `${idx + 1}번째 항목`)
+      if (error) errors.push(error)
+      else if (profile) candidates.push(profile)
+    })
+  } else {
+    const rows = parseCSV(text)
+    if (!rows.length) return { ok: false, error: 'CSV 파일에 내용이 없습니다.' }
+    const header = rows[0]
+    for (let i = 1; i < rows.length; i++) {
+      const rowLabel = `${i + 1}행`
+      const rec = csvRecordFromRow(header, rows[i])
+      if (Object.values(rec).every((v) => !v)) continue // 완전히 빈 행은 건너뜀
+      if (rec['host']?.startsWith('#')) continue // 예시/안내 행(내보내기·템플릿에 포함)은 건너뜀
+      const { profile, error, warning } = await csvRowToProfile(rec, rowLabel)
+      if (error) errors.push(error)
+      else if (profile) candidates.push(profile)
+      if (warning) warnings.push(warning)
+    }
+  }
+
+  const existing = await readProfiles()
+  const seen = new Set(existing.map(profileKey))
+  const added: SavedProfile[] = []
+  let skippedCount = 0
+  for (const profile of candidates) {
+    const key = profileKey(profile)
+    if (seen.has(key)) {
+      skippedCount++
+      continue
+    }
+    seen.add(key)
+    added.push(profile)
+  }
+
+  const list = added.length ? [...existing, ...added] : existing
+  if (added.length) await writeProfiles(list)
+
+  return {
+    ok: true,
+    addedCount: added.length,
+    skippedCount,
+    errorCount: errors.length,
+    warnings,
+    errors,
+    list,
+  }
+})
+
+const CSV_IMPORT_TEMPLATE =
+  'host,port,username,authMethod,password,keyPath,label,group\n' +
+  '#예시,22(기본 SSH 포트),접속계정,password 또는 key,password 방식이면 비밀번호 입력,key 방식이면 개인키 "파일 경로" 입력,화면에 표시할 별칭(선택),묶어볼 그룹명(선택)\n' +
+  '203.0.113.10,22,admin,password,mypassword,,Node1,Prod\n' +
+  '203.0.113.11,22,deploy,key,,C:\\Users\\me\\.ssh\\id_rsa,Node2,Prod\n'
+
+// host 가 '#' 로 시작하는 항목은 안내용 예시일 뿐이며 CSV/JSON 가져오기 시 자동으로 건너뛴다.
+const JSON_GUIDE_ENTRY = {
+  host: '#예시 — 실제로 가져오지 않음',
+  port: '22 (기본 SSH 포트)',
+  username: '접속계정',
+  authMethod: 'password 또는 key 또는 agent',
+  password: 'password 방식이면 비밀번호',
+  privateKey: 'key 방식이면 개인키 전체 내용',
+  passphrase: '개인키 암호(선택)',
+  label: '화면에 표시할 별칭(선택)',
+  group: '묶어볼 그룹명(선택)',
+  startup: '접속 후 자동 실행할 명령어(선택)',
+  color: '태그 색상 hex 예: #22c55e(선택)',
+}
+
+const JSON_IMPORT_TEMPLATE = JSON.stringify(
+  [
+    JSON_GUIDE_ENTRY,
+    {
+      host: '203.0.113.10',
+      port: '22',
+      username: 'admin',
+      authMethod: 'password',
+      password: 'mypassword',
+      label: 'Node1',
+      group: 'Prod',
+    },
+    {
+      host: '203.0.113.11',
+      port: '22',
+      username: 'deploy',
+      authMethod: 'password',
+      password: 'mypassword2',
+      label: 'Node2',
+      group: 'Prod',
+    },
+  ],
+  null,
+  2,
+)
+
+// 엑셀은 BOM 없는 UTF-8 텍스트를 시스템 로케일(한글 Windows는 CP949)로 오인해 한글을 깨뜨리므로 BOM을 붙인다.
+const BOM = '﻿'
+
+// 가져오기 양식 예시 파일 저장 (사용자가 업로드 전에 형식을 확인/채워넣을 수 있도록)
+ipcMain.handle('profiles:saveTemplate', async (_evt, format: 'csv' | 'json') => {
+  const isCsv = format === 'csv'
+  const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+    title: '세션 프로필 가져오기 템플릿 저장',
+    defaultPath: isCsv ? 'session-profiles-template.csv' : 'session-profiles-template.json',
+    filters: [{ name: isCsv ? 'CSV' : 'JSON', extensions: [isCsv ? 'csv' : 'json'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    await writeFile(r.filePath, BOM + (isCsv ? CSV_IMPORT_TEMPLATE : JSON_IMPORT_TEMPLATE), 'utf-8')
+    return { saved: true, path: r.filePath }
+  } catch (e) {
+    return { saved: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+/** RFC4180 스타일 CSV 필드 이스케이프 — 콤마/줄바꿈/큰따옴표 포함 시 따옴표로 감싸고 내부 따옴표는 중복 */
+function csvEscape(v: string): string {
+  if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"'
+  return v
+}
+
+// 현재 저장된 전체 프로필을 CSV/JSON 으로 내보내기 — 가져오기와 동일한 컬럼 구조라 다시 가져올 수 있음.
+// 개인키/비밀번호가 평문으로 포함되므로 파일 취급에 주의하라고 렌더러에서 안내한다.
+ipcMain.handle('profiles:export', async (_evt, format: 'csv' | 'json') => {
+  const isCsv = format === 'csv'
+  const stamp = new Date().toISOString().slice(0, 10)
+  const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+    title: '세션 프로필 내보내기',
+    defaultPath: isCsv ? `session-profiles-${stamp}.csv` : `session-profiles-${stamp}.json`,
+    filters: [{ name: isCsv ? 'CSV' : 'JSON', extensions: [isCsv ? 'csv' : 'json'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    const list = await readProfiles()
+    if (isCsv) {
+      const header = ['host', 'port', 'username', 'authMethod', 'password', 'privateKey', 'passphrase', 'label', 'group', 'startup', 'color']
+      // 각 컬럼에 어떤 값을 넣는지 보여주는 안내 행 — host 가 '#' 로 시작하면 가져오기 시 건너뛴다.
+      const guideRow = [
+        '#예시',
+        '22(기본 SSH 포트)',
+        '접속계정',
+        'password 또는 key 또는 agent',
+        'password 방식이면 비밀번호',
+        'key 방식이면 개인키 전체 내용',
+        '개인키 암호(선택)',
+        '화면에 표시할 별칭(선택)',
+        '묶어볼 그룹명(선택)',
+        '접속 후 자동 실행할 명령어(선택)',
+        '태그 색상 hex 예: #22c55e(선택)',
+      ].map(csvEscape)
+      const rows = list.map((p) =>
+        header.map((h) => csvEscape(String((p as unknown as Record<string, unknown>)[h] ?? ''))).join(','),
+      )
+      await writeFile(r.filePath, BOM + [header.join(','), guideRow.join(','), ...rows].join('\n') + '\n', 'utf-8')
+    } else {
+      await writeFile(r.filePath, BOM + JSON.stringify([JSON_GUIDE_ENTRY, ...list], null, 2), 'utf-8')
+    }
+    return { saved: true, path: r.filePath, count: list.length }
+  } catch (e) {
+    return { saved: false, error: e instanceof Error ? e.message : String(e) }
+  }
 })
 
 // ─────────────────────────────────────────────────────────────
@@ -1480,6 +2361,97 @@ async function execEscalatedNoStdin(
   return { ok: false, err: lastErr || '권한 부족' }
 }
 
+// ── 실시간 로그 뷰어 (tail -f) ──────────────────────────────────
+// 일반 exec(execCapture)는 종료(close)돼야 resolve 되므로 tail -f 처럼 끝나지 않는 명령엔 못 쓴다.
+// 채널을 계속 열어두고 데이터가 올 때마다 logtail:data 이벤트로 흘려보내는 전용 스트리밍 실행기.
+ipcMain.handle(
+  'logtail:start',
+  async (
+    _evt,
+    { sessionId, path: filePath, sudoPassword }: { sessionId: string; path: string; sudoPassword?: string },
+  ) => {
+    const s = getSession(sessionId)
+    const client = s.client
+    if (!client) return { ok: false, error: '연결되어 있지 않습니다.' }
+    // 같은 세션에서 이전에 보던 tail 이 있으면 먼저 정리(세션당 하나만 유지)
+    if (s.logTailStream) {
+      try {
+        s.logTailStream.close()
+      } catch {
+        /* 무시 */
+      }
+      s.logTailStream = undefined
+      s.logTailId = undefined
+    }
+    const tailId = randomUUID()
+    const q = shQuote(filePath)
+    const usePty = !!sudoPassword
+    const cmd = usePty ? `sudo -S -p '' tail -f -n 200 ${q}` : `tail -f -n 200 ${q}`
+
+    return new Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }>((resolve) => {
+      const onStream = (err: Error | undefined, stream: ClientChannel) => {
+        if (err) return resolve({ ok: false, error: err.message })
+        let earlyText = '' // 시작 후 잠깐(grace) 동안의 출력 — 즉시 실패(권한없음/파일없음) 판별용
+        let settled = false
+        const forward = (data: string) => {
+          mainWindow?.webContents.send('logtail:data', { sessionId, tailId, data })
+        }
+        stream.on('data', (d: Buffer) => {
+          const text = d.toString('utf-8')
+          if (!settled) earlyText += text
+          else forward(text)
+        })
+        if (!usePty) {
+          // PTY 모드는 stdout/stderr 가 한 스트림으로 합쳐지므로 별도 처리 불필요
+          stream.stderr.on('data', (d: Buffer) => {
+            const text = d.toString('utf-8')
+            if (!settled) earlyText += text
+            else forward(text)
+          })
+        }
+        stream.on('close', () => {
+          if (s.logTailStream === stream) {
+            s.logTailStream = undefined
+            s.logTailId = undefined
+          }
+          if (!settled) {
+            settled = true
+            if (/permission denied/i.test(earlyText)) resolve({ ok: false, needSudoPassword: true })
+            else resolve({ ok: false, error: earlyText.trim() || '로그 스트림이 즉시 종료되었습니다.' })
+            return
+          }
+          mainWindow?.webContents.send('logtail:closed', { sessionId, tailId })
+        })
+        // grace 기간 동안 안 죽고 살아있으면 정상적으로 흐르고 있는 것으로 간주
+        setTimeout(() => {
+          if (settled) return
+          settled = true
+          s.logTailStream = stream
+          s.logTailId = tailId
+          if (earlyText) forward(earlyText) // 오류가 아니었으므로 grace 기간 중 출력도 그대로 전달
+          resolve({ ok: true, tailId })
+        }, 700)
+      }
+      if (usePty) client.exec(cmd, { pty: true }, onStream)
+      else client.exec(cmd, onStream)
+    })
+  },
+)
+
+ipcMain.handle('logtail:stop', async (_evt, { sessionId }: { sessionId: string }) => {
+  const s = getSession(sessionId)
+  if (s.logTailStream) {
+    try {
+      s.logTailStream.close()
+    } catch {
+      /* 무시 */
+    }
+    s.logTailStream = undefined
+    s.logTailId = undefined
+  }
+  return { ok: true }
+})
+
 // 설정파일 백업을 모으는 고정 베이스 경로 (원본 디렉토리를 더럽히지 않도록 분리).
 // 이 아래에 원본 경로 구조를 그대로 미러링해 저장한다. (변경하려면 이 값만 수정)
 const BACKUP_BASE = '/var/tmp/ivk-backups'
@@ -1630,6 +2602,72 @@ function getMonitor(id: string): MonitorState {
   return m
 }
 
+// ── 모니터링 이력 장기 보관 (앱 로컬) ──────────────────────────
+// 서버 데몬은 최근 1시간치만 들고 있어(READ_LINES 제한), 그 이상의 추세 비교를 위해
+// 앱이 호스트별로 수신한 샘플을 로컬 JSONL 로 누적 저장한다. 파일이 무한정 커지지
+// 않도록 일정 주기마다 보관기간(7일)이 지난 샘플을 잘라낸다.
+const METRICS_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const metricsHistoryDir = () => path.join(app.getPath('userData'), 'metrics-history')
+const sanitizeHost = (host: string) => host.replace(/[^a-zA-Z0-9.-]/g, '_')
+const metricsHistoryPath = (host: string) => path.join(metricsHistoryDir(), `${sanitizeHost(host)}.jsonl`)
+const historyAppendCounts = new Map<string, number>()
+
+async function trimMetricsHistory(host: string): Promise<void> {
+  const p = metricsHistoryPath(host)
+  try {
+    const raw = await readFile(p, 'utf-8')
+    const cutoff = (Date.now() - METRICS_HISTORY_RETENTION_MS) / 1000
+    const kept = raw
+      .split('\n')
+      .filter(Boolean)
+      .filter((line) => {
+        try {
+          return (JSON.parse(line) as MetricSample).ts >= cutoff
+        } catch {
+          return false
+        }
+      })
+    await writeFile(p, kept.length ? kept.join('\n') + '\n' : '', 'utf-8')
+  } catch {
+    /* 파일 없음 등은 무시 */
+  }
+}
+
+/** 실패해도 실시간 모니터링에 영향 없도록 best-effort 로 로컬 이력에 추가 */
+async function appendMetricsHistory(sample: MetricSample): Promise<void> {
+  try {
+    await mkdir(metricsHistoryDir(), { recursive: true })
+    await appendFile(metricsHistoryPath(sample.host), JSON.stringify(sample) + '\n', 'utf-8')
+    const n = (historyAppendCounts.get(sample.host) ?? 0) + 1
+    historyAppendCounts.set(sample.host, n)
+    if (n % 200 === 0) await trimMetricsHistory(sample.host)
+  } catch {
+    /* 무시 */
+  }
+}
+
+// 호스트의 로컬 저장 이력 조회 (기간 지정, ms) — Dashboard 의 6h/24h/7d 범위 선택용
+ipcMain.handle('monitor:history', async (_evt, { host, sinceMs }: { host: string; sinceMs: number }) => {
+  try {
+    const raw = await readFile(metricsHistoryPath(host), 'utf-8')
+    const cutoff = sinceMs / 1000
+    const samples = raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as MetricSample
+        } catch {
+          return null
+        }
+      })
+      .filter((s): s is MetricSample => s !== null && s.ts >= cutoff)
+    return { ok: true, samples }
+  } catch {
+    return { ok: true, samples: [] as MetricSample[] }
+  }
+})
+
 // 앱 종료 시 서버 데몬을 kill 할지 여부 (렌더러 설정 → 종료 핸들러에서 사용)
 let killDaemonOnExit = false
 
@@ -1696,6 +2734,7 @@ async function readNewSamples(sessionId: string) {
       if (sample.ts > m.lastTs) {
         m.lastTs = sample.ts
         mainWindow?.webContents.send('monitor:sample', { sessionId, sample })
+        void appendMetricsHistory(sample)
       }
     }
   } catch (e) {
@@ -1754,6 +2793,33 @@ ipcMain.handle('monitor:stop', async (_evt, { sessionId }: { sessionId: string }
   return { ok: true }
 })
 
+// 전체 프로세스 목록(온디맨드) — 상시 데몬(top-10 폴링)과 무관하게, 사용자가 프로세스 뷰를
+// 열었을 때만 한 번 더 fresh 하게 조회한다. 상시 오버헤드를 늘리지 않기 위해 폴링 주기에는 넣지 않음.
+ipcMain.handle('monitor:listProcesses', async (_evt, { sessionId }: { sessionId: string }) => {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+  try {
+    // comm 대신 args 로 전체 명령행까지 확보 — 마지막 필드라 공백 포함해도 split 개수만 맞춰주면 됨
+    const r = await execCapture(
+      client,
+      `ps -eo pid=,comm=,pcpu=,pmem=,args= --sort=-%cpu 2>/dev/null | head -n 300`,
+    )
+    const procs = r.out
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const m = line.match(/^(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(.*)$/)
+        if (!m) return null
+        return { pid: Number(m[1]), name: m[2], cpu: Number(m[3]), mem: Number(m[4]), command: m[5] }
+      })
+      .filter((p): p is { pid: number; name: string; cpu: number; mem: number; command: string } => !!p)
+    return { ok: true, procs }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+})
+
 // 특정 프로세스 kill (SIGTERM → 실패 시 SIGKILL)
 ipcMain.handle(
   'monitor:killProc',
@@ -1784,6 +2850,7 @@ ipcMain.on('monitor:setKillOnExit', (_evt, value: boolean) => {
 // ── 앱 라이프사이클 ────────────────────────────────────────────
 app.whenReady().then(() => {
   createWindow()
+  void trimSessionLogs()
   // 패키징된 빌드에서만 자동 업데이트 확인 (GitHub Releases 의 latest.yml 기준)
   if (app.isPackaged) {
     import('electron-updater')
