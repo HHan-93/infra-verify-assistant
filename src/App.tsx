@@ -639,12 +639,14 @@ export default function App() {
     }
   }
 
-  // 사이드바 등록/편집 저장 (키가 바뀌면 기존 항목 삭제 후 갱신)
+  // 사이드바 등록/편집 저장 (키가 바뀌면 기존 항목 삭제 후 갱신).
+  // preserveMeta:false — 이 경로는 사용자가 편집 폼에서 값을 직접 채우거나 지운 결과이므로,
+  // (SSHForm 자동저장과 달리) 별칭/폴더/자동실행/점프호스트를 비웠으면 그대로 비워서 저장해야 한다.
   const saveProfile = async (p: SavedProfile, originalKey?: string) => {
     if (originalKey && originalKey !== profileKey(p)) {
       await window.electronAPI.profilesDelete(originalKey)
     }
-    setProfiles(await window.electronAPI.profilesUpsert(p))
+    setProfiles(await window.electronAPI.profilesUpsert(p, { preserveMeta: false }))
   }
 
   const deleteProfile = async (p: SavedProfile) => {

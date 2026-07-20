@@ -182,8 +182,8 @@ const electronAPI = {
 
   // ── SSH 접속 기록(프로필) 관리 — 암호화 저장 ─────────────────
   profilesList: (): Promise<SavedProfile[]> => ipcRenderer.invoke('profiles:list'),
-  profilesUpsert: (profile: SavedProfile): Promise<SavedProfile[]> =>
-    ipcRenderer.invoke('profiles:upsert', profile),
+  profilesUpsert: (profile: SavedProfile, opts?: { preserveMeta?: boolean }): Promise<SavedProfile[]> =>
+    ipcRenderer.invoke('profiles:upsert', profile, opts),
   profilesDelete: (key: string): Promise<SavedProfile[]> =>
     ipcRenderer.invoke('profiles:delete', key),
   profilesClear: (): Promise<SavedProfile[]> => ipcRenderer.invoke('profiles:clear'),

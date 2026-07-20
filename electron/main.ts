@@ -1756,25 +1756,33 @@ ipcMain.handle(
 ipcMain.handle('profiles:list', async () => readProfiles())
 
 // 프로필 추가/갱신 (최근 사용을 맨 앞으로).
-// 자동 저장(연결 시)은 label/group 을 안 주므로, 기존에 지정된 값이 있으면 보존한다.
-ipcMain.handle('profiles:upsert', async (_evt, profile: SavedProfile) => {
-  const all = await readProfiles()
-  const idx = all.findIndex((p) => profileKey(p) === profileKey(profile))
-  const existing = idx >= 0 ? all[idx] : undefined
-  const merged: SavedProfile = {
-    ...profile,
-    label: profile.label ?? existing?.label,
-    group: profile.group ?? existing?.group,
-    jump: profile.jump ?? existing?.jump,
-    startup: profile.startup ?? existing?.startup,
-  }
-  // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
-  const list = [...all]
-  if (idx >= 0) list[idx] = merged
-  else list.unshift(merged) // 신규 프로필만 맨 앞에 추가
-  await writeProfiles(list)
-  return list
-})
+// 자동 저장(연결 시 SSHForm)은 label/group/jump/startup 을 안 주므로, 기존에 지정된
+// 값이 있으면 보존한다(preserveMeta, 기본값 true). 반면 사이드바 편집 모달의 명시적
+// 저장은 preserveMeta:false 로 호출해, 사용자가 필드를 일부러 비웠을 때 그대로 반영한다.
+ipcMain.handle(
+  'profiles:upsert',
+  async (_evt, profile: SavedProfile, opts?: { preserveMeta?: boolean }) => {
+    const preserveMeta = opts?.preserveMeta ?? true
+    const all = await readProfiles()
+    const idx = all.findIndex((p) => profileKey(p) === profileKey(profile))
+    const existing = idx >= 0 ? all[idx] : undefined
+    const merged: SavedProfile = preserveMeta
+      ? {
+          ...profile,
+          label: profile.label ?? existing?.label,
+          group: profile.group ?? existing?.group,
+          jump: profile.jump ?? existing?.jump,
+          startup: profile.startup ?? existing?.startup,
+        }
+      : { ...profile }
+    // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
+    const list = [...all]
+    if (idx >= 0) list[idx] = merged
+    else list.unshift(merged) // 신규 프로필만 맨 앞에 추가
+    await writeProfiles(list)
+    return list
+  },
+)
 
 // 특정 프로필 삭제 (key = host:port:username)
 ipcMain.handle('profiles:delete', async (_evt, key: string) => {
