@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Minus, Radio, Copy, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Minus, Radio, Copy, ChevronLeft, ChevronRight, XCircle } from 'lucide-react'
 
 export interface TabInfo {
   id: string
@@ -22,6 +22,8 @@ interface TabBarProps {
   onSelect: (id: string) => void
   onAdd: () => void
   onClose: (id: string) => void
+  /** 모든 탭 한 번에 닫기 (확인은 App 쪽에서 처리) */
+  onCloseAll: () => void
   /** 탭 이름 변경 */
   onRename: (id: string, title: string) => void
   /** 탭 순서 변경 (from 을 to 위치로) */
@@ -46,6 +48,8 @@ interface TabBarProps {
   /** 분할 동시 입력(브로드캐스트) 토글 — 분할 모드에서만 노출 */
   broadcast: boolean
   onToggleBroadcast: () => void
+  /** 세션 로그 기록 중인 탭 id 집합 — 활성 탭이 아니어도 기록 중임을 표시하기 위함 */
+  loggingIds: Set<string>
 }
 
 /** 상태별 점 색상 — 연결됨(초록)/연결중(노랑)/오류(빨강)/로컬·미연결(회색) */
@@ -88,6 +92,7 @@ export default function TabBar({
   onSelect,
   onAdd,
   onClose,
+  onCloseAll,
   onRename,
   onReorder,
   onDuplicate,
@@ -102,6 +107,7 @@ export default function TabBar({
   canClosePane,
   broadcast,
   onToggleBroadcast,
+  loggingIds,
 }: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -190,7 +196,7 @@ export default function TabBar({
                 onClick={() => onSelect(t.id)}
                 onDoubleClick={() => startRename(t)}
                 className={
-                  'group flex cursor-pointer items-center gap-1.5 rounded-md py-1 pl-1 pr-2.5 text-xs ' +
+                  'group flex cursor-grab select-none items-center gap-1.5 rounded-md py-1 pl-1 pr-2.5 text-xs active:cursor-grabbing ' +
                   (active
                     ? 'bg-panel text-gray-100 ring-1 ring-white/15'
                     : 'text-gray-400 hover:bg-white/5 hover:text-gray-200') +
@@ -220,6 +226,11 @@ export default function TabBar({
                   />
                 ) : (
                   <span className="max-w-[120px] truncate">{t.title}</span>
+                )}
+                {loggingIds.has(t.id) && (
+                  <span title="세션 로그 기록 중" className="shrink-0">
+                    <Circle size={7} className="fill-current text-red-400" />
+                  </span>
                 )}
                 <button
                   type="button"
@@ -269,6 +280,15 @@ export default function TabBar({
         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-300 hover:bg-white/10 disabled:opacity-30"
       >
         <Plus size={14} />
+      </button>
+
+      <button
+        type="button"
+        onClick={onCloseAll}
+        title="모든 탭 닫기"
+        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-300 hover:bg-red-500/20 hover:text-red-300"
+      >
+        <XCircle size={14} />
       </button>
 
       {/* 분할 동시입력(브로드캐스트) — 분할 모드에서만 */}

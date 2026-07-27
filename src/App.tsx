@@ -10,6 +10,9 @@ import {
   ChevronDown,
   X,
   Plug,
+  Maximize2,
+  Minimize2,
+  Highlighter,
 } from 'lucide-react'
 import SSHForm, { type SSHFormHandle } from './components/SSHForm'
 import Toolbar from './components/Toolbar'
@@ -20,15 +23,18 @@ import AIPanel, { type AIPanelHandle } from './components/AIPanel'
 import Dashboard from './components/Dashboard'
 import MonitorOverview from './components/MonitorOverview'
 import LogViewer from './components/LogViewer'
+import HighlightRulesModal from './components/HighlightRulesModal'
 import FileViewer from './components/FileViewer'
 import FileExplorer from './components/FileExplorer'
 import LiveLogViewer from './components/LiveLogViewer'
 import TunnelManager from './components/TunnelManager'
 import MultiRun from './components/MultiRun'
+import ScenarioRunner, { type RunnerScenario } from './components/ScenarioRunner'
 import NodeDiff, { type DiffSource } from './components/NodeDiff'
 import TabBar, { type TabInfo, type LayoutMode } from './components/TabBar'
 import SessionSidebar, { profileKey } from './components/SessionSidebar'
 import Mascot from './components/Mascot'
+import ConfirmDialog from './components/ConfirmDialog'
 import type { SavedProfile, ProfileImportResult } from '../electron/shared-types'
 import {
   type PaneNode,
@@ -42,6 +48,14 @@ import {
   layoutTree,
   buildBalancedTree,
 } from './lib/paneTree'
+import {
+  maskReportEnabled,
+  setMaskReportEnabled,
+  maskDisplayEnabled,
+  setMaskDisplayEnabled,
+  maskIpEnabled,
+  setMaskIpEnabled,
+} from './lib/mask'
 
 /** 터미널 색상 테마 프리셋 */
 const THEMES: Record<string, { name: string; background: string; foreground: string; cursor: string }> = {
@@ -51,8 +65,6 @@ const THEMES: Record<string, { name: string; background: string; foreground: str
   light: { name: '라이트', background: '#fafafa', foreground: '#2b2b2b', cursor: '#2b2b2b' },
 }
 
-/** 유휴 마스코트 등장까지의 시간(ms) */
-const IDLE_DELAY = 60_000
 /** 활동 발생 후 마스코트를 유지하다 사라지기까지의 유예(ms) */
 const HIDE_GRACE = 5_000
 
@@ -106,15 +118,19 @@ export default function App() {
   const [showExplorer, setShowExplorer] = useState(false)
   const [showTunnels, setShowTunnels] = useState(false)
   const [showMultiRun, setShowMultiRun] = useState(false)
+  const [runnerScenario, setRunnerScenario] = useState<RunnerScenario | null>(null)
   const [showLogViewer, setShowLogViewer] = useState(false)
+  const [showHlRules, setShowHlRules] = useState(false)
   // 실시간 로그(tail -f) 뷰어 — 파일탐색기의 "실시간 보기"로 열면 prefillPath 가 채워짐
   const [showLiveLog, setShowLiveLog] = useState(false)
   const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
   const [diffSources, setDiffSources] = useState<DiffSource[] | null>(null)
-  // 선택/전체 세션 AI 분석 — 질문 입력 모달 (공용)
+  // 선택 세션 AI 분석 — 질문 입력 모달 (공용)
   const [analysisPending, setAnalysisPending] = useState<string | null>(null)
-  const [analysisLabel, setAnalysisLabel] = useState('선택 AI 분석')
+  const [analysisLabel, setAnalysisLabel] = useState('선택 세션 AI 분석')
   const [analysisQuestion, setAnalysisQuestion] = useState('')
+  // AI 패널이 이미 스트리밍 중이라 analyze() 가 무시됐을 때만 채워지는 안내 문구
+  const [analysisBusyNotice, setAnalysisBusyNotice] = useState('')
   // 세션 프로필 가져오기(CSV/JSON) 결과 — 완료 후 요약 모달에 표시
   const [importResult, setImportResult] = useState<ProfileImportResult | null>(null)
   // 가져오기 전 형식 안내 + 템플릿 다운로드 모달
@@ -144,11 +160,15 @@ export default function App() {
   const [openConnectCellId, setOpenConnectCellId] = useState<string | null>(null)
   // 유휴 마스코트 표시 여부 (입력/출력/마우스 없을 때 등장)
   const [idle, setIdle] = useState(false)
-  // 마스코트 리액션(놀람/슬픔) 트리거 — 마스코트가 이미 나와있을 때(idle)만 반영됨
+  // 마스코트 리액션(놀람/슬픔) 트리거 — 마스코트가 이미 나와있을 때(idle)만 반영됨.
+  // nonce 는 Date.now() 대신 단조 증가 카운터를 쓴다 — 같은 렌더 배치에서 여러 세션이 동시에
+  // 끊기는 등 짧은 시간 안에 연달아 트리거되면 Date.now() 는 밀리초 해상도상 같은 값이 나올 수
+  // 있어, Mascot 쪽에서 "새 이벤트"로 인식하지 못하고 묻힐 수 있었다.
   const [mascotReaction, setMascotReaction] = useState<{ type: 'surprised' | 'sad'; nonce: number } | null>(null)
+  const mascotNonceRef = useRef(0)
   const triggerMascotReaction = (type: 'surprised' | 'sad') => {
     if (!idle) return
-    setMascotReaction({ type, nonce: Date.now() })
+    setMascotReaction({ type, nonce: ++mascotNonceRef.current })
   }
   // SSH 폼(상단 공용 / 그리드 셀 인라인) 공통 연결 성공 처리
   const handleSessionConnected = (tabId: string, p: SavedProfile) => {
@@ -184,6 +204,26 @@ export default function App() {
   const [restoreOnLaunch, setRestoreOnLaunch] = useState(
     () => localStorage.getItem('restore_sessions') === '1',
   )
+  // 작업 중 예기치 않게 끊긴 세션을 자동으로 다시 연결 (기본 OFF — 사용자가 켬)
+  const [autoReconnect, setAutoReconnect] = useState(
+    () => localStorage.getItem('auto_reconnect') === '1',
+  )
+  // 민감정보 마스킹 — 리포트 저장/AI 전송 시(기본 ON) / 로그 화면 표시(기본 OFF) / IP까지(기본 OFF)
+  const [maskReport, setMaskReport] = useState(() => maskReportEnabled())
+  const [maskDisplay, setMaskDisplay] = useState(() => maskDisplayEnabled())
+  const [maskIp, setMaskIp] = useState(() => maskIpEnabled())
+  // 유휴 마스코트 등장까지의 시간(ms) — 기본 5분, 외형 설정에서 조절 가능
+  const [idleDelayMs, setIdleDelayMs] = useState(
+    () => Number(localStorage.getItem('mascot_idle_delay_ms')) || 300_000,
+  )
+  const idleDelayRef = useRef(idleDelayMs)
+  useEffect(() => {
+    idleDelayRef.current = idleDelayMs
+  }, [idleDelayMs])
+  const changeIdleDelay = (ms: number) => {
+    setIdleDelayMs(ms)
+    localStorage.setItem('mascot_idle_delay_ms', String(ms))
+  }
   // 임의 재귀 분할 레이아웃(tmux 스타일) — null 이면 탭 보기와 동일(단일 리프로 취급)
   const [splitTree, setSplitTree] = useState<PaneNode | null>(null)
   const termAreaRef = useRef<HTMLDivElement>(null)
@@ -198,8 +238,6 @@ export default function App() {
   const panelDragRef = useRef(false)
   const panelWrapRef = useRef<HTMLDivElement>(null)
 
-  // 세션ID 생성용 카운터 (s1 은 초기값으로 이미 사용)
-  const idCounter = useRef(1)
   // 세션별 터미널 핸들
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({})
   // 세션별 SSH 폼 핸들 (사이드바에서 연결 트리거)
@@ -228,6 +266,10 @@ export default function App() {
   const broadcasting = isSplit && broadcast && effectiveTargets.length > 0
   // 분할 가능 여부 — 아직 트리에 없는 스페어 탭이 있거나, 세션을 더 만들 여유가 있으면 항상 분할 가능
   const canSplit = new Set(gridIds).size < MAX_SESSIONS
+  // 그리드 셀이 많아 좁을 때, 특정 칸만 팝업처럼 크게 확대해서 보는 기능 — 그리드 안에 있는
+  // 탭이 아니게 되면(칸이 닫히는 등) 자동으로 무효 처리
+  const [zoomedId, setZoomedId] = useState<string | null>(null)
+  const zoomActive = isSplit && !!zoomedId && gridIds.includes(zoomedId)
   // 활성 세션이 분할 트리 안에 있고, 트리에 칸이 2개 이상일 때만 "칸 닫기" 가능
   const canClosePane = isSplit && !!splitTree && splitTree.type === 'split' && !!findLeaf(splitTree, activeId)
 
@@ -390,7 +432,67 @@ export default function App() {
     }
   }, [])
 
-  // 유휴 감지 — IDLE_DELAY 동안 활동 없으면 등장. 등장 중 활동이 생기면
+  // 그리드 셀 헤더 드래그(칸끼리 자리 맞바꿈) — 네이티브 HTML5 DnD 대신 마우스 좌표 추적 방식.
+  // 헤더 위 텍스트에서 드래그를 시작하면 브라우저가 엘리먼트 드래그 대신 텍스트 선택/포커스
+  // 이동으로 가로채 dragstart 자체가 안 일어나는 문제가 있어, 직접 mousemove/mouseup 으로 구현.
+  const gridDragRef = useRef<{ tabId: string; startX: number; startY: number; moved: boolean } | null>(null)
+  const leafAtPoint = (mxPct: number, myPct: number) => {
+    const tree = splitTreeRef.current
+    if (!tree) return null
+    const { leaves } = layoutTree(tree)
+    return (
+      leaves.find(
+        (l) => mxPct >= l.left && mxPct <= l.left + l.width && myPct >= l.top && myPct <= l.top + l.height,
+      ) ?? null
+    )
+  }
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const drag = gridDragRef.current
+      const el = termAreaRef.current
+      if (!drag || !el) return
+      if (!drag.moved) {
+        if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 6) return
+        drag.moved = true
+        setDraggingTabId(drag.tabId)
+        document.body.style.cursor = 'grabbing'
+      }
+      const areaRect = el.getBoundingClientRect()
+      const mxPct = ((e.clientX - areaRect.left) / areaRect.width) * 100
+      const myPct = ((e.clientY - areaRect.top) / areaRect.height) * 100
+      const hovered = leafAtPoint(mxPct, myPct)
+      setDragOverId(hovered ? hovered.tabId : null)
+    }
+    const onUp = (e: MouseEvent) => {
+      const drag = gridDragRef.current
+      gridDragRef.current = null
+      document.body.style.cursor = ''
+      const el = termAreaRef.current
+      if (!drag?.moved || !el) {
+        setDraggingTabId(null)
+        setDragOverId(null)
+        return
+      }
+      const areaRect = el.getBoundingClientRect()
+      const mxPct = ((e.clientX - areaRect.left) / areaRect.width) * 100
+      const myPct = ((e.clientY - areaRect.top) / areaRect.height) * 100
+      const hovered = leafAtPoint(mxPct, myPct)
+      if (hovered) {
+        setSplitTree((t) => (t ? reassignTab(t, hovered.leafId, drag.tabId) : t))
+      }
+      setDraggingTabId(null)
+      setDragOverId(null)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 유휴 감지 — idleDelayMs(외형 설정에서 조절) 동안 활동 없으면 등장. 등장 중 활동이 생기면
   // 즉시 사라지지 않고 HIDE_GRACE(5초) 유지 후 사라짐.
   useEffect(() => {
     const bump = () => {
@@ -408,7 +510,7 @@ export default function App() {
       const now = Date.now()
       if (!idleRef.current) {
         // 미표시 → 충분히 유휴면 등장
-        if (now - lastActivityRef.current > IDLE_DELAY) {
+        if (now - lastActivityRef.current > idleDelayRef.current) {
           idleRef.current = true
           hideAtRef.current = 0
           setIdle(true)
@@ -481,6 +583,45 @@ export default function App() {
 
   // 세션별 상태 전환에 따른 터미널 시각 표시 (연결 시작/종료/오류)
   const prevStatuses = useRef<Record<string, string>>({})
+  // 자동 재연결 상태 — 세션별 시도 횟수 / 예약 타이머. manualClosingRef 는 사용자가 직접 닫은 세션(재연결 제외).
+  const reconnectRef = useRef<{ attempts: Record<string, number>; timers: Record<string, ReturnType<typeof setTimeout>> }>({
+    attempts: {},
+    timers: {},
+  })
+  const manualClosingRef = useRef<Set<string>>(new Set())
+  const RECONNECT_BACKOFF_MS = [3000, 6000, 12000, 20000] // 시도별 대기(마지막 값 이후 포기)
+
+  // 예기치 않게 끊긴 세션을 프로필로 다시 연결 예약 (백오프 + 최대 시도 제한)
+  const scheduleReconnect = (id: string) => {
+    const rc = reconnectRef.current
+    const attempt = rc.attempts[id] ?? 0
+    const term = terminalRefs.current[id]
+    if (attempt >= RECONNECT_BACKOFF_MS.length) {
+      term?.writeNotice(`자동 재연결 ${attempt}회 실패 — 중단했습니다. SSH 정보를 입력해 수동으로 연결하세요.`)
+      return
+    }
+    // 이 세션의 프로필 찾기 (상태에 보관된 key → 저장 프로필). 못 찾으면 자동 재연결 불가.
+    const key = statuses[id]?.key
+    const profile = key ? profiles.find((p) => profileKey(p) === key) : undefined
+    if (!profile) {
+      term?.writeNotice('자동 재연결할 프로필 정보를 찾지 못했습니다. 수동으로 연결하세요.')
+      return
+    }
+    const delay = RECONNECT_BACKOFF_MS[attempt]
+    rc.attempts[id] = attempt + 1
+    term?.writeNotice(`자동 재연결 예약: ${Math.round(delay / 1000)}초 후 재시도 (${attempt + 1}/${RECONNECT_BACKOFF_MS.length})`)
+    if (rc.timers[id]) clearTimeout(rc.timers[id])
+    rc.timers[id] = setTimeout(() => {
+      delete rc.timers[id]
+      // 그 사이 사용자가 탭을 닫았거나 이미 다시 연결됐으면 중단
+      if (manualClosingRef.current.has(id)) return
+      if (statuses[id]?.status === 'connected' || statuses[id]?.status === 'connecting') return
+      terminalRefs.current[id]?.writeNotice('자동 재연결 시도 중…')
+      // 폼 ref 마운트 타이밍을 처리하는 지연 연결 큐에 넣는다(끊긴 셀은 SSH 폼이 다시 마운트됨).
+      setPendingConnects((prev) => (prev.some((pc) => pc.id === id) ? prev : [...prev, { id, p: profile }]))
+    }, delay)
+  }
+
   useEffect(() => {
     for (const t of tabs) {
       const cur = statuses[t.id]?.status ?? 'idle'
@@ -488,16 +629,57 @@ export default function App() {
       if (cur === prev) continue
       prevStatuses.current[t.id] = cur
       const term = terminalRefs.current[t.id]
-      if (cur === 'connecting') term?.reset()
-      else if (cur === 'closed' && prev === 'connected') {
-        term?.writeNotice('연결이 종료되었습니다. 다시 연결하려면 SSH 정보를 입력하세요.')
-        triggerMascotReaction('sad')
-      } else if (cur === 'error' && prev === 'connected') {
-        term?.writeNotice('연결이 끊겼습니다 (오류).')
-        triggerMascotReaction('sad')
+      if (cur === 'connecting') {
+        term?.reset()
+        // 재연결 예약 타이머가 남아 있으면 취소 — 수동 재연결이 시작됐거나 이미 연결 시도 중이라
+        // 뒤늦게 타이머가 발화해 중복 연결하는 것을 막는다(오래된 statuses 클로저 방지).
+        const rc = reconnectRef.current
+        if (rc.timers[t.id]) {
+          clearTimeout(rc.timers[t.id])
+          delete rc.timers[t.id]
+        }
+      } else if (cur === 'connected') {
+        // 재연결 성공(또는 정상 연결) — 시도 카운터/타이머 초기화
+        const rc = reconnectRef.current
+        if (rc.attempts[t.id]) term?.writeNotice('연결이 복구되었습니다.')
+        rc.attempts[t.id] = 0
+        if (rc.timers[t.id]) {
+          clearTimeout(rc.timers[t.id])
+          delete rc.timers[t.id]
+        }
+        manualClosingRef.current.delete(t.id)
+      } else if (cur === 'closed' || cur === 'error') {
+        // 끊김 원인: 정상 연결 상태에서의 드롭(prev==='connected') 또는
+        // 재연결 시도(prev==='connecting')가 실패한 경우 — 후자는 진행 중인 재시도 사이클을 이어간다.
+        const inCycle = (reconnectRef.current.attempts[t.id] ?? 0) > 0 && prev === 'connecting'
+        const droppedFromConnected = prev === 'connected'
+        if (droppedFromConnected) triggerMascotReaction('sad')
+        if (
+          autoReconnect &&
+          !manualClosingRef.current.has(t.id) &&
+          (droppedFromConnected || inCycle)
+        ) {
+          scheduleReconnect(t.id)
+        } else if (droppedFromConnected) {
+          term?.writeNotice(
+            cur === 'error'
+              ? '연결이 끊겼습니다 (오류).'
+              : '연결이 종료되었습니다. 다시 연결하려면 SSH 정보를 입력하세요.',
+          )
+        }
       }
     }
-  }, [statuses, tabs])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statuses, tabs, autoReconnect])
+
+  // 자동 재연결을 끄면 예약돼 있던 재연결 타이머를 모두 취소 (끈 뒤 뒤늦게 재연결되는 것 방지)
+  useEffect(() => {
+    if (autoReconnect) return
+    const rc = reconnectRef.current
+    Object.values(rc.timers).forEach((t) => clearTimeout(t))
+    rc.timers = {}
+    rc.attempts = {}
+  }, [autoReconnect])
 
   // 그리드 셀 인라인 연결 폼 — 연결에 성공하면 자동으로 닫고 터미널을 보여준다
   useEffect(() => {
@@ -509,15 +691,29 @@ export default function App() {
   // ── 탭 추가/닫기 / 보기 모드 ──────────────────────────────────
   // 새 탭 생성 (활성 전환은 호출부에서). 생성된 id 반환
   const createTab = (): string => {
-    const id = `s${++idCounter.current}`
+    // 렌더러 HMR(개발 모드 핫리로드) 재시작 시에도 절대 겹치지 않도록 카운터 대신 UUID 사용 —
+    // main 프로세스의 세션 Map은 렌더러와 별개로 살아있어, 카운터가 리셋되면 과거에 쓰던 id와
+    // 겹쳐 죽은 세션 정보를 재사용해버리는 문제가 있었다.
+    const id = crypto.randomUUID()
     setTabs((t) => [...t, { id, title: `세션 ${t.length + 1}` }])
     setStatuses((m) => ({ ...m, [id]: { status: 'idle', msg: '' } }))
     return id
   }
 
+  // 탭 선택 — 분할 모드에서 현재 트리에 없는 탭(스페어 탭, 방금 만든 새 탭 등)을 고르면 그
+  // 탭은 어느 칸에도 그려지지 않아 "선택했는데 화면에 안 보이는" 상태가 된다. 그 경우 탭(단일)
+  // 보기로 전환해 방금 고른 세션을 바로 보여준다 — splitTree 자체는 그대로 둬서, 다시 분할
+  // 프리셋을 누르면 기존 그리드를 이어서 쓸 수 있다.
+  const selectTab = (id: string) => {
+    setActiveId(id)
+    if (layout === 'split' && splitTree && !findLeaf(splitTree, id)) {
+      setLayoutMode('tabs')
+    }
+  }
+
   const addTab = () => {
     if (tabs.length >= MAX_SESSIONS) return
-    setActiveId(createTab())
+    selectTab(createTab())
   }
 
 
@@ -601,40 +797,52 @@ export default function App() {
   // 사이드바 더블클릭 → 스마트 대상 선택 후 연결
   //  - 활성 탭이 비어있으면 거기 / 다른 빈 탭이 있으면 그 탭 / 없으면 새 탭(여유 시) / 다 차면 활성 탭에서 전환
   const openProfile = (p: SavedProfile) => {
+    // 항상 새 탭으로 연결 — 세션 한도에 걸렸을 때만 예외적으로 비어있는 탭을 재사용.
     const st = (id: string) => statuses[id]?.status ?? 'idle'
     const free = (id: string) => st(id) !== 'connected' && st(id) !== 'connecting'
-    let target = activeId
-    if (!free(activeId)) {
-      const freeTab = tabs.find((t) => free(t.id))
-      if (freeTab) target = freeTab.id
-      else if (tabs.length < MAX_SESSIONS) target = createTab()
-    }
-    setActiveId(target)
+    const target = tabs.length < MAX_SESSIONS ? createTab() : (tabs.find((t) => free(t.id))?.id ?? activeId)
+    selectTab(target)
     setPendingConnects((q) => [...q, { id: target, p }])
   }
 
-  // 여러 세션을 한 번에 그리드+동시입력으로 열기 (클러스터)
+  // 여러 세션을 한 번에 그리드+동시입력으로 열기 (클러스터).
+  // 모든 칸을 "새 탭"으로 만들고, 겉돌던 미접속(idle) 빈 탭("세션 1" 등)은 이번에 정리한다.
+  //  - 예전엔 빈 탭을 재사용했는데, 재사용된 탭은 이미 마운트돼 있던 폼/로컬셸 인스턴스라
+  //    새로 만들어지는 탭들과 ref/마운트 타이밍이 달라(+StrictMode 이펙트 이중실행) 연결 지연 큐
+  //    (pendingConnects)에서 그 한 칸만 누락돼 연결이 안 되는 문제가 있었다. 새 탭만 쓰면
+  //    항상 동일한(안정적인) 연결 경로를 타므로 이 레이스가 사라진다.
+  //  - room 은 연결 중/연결됨으로 "실제 사용 중"인 탭 수만 제외하고 계산(idle 탭은 어차피 정리하므로).
   const openCluster = (list: SavedProfile[]) => {
-    const connectedCount = tabs.filter((t) => {
-      const s = statuses[t.id]?.status
-      return s === 'connected' || s === 'connecting'
-    }).length
-    const room = Math.max(1, MAX_SESSIONS - connectedCount)
+    const idleIds = tabs.filter((t) => (statuses[t.id]?.status ?? 'idle') === 'idle').map((t) => t.id)
+    const keptCount = tabs.length - idleIds.length
+    const room = Math.max(0, MAX_SESSIONS - keptCount)
     const sel = list.slice(0, room)
     if (!sel.length) return
     const newIds = sel.map(() => createTab())
-    // 새 탭들을 앞으로 모아 그리드 앞칸에 표시
+    // 겉돌던 빈 탭은 백엔드 로컬셸까지 정리
+    idleIds.forEach((id) => window.electronAPI.sessionClose(id))
+    // 새 탭들을 앞으로 모으고, 정리 대상 idle 탭은 목록에서 제거
     setTabs((ts) => {
       const news = ts.filter((t) => newIds.includes(t.id))
-      const olds = ts.filter((t) => !newIds.includes(t.id))
-      return [...news, ...olds]
+      const kept = ts.filter((t) => !newIds.includes(t.id) && !idleIds.includes(t.id))
+      return [...news, ...kept]
+    })
+    setStatuses((m) => {
+      const c = { ...m }
+      idleIds.forEach((id) => delete c[id])
+      return c
     })
     setActiveId(newIds[0])
-    setPendingConnects((q) => [...q, ...newIds.map((id, i) => ({ id, p: sel[i] }))])
+    setPendingConnects((q) => [
+      ...q.filter((pc) => !idleIds.includes(pc.id)),
+      ...newIds.map((id, i) => ({ id, p: sel[i] })),
+    ])
     if (newIds.length >= 2) {
       setSplitTree(buildBalancedTree(newIds, nextPaneId))
       setLayoutMode('split')
-      setBroadcast(true)
+      // 동시입력은 기본 비활성 — 켜두면 그리드를 열자마자 여러 세션에 동시 입력되는 게 당황스러움.
+      // 대상 목록만 미리 채워둬서, 나중에 수동으로 켜면 바로 이 세션들을 대상으로 쓸 수 있게 한다.
+      setBroadcast(false)
       setBroadcastTargets(newIds)
     }
   }
@@ -694,13 +902,16 @@ export default function App() {
     const key = statuses[id]?.key
     const p = key ? profiles.find((x) => profileKey(x) === key) : undefined
     const nid = createTab()
-    setActiveId(nid)
+    selectTab(nid)
     if (p) setPendingConnects((q) => [...q, { id: nid, p }]) // 연결돼 있던 세션이면 같은 프로필로 연결
   }
 
-  // 사이드바에서 세션을 폴더로 드래그 → 그룹(폴더) 변경 (키 불변이므로 upsert만)
+  // 사이드바에서 세션을 폴더로 드래그 → 그룹(폴더) 변경 (키 불변이므로 upsert만).
+  // preserveMeta:false — "분류 없음"으로 뺄 때 group:undefined 가 기존 값으로 되살아나지 않도록.
   const moveProfile = async (p: SavedProfile, group: string | undefined) => {
-    setProfiles(await window.electronAPI.profilesUpsert({ ...p, group: group || undefined }))
+    setProfiles(
+      await window.electronAPI.profilesUpsert({ ...p, group: group || undefined }, { preserveMeta: false }),
+    )
   }
 
   // 폴더명 일괄 변경 (순서 보존)
@@ -726,10 +937,16 @@ export default function App() {
   }
 
   const closeTab = (id: string) => {
+    manualClosingRef.current.add(id) // 사용자가 직접 닫음 — 자동 재연결 대상에서 제외
+    const rc = reconnectRef.current
+    if (rc.timers[id]) {
+      clearTimeout(rc.timers[id])
+      delete rc.timers[id]
+    }
     window.electronAPI.sessionClose(id) // 백엔드 연결/로컬셸 정리
     const remaining = tabs.filter((x) => x.id !== id)
     if (remaining.length === 0) {
-      const nid = `s${++idCounter.current}`
+      const nid = crypto.randomUUID()
       setTabs([{ id: nid, title: '세션 1' }])
       setStatuses({ [nid]: { status: 'idle', msg: '' } })
       setActiveId(nid)
@@ -759,6 +976,36 @@ export default function App() {
       }
     }
     if (id === activeId) setActiveId(nextActive ?? remaining[remaining.length - 1].id)
+  }
+
+  // 모든 탭 한 번에 닫기 — 열려 있는 세션이 하나뿐이고 미접속(idle)이면 닫아봐야 잃을 게 없으니
+  // 확인창 없이 바로 처리하고, 그 외(연결됨/연결시도 이력 있음/여러 개)에는 확인을 거친다.
+  const [confirmCloseAll, setConfirmCloseAll] = useState(false)
+  const closeAllTabs = () => {
+    // 예약된 재연결 타이머를 모두 취소하고 수동 종료로 표시 (뒤늦은 유령 재연결 방지)
+    const rc = reconnectRef.current
+    Object.values(rc.timers).forEach((t) => clearTimeout(t))
+    rc.timers = {}
+    rc.attempts = {}
+    tabs.forEach((t) => {
+      manualClosingRef.current.add(t.id)
+      window.electronAPI.sessionClose(t.id)
+    })
+    const nid = crypto.randomUUID()
+    setTabs([{ id: nid, title: '세션 1' }])
+    setStatuses({ [nid]: { status: 'idle', msg: '' } })
+    setActiveId(nid)
+    setSplitTree(null)
+    setLayoutMode('tabs')
+    setOpenConnectCellId(null)
+    setBroadcast(false)
+    setBroadcastTargets([])
+    setPendingConnects([])
+  }
+  const requestCloseAllTabs = () => {
+    const trivial = tabs.length === 1 && (statuses[tabs[0].id]?.status ?? 'idle') === 'idle'
+    if (trivial) return
+    setConfirmCloseAll(true)
   }
 
   // 동시입력 토글 — 켤 때 기본값으로 분할 전체를 대상에 포함
@@ -798,42 +1045,42 @@ export default function App() {
   const analyzeSelection = () => {
     const text = activeTerm()?.getSelection() ?? ''
     setAnalysisPending(text)
-    setAnalysisLabel('선택 AI 분석')
+    setAnalysisLabel('선택 세션 AI 분석')
     setAnalysisQuestion('')
+    setAnalysisBusyNotice('')
   }
 
   const submitAnalysis = () => {
     if (analysisPending === null) return
     setShowAI(true)
-    aiPanelRef.current?.analyze(analysisPending, analysisQuestion.trim() || undefined)
+    // analyze() 는 AI 패널이 이미 스트리밍 중이면 조용히 무시하고 false 를 반환한다 — 이 경우
+    // 모달을 닫으면 사용자는 요청이 처리된 줄 알지만 실제로는 유실되므로, 열어둔 채 안내만 표시.
+    const started = aiPanelRef.current?.analyze(analysisPending, analysisQuestion.trim() || undefined)
+    if (started === false) {
+      setAnalysisBusyNotice('AI가 이미 다른 응답을 생성하는 중입니다. 잠시 후 다시 시도하세요.')
+      return
+    }
+    setAnalysisBusyNotice('')
     setAnalysisPending(null)
     setAnalysisQuestion('')
   }
-  // 연결된 모든 세션 출력을 라벨과 함께 묶어 한 번에 AI 분석
-  const analyzeAll = () => {
-    const parts = tabs
-      .filter((t) => statuses[t.id]?.status === 'connected')
-      .map((t) => {
-        const label = t.custom ? t.title : (statuses[t.id]?.host ?? t.title)
-        const text = terminalRefs.current[t.id]?.getRecentOutput(60) ?? ''
-        return `### 세션: ${label}\n${text}`
-      })
-    const ctx = parts.length
-      ? `다음은 여러 노드(세션)의 최근 터미널 출력입니다. 노드 간 차이/이상 징후를 비교 분석해 주세요.\n\n${parts.join('\n\n')}`
-      : (activeTerm()?.getRecentOutput() ?? '')
-    setAnalysisPending(ctx)
-    setAnalysisLabel('전체 세션 AI 분석')
-    setAnalysisQuestion('')
-  }
 
-  // 노드 간 출력 비교 — 연결된 세션들의 선택영역(없으면 최근 출력)을 모아 diff
+  // 모달(다중 실행/세션 비교/파일 뷰어)에서 만든 컨텍스트를 AI 패널로 바로 보내 분석.
+  // AI 패널을 열고 analyze() 를 호출 — 이미 스트리밍 중이면 analyze() 가 false 를 반환한다.
+  const analyzeText = (text: string): boolean => {
+    setShowAI(true)
+    return aiPanelRef.current?.analyze(text) ?? false
+  }
+  // 노드 간 출력 비교 — 연결된 세션들의 선택영역(없으면 최근 출력)을 모아 diff.
+  // 50줄은 sshd_config 같은 설정파일 cat 한 번에도 앞부분이 스크롤아웃돼 비교 대상에서
+  // 빠지기 쉬웠다 — AI 분석과 달리 토큰 비용이 없으니 넉넉하게 잡는다(터미널 scrollback 자체는 5000줄).
   const compareNodes = () => {
     const sources: DiffSource[] = tabs
       .filter((t) => statuses[t.id]?.status === 'connected')
       .map((t) => {
         const ref = terminalRefs.current[t.id]
         const sel = ref?.getSelection() ?? ''
-        const text = sel.trim() ? sel : (ref?.getRecentOutput(50) ?? '')
+        const text = sel.trim() ? sel : (ref?.getRecentOutput(500) ?? '')
         return {
           id: t.id,
           label: t.custom ? t.title : (statuses[t.id]?.host ?? t.title),
@@ -999,9 +1246,10 @@ export default function App() {
           activeId={activeId}
           statuses={statuses}
           max={MAX_SESSIONS}
-          onSelect={setActiveId}
+          onSelect={selectTab}
           onAdd={addTab}
           onClose={closeTab}
+          onCloseAll={requestCloseAllTabs}
           onRename={renameTab}
           onReorder={reorderTabs}
           onDuplicate={duplicateTab}
@@ -1019,6 +1267,7 @@ export default function App() {
           canClosePane={canClosePane}
           broadcast={broadcast}
           onToggleBroadcast={toggleBroadcast}
+          loggingIds={loggingSessions}
         />
 
         {/* 빠른 연결 바 */}
@@ -1079,7 +1328,6 @@ export default function App() {
           onOpenSettings={() => setShowSettings(true)}
           onCompareNodes={compareNodes}
           onAnalyzeSelection={analyzeSelection}
-          onAnalyzeAll={analyzeAll}
         />
         {(panel === 'presets' || panel === 'scenarios') && (
           <>
@@ -1092,7 +1340,12 @@ export default function App() {
                 />
               )}
               {panel === 'scenarios' && (
-                <ScenarioPanel connected={connected} onRun={runOnActive} onClose={() => setPanel(null)} />
+                <ScenarioPanel
+                  connected={connected}
+                  onRun={runOnActive}
+                  onClose={() => setPanel(null)}
+                  onRunScenario={(s) => setRunnerScenario(s)}
+                />
               )}
             </div>
             <div
@@ -1143,14 +1396,23 @@ export default function App() {
                 }
               />
             ))}
+          {/* 셀 확대 중이면 나머지 그리드를 덮어 어둡게 — 클릭하면 확대 해제 */}
+          {zoomActive && (
+            <div className="absolute inset-0 z-30 bg-black/70" onClick={() => setZoomedId(null)} />
+          )}
           {tabs.map((t) => {
             const leaf = isSplit && splitTree ? paneLeaves.find((l) => l.tabId === t.id) : undefined
             // 이 셀이 동시입력 대상으로 선택되어 있는지
             const isTarget = broadcast && isSplit && broadcastTargets.includes(t.id)
+            const zoomedHere = zoomActive && t.id === zoomedId
             let cls: string
             let posStyle: React.CSSProperties | undefined
             if (!isSplit) {
               cls = t.id === activeId ? 'absolute inset-0' : 'hidden'
+            } else if (zoomedHere) {
+              // 팝업처럼 화면 대부분을 차지하게 확대 — 그리드 좌표(%) 대신 고정 오버레이 위치 사용
+              cls = 'absolute z-40 overflow-hidden rounded-lg border border-white/20 shadow-2xl'
+              posStyle = { left: '4%', top: '4%', width: '92%', height: '92%' }
             } else if (leaf) {
               cls =
                 'absolute overflow-hidden ' +
@@ -1181,11 +1443,30 @@ export default function App() {
                   triggerMascotReaction('surprised')
                 }}
               >
-                {/* 그리드 셀 헤더 바 (터미널을 가리지 않도록 상단에 분리 배치) */}
+                {/* 그리드 셀 헤더 바 (터미널을 가리지 않도록 상단에 분리 배치)
+                    — 헤더 자체를 드래그해서 다른 칸으로 끌어다 놓으면 그 칸과 서로 자리를 맞바꿈
+                    (탭바에서 드래그하는 것과 동일한 draggingTabId/reassignTab 경로 재사용) */}
                 {isSplit && leaf && (
-                  <div className="absolute left-0 right-0 top-0 z-10 flex h-[19px] items-center gap-1 border-b border-white/10 bg-panel-light px-1.5 text-[10px] text-gray-300">
+                  <div
+                    onMouseDown={(e) => {
+                      // 상위 셀의 onMouseDown(터미널 focus 이동)이 먼저 발동하는 걸 막아야 함.
+                      // 드래그 자체는 네이티브 HTML5 DnD 가 아니라 gridDragRef 기반 마우스 추적으로
+                      // 처리한다 — 텍스트 위에서 드래그 시작 시 브라우저가 엘리먼트 드래그 대신
+                      // 텍스트 선택/포커스 이동으로 가로채 dragstart 가 아예 안 일어나는 문제가 있었음.
+                      e.stopPropagation()
+                      setActiveId(t.id)
+                      gridDragRef.current = { tabId: t.id, startX: e.clientX, startY: e.clientY, moved: false }
+                    }}
+                    title="드래그해서 다른 칸과 자리 바꾸기"
+                    className="absolute left-0 right-0 top-0 z-10 flex h-[19px] cursor-grab select-none items-center gap-1 border-b border-white/10 bg-panel-light px-1.5 text-[10px] text-gray-300 active:cursor-grabbing"
+                  >
                     <Circle size={7} className={dotColor(statuses[t.id]?.status) + ' fill-current'} />
                     <span className="truncate">{gridCellLabel(t)}</span>
+                    {loggingSessions.has(t.id) && (
+                      <span title="세션 로그 기록 중" className="shrink-0">
+                        <Circle size={6} className="fill-current text-red-400" />
+                      </span>
+                    )}
                     {statuses[t.id]?.status !== 'connected' && (
                       <button
                         onMouseDown={(e) => e.stopPropagation()}
@@ -1205,23 +1486,36 @@ export default function App() {
                         연결
                       </button>
                     )}
-                    {broadcast && (
+                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                      {broadcast && (
+                        <button
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleTarget(t.id)
+                          }}
+                          title={isTarget ? '동시입력 대상에서 제외' : '동시입력 대상에 포함'}
+                          className={
+                            'flex items-center gap-1 rounded px-1.5 text-[10px] font-medium ' +
+                            (isTarget ? 'bg-red-600/80 text-white' : 'text-gray-400 hover:bg-white/10')
+                          }
+                        >
+                          {isTarget ? <CheckSquare size={10} /> : <Square size={10} />}
+                          동시입력
+                        </button>
+                      )}
                       <button
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation()
-                          toggleTarget(t.id)
+                          setZoomedId((cur) => (cur === t.id ? null : t.id))
                         }}
-                        title={isTarget ? '동시입력 대상에서 제외' : '동시입력 대상에 포함'}
-                        className={
-                          'ml-auto flex items-center gap-1 rounded px-1.5 text-[10px] font-medium ' +
-                          (isTarget ? 'bg-red-600/80 text-white' : 'text-gray-400 hover:bg-white/10')
-                        }
+                        title={zoomedHere ? '원래 크기로' : '이 세션 크게 보기'}
+                        className="flex items-center rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
                       >
-                        {isTarget ? <CheckSquare size={10} /> : <Square size={10} />}
-                        동시입력
+                        {zoomedHere ? <Minimize2 size={10} /> : <Maximize2 size={10} />}
                       </button>
-                    )}
+                    </div>
                   </div>
                 )}
                 {/* 탭을 이 칸으로 드래그 배치 (분할 모드 — 원래 있던 탭과 서로 자리를 맞바꿈) */}
@@ -1477,6 +1771,13 @@ export default function App() {
           key={`${activeId}-${liveLogPrefill ?? ''}`}
           sessionId={activeId}
           initialPath={liveLogPrefill}
+          currentLabel={(() => {
+            const t = tabs.find((t) => t.id === activeId)
+            return t ? gridCellLabel(t) : undefined
+          })()}
+          otherSessions={tabs
+            .filter((t) => t.id !== activeId && statuses[t.id]?.status === 'connected')
+            .map((t) => ({ id: t.id, label: gridCellLabel(t) }))}
           onClose={() => {
             setShowLiveLog(false)
             setLiveLogPrefill(undefined)
@@ -1496,26 +1797,56 @@ export default function App() {
             .filter((t) => statuses[t.id]?.status === 'connected')
             .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
           onClose={() => setShowMultiRun(false)}
+          onAnalyze={analyzeText}
+        />
+      )}
+
+      {/* 시나리오 검증 러너 (순차 실행 + 자동 판정 + 리포트) */}
+      {runnerScenario && (
+        <ScenarioRunner
+          scenario={runnerScenario}
+          sessions={tabs
+            .filter((t) => statuses[t.id]?.status === 'connected')
+            .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
+          defaultSessionId={activeId}
+          onClose={() => setRunnerScenario(null)}
+          onAnalyze={analyzeText}
         />
       )}
 
       {/* 세션 로그 뷰어(목록/검색/리플레이) */}
       {showLogViewer && <LogViewer onClose={() => setShowLogViewer(false)} />}
+      {showHlRules && <HighlightRulesModal onClose={() => setShowHlRules(false)} />}
 
       {/* 노드 간 출력 비교 모달 */}
-      {diffSources && <NodeDiff sources={diffSources} onClose={() => setDiffSources(null)} />}
+      {diffSources && (
+        <NodeDiff sources={diffSources} onClose={() => setDiffSources(null)} onAnalyze={analyzeText} />
+      )}
+
+      {confirmCloseAll && (
+        <ConfirmDialog
+          title="모든 탭 닫기"
+          message={`열려 있는 세션 ${tabs.length}개를 모두 닫을까요?\n연결된 세션은 전부 연결 해제됩니다.`}
+          confirmLabel="모두 닫기"
+          onCancel={() => setConfirmCloseAll(false)}
+          onConfirm={() => {
+            setConfirmCloseAll(false)
+            closeAllTabs()
+          }}
+        />
+      )}
 
       {/* 선택 AI 분석 — 질문 입력 모달 */}
       {analysisPending !== null && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setAnalysisPending(null)}
+          onClick={() => { setAnalysisPending(null); setAnalysisBusyNotice('') }}
         >
           <div
             className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') setAnalysisPending(null)
+              if (e.key === 'Escape') { setAnalysisPending(null); setAnalysisBusyNotice('') }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAnalysis() }
             }}
           >
@@ -1528,9 +1859,12 @@ export default function App() {
               placeholder="질문을 입력하세요... (비우면 기본 분석 스타일 적용)"
               className="w-full resize-none rounded-md border border-white/10 bg-panel-light px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
             />
+            {analysisBusyNotice && (
+              <p className="mt-1.5 text-[11px] text-amber-300">{analysisBusyNotice}</p>
+            )}
             <div className="mt-3 flex justify-end gap-2">
               <button
-                onClick={() => setAnalysisPending(null)}
+                onClick={() => { setAnalysisPending(null); setAnalysisBusyNotice('') }}
                 className="rounded px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
               >
                 취소
@@ -1775,6 +2109,13 @@ export default function App() {
               />
               출력 하이라이트 (ERROR/WARN/OK 색상 강조)
             </label>
+            <button
+              onClick={() => setShowHlRules(true)}
+              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-panel-light px-2 py-1.5 text-xs text-gray-200 hover:bg-white/10"
+            >
+              <Highlighter size={13} className="text-blue-300" />
+              로그 하이라이트 규칙 관리 (사용자 키워드)
+            </button>
             <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
               <input
                 type="checkbox"
@@ -1786,6 +2127,72 @@ export default function App() {
               />
               시작 시 이전 세션 복원 (자동 재연결)
             </label>
+            <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
+              <input
+                type="checkbox"
+                checked={autoReconnect}
+                onChange={(e) => {
+                  setAutoReconnect(e.target.checked)
+                  localStorage.setItem('auto_reconnect', e.target.checked ? '1' : '0')
+                }}
+              />
+              작업 중 끊기면 자동 재연결 시도 (최대 4회, 백오프)
+            </label>
+
+            <div className="mt-4 rounded-md border border-white/10 bg-panel-light/50 p-2.5">
+              <div className="mb-1.5 text-[11px] font-medium text-gray-300">민감정보 마스킹</div>
+              <label className="flex items-center gap-2 text-xs text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={maskReport}
+                  onChange={(e) => {
+                    setMaskReport(e.target.checked)
+                    setMaskReportEnabled(e.target.checked)
+                  }}
+                />
+                리포트 저장·AI 전송 시 비밀번호/토큰/키 가리기
+              </label>
+              <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={maskDisplay}
+                  onChange={(e) => {
+                    setMaskDisplay(e.target.checked)
+                    setMaskDisplayEnabled(e.target.checked)
+                  }}
+                />
+                실시간 로그 화면에도 마스킹 적용
+              </label>
+              <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={maskIp}
+                  disabled={!maskReport && !maskDisplay}
+                  onChange={(e) => {
+                    setMaskIp(e.target.checked)
+                    setMaskIpEnabled(e.target.checked)
+                  }}
+                />
+                <span className={maskReport || maskDisplay ? '' : 'text-gray-500'}>
+                  IP 주소도 가리기 (앞 3옥텟)
+                </span>
+              </label>
+            </div>
+
+            <label className="mt-3 block text-[11px] text-gray-400">
+              유휴 마스코트 등장 시간 (무동작 상태가 이 시간만큼 지속되면 등장)
+            </label>
+            <select
+              value={idleDelayMs}
+              onChange={(e) => changeIdleDelay(Number(e.target.value))}
+              className="mt-1 w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value={60_000}>1분</option>
+              <option value={180_000}>3분</option>
+              <option value={300_000}>5분</option>
+              <option value={600_000}>10분</option>
+              <option value={1_200_000}>20분</option>
+            </select>
 
             <div className="mt-4 flex justify-end">
               <button
@@ -1808,7 +2215,7 @@ export default function App() {
             setShowFiles(false)
             setTimeout(() => activeTerm()?.focus(), 0)
           }}
-          onAnalyze={(text) => aiPanelRef.current?.analyze(text)}
+          onAnalyze={analyzeText}
         />
       )}
     </div>

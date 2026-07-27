@@ -544,6 +544,7 @@ export default function SessionSidebar({
         <EditorModal
           state={editor}
           folders={existingFolders}
+          existingKeys={new Set(profiles.map(profileKey))}
           onClose={() => setEditor(null)}
           onSubmit={(draft, originalKey) => {
             onSave(draft, originalKey)
@@ -597,11 +598,14 @@ export default function SessionSidebar({
 function EditorModal({
   state,
   folders,
+  existingKeys,
   onClose,
   onSubmit,
 }: {
   state: { draft: SavedProfile; originalKey?: string }
   folders: string[]
+  /** 이미 등록된 프로필들의 키(host:port:username) — 다른 항목과 겹치는 수정 방지용 */
+  existingKeys: Set<string>
   onClose: () => void
   onSubmit: (draft: SavedProfile, originalKey?: string) => void
 }) {
@@ -631,6 +635,11 @@ function EditorModal({
   const submit = () => {
     if (!d.host.trim()) {
       setErr('IP/호스트를 입력하세요.')
+      return
+    }
+    const newKey = `${d.host.trim()}:${d.port.trim() || '22'}:${d.username.trim() || 'root'}`
+    if (newKey !== state.originalKey && existingKeys.has(newKey)) {
+      setErr('같은 IP/Port/User 조합의 세션이 이미 있습니다. 값을 다르게 입력하세요.')
       return
     }
     const jump =

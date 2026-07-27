@@ -1,10 +1,16 @@
 // 단일 명령어 프리셋 (카테고리 → 하위분류 → 명령어).
 // 명령어_편집.md 에서 자동 생성됨. <...> 플레이스홀더는 앱에서 실행 대신 "입력".
 
+import type { CommandCheck } from '../electron/shared-types'
+
 export interface PresetCommand {
   label: string
   command: string
   desc: string
+  /** true 면 실행할 명령이 아니라 안내 문구 — 실행/복사 버튼 없이 노트 형태로만 표시 */
+  info?: boolean
+  /** 실행 결과 자동 판정 기준 (선택) */
+  check?: CommandCheck
 }
 
 export interface PresetSubGroup {
@@ -1193,6 +1199,138 @@ export const PRESETS: PresetGroup[] = [
             "label": "이전 명령어 기록",
             "command": "history | grep <키워드>",
             "desc": "과거 입력했던 긴 명령어를 다시 찾아서 재사용"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "solution": "가용성 검증",
+    "subgroups": [
+      {
+        "name": "Engine 확인 사항",
+        "commands": [
+          {
+            "label": "[Pacemaker] 클러스터 상태",
+            "command": "pcs status",
+            "desc": "OpenStack Internal Server Error 점검 시 가장 먼저 볼 것 — HA 클러스터 전체 상태.\n확인할 것:\n- int_vip, haproxy, openstack_exporter 등 HA 리소스가 Started 상태인지\n- VIP가 의도한 컨트롤러에 올라와 있는지\n- OFFLINE, UNCLEAN, FAILED, not running 리소스가 있는지"
+          },
+          {
+            "label": "[Pacemaker] 리소스 상태",
+            "command": "pcs resource status",
+            "desc": "리소스 목록만 별도로 확인할 때 (확인할 것은 pcs status와 동일)"
+          },
+          {
+            "label": "[Pacemaker] VIP 다른 노드로 이동",
+            "command": "pcs resource move int_vip <NAME>",
+            "desc": "예: pcs resource move int_vip con01"
+          },
+          {
+            "label": "[Pacemaker] VIP 벤(이동 금지)",
+            "command": "pcs resource ban int_vip <NAME>",
+            "desc": "해당 노드로 VIP가 이동하지 못하도록 차단. 예: pcs resource ban int_vip con02"
+          },
+          {
+            "label": "[Pacemaker] VIP 벤 해제",
+            "command": "pcs resource clear int_vip <NAME>",
+            "desc": "ban/move로 걸린 제약 해제. 예: pcs resource clear int_vip con01"
+          },
+          {
+            "label": "[RabbitMQ] 서비스 상태",
+            "command": "systemctl status rabbitmq-server",
+            "desc": "rabbitmq-server 데몬이 각 노드에서 정상 기동 중인지 확인"
+          },
+          {
+            "label": "[RabbitMQ] 클러스터 상태",
+            "command": "rabbitmqctl cluster_status",
+            "desc": "확인할 것:\n- 모든 RabbitMQ 노드가 running_nodes에 포함되는지\n- Network Partitions가 비어 있는지\n- memory/disk alarm이 없는지\n- OpenStack 서비스 로그에 AMQP, Connection refused, timeout 오류가 있는지"
+          },
+          {
+            "label": "[MySQL/Galera] 서비스 상태",
+            "command": "systemctl status mysql",
+            "desc": "mysql(Galera/PXC) 데몬이 각 노드에서 정상 기동 중인지 확인"
+          },
+          {
+            "label": "[MySQL/Galera] 클러스터 상태(Primary 여부)",
+            "command": "mysql -e \"SHOW GLOBAL STATUS LIKE 'wsrep_cluster_status';\"",
+            "desc": "정상 기준:\n- wsrep_cluster_status = Primary\n- wsrep_local_state_comment = Synced\n- wsrep_ready = ON\n- wsrep_connected = ON"
+          },
+          {
+            "label": "[MySQL/Galera] 클러스터 노드 수",
+            "command": "mysql -e \"SHOW GLOBAL STATUS LIKE 'wsrep_cluster_size';\"",
+            "desc": "wsrep_cluster_size가 기대하는 노드 수와 일치하는지 확인"
+          }
+        ]
+      },
+      {
+        "name": "middleware(pod) 확인 사항",
+        "commands": [
+          {
+            "label": "실시간 로그 뷰어 활용 안내",
+            "command": "",
+            "desc": "파드 로그는 실시간 로그 뷰어의 [Kubernetes 파드] 탭에서 네임스페이스 → 파드 → 컨테이너 순으로 선택하면 바로 tail -f 로 확인할 수 있습니다.",
+            "info": true
+          },
+          {
+            "label": "네임스페이스 목록",
+            "command": "kubectl get namespace",
+            "desc": "전체 네임스페이스 확인"
+          },
+          {
+            "label": "파드 상태 확인",
+            "command": "kubectl get pods -n <namespace> -o wide",
+            "desc": "네임스페이스 내 파드 상태/배치 노드 확인"
+          },
+          {
+            "label": "dataplatform 파드 상태 확인",
+            "command": "kubectl get pods -n dataplatform -o wide",
+            "desc": "DB 관련 네임스페이스 — 가용성 검증 중 문제가 가장 자주 발생하는 영역이라 우선적으로 집중 점검할 것.\ndataplatform 대신 다른 네임스페이스명을 입력하면 해당 네임스페이스의 파드 상태를 확인할 수 있습니다."
+          }
+        ]
+      },
+      {
+        "name": "masakari 확인 사항",
+        "commands": [
+          {
+            "label": "실시간 로그 뷰어 활용 안내",
+            "command": "",
+            "desc": "아래 각 경로를 실시간 로그 뷰어의 [파일 경로] 탭에 입력하면 tail -f 로 바로 확인할 수 있습니다.",
+            "info": true
+          },
+          {
+            "label": "masakari-engine 로그",
+            "command": "tail -f -n 200 /var/log/masakari/masakari-engine.log",
+            "desc": "마사카리 동작(인스턴스 복구/evacuate 처리) 로그.\ncontroller 또는 mixed 노드에서 확인할 수 있습니다."
+          },
+          {
+            "label": "masakari-host-monitor 로그",
+            "command": "tail -f -n 200 /var/log/masakarimonitors/masakari-host-monitor.log",
+            "desc": "마사카리 notification(호스트 장애 감지) 로그.\ncompute 또는 mixed 노드에서 확인할 수 있습니다."
+          },
+          {
+            "label": "nova-compute 로그",
+            "command": "tail -f -n 200 /var/log/nova/nova-compute.log",
+            "desc": "컴퓨트 노드의 인스턴스 복구/재배치 처리 로그"
+          },
+          {
+            "label": "nova-conductor 로그",
+            "command": "tail -f -n 200 /var/log/nova/nova-conductor.log",
+            "desc": "DB 중계 및 복구 조정 로그"
+          },
+          {
+            "label": "nova-scheduler 로그",
+            "command": "tail -f -n 200 /var/log/nova/nova-scheduler.log",
+            "desc": "재배치 대상 호스트 스케줄링 로그"
+          }
+        ]
+      },
+      {
+        "name": "Ceph 확인 사항",
+        "commands": [
+          {
+            "label": "Ceph 클러스터 상태(실시간)",
+            "command": "watch ceph -s",
+            "desc": "controller 또는 mixed 노드에서 확인할 수 있습니다.\n노드를 올린 직후에는 health가 HEALTH_OK로 돌아온 뒤에 다음 작업을 진행할 것.\nHEALTH_WARN 상태에서 clock skew 경고가 뜨거나, pgs: N/M objects misplaced (X%) 처럼 PG가 재배치(rebalance) 중이라면 아직 완료된 게 아니므로, OK가 될 때까지 기다렸다가 넘어갈 것."
           }
         ]
       }

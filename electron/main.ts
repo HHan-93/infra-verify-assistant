@@ -34,6 +34,7 @@ import {
   type CustomScenario,
   type LogIndexEntry,
   type LogRetentionSettings,
+  type LogTailTarget,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -76,9 +77,12 @@ interface Session {
   hadError?: boolean // 연결 중 오류(네트워크/keepalive) 발생 여부
   userClosed?: boolean // 사용자가 직접 끊었는지 (재접속 안 함)
   reconnecting?: boolean // 자동 재접속 루프 진행 중
-  /** 실시간 로그 뷰어(tail -f) 채널 — 세션당 1개만 유지, 새로 시작하면 기존 것을 닫는다 */
-  logTailStream?: ClientChannel
-  logTailId?: string
+  /** 실시간 로그 뷰어(tail -f / kubectl logs -f) 채널들 — tailId 로 구분해 세션당 여러 개
+   *  동시에 유지 가능(듀얼 패널에서 같은 세션의 다른 로그 두 개를 동시에 볼 수 있도록). */
+  logTailStreams?: Map<string, ClientChannel>
+  /** 렌더러 xterm 이 보고한 최신 PTY 크기 — SSH 셸을 열 때 초기 크기로 사용해야
+   *  원격 화면이 실제 터미널 크기와 맞는다(안 그러면 기본 80x24 로 열려 vi 등이 반토막 남). */
+  ptySize?: { cols: number; rows: number }
 }
 
 /** 포트 포워딩 항목 */
@@ -264,6 +268,8 @@ function cleanupConnection(s: Session) {
     /* 이미 닫힘 */
   }
   s.sftp = undefined
+  // 실시간 로그 tail 채널들 — client.end() 로 전부 끊기지만, 참조는 명시적으로 비운다
+  s.logTailStreams?.clear()
   s.client?.end()
   s.client = null
   s.jumpClient?.end()
@@ -299,7 +305,10 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
             status: 'connected',
             message: `${config.username}@${config.host} 연결됨${sock ? ' (점프 경유)' : ''}`,
           })
-          conn.shell({ term: 'xterm-256color' }, (err, stream) => {
+          const win = s.ptySize
+            ? { term: 'xterm-256color', cols: s.ptySize.cols, rows: s.ptySize.rows }
+            : { term: 'xterm-256color' }
+          conn.shell(win, (err, stream) => {
             if (err) {
               sendStatus(sessionId, { status: 'error', message: `쉘 오픈 실패: ${err.message}` })
               resolve({ success: false, message: err.message })
@@ -310,8 +319,9 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
             stream.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
             stream.stderr.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
             stream.on('close', () => {
-              // 채널 종료 → 연결 종료 유도 (나머지 정리/재접속 판단은 client 'close' 가 담당)
-              s.client?.end()
+              // 채널 종료 → 연결 종료 유도 (나머지 정리/재접속 판단은 client 'close' 가 담당).
+              // 단, 이 스트림이 이미 교체된(옛) 연결의 것이면 새 연결을 끊지 않도록 가드.
+              if (s.client === conn) s.client.end()
             })
             // 접속 후 자동 실행 명령 (프롬프트가 뜬 뒤 전송)
             if (config.startup && config.startup.trim()) {
@@ -326,6 +336,8 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
           })
         })
         .on('error', (err) => {
+          // 이미 새 연결로 교체된 옛 연결의 늦은 에러는 무시 (새 연결 상태를 덮어쓰지 않도록)
+          if (s.client !== conn) return
           s.connecting = false
           s.hadError = true
           const changed = !!pendingHostKey[targetId]
@@ -336,6 +348,10 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
           resolve({ success: false, message, hostKeyChanged: changed })
         })
         .on('close', () => {
+          // 이미 새 연결로 교체된 옛 연결의 늦은 close 는 무시 — 안 그러면 이 핸들러가
+          // cleanupConnection 으로 갓 맺은 새 연결(s.client)을 끊고 상태를 'closed' 로
+          // 덮어써, 드래그-드롭 재연결 시 "기존만 끊기고 새 연결은 안 되는" 문제가 생긴다.
+          if (s.client !== conn) return
           if (s.reconnecting) return // 재접속 루프가 제어 중
           const shouldReconnect = !!(s.wasConnected && s.hadError && !s.userClosed && s.lastConfig)
           sendStatus(sessionId, {
@@ -362,8 +378,10 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
         readyTimeout: 20000,
         hostHash: 'sha256',
         hostVerifier: makeHostVerifier(config.host, config.port),
+        // 짧은 네트워크 끊김(VPN 재협상, 패킷 유실 등)에도 곧바로 재접속 루프(노란불)로 안 빠지도록
+        // 허용 폭을 넓힘 — 15초 * 3회(45초) → 15초 * 6회(90초). 실제 연결이 끊긴 경우는 여전히 감지됨.
         keepaliveInterval: 15000,
-        keepaliveCountMax: 3,
+        keepaliveCountMax: 6,
       })
     }
 
@@ -411,8 +429,10 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
         readyTimeout: 20000,
         hostHash: 'sha256',
         hostVerifier: makeHostVerifier(jump.host, jump.port),
+        // 짧은 네트워크 끊김(VPN 재협상, 패킷 유실 등)에도 곧바로 재접속 루프(노란불)로 안 빠지도록
+        // 허용 폭을 넓힘 — 15초 * 3회(45초) → 15초 * 6회(90초). 실제 연결이 끊긴 경우는 여전히 감지됨.
         keepaliveInterval: 15000,
-        keepaliveCountMax: 3,
+        keepaliveCountMax: 6,
       })
     } else {
       sendStatus(sessionId, { status: 'connecting', message: `${config.host} 연결 시도 중...` })
@@ -719,6 +739,9 @@ ipcMain.on('terminal:input', (_evt, sessionId: string, data: string) => {
 // ── IPC: 터미널 리사이즈 (활성 대상 PTY 크기 동기화) ──────────────
 ipcMain.on('terminal:resize', (_evt, sessionId: string, size: { cols: number; rows: number }) => {
   const s = getSession(sessionId)
+  // 최신 크기를 기억 — 아직 셸이 없을 때(로컬 셸/연결 전) 값도 저장해두면, 이후 SSH 셸을
+  // 열 때 이 크기로 생성돼 원격 화면이 실제 터미널과 맞게 된다.
+  s.ptySize = { cols: Math.max(1, size.cols), rows: Math.max(1, size.rows) }
   if (s.shellStream) s.shellStream.setWindow(size.rows, size.cols, 0, 0)
   else s.localPty?.resize(Math.max(1, size.cols), Math.max(1, size.rows))
 })
@@ -1773,6 +1796,7 @@ ipcMain.handle(
           group: profile.group ?? existing?.group,
           jump: profile.jump ?? existing?.jump,
           startup: profile.startup ?? existing?.startup,
+          color: profile.color ?? existing?.color,
         }
       : { ...profile }
     // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
@@ -1865,10 +1889,11 @@ ipcMain.handle('customPresets:upsert', async (_evt, item: CustomPresetCommand) =
   // 신규 항목은 생성 시각을 기본 순서로 사용 — 내장 명령어는 배열 인덱스(작은 정수)를 암묵적
   // 순서로 쓰므로, 훨씬 큰 타임스탬프 값이면 자연히 맨 뒤로 붙는다. 위치 이동은 order 값을
   // 직접 지정해서 다시 upsert 하는 방식으로 처리(별도 재정렬 API 불필요).
+  const existingOrder = isNew ? undefined : list.find((p) => p.id === item.id)?.order
   const withId: CustomPresetCommand = {
     ...item,
     id: item.id || randomUUID(),
-    order: item.order ?? (isNew ? Date.now() : undefined),
+    order: item.order ?? (isNew ? Date.now() : existingOrder),
   }
   const idx = list.findIndex((p) => p.id === withId.id)
   if (idx >= 0) list[idx] = withId
@@ -1886,10 +1911,11 @@ ipcMain.handle('customScenarios:list', async () => readCustomScenarios())
 ipcMain.handle('customScenarios:upsert', async (_evt, item: CustomScenario) => {
   const list = await readCustomScenarios()
   const isNew = !item.id || !list.some((s) => s.id === item.id)
+  const existingOrder = isNew ? undefined : list.find((s) => s.id === item.id)?.order
   const withId: CustomScenario = {
     ...item,
     id: item.id || randomUUID(),
-    order: item.order ?? (isNew ? Date.now() : undefined),
+    order: item.order ?? (isNew ? Date.now() : existingOrder),
   }
   const idx = list.findIndex((s) => s.id === withId.id)
   if (idx >= 0) list[idx] = withId
@@ -2369,36 +2395,47 @@ async function execEscalatedNoStdin(
   return { ok: false, err: lastErr || '권한 부족' }
 }
 
-// ── 실시간 로그 뷰어 (tail -f) ──────────────────────────────────
+// ── 실시간 로그 뷰어 (tail -f / kubectl logs -f) ──────────────────
 // 일반 exec(execCapture)는 종료(close)돼야 resolve 되므로 tail -f 처럼 끝나지 않는 명령엔 못 쓴다.
 // 채널을 계속 열어두고 데이터가 올 때마다 logtail:data 이벤트로 흘려보내는 전용 스트리밍 실행기.
+// target 종류(파일/파드)에 따라 명령만 다르고, 스트리밍 배관(그레이스 판정/전달/종료처리)은 공용이다.
+function buildTailCommand(target: LogTailTarget, usePty: boolean): string {
+  if (target.kind === 'file') {
+    const q = shQuote(target.path)
+    return usePty ? `sudo -S -p '' tail -f -n 200 ${q}` : `tail -f -n 200 ${q}`
+  }
+  const podQ = shQuote(target.pod)
+  const nsQ = shQuote(target.namespace)
+  const containerFlag = target.container ? ` -c ${shQuote(target.container)}` : ''
+  return `kubectl logs -f --tail=200 ${podQ} -n ${nsQ}${containerFlag}`
+}
+
 ipcMain.handle(
   'logtail:start',
   async (
     _evt,
-    { sessionId, path: filePath, sudoPassword }: { sessionId: string; path: string; sudoPassword?: string },
+    {
+      sessionId,
+      target,
+      sudoPassword,
+    }: { sessionId: string; target: LogTailTarget; sudoPassword?: string },
   ) => {
     const s = getSession(sessionId)
     const client = s.client
     if (!client) return { ok: false, error: '연결되어 있지 않습니다.' }
-    // 같은 세션에서 이전에 보던 tail 이 있으면 먼저 정리(세션당 하나만 유지)
-    if (s.logTailStream) {
-      try {
-        s.logTailStream.close()
-      } catch {
-        /* 무시 */
-      }
-      s.logTailStream = undefined
-      s.logTailId = undefined
-    }
     const tailId = randomUUID()
-    const q = shQuote(filePath)
-    const usePty = !!sudoPassword
-    const cmd = usePty ? `sudo -S -p '' tail -f -n 200 ${q}` : `tail -f -n 200 ${q}`
+    // sudo(PTY) 는 파일 tail 에서 권한 문제가 있을 때만 쓴다 — kubectl logs 는 대상이 아님
+    const usePty = target.kind === 'file' && !!sudoPassword
+    const cmd = buildTailCommand(target, usePty)
 
     return new Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }>((resolve) => {
       const onStream = (err: Error | undefined, stream: ClientChannel) => {
         if (err) return resolve({ ok: false, error: err.message })
+        // grace 기간이 끝나기 전에 뷰어가 닫혀 logtail:stop 이 먼저 호출되면(빠르게 닫은 경우),
+        // 등록이 안 되어 있어 stop 이 아무 것도 못 닫고 조용히 무시되던 문제가 있었다.
+        // grace 기간을 기다리지 않고 채널을 얻는 즉시 등록해서, stop 이 언제 오든 바로 닫히게 한다.
+        if (!s.logTailStreams) s.logTailStreams = new Map()
+        s.logTailStreams.set(tailId, stream)
         let earlyText = '' // 시작 후 잠깐(grace) 동안의 출력 — 즉시 실패(권한없음/파일없음) 판별용
         let settled = false
         const forward = (data: string) => {
@@ -2418,10 +2455,7 @@ ipcMain.handle(
           })
         }
         stream.on('close', () => {
-          if (s.logTailStream === stream) {
-            s.logTailStream = undefined
-            s.logTailId = undefined
-          }
+          if (s.logTailStreams?.get(tailId) === stream) s.logTailStreams.delete(tailId)
           if (!settled) {
             settled = true
             if (/permission denied/i.test(earlyText)) resolve({ ok: false, needSudoPassword: true })
@@ -2434,8 +2468,6 @@ ipcMain.handle(
         setTimeout(() => {
           if (settled) return
           settled = true
-          s.logTailStream = stream
-          s.logTailId = tailId
           if (earlyText) forward(earlyText) // 오류가 아니었으므로 grace 기간 중 출력도 그대로 전달
           resolve({ ok: true, tailId })
         }, 700)
@@ -2446,19 +2478,72 @@ ipcMain.handle(
   },
 )
 
-ipcMain.handle('logtail:stop', async (_evt, { sessionId }: { sessionId: string }) => {
+ipcMain.handle('logtail:stop', async (_evt, { sessionId, tailId }: { sessionId: string; tailId: string }) => {
   const s = getSession(sessionId)
-  if (s.logTailStream) {
+  const stream = s.logTailStreams?.get(tailId)
+  if (stream) {
     try {
-      s.logTailStream.close()
+      stream.close()
     } catch {
       /* 무시 */
     }
-    s.logTailStream = undefined
-    s.logTailId = undefined
+    s.logTailStreams?.delete(tailId)
   }
   return { ok: true }
 })
+
+// ── Kubernetes 파드 로그용 탐색 (네임스페이스/파드/컨테이너 목록) ──────
+// kubectl 이 없거나 클러스터 접근 권한이 없으면 kubectl 자체 에러 메시지를 그대로 보여준다.
+ipcMain.handle('k8s:listNamespaces', async (_evt, { sessionId }: { sessionId: string }) => {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+  try {
+    const r = await execCapture(client, `kubectl get ns --no-headers -o custom-columns=:metadata.name 2>&1`)
+    if (r.code !== 0) return { ok: false, error: r.out.trim() || '네임스페이스 조회 실패' }
+    return { ok: true, namespaces: r.out.split('\n').map((s) => s.trim()).filter(Boolean) }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+})
+
+ipcMain.handle(
+  'k8s:listPods',
+  async (_evt, { sessionId, namespace }: { sessionId: string; namespace: string }) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      const r = await execCapture(
+        client,
+        `kubectl get pods -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name 2>&1`,
+      )
+      if (r.code !== 0) return { ok: false, error: r.out.trim() || '파드 조회 실패' }
+      return { ok: true, pods: r.out.split('\n').map((s) => s.trim()).filter(Boolean) }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+ipcMain.handle(
+  'k8s:listContainers',
+  async (
+    _evt,
+    { sessionId, namespace, pod }: { sessionId: string; namespace: string; pod: string },
+  ) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      const r = await execCapture(
+        client,
+        `kubectl get pod ${shQuote(pod)} -n ${shQuote(namespace)} -o jsonpath='{.spec.containers[*].name}' 2>&1`,
+      )
+      if (r.code !== 0) return { ok: false, error: r.out.trim() || '컨테이너 조회 실패' }
+      return { ok: true, containers: r.out.trim().split(/\s+/).filter(Boolean) }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
 
 // 설정파일 백업을 모으는 고정 베이스 경로 (원본 디렉토리를 더럽히지 않도록 분리).
 // 이 아래에 원본 경로 구조를 그대로 미러링해 저장한다. (변경하려면 이 값만 수정)
@@ -2828,14 +2913,25 @@ ipcMain.handle('monitor:listProcesses', async (_evt, { sessionId }: { sessionId:
   }
 })
 
-// 특정 프로세스 kill (SIGTERM → 실패 시 SIGKILL)
+// 특정 프로세스 kill (SIGTERM → 잠깐 대기 후에도 살아있으면 SIGKILL).
+// 참고: `kill pid`는 신호 전달에 성공하기만 하면 exit 0 을 반환하므로(프로세스가 실제로 죽는지는
+// 안 기다림), SIGTERM 을 트랩/무시하는 프로세스에도 "성공"으로 오판할 수 있었다. 마지막에
+// kill -0 으로 실제 생존 여부를 확인해 그 결과를 그대로 반환한다.
 ipcMain.handle(
   'monitor:killProc',
   async (_evt, { sessionId, pid }: { sessionId: string; pid: number }) => {
     const client = sessions.get(sessionId)?.client
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
     try {
-      await execCapture(client, `kill ${pid} 2>/dev/null || kill -9 ${pid} 2>/dev/null; true`)
+      const r = await execCapture(
+        client,
+        `kill ${pid} 2>/dev/null; sleep 0.3; ` +
+          `if kill -0 ${pid} 2>/dev/null; then kill -9 ${pid} 2>/dev/null; sleep 0.2; fi; ` +
+          `kill -0 ${pid} 2>/dev/null && echo ALIVE || echo DEAD`,
+      )
+      if (/ALIVE/.test(r.out)) {
+        return { ok: false, error: '프로세스를 종료하지 못했습니다 (권한 부족이거나 신호를 무시하는 프로세스일 수 있습니다).' }
+      }
       return { ok: true }
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }

@@ -11,7 +11,6 @@ import {
   Circle,
   Settings,
   GitCompare,
-  Layers,
   SquareTerminal,
   ScrollText,
   Activity,
@@ -44,8 +43,6 @@ interface ToolbarProps {
   onCompareNodes: () => void
   /** 터미널에서 선택한 영역을 AI 분석 */
   onAnalyzeSelection: () => void
-  /** 연결된 모든 세션 출력을 한 번에 AI 분석 */
-  onAnalyzeAll: () => void
 }
 
 /**
@@ -69,7 +66,6 @@ export default function Toolbar({
   onOpenSettings,
   onCompareNodes,
   onAnalyzeSelection,
-  onAnalyzeAll,
 }: ToolbarProps) {
   return (
     <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap border-b border-white/10 bg-panel px-3 py-2">
@@ -125,15 +121,7 @@ export default function Toolbar({
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScanText size={14} className="text-blue-300" />
-          선택 AI 분석
-        </button>
-        <button
-          onClick={onAnalyzeAll}
-          title="연결된 모든 세션 출력을 한 번에 AI 분석 (클러스터 진단)"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
-        >
-          <Layers size={14} className="text-blue-300" />
-          전체 세션 AI 분석
+          선택 세션 AI 분석
         </button>
         <button
           onClick={onOpenMultiRun}
@@ -154,10 +142,18 @@ export default function Toolbar({
 
         <Divider />
 
-        {/* 유틸 */}
+        {/* 로그: 실시간 로깅 → 로그 녹화(토글) → 녹화 로그 뷰어 */}
+        <button
+          onClick={onOpenLiveLog}
+          title="실시간 로그 보기 (tail -f / kubectl logs -f)"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+        >
+          <Activity size={14} />
+          실시간 로깅
+        </button>
         <button
           onClick={onToggleLog}
-          title={logging ? '세션 로그 기록 중지' : '세션 로그 파일로 기록'}
+          title={logging ? '세션 로그 녹화 중지' : '세션 로그를 파일로 녹화'}
           className={
             'flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs transition ' +
             (logging
@@ -166,14 +162,16 @@ export default function Toolbar({
           }
         >
           <Circle size={10} className={logging ? 'fill-current text-red-400' : ''} />
-          {logging ? '기록 중' : '로깅'}
+          {logging ? '녹화 중' : '로그 녹화'}
         </button>
-        <IconBtn onClick={onOpenLiveLog} title="실시간 로그 (tail -f)">
-          <Activity size={15} />
-        </IconBtn>
-        <IconBtn onClick={onOpenLogViewer} title="세션 로그 뷰어 (검색/리플레이)">
-          <ScrollText size={15} />
-        </IconBtn>
+        <button
+          onClick={onOpenLogViewer}
+          title="녹화된 세션 로그 검색/리플레이"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+        >
+          <ScrollText size={14} />
+          녹화 로그 뷰어
+        </button>
         <IconBtn onClick={onOpenSettings} title="외형 설정 (글꼴/테마)">
           <Settings size={15} />
         </IconBtn>

@@ -6,6 +6,7 @@ import {
   Check,
   X,
   ListChecks,
+  ClipboardCheck,
   Search,
   ChevronDown,
   ChevronUp,
@@ -14,7 +15,7 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react'
-import { SCENARIOS, type Scenario } from '../scenarios'
+import { SCENARIOS, type Scenario, type ScenarioStep } from '../scenarios'
 import type { CustomScenario, CustomScenarioStep } from '../../electron/shared-types'
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
@@ -24,6 +25,8 @@ interface ScenarioPanelProps {
   connected: boolean
   onRun: (cmd: string, execute: boolean) => void
   onClose: () => void
+  /** 시나리오를 검증 러너로 실행 (순차 실행 + 자동 판정 + 리포트) */
+  onRunScenario?: (scenario: { title: string; summary: string; steps: ScenarioStep[] }) => void
 }
 
 /**
@@ -84,7 +87,7 @@ function matchScenario(s: Scenario, q: string): { matches: boolean; stepCount: n
   return { matches: titleMatch || matchedSteps.length > 0, stepCount: matchedSteps.length }
 }
 
-export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPanelProps) {
+export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario }: ScenarioPanelProps) {
   const [selectedId, setSelectedId] = useState(SCENARIOS[0].id)
   const [copied, setCopied] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -136,10 +139,13 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
     const list = await window.electronAPI.customScenariosUpsert({ ...item, order: newOrder })
     setCustomScenarios(list)
   }
-  // 드래그앤드롭: targetSol 의 beforeIdx 앞에 끼워넣기 (다른 카테고리로도 이동 가능)
-  const dropCustomScenarioBefore = async (id: string, targetSol: string, beforeIdx: number) => {
+  // 드래그앤드롭: targetSol 안에서 targetId 바로 앞에 끼워넣기 (다른 카테고리로도 이동 가능).
+  // "드래그 대상을 뺀 목록" 안에서 targetId 의 위치를 직접 찾는다 — 호출부에서 미리 계산한
+  // 인덱스(필터링 전 목록 기준)를 그대로 넘기면 필터링 후 하나씩 밀려 위치가 어긋난다(off-by-one).
+  const dropCustomScenarioBefore = async (id: string, targetSol: string, targetId: string | null) => {
     const merged = siblingsOf(targetSol).filter((s) => s.id !== id)
-    const newOrder = computeInsertBeforeOrder(merged, beforeIdx)
+    const beforeIdx = targetId ? merged.findIndex((s) => s.id === targetId) : -1
+    const newOrder = computeInsertBeforeOrder(merged, beforeIdx < 0 ? merged.length : beforeIdx)
     const item = customScenarios.find((s) => s.id === id)
     if (!item) return
     const list = await window.electronAPI.customScenariosUpsert({ ...item, solution: targetSol, order: newOrder })
@@ -373,7 +379,7 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                         const id = e.dataTransfer.getData('text/plain')
                         setOverKey(null)
                         setDraggingId(null)
-                        if (id && id !== s.id) dropCustomScenarioBefore(id, g.solution, idx)
+                        if (id && id !== s.id) dropCustomScenarioBefore(id, g.solution, s.id)
                       }}
                       title={s.custom ? '드래그해서 순서/카테고리 이동' : undefined}
                       className={
@@ -453,6 +459,18 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
               </div>
               <div className="text-[11px] leading-relaxed text-gray-400">{scenario.summary}</div>
             </div>
+            {onRunScenario && (
+              <button
+                onClick={() =>
+                  onRunScenario({ title: scenario.title, summary: scenario.summary, steps: scenario.steps })
+                }
+                disabled={!connected}
+                title={connected ? '시나리오를 순차 실행하고 결과를 자동 판정' : 'SSH 연결 필요'}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-blue-500/40 bg-blue-600/20 px-2 py-1 text-[11px] text-blue-100 hover:bg-blue-600/30 disabled:opacity-40"
+              >
+                <ClipboardCheck size={13} /> 검증 실행
+              </button>
+            )}
             {scenario.custom && (
               <div className="flex shrink-0 items-center gap-1">
                 <button
@@ -526,28 +544,47 @@ export default function ScenarioPanel({ connected, onRun, onClose }: ScenarioPan
                                 <Copy size={13} />
                               )}
                             </button>
-                            <button
-                              onClick={() =>
-                                ph
-                                  ? togglePlaceholderInput(rowKey, step.command)
-                                  : onRun(step.command, true)
-                              }
-                              disabled={!connected}
-                              title={
-                                !connected
-                                  ? 'SSH 연결 필요'
-                                  : ph
-                                    ? '값 입력란 펼치기 (비워두면 기본 명령어 그대로 실행)'
-                                    : '터미널에서 실행'
-                              }
-                              className={
-                                'flex items-center gap-1 rounded px-2 py-1 text-[11px] text-white disabled:cursor-not-allowed disabled:opacity-40 ' +
-                                (ph ? 'bg-amber-600/80 hover:bg-amber-500' : 'bg-blue-600/80 hover:bg-blue-500')
-                              }
-                            >
-                              {ph ? <CornerDownLeft size={11} /> : <Play size={11} />}
-                              {ph ? '입력' : '실행'}
-                            </button>
+                            {(() => {
+                              // warn 이 달린 스텝 = 실행 후 터미널에서 사용자 입력(Enter/비밀번호 등)이 필요.
+                              // 플레이스홀더 '입력'(amber)과 구분해 주황색 + 경고 아이콘 + '실행·입력' 으로 표시.
+                              const needsInput = !ph && !!step.warn
+                              return (
+                                <button
+                                  onClick={() =>
+                                    ph
+                                      ? togglePlaceholderInput(rowKey, step.command)
+                                      : onRun(step.command, true)
+                                  }
+                                  disabled={!connected}
+                                  title={
+                                    !connected
+                                      ? 'SSH 연결 필요'
+                                      : ph
+                                        ? '값 입력란 펼치기 (비워두면 기본 명령어 그대로 실행)'
+                                        : needsInput
+                                          ? '실행 후 터미널에서 입력(Enter/비밀번호 등)이 필요합니다 — 아래 경고 확인'
+                                          : '터미널에서 실행'
+                                  }
+                                  className={
+                                    'flex items-center gap-1 rounded px-2 py-1 text-[11px] text-white disabled:cursor-not-allowed disabled:opacity-40 ' +
+                                    (ph
+                                      ? 'bg-amber-600/80 hover:bg-amber-500'
+                                      : needsInput
+                                        ? 'bg-orange-600/80 hover:bg-orange-500'
+                                        : 'bg-blue-600/80 hover:bg-blue-500')
+                                  }
+                                >
+                                  {ph ? (
+                                    <CornerDownLeft size={11} />
+                                  ) : needsInput ? (
+                                    <AlertTriangle size={11} />
+                                  ) : (
+                                    <Play size={11} />
+                                  )}
+                                  {ph ? '입력' : needsInput ? '실행·입력' : '실행'}
+                                </button>
+                              )
+                            })()}
                           </div>
                         </>
                       )}

@@ -181,18 +181,32 @@ export default function FileExplorer({
   const localDragRef = useRef(false)
   const bodyRef = useRef<HTMLDivElement>(null)
 
-  // 전송 진행률 구독
+  // 전송 진행률 구독 — 세션간 직접 전송(relayTransfer) 중에는 "받는 중"(원본 세션)과
+  // "보내는 중"(대상 세션) 이벤트가 서로 다른 sessionId 로 전송되므로, 좌측에 다른 세션이
+  // 선택돼 있으면 그 세션의 진행률도 함께 받아야 다운로드 구간에서 진행률이 멈추지 않는다.
   useEffect(() => {
+    const relayFrom = leftMode === 'session' ? leftSessionId : null
     const off = window.electronAPI.onSftpProgress((d) => {
-      if (d.sessionId !== sessionId) return
+      if (d.sessionId !== sessionId && d.sessionId !== relayFrom) return
       setProgress(d.pct >= 100 ? null : { name: d.name, pct: d.pct })
     })
     return off
+  }, [sessionId, leftMode, leftSessionId])
+
+  // 이 모달은 sessionId prop 이 바뀌어도(활성 탭 전환 등) 리마운트되지 않고 그대로 유지되므로,
+  // 세션 전환 전에 날린 sftp:list 요청이 전환 후에 늦게 도착하면 화면은 이전 세션의 트리를
+  // 보여주면서 실제 조작 대상은 새 세션이 되는 불일치가 생길 수 있다. ref 로 "요청 시점 이후
+  // sessionId 가 바뀌었는지"를 확인해 늦게 온 응답은 버린다.
+  const sessionIdRef = useRef(sessionId)
+  useEffect(() => {
+    sessionIdRef.current = sessionId
   }, [sessionId])
 
   const listDir = useCallback(
     async (path?: string) => {
+      const forSession = sessionId
       const r = await window.electronAPI.sftpList(sessionId, path)
+      if (forSession !== sessionIdRef.current) return null
       if (!r.ok) {
         setError(r.error || '목록을 불러오지 못했습니다.')
         return null
@@ -273,11 +287,24 @@ export default function FileExplorer({
   // ── 좌측 패널(듀얼패인) — 읽기 전용 탐색 + 다중선택, 업로드/전송 소스로만 사용.
   // leftMode==='local' 이면 local:list, 'session' 이면 다른 세션의 sftp:list 로 조회하되
   // 반환 형태(path/parent/entries)는 동일하게 맞춰서 이후 로직(toggle/refresh)은 공용으로 쓴다.
+  // listDir 와 같은 이유로, 좌측 패널이 다른 세션을 조회하는 도중 leftMode/leftSessionId 가
+  // 바뀌면 늦게 도착한 응답을 버려야 한다.
+  const leftModeRef = useRef(leftMode)
+  const leftSessionIdRef = useRef(leftSessionId)
+  useEffect(() => {
+    leftModeRef.current = leftMode
+    leftSessionIdRef.current = leftSessionId
+  }, [leftMode, leftSessionId])
+
   const listLocalDir = useCallback(
     async (dirPath?: string) => {
+      const forMode = leftMode
+      const forSession = leftSessionId
+      const stillCurrent = () => forMode === leftModeRef.current && forSession === leftSessionIdRef.current
       if (leftMode === 'session') {
         if (!leftSessionId) return null
         const r = await window.electronAPI.sftpList(leftSessionId, dirPath)
+        if (!stillCurrent()) return null
         if (!r.ok) {
           setLocalError(r.error || '목록을 불러오지 못했습니다.')
           return null
@@ -291,6 +318,7 @@ export default function FileExplorer({
         }
       }
       const r = await window.electronAPI.localList(dirPath)
+      if (!stillCurrent()) return null
       if (!r.ok) {
         setLocalError(r.error || '목록을 불러오지 못했습니다.')
         return null
@@ -374,20 +402,21 @@ export default function FileExplorer({
       setBusy(`전송 중... (${items.length}개)`)
       const r = await window.electronAPI.sftpRelayTransfer(leftSessionId, sessionId, items, dir)
       setBusy('')
-      if (r.ok) {
-        setLocalSelected(new Set())
-        refreshDir(dir)
-      } else if (r.error) setError(r.error)
+      // 항목을 순차 처리하다 중간에 실패해도 그 앞까지는 이미 서버에 반영돼 있으므로,
+      // 실패 시에도 트리를 새로고침해서 화면이 실제 상태와 어긋나지 않게 한다.
+      setLocalSelected(new Set())
+      refreshDir(dir)
+      if (!r.ok && r.error) setError(r.error)
       return
     }
     const paths = [...localSelected]
     setBusy(`업로드 중... (${paths.length}개)`)
     const r = await window.electronAPI.sftpUpload(sessionId, dir, paths)
     setBusy('')
-    if (r.ok) {
-      setLocalSelected(new Set())
-      refreshDir(dir)
-    } else if (!r.canceled) setError(r.error || '업로드 실패')
+    if (r.canceled) return
+    setLocalSelected(new Set())
+    refreshDir(dir)
+    if (!r.ok) setError(r.error || '업로드 실패')
   }
 
   // 원격에서 선택한 항목들을 현재 로컬 선택 폴더로 다운로드 (대화상자 없이 바로)
@@ -419,11 +448,12 @@ export default function FileExplorer({
     setBusy(`삭제 중... (${items.length}개)`)
     const r = await window.electronAPI.sftpDeletePaths(sessionId, items)
     setBusy('')
-    if (r.ok) {
-      setRemoteSelected(new Set())
-      const parents = new Set(targets.map((n) => parentOf(n.path)))
-      for (const p of parents) refreshDir(p)
-    } else setError(r.error || '삭제 실패')
+    // 항목을 순차 삭제하다 중간에 실패해도 그 앞까지는 이미 지워졌으므로, 실패 시에도
+    // 새로고침해서 "이미 지워진 항목이 트리에 남아있는" 상태로 보이지 않게 한다.
+    setRemoteSelected(new Set())
+    const parents = new Set(targets.map((n) => parentOf(n.path)))
+    for (const p of parents) refreshDir(p)
+    if (!r.ok) setError(r.error || '삭제 실패')
   }
 
   const download = async (node: Node) => {

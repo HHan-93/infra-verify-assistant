@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { SquareTerminal, X, Play, Loader2, ChevronDown, ChevronRight, Search } from 'lucide-react'
+import { SquareTerminal, X, Play, Loader2, ChevronDown, ChevronRight, Search, ScanText, Info } from 'lucide-react'
+import { judgeOutput, verdictBadge, type Verdict } from '../lib/verdict'
 
 export interface RunTarget {
   id: string
@@ -9,6 +10,8 @@ export interface RunTarget {
 interface MultiRunProps {
   sessions: RunTarget[]
   onClose: () => void
+  /** 실행 결과 전체를 AI 패널로 보내 분석 (스트리밍 중이면 false 반환) */
+  onAnalyze: (text: string) => boolean
 }
 
 interface Result {
@@ -39,8 +42,9 @@ function highlight(text: string, query: string) {
  * 다중 호스트 명령 실행 — 명령 1개를 선택한 세션들에 동시 실행하고
  * 호스트별 종료코드/출력을 표 형태로 수집(인터랙티브 셸과 분리된 exec 채널).
  */
-export default function MultiRun({ sessions, onClose }: MultiRunProps) {
+export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps) {
   const [cmd, setCmd] = useState('')
+  const [analyzeNotice, setAnalyzeNotice] = useState('')
   const [targets, setTargets] = useState<Set<string>>(new Set(sessions.map((s) => s.id)))
   const [results, setResults] = useState<Record<string, Result>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -85,8 +89,39 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
 
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name ?? id
 
+  // 실행 결과 전체를 노드별로 묶어 AI 분석에 보냄 (노드 간 차이/이상 비교)
+  const analyzeResults = () => {
+    const entries = Object.entries(results)
+    if (!entries.length) return
+    const parts = entries.map(([id, r]) => {
+      const body = r.error
+        ? `⚠ ${r.error}`
+        : `exit ${r.code}\n${(r.out || '') + (r.err ? `\n[stderr]\n${r.err}` : '')}`.trim()
+      return `### 세션: ${nameOf(id)}\n$ ${cmd}\n${body || '(출력 없음)'}`
+    })
+    const text = `다음은 여러 노드에서 같은 명령 "${cmd}" 를 실행한 결과입니다. 노드 간 차이/이상 징후를 비교 분석해 주세요.\n\n${parts.join('\n\n')}`
+    const started = onAnalyze(text)
+    setAnalyzeNotice(started ? '' : 'AI가 이미 다른 응답을 생성하는 중입니다. 잠시 후 다시 시도하세요.')
+  }
+
   const trimmedQuery = query.trim()
-  const isFailed = (r: Result) => r.status === 'error' || (r.status === 'done' && r.code !== 0)
+  // 자동 판정 — MultiRun 은 임의 명령을 직접 입력해 돌리는 도구라 명시적 기준(check)이 없으므로
+  // 기본 판정(위험 키워드/종료코드)만 적용된다: 실패(빨강) 또는 정보(회색). 초록 PASS 는 뜨지 않음.
+  const verdictOf = (r: Result): Verdict | null =>
+    r.status === 'done' ? judgeOutput(r.out, r.err, r.code).verdict : null
+  const isFailed = (r: Result) => r.status === 'error' || verdictOf(r) === 'fail'
+  const summary = useMemo(() => {
+    let fail = 0, info = 0, err = 0
+    for (const r of Object.values(results)) {
+      if (r.status === 'error') err++
+      else if (r.status === 'done') {
+        const v = judgeOutput(r.out, r.err, r.code).verdict
+        if (v === 'fail') fail++
+        else info++
+      }
+    }
+    return { fail, info, err }
+  }, [results])
   const matchesQuery = (id: string, r: Result) => {
     if (!trimmedQuery) return true
     const q = trimmedQuery.toLowerCase()
@@ -109,19 +144,35 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
       <div
-        className="flex h-[80vh] w-[760px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
+        className="flex h-[80vh] w-[1000px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <SquareTerminal size={16} className="text-blue-400" />
           <span className="text-sm font-semibold text-gray-100">다중 호스트 실행</span>
+          {Object.keys(results).length > 0 && (
+            <button
+              onClick={analyzeResults}
+              title="실행 결과 전체를 AI로 비교 분석"
+              className="ml-auto flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+            >
+              <ScanText size={14} className="text-blue-300" />
+              AI 분석
+            </button>
+          )}
           <button
             onClick={onClose}
-            className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+            className={
+              (Object.keys(results).length > 0 ? '' : 'ml-auto ') +
+              'rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200'
+            }
           >
             <X size={16} />
           </button>
         </div>
+        {analyzeNotice && (
+          <div className="bg-amber-500/10 px-4 py-1 text-[11px] text-amber-300">{analyzeNotice}</div>
+        )}
 
         {sessions.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
@@ -177,6 +228,16 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
                   placeholder="호스트명, 출력 내용 검색..."
                   className="min-w-0 flex-1 bg-transparent text-xs text-gray-200 outline-none placeholder:text-gray-600"
                 />
+                {(summary.fail > 0 || summary.err > 0) && (
+                  <span className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[11px] font-medium text-red-300">
+                    실패 {summary.fail + summary.err}
+                  </span>
+                )}
+                {summary.info > 0 && (
+                  <span className="shrink-0 flex items-center gap-0.5 text-[11px] text-emerald-300/70">
+                    <Info size={11} /> 실행됨 {summary.info}
+                  </span>
+                )}
                 <button
                   onClick={() => setOnlyFailed((v) => !v)}
                   className={
@@ -219,16 +280,22 @@ export default function MultiRun({ sessions, onClose }: MultiRunProps) {
                           ) : r.status === 'error' ? (
                             <span className="rounded bg-red-500/20 px-1.5 text-[10px] text-red-300">오류</span>
                           ) : (
-                            <span
-                              className={
-                                'rounded px-1.5 text-[10px] ' +
-                                (r.code === 0
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-amber-500/20 text-amber-300')
-                              }
-                            >
-                              exit {r.code}
-                            </span>
+                            (() => {
+                              const j = judgeOutput(r.out, r.err, r.code)
+                              const b = verdictBadge(j.verdict)
+                              return (
+                                <>
+                                  <span
+                                    title={j.reasons.join(', ')}
+                                    className={'flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ' + b.cls}
+                                  >
+                                    {j.verdict === 'info' && <Info size={10} />}
+                                    {b.label}
+                                  </span>
+                                  <span className="text-[10px] text-gray-500">exit {r.code}</span>
+                                </>
+                              )
+                            })()
                           )}
                         </div>
                         {open && r.status !== 'running' && (

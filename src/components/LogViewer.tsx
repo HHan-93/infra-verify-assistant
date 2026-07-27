@@ -17,6 +17,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { LogIndexEntry, LogRetentionSettings } from '../../electron/shared-types'
 import ConfirmDialog from './ConfirmDialog'
+import { renderLogLine } from '../lib/logDisplay'
 
 interface LogViewerProps {
   onClose: () => void
@@ -104,7 +105,7 @@ export default function LogViewer({ onClose }: LogViewerProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
-      <div className="flex h-full max-h-[880px] w-full max-w-5xl overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
+      <div className="flex h-full max-h-[920px] w-[1600px] max-w-[97vw] overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
         {/* 좌측: 로그 목록 */}
         <div className="flex w-64 shrink-0 flex-col border-r border-white/10">
           <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-1.5">
@@ -395,11 +396,15 @@ function LogTextView({ entry }: { entry: LogIndexEntry }) {
                   if (hasMatch) matchRefs.current[matchSeen] = el
                 }}
                 className={
-                  'whitespace-pre-wrap break-all text-gray-300' +
-                  (isCurrent ? ' rounded bg-yellow-500/30' : hasMatch ? ' bg-yellow-500/10' : '')
+                  'whitespace-pre-wrap break-all -mx-1 px-1 text-gray-300' +
+                  (isCurrent
+                    ? ' rounded ring-1 ring-yellow-400 bg-yellow-500/25'
+                    : hasMatch
+                      ? ' bg-yellow-500/10'
+                      : '')
                 }
               >
-                {line || ' '}
+                {renderLogLine(line, hasMatch ? trimmedQuery : '')}
               </div>
             )
           })

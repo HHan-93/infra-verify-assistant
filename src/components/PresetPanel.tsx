@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, CornerDownLeft, Copy, Check, X, Search, Plus, Pencil, Trash2, ChevronUp, ChevronDown } from 'lucide-react'
+import { Play, CornerDownLeft, Copy, Check, X, Search, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
 import { PRESETS, type PresetGroup } from '../presets'
 import type { CustomPresetCommand } from '../../electron/shared-types'
 import AutocompleteInput from './AutocompleteInput'
@@ -16,6 +16,8 @@ interface PanelCommand {
   label: string
   command: string
   desc: string
+  /** true 면 실행할 명령이 아니라 안내 문구 — 실행/복사 버튼 없이 노트 형태로만 표시 */
+  info?: boolean
   /** 사용자 정의 항목일 때만 존재 — 편집/삭제/이동 대상 식별용 */
   id?: string
   custom?: boolean
@@ -161,10 +163,23 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
     setCustomPresets(list)
   }
 
-  // 드래그앤드롭: targetSol/targetSub 의 beforeIdx 앞에 끼워넣기 (다른 카테고리/하위분류로도 이동 가능)
-  const dropCustomPresetBefore = async (id: string, targetSol: string, targetSub: string, beforeIdx: number) => {
+  // 드래그앤드롭: targetSol/targetSub 안에서 target 바로 앞에 끼워넣기 (다른 카테고리/하위분류로도 이동 가능).
+  // target 자체를 받아서 "드래그 대상을 뺀 목록" 안에서 직접 위치를 찾는다 — 호출부에서 미리 계산한
+  // 인덱스를 넘기면, 그 인덱스가 드래그 대상을 포함한 목록 기준이라 필터링 후 하나씩 밀려 위치가
+  // 어긋나는(off-by-one) 문제가 있었다.
+  const dropCustomPresetBefore = async (
+    id: string,
+    targetSol: string,
+    targetSub: string,
+    target: { id?: string; command: string; label: string } | null,
+  ) => {
     const merged = siblingsOf(targetSol, targetSub).filter((c) => c.id !== id)
-    const newOrder = computeInsertBeforeOrder(merged, beforeIdx)
+    const beforeIdx = target
+      ? merged.findIndex((x) =>
+          target.id ? x.id === target.id : !x.id && x.command === target.command && x.label === target.label,
+        )
+      : -1
+    const newOrder = computeInsertBeforeOrder(merged, beforeIdx < 0 ? merged.length : beforeIdx)
     const item = customPresets.find((p) => p.id === id)
     if (!item) return
     const list = await window.electronAPI.customPresetsUpsert({
@@ -283,6 +298,34 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
     const isOpenPh = openPh?.key === key
     const sol = c.solution ?? solution
     const sub = c.subgroup ?? subName
+
+    // 안내 문구 항목 — 실행할 명령이 없으므로 실행/복사 버튼 없이 노트 형태로만 표시
+    if (c.info) {
+      return (
+        <div
+          key={key}
+          className="rounded-md border border-blue-500/20 bg-blue-500/5 p-2"
+        >
+          <div className="flex items-center gap-2">
+            {showContext && (
+              <span className="shrink-0 rounded bg-blue-600/20 px-1.5 py-0.5 text-[10px] text-blue-300">
+                {c.solution} · {c.subgroup}
+              </span>
+            )}
+            <Info size={13} className="shrink-0 text-blue-300" />
+            <span className="text-[13px] font-medium text-blue-100">
+              <Highlight text={c.label} query={trimmed} />
+            </span>
+          </div>
+          {c.desc && (
+            <p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-gray-400">
+              <Highlight text={c.desc} query={trimmed} />
+            </p>
+          )}
+        </div>
+      )
+    }
+
     return (
       <div
         key={key}
@@ -310,13 +353,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
           setOverKey(null)
           setDraggingId(null)
           if (!id || id === c.id) return
-          const merged = siblingsOf(sol, sub)
-          // c.id 가 있으면(사용자 정의 대상) id 로, 없으면(내장 대상 — 전부 id===undefined 라 id만으론
-          // 구분 불가) 같은 라벨+명령어 조합으로 정확한 위치를 찾는다.
-          const beforeIdx = merged.findIndex((x) =>
-            c.id ? x.id === c.id : !x.id && x.command === c.command && x.label === c.label,
-          )
-          dropCustomPresetBefore(id, sol, sub, beforeIdx < 0 ? merged.length : beforeIdx)
+          dropCustomPresetBefore(id, sol, sub, c)
         }}
         title={c.custom ? '드래그해서 순서/카테고리 이동' : undefined}
         className={
@@ -426,7 +463,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
           </div>
         </div>
         {c.desc && (
-          <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+          <p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-gray-400">
             <Highlight text={c.desc} query={trimmed} />
             {ph && <span className="ml-1 text-amber-400/80">· &lt;...&gt; 수정 필요</span>}
           </p>
@@ -532,41 +569,43 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
         /* 일반 탐색 모드 */
         <div ref={bodyRef} className="flex min-w-0 flex-1 overflow-hidden">
           {/* 1단계: 카테고리 */}
-          <div style={{ width: catWidth }} className="flex shrink-0 flex-col py-2">
+          <div style={{ width: catWidth }} className="flex min-h-0 shrink-0 flex-col py-2">
             <div className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
               카테고리
             </div>
-            {groups.map((g) => (
-              <button
-                key={g.solution}
-                onClick={() => selectSolution(g.solution)}
-                onDragOver={(e) => {
-                  if (!draggingId) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = 'move'
-                  if (overKey !== 'cat-' + g.solution) setOverKey('cat-' + g.solution)
-                }}
-                onDragLeave={() => setOverKey((k) => (k === 'cat-' + g.solution ? null : k))}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  const id = e.dataTransfer.getData('text/plain')
-                  setOverKey(null)
-                  setDraggingId(null)
-                  if (id && g.subgroups[0]) dropCustomPresetAppend(id, g.solution, g.subgroups[0].name)
-                }}
-                title={draggingId ? `"${g.solution}" 카테고리로 이동` : undefined}
-                className={
-                  'mx-1 rounded-md px-2.5 py-1.5 text-left text-[13px] transition ' +
-                  (overKey === 'cat-' + g.solution
-                    ? 'bg-blue-500/40 ring-1 ring-blue-400'
-                    : g.solution === solution
-                      ? 'bg-blue-600/30 font-medium text-blue-100'
-                      : 'text-gray-300 hover:bg-white/5')
-                }
-              >
-                {g.solution}
-              </button>
-            ))}
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              {groups.map((g) => (
+                <button
+                  key={g.solution}
+                  onClick={() => selectSolution(g.solution)}
+                  onDragOver={(e) => {
+                    if (!draggingId) return
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                    if (overKey !== 'cat-' + g.solution) setOverKey('cat-' + g.solution)
+                  }}
+                  onDragLeave={() => setOverKey((k) => (k === 'cat-' + g.solution ? null : k))}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const id = e.dataTransfer.getData('text/plain')
+                    setOverKey(null)
+                    setDraggingId(null)
+                    if (id && g.subgroups[0]) dropCustomPresetAppend(id, g.solution, g.subgroups[0].name)
+                  }}
+                  title={draggingId ? `"${g.solution}" 카테고리로 이동` : undefined}
+                  className={
+                    'mx-1 shrink-0 rounded-md px-2.5 py-1.5 text-left text-[13px] transition ' +
+                    (overKey === 'cat-' + g.solution
+                      ? 'bg-blue-500/40 ring-1 ring-blue-400'
+                      : g.solution === solution
+                        ? 'bg-blue-600/30 font-medium text-blue-100'
+                        : 'text-gray-300 hover:bg-white/5')
+                  }
+                >
+                  {g.solution}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div
@@ -679,6 +718,14 @@ function PresetEditorModal({
   const [command, setCommand] = useState(initial?.command ?? '')
   const [desc, setDesc] = useState(initial?.desc ?? '')
   const [err, setErr] = useState('')
+  // 자동 판정 기준 (선택) — 쉼표로 여러 개
+  const [failContains, setFailContains] = useState((initial?.check?.failContains ?? []).join(', '))
+  const [passContains, setPassContains] = useState((initial?.check?.passContains ?? []).join(', '))
+  const [passRegex, setPassRegex] = useState(initial?.check?.passRegex ?? '')
+  const [requireExitZero, setRequireExitZero] = useState(initial?.check?.requireExitZero ?? false)
+  const [showCheck, setShowCheck] = useState(
+    !!(initial?.check && (initial.check.failContains?.length || initial.check.passContains?.length || initial.check.passRegex || initial.check.requireExitZero)),
+  )
 
   const inputCls =
     'w-full rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-[13px] text-gray-100 ' +
@@ -689,6 +736,11 @@ function PresetEditorModal({
       setErr('카테고리 · 하위분류 · 라벨 · 명령어는 필수입니다.')
       return
     }
+    const splitCsv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean)
+    const fail = splitCsv(failContains)
+    const pass = splitCsv(passContains)
+    const rx = passRegex.trim()
+    const hasAnyCheck = fail.length || pass.length || rx || requireExitZero
     onSave({
       id: initial?.id ?? '',
       solution: solutionVal.trim(),
@@ -696,6 +748,14 @@ function PresetEditorModal({
       label: label.trim(),
       command: command.trim(),
       desc: desc.trim(),
+      check: hasAnyCheck
+        ? {
+            ...(fail.length ? { failContains: fail } : {}),
+            ...(pass.length ? { passContains: pass } : {}),
+            ...(rx ? { passRegex: rx } : {}),
+            ...(requireExitZero ? { requireExitZero: true } : {}),
+          }
+        : undefined,
       // 편집 시 기존 순서를 그대로 유지 (신규 추가는 undefined → 메인에서 생성 시각으로 기본값 지정)
       order: initial?.order,
     })
@@ -767,6 +827,58 @@ function PresetEditorModal({
               className={inputCls}
             />
           </div>
+
+          {/* 자동 판정 기준 (선택) — 다중 실행/시나리오 검증에서 결과를 Pass/Fail 로 자동 판정 */}
+          <div className="rounded-md border border-white/10 bg-panel-light/40">
+            <button
+              type="button"
+              onClick={() => setShowCheck((v) => !v)}
+              className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-gray-300 hover:text-gray-100"
+            >
+              {showCheck ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              자동 판정 기준 <span className="text-gray-500">(선택 — 비우면 "정보"로만 표시)</span>
+            </button>
+            {showCheck && (
+              <div className="space-y-2 px-2.5 pb-2.5">
+                <div>
+                  <label className="mb-1 block text-[11px] text-red-300/80">실패 문자열 (하나라도 있으면 ✗ 실패)</label>
+                  <input
+                    value={failContains}
+                    onChange={(e) => setFailContains(e.target.value)}
+                    placeholder="예: HEALTH_ERR, OFFLINE, ERROR (쉼표로 구분)"
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-emerald-300/80">정상 문자열 (모두 있어야 ✓ 정상)</label>
+                  <input
+                    value={passContains}
+                    onChange={(e) => setPassContains(e.target.value)}
+                    placeholder="예: HEALTH_OK (쉼표로 구분)"
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-gray-400">정상 정규식 (매칭 시 ✓ 정상)</label>
+                  <input
+                    value={passRegex}
+                    onChange={(e) => setPassRegex(e.target.value)}
+                    placeholder="예: active \\(running\\)"
+                    className={inputCls + ' font-mono'}
+                  />
+                </div>
+                <label className="flex items-center gap-1.5 text-[11px] text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={requireExitZero}
+                    onChange={(e) => setRequireExitZero(e.target.checked)}
+                  />
+                  종료 코드 0 을 요구 (0 이 아니면 실패)
+                </label>
+              </div>
+            )}
+          </div>
+
           {err && <p className="text-[11px] text-red-400">{err}</p>}
         </div>
         <div className="mt-4 flex justify-end gap-2">

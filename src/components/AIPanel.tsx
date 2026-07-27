@@ -30,10 +30,13 @@ import {
 } from '../../electron/shared-types'
 import Markdown from './Markdown'
 import { buildReportHtml } from '../lib/reportHtml'
+import { maskForExport } from '../lib/mask'
+import { PRESETS } from '../presets'
 
-/** App 에서 ref 로 호출: 터미널 출력 텍스트를 분석 요청 */
+/** App 에서 ref 로 호출: 터미널 출력 텍스트를 분석 요청.
+ *  반환값 false 는 "이미 스트리밍 중이라 무시됨" — 호출부는 요청이 실제로 접수됐다고 가정하면 안 된다. */
 export interface AIPanelHandle {
-  analyze: (context: string, question?: string) => void
+  analyze: (context: string, question?: string) => boolean
 }
 
 interface ChatItem {
@@ -50,6 +53,37 @@ function parseCommandCard(content: string): { command: string; explain: string }
   if (!m) return null
   const explainMatch = content.match(/설명:\s*([\s\S]*)/)
   return { command: m[1].trim(), explain: explainMatch ? explainMatch[1].trim() : '' }
+}
+
+const ALL_PRESET_COMMANDS = PRESETS.flatMap((g) => g.subgroups.flatMap((sg) => sg.commands)).filter(
+  (c) => !c.info,
+)
+
+/**
+ * "명령어 생성" 요청과 겹치는 프리셋(이미 검증된 사내 명령어)을 찾아 상위 몇 개를 반환.
+ * OpenStack 서브커맨드처럼 AI가 그럴듯하지만 틀린 문법을 지어내는 걸 막기 위해, 이미
+ * 검증된 명령어가 있으면 그걸 그대로 쓰도록 프롬프트에 참고자료로 붙여준다(RAG와 같은 취지).
+ * 한국어는 공백 기준 형태소 분리가 정확하지 않지만, 프리셋 label/desc 자체가 공백으로
+ * 나뉜 핵심 용어 위주라 부분 문자열 겹침만으로도 실용적으로 잘 맞는다.
+ */
+function findRelevantPresetCommands(query: string, maxResults = 3) {
+  const tokens = query
+    .split(/[\s,./·\-()]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 2)
+  if (!tokens.length) return []
+  const scored = ALL_PRESET_COMMANDS.map((c) => {
+    const haystack = (c.label + ' ' + c.desc).toLowerCase()
+    const score = tokens.filter((t) => haystack.includes(t)).length
+    return { c, score }
+  })
+  // 토큰 1개만 겹치는 건 흔한 단어(예: "확인") 하나로 우연히 걸린 경우가 많아 제외 —
+  // 2개 이상 겹칠 때만 실제로 관련 있는 후보로 취급
+  return scored
+    .filter((s) => s.score >= 2)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxResults)
+    .map((s) => s.c)
 }
 
 /** 프로바이더별 사용자 설정 (키 + 모델) */
@@ -237,7 +271,17 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
   const submit = (text: string, mode: 'chat' | 'command' = 'chat') => {
     const trimmed = text.trim()
     if (!trimmed || streaming) return
-    const userMsg: ChatItem = { id: crypto.randomUUID(), role: 'user', content: trimmed }
+    let content = trimmed
+    if (mode === 'command') {
+      // 이미 검증된 프리셋 명령어가 있으면 참고자료로 붙여서, AI가 문법을 지어내는 대신
+      // 그 명령어를 그대로 쓰도록 유도한다(shellgen 시스템 프롬프트가 이 블록을 우선하도록 지시).
+      const matches = findRelevantPresetCommands(trimmed)
+      if (matches.length) {
+        const refBlock = matches.map((m) => `- ${m.command} : ${m.desc}`).join('\n')
+        content = `${trimmed}\n\n(참고용 사내 검증 명령어 후보)\n${refBlock}`
+      }
+    }
+    const userMsg: ChatItem = { id: crypto.randomUUID(), role: 'user', content }
     if (mode === 'command') startStream([...messagesRef.current, userMsg], 'shellgen', 'command')
     else startStream([...messagesRef.current, userMsg])
   }
@@ -247,14 +291,14 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
   // 응답을 영영 못 받고 "…"/"명령어 생성 중" 상태로 멈춰버림)
   useImperativeHandle(ref, () => ({
     analyze: (context: string, question?: string) => {
-      if (streaming) return
+      if (streaming) return false
       // 이 핸들은 항상 '일반 대화' 형식(자유 서술)으로 응답을 생성한다 — 명령어 생성
       // 탭이 켜진 채로 호출되면 탭 표시와 실제 응답 형식이 어긋나 보이므로 탭도 맞춰준다.
       setChatMode('chat')
       const ctx = context.trim()
       if (!ctx) {
         submit('터미널 출력이 비어 있습니다. (선택 영역이 없거나 출력이 없음)')
-        return
+        return true
       }
       if (question) {
         const userMsg: ChatItem = {
@@ -266,6 +310,7 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
       } else {
         submit(`다음 터미널 출력을 분석해 주세요:\n\n\`\`\`\n${ctx}\n\`\`\``)
       }
+      return true
     },
   }))
 
@@ -318,7 +363,8 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
       lines.push(m.content)
       lines.push('')
     })
-    return lines.join('\n')
+    // 리포트 저장 공통 출구 — 설정 ON 시 민감정보(비밀번호/토큰/키) 마스킹
+    return maskForExport(lines.join('\n'))
   }
 
   // 파일명용 타임스탬프 (YYYYMMDD-HHmm)
@@ -378,11 +424,16 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
       ? resolvedModel
       : modelOptions[0]
 
-  // 입력한 키로 실제 사용 가능한 모델 목록 조회
+  // 입력한 키로 실제 사용 가능한 모델 목록 조회.
+  // fetchedModels 자체는 provider 로 키잉돼 있어 안전하지만, modelLoading/modelMsg/showCustomModel은
+  // 전역 단일 상태라 조회 도중 다른 provider 로 전환하면 늦게 온 응답이 지금 보이는 설정 화면을
+  // 오염시킨다 — 요청 시점의 provider 가 아직 선택돼 있을 때만 반영한다.
   const loadModels = async () => {
+    const forProvider = provider
     setModelLoading(true)
     setModelMsg('')
     const res = await window.electronAPI.aiListModels(provider, cur.key || undefined)
+    if (forProvider !== configRef.current.provider) return
     setModelLoading(false)
     if (res.ok && res.models) {
       setFetchedModels((prev) => ({ ...prev, [provider]: res.models }))

@@ -140,10 +140,12 @@ export const ANALYSIS_STYLES: Record<
   shellgen: {
     label: '명령어 생성 (내부용)',
     hint: '자연어 요청을 쉘 명령어로 변환',
-    system: `당신은 리눅스/유닉스 쉘 명령어 전문가입니다. 사용자의 자연어 요청을 실행 가능한 쉘 명령어 한 줄로 변환하세요.
+    system: `당신은 리눅스/유닉스 쉘 명령어, 그리고 OpenStack/Ceph/Kubernetes 등 클라우드 인프라 CLI 전문가입니다. 사용자의 자연어 요청을 실행 가능한 명령어 한 줄로 변환하세요.
 반드시 아래 형식으로만 답하고, 다른 텍스트·코드블록·마크다운은 절대 추가하지 마세요.
 COMMAND: <명령어>
 설명: <한국어로 한 줄 설명>
+사용자 메시지 끝에 "(참고용 사내 검증 명령어 후보)" 블록이 붙어 있으면, 그중 요청과 일치하는 항목이 있으면 반드시 그 명령어를 정확히 그대로 COMMAND 로 사용하세요 — 새로 만들거나 비슷하게 바꾸지 마세요.
+그런 후보가 없는 요청이라면 알고 있는 정확한 문법으로 직접 생성하되, OpenStack(openstack/nova/neutron 등)처럼 서브커맨드가 버전마다 바뀌어온 CLI는 특히 신중하게: 서브커맨드나 옵션 철자를 확신할 수 없으면 그럴듯하게 지어내지 말고, 설명에 "정확한 문법은 공식 문서로 재확인 권장"이라고 반드시 덧붙이세요.
 명령어를 확신할 수 없거나 파괴적인 작업(rm -rf, dd, mkfs 등)이 필요하면, COMMAND 에는 요청을 만족하는 가장 안전한 형태의 명령어를 적고 설명에 주의사항을 반드시 포함하세요.`,
   },
 }
@@ -297,6 +299,26 @@ export interface LogRetentionSettings {
   maxEntries: number
 }
 
+/** 실시간 로그 뷰어(logtail)의 조회 대상 — 파일 tail -f 또는 Kubernetes 파드 로그 */
+export type LogTailTarget =
+  | { kind: 'file'; path: string }
+  | { kind: 'k8s'; namespace: string; pod: string; container?: string }
+
+/**
+ * 명령 결과 자동 판정 기준. 미지정(또는 빈 값)이면 위험 키워드 유무로 "정보/실패"만 가리고
+ * 초록 PASS 는 띄우지 않는다 — 단순 조회 명령(df -h, lscpu 등)에 의미 없는 통과 표시를 막기 위함.
+ */
+export interface CommandCheck {
+  /** 하나라도 출력에 있으면 FAIL (예: ["HEALTH_ERR", "OFFLINE"]) */
+  failContains?: string[]
+  /** 모두 출력에 있어야 PASS (예: ["HEALTH_OK"]) */
+  passContains?: string[]
+  /** 이 정규식이 출력과 매칭되면 PASS (대소문자 무시) */
+  passRegex?: string
+  /** 종료 코드 0 을 요구할지 (기본 true — check 가 설정된 경우에만 적용) */
+  requireExitZero?: boolean
+}
+
 /** 사용자가 앱 내에서 직접 추가한 단일 명령어 프리셋 (내장 PRESETS 와 병합되어 표시됨) */
 export interface CustomPresetCommand {
   id: string
@@ -307,6 +329,8 @@ export interface CustomPresetCommand {
   label: string
   command: string
   desc: string
+  /** 실행 결과 자동 판정 기준 (선택) */
+  check?: CommandCheck
   /**
    * 같은 하위분류 안에서의 표시 순서. 내장 명령어는 배열 인덱스(0,1,2..)를 암묵적 순서로 쓰고,
    * 사용자 정의 항목은 이 값으로 그 사이 어디든 끼워 넣을 수 있음(소수점 사용, 두 이웃의 중간값).
@@ -324,6 +348,8 @@ export interface CustomScenarioStep {
   info?: string
   warn?: string
   code?: string
+  /** 실행 결과 자동 판정 기준 (선택) */
+  check?: CommandCheck
 }
 export interface CustomScenario {
   id: string

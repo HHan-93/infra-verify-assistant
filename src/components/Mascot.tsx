@@ -400,7 +400,9 @@ export default function Mascot({ active, reaction }: MascotProps) {
         } else {
           aO.pose = 'sit'
           aO.crying = true
-          aO.bob = Math.sin(s.t * 1.5) * 1
+          // s.t 는 오버라이드 중엔 멈춰있으므로(정상 시퀀스 위치 보존용) 몸통 bob 에 쓰면
+          // 우는 내내 자세가 그대로 정지돼 보인다 — 오버라이드 자체의 진행 시간(s.override.t)을 쓴다.
+          aO.bob = Math.sin(s.override.t * 1.5) * 1
           aO.rotate = -0.05
         }
       } else {

@@ -16,6 +16,7 @@ import type {
   LogIndexEntry,
   LogRetentionSettings,
   MetricSample,
+  LogTailTarget,
 } from './shared-types'
 
 /** 활성 포트 포워딩 항목 (렌더러 표시용) */
@@ -330,14 +331,16 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('sftp:progress', h)
   },
 
-  // ── 실시간 로그 뷰어 (tail -f) ───────────────────────────────
+  // ── 실시간 로그 뷰어 (tail -f / kubectl logs -f) ───────────────
+  // 세션당 여러 tailId 를 동시에 유지할 수 있어(듀얼 패널), stop 은 tailId 로 특정 스트림만 끊는다.
   logtailStart: (
     sessionId: string,
-    path: string,
+    target: LogTailTarget,
     sudoPassword?: string,
   ): Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }> =>
-    ipcRenderer.invoke('logtail:start', { sessionId, path, sudoPassword }),
-  logtailStop: (sessionId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('logtail:stop', { sessionId }),
+    ipcRenderer.invoke('logtail:start', { sessionId, target, sudoPassword }),
+  logtailStop: (sessionId: string, tailId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('logtail:stop', { sessionId, tailId }),
   onLogtailData: (cb: (d: { sessionId: string; tailId: string; data: string }) => void): (() => void) => {
     const h = (_e: IpcRendererEvent, d: { sessionId: string; tailId: string; data: string }) => cb(d)
     ipcRenderer.on('logtail:data', h)
@@ -348,6 +351,21 @@ const electronAPI = {
     ipcRenderer.on('logtail:closed', h)
     return () => ipcRenderer.removeListener('logtail:closed', h)
   },
+
+  // ── Kubernetes 파드 로그 탐색 (네임스페이스/파드/컨테이너 목록) ──
+  k8sListNamespaces: (sessionId: string): Promise<{ ok: boolean; namespaces?: string[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:listNamespaces', { sessionId }),
+  k8sListPods: (
+    sessionId: string,
+    namespace: string,
+  ): Promise<{ ok: boolean; pods?: string[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:listPods', { sessionId, namespace }),
+  k8sListContainers: (
+    sessionId: string,
+    namespace: string,
+    pod: string,
+  ): Promise<{ ok: boolean; containers?: string[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:listContainers', { sessionId, namespace, pod }),
 
   // ── 서버 모니터링(상시 데몬, 세션별) ─────────────────────────
   // 수집 시작: 에이전트 배포(필요시) + 데몬 기동 + 증분 리더 시작

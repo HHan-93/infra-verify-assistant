@@ -10,6 +10,7 @@ import {
 } from 'recharts'
 import { Play, Square, FileText, Save, FileDown, Loader2, Info, X, Download } from 'lucide-react'
 import Markdown from './Markdown'
+import ConfirmDialog from './ConfirmDialog'
 import ProcessListModal from './ProcessListModal'
 import { useMonitor, formatForReport } from '../hooks/useMonitor'
 import { buildReportHtml } from '../lib/reportHtml'
@@ -115,10 +116,21 @@ export default function Dashboard({ sessionId, connected }: Props) {
   // 차트 범위 토글 — 가로축은 '시각' 기준, 항상 [지금-범위 ~ 지금] 구간을 표시
   // 프로세스 kill 진행 중인 PID 추적
   const [killingPids, setKillingPids] = useState<Set<number>>(new Set())
+  // 종료 확인 대상 — X 클릭 시 바로 죽이지 않고 확인창을 띄운다.
+  const [confirmKill, setConfirmKill] = useState<{ pid: number; name: string } | null>(null)
+  const [killError, setKillError] = useState('')
+  const killErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const killProc = async (pid: number) => {
     setKillingPids((prev) => new Set(prev).add(pid))
-    await window.electronAPI.monitorKillProc(sessionId, pid)
+    const r = await window.electronAPI.monitorKillProc(sessionId, pid)
     setKillingPids((prev) => { const s = new Set(prev); s.delete(pid); return s })
+    // kill 결과를 무시하고 있었음 — 실패해도 아무 안내가 없었다. 상위 프로세스 표는 상시
+    // 폴링(수 초~수십 초 간격)으로만 갱신되므로 여기선 즉시 새로고침할 수단이 없어 에러만 표시.
+    if (!r.ok) {
+      if (killErrorTimerRef.current) clearTimeout(killErrorTimerRef.current)
+      setKillError(r.error || `PID ${pid} 종료에 실패했습니다.`)
+      killErrorTimerRef.current = setTimeout(() => setKillError(''), 4000)
+    }
   }
 
   const [chartRange, setChartRange] = useState<ChartRange>('5m')
@@ -364,18 +376,18 @@ export default function Dashboard({ sessionId, connected }: Props) {
 
       {/* KPI 카드 */}
       <div className="grid grid-cols-4 gap-2">
-        <Kpi label="CPU" value={latest ? `${latest.cpu}%` : '—'} warn={(latest?.cpu ?? 0) > 85} />
+        <Kpi label="CPU" value={latest ? `${latest.cpu}%` : '—'} pct={latest?.cpu} />
         <Kpi
           label="Memory"
           value={latest ? `${latest.mem.pct}%` : '—'}
           sub={latest ? `${latest.mem.used} / ${latest.mem.total} MB` : undefined}
-          warn={(latest?.mem.pct ?? 0) > 90}
+          pct={latest?.mem.pct}
         />
         <Kpi
           label="Disk"
           value={latest ? `${latest.disk.pct}%` : '—'}
           sub={latest ? `루트(/) · ${latest.disk.used}/${latest.disk.total} GB` : '루트(/) 파티션'}
-          warn={diskPct > 85}
+          pct={latest ? diskPct : undefined}
         />
         {/* Network: 두 수치가 받기/보내기임을 라벨로 명시 */}
         <div
@@ -402,13 +414,13 @@ export default function Dashboard({ sessionId, connected }: Props) {
 
       {/* 실시간 차트 */}
       <div className="rounded border border-white/10 bg-black/20 p-2">
-        <div className="mb-1 flex items-center gap-2">
-          <span className="text-xs text-gray-400">CPU / Memory 사용률 (%)</span>
-          <div className="flex items-center gap-2 text-[10px]">
+        <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="shrink-0 whitespace-nowrap text-xs text-gray-400">CPU / Memory 사용률 (%)</span>
+          <div className="flex shrink-0 items-center gap-2 text-[10px]">
             <LegendDot color="#38bdf8" label="CPU" />
             <LegendDot color="#a78bfa" label="Memory" />
           </div>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             {CHART_RANGES.map((r) => (
               <button
                 key={r}
@@ -538,6 +550,9 @@ export default function Dashboard({ sessionId, connected }: Props) {
             전체 프로세스 보기
           </button>
         </div>
+        {killError && (
+          <div className="mb-1 rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-300">{killError}</div>
+        )}
         <table className="w-full text-xs">
           <thead className="text-gray-500">
             <tr>
@@ -557,7 +572,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
                 <td className="text-right">{p.mem}</td>
                 <td className="text-right">
                   <button
-                    onClick={() => killProc(p.pid)}
+                    onClick={() => setConfirmKill({ pid: p.pid, name: p.name })}
                     disabled={killingPids.has(p.pid)}
                     title={`PID ${p.pid} (${p.name}) 프로세스 종료`}
                     className="rounded p-0.5 text-gray-600 opacity-0 transition-opacity hover:bg-rose-500/20 hover:text-rose-400 group-hover:opacity-100 disabled:opacity-30"
@@ -621,20 +636,38 @@ export default function Dashboard({ sessionId, connected }: Props) {
       {showProcessModal && (
         <ProcessListModal sessionId={sessionId} onClose={() => setShowProcessModal(false)} />
       )}
+
+      {confirmKill && (
+        <ConfirmDialog
+          title="프로세스 종료"
+          message={`PID ${confirmKill.pid} (${confirmKill.name}) 프로세스를 종료할까요?\n실행 중인 작업이 즉시 중단될 수 있습니다.`}
+          confirmLabel="종료"
+          onCancel={() => setConfirmKill(null)}
+          onConfirm={() => {
+            const pid = confirmKill.pid
+            setConfirmKill(null)
+            killProc(pid)
+          }}
+        />
+      )}
     </div>
   )
 }
 
-function Kpi({ label, value, warn, sub }: { label: string; value: string; warn?: boolean; sub?: string }) {
+// 사용률 KPI 카드 — pct 로 색을 단계 표시: 50~80% 주황, 81~100% 빨강, 그 미만은 기본.
+function Kpi({ label, value, pct, sub }: { label: string; value: string; pct?: number; sub?: string }) {
+  const level = pct == null ? 'ok' : pct >= 81 ? 'high' : pct >= 50 ? 'mid' : 'ok'
+  const boxCls =
+    level === 'high'
+      ? 'border-rose-500/50 bg-rose-500/10'
+      : level === 'mid'
+        ? 'border-amber-500/50 bg-amber-500/10'
+        : 'border-white/10 bg-black/20'
+  const valCls = level === 'high' ? 'text-rose-300' : level === 'mid' ? 'text-amber-300' : ''
   return (
-    <div
-      className={
-        'rounded border p-2 ' +
-        (warn ? 'border-rose-500/50 bg-rose-500/10' : 'border-white/10 bg-black/20')
-      }
-    >
+    <div className={'rounded border p-2 ' + boxCls}>
       <div className="text-[11px] text-gray-400">{label}</div>
-      <div className={'truncate text-lg font-semibold leading-tight ' + (warn ? 'text-rose-300' : '')}>{value}</div>
+      <div className={'truncate text-lg font-semibold leading-tight ' + valCls}>{value}</div>
       {sub && <div className="truncate text-[10px] text-gray-500">{sub}</div>}
     </div>
   )

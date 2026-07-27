@@ -1,6 +1,8 @@
 // 작업 시나리오(플레이북) — 순서가 있는 명령어 흐름.
 // 명령어_편집.md 에서 자동 생성됨. <...> 플레이스홀더는 실행 대신 "입력".
 
+import type { CommandCheck } from '../electron/shared-types'
+
 export interface ScenarioStep {
   title: string
   command: string
@@ -12,6 +14,8 @@ export interface ScenarioStep {
   warn?: string
   /** 아코디언 코드 예시 (conf 파일 등 긴 입력 내용) */
   code?: string
+  /** 실행 결과 자동 판정 기준 (선택) */
+  check?: CommandCheck
 }
 
 export interface Scenario {
@@ -134,6 +138,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "패키지 저장소 업데이트",
         "command": "sudo apt update",
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
@@ -145,22 +150,26 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "IOPS 쓰기 테스트",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "무작위 4K 쓰기로 IOPS를 측정합니다. write_iops_sec 제한값 부근에서 수렴하는지 확인합니다.",
         "info": "--direct=1: 페이지 캐시를 우회하여 디스크 QoS가 직접 측정됩니다.\n--ioengine=libaio: 비동기 I/O 엔진으로 iodepth=32가 실제로 동작합니다."
       },
       {
         "title": "IOPS 읽기 테스트",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "무작위 4K 읽기로 IOPS를 측정합니다. read_iops_sec 제한값 부근에서 수렴하는지 확인합니다."
       },
       {
         "title": "대역폭 쓰기 테스트",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하는지 확인합니다."
       },
       {
         "title": "대역폭 읽기 테스트",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하는지 확인합니다."
       },
       {
@@ -209,7 +218,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "iperf3 서버 구성 (별도 인스턴스)",
-        "command": "sudo apt update && sudo apt install -y iperf3 && iperf3 -s",
+        "command": "sudo apt update && sudo apt install -y iperf3 && iperf3 -s -D",
         "desc": "QoS가 적용되지 않은 별도 인스턴스(또는 외부 서버)에서 실행합니다. iperf3 서버가 준비되어야 테스트 대상 인스턴스에서 연결할 수 있습니다.",
         "info": "서버 역할 인스턴스는 네트워크 QoS가 없어야 정확한 측정이 가능합니다.\niperf3 서버 기본 포트는 5201입니다. 보안 그룹에서 해당 포트가 허용되어야 합니다."
       },
@@ -221,6 +230,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "패키지 저장소 업데이트",
         "command": "sudo apt update",
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "iperf3 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
@@ -232,12 +242,14 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "아웃바운드(업로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5",
+        "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다.",
         "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n구간별 Bitrate가 초반에 높다가 이후 수렴하는 것은 burst 소진 후 average 제한이 걸린 정상 동작입니다."
       },
       {
         "title": "인바운드(다운로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5 -R",
+        "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "-R 플래그로 트래픽 방향을 역전(서버 → 이 인스턴스)하여 인바운드 대역폭을 측정합니다.",
         "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n-R(Reverse): 서버 → 이 인스턴스 방향으로 전송하므로 인바운드 QoS 제한이 측정됩니다."
       }
@@ -304,8 +316,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "[클라이언트 인스턴스] 작업 디렉토리 생성",
-        "command": "mkdir ssl-certs && cd ssl-certs",
-        "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다."
+        "command": "mkdir -p ssl-certs && cd ssl-certs",
+        "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)"
       },
       {
         "title": "Root CA 키 생성",
@@ -325,9 +337,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Root CA CSR 생성",
-        "command": "openssl req -new -sha256 -key ca.key -config ca.conf -out ca.csr",
-        "desc": "ca.conf의 기본값이 자동 적용됩니다. 입력 프롬프트가 나타나면 Enter를 눌러 기본값으로 진행합니다.",
-        "warn": "실행 후 필드별 입력 프롬프트가 순서대로 나타납니다. 프롬프트가 모두 끝나 프롬프트(ubuntu@...$)로 돌아올 때까지 Enter를 여러 번 눌러야 합니다. 다음 단계를 성급하게 실행하지 마세요."
+        "command": "openssl req -new -sha256 -key ca.key -config ca.conf -out ca.csr -batch",
+        "desc": "-batch 옵션으로 ca.conf의 기본값을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
       },
       {
         "title": "Root CA 인증서 생성",
@@ -352,9 +363,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "서비스 CSR 생성",
-        "command": "openssl req -new -sha256 -key service.key -config service.conf -out service.csr",
-        "desc": "service.conf의 기본값이 자동 적용됩니다. 입력 프롬프트에서 Enter를 눌러 기본값으로 진행합니다.",
-        "warn": "실행 후 필드별 입력 프롬프트가 순서대로 나타납니다. 프롬프트가 모두 끝나 프롬프트(ubuntu@...$)로 돌아올 때까지 Enter를 여러 번 눌러야 합니다. 다음 단계를 성급하게 실행하지 마세요."
+        "command": "openssl req -new -sha256 -key service.key -config service.conf -out service.csr -batch",
+        "desc": "-batch 옵션으로 service.conf의 기본값(VIP 포함)을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
       },
       {
         "title": "서비스 인증서 서명 (Root CA로 서명)",
@@ -363,10 +373,9 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "PKCS#12 형식으로 변환",
-        "command": "openssl pkcs12 -export -out service.p12 -inkey service.key -in service.crt -certfile ca.crt",
-        "desc": "서비스 키 + 서비스 인증서 + CA 인증서를 하나의 PKCS#12(.p12) 파일로 묶습니다. export 비밀번호 입력 시 Enter를 눌러 빈 값으로 설정해도 됩니다.",
-        "note": "OpenStack LB는 PKCS#12를 Base64로 인코딩한 값을 요구합니다.",
-        "warn": "실행 후 'Enter Export Password:'와 'Verifying - Enter Export Password:' 두 번의 입력 프롬프트가 나타납니다. 두 번 모두 Enter를 눌러 프롬프트로 돌아온 뒤 다음 단계를 진행하세요."
+        "command": "openssl pkcs12 -export -passout pass: -out service.p12 -inkey service.key -in service.crt -certfile ca.crt",
+        "desc": "서비스 키 + 서비스 인증서 + CA 인증서를 하나의 PKCS#12(.p12) 파일로 묶습니다. -passout pass: 로 export 비밀번호를 빈 값으로 지정해 비대화형으로 실행합니다. (Enter 입력 불필요)",
+        "note": "OpenStack LB는 PKCS#12를 Base64로 인코딩한 값을 요구합니다."
       },
       {
         "title": "Base64 인코딩",
@@ -401,8 +410,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "CA 인증서 시스템에 복사",
-        "command": "cp -r ca.crt /usr/local/share/ca-certificates/",
-        "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다."
+        "command": "sudo cp ca.crt /usr/local/share/ca-certificates/",
+        "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다. (ca.crt 가 있는 디렉토리에서 실행 — 시스템 경로 쓰기라 sudo 필요)"
       },
       {
         "title": "시스템 인증서 업데이트",
@@ -436,18 +445,20 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "패키지 목록 업데이트",
         "command": "sudo apt update",
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "netcat 설치에 앞서 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "netcat 설치",
-        "command": "sudo apt install -y netcat",
+        "command": "sudo apt install -y netcat-openbsd",
         "desc": "포트 연결 테스트에 사용할 netcat을 설치합니다.",
         "note": "RHEL/CentOS 계열: yum install -y nmap-ncat"
       },
       {
         "title": "포트 수신 대기 시작 (인스턴스 A)",
-        "command": "nc -l -p <포트번호>",
+        "command": "nc -l <포트번호>",
+        "warn": "'입력'으로 포트를 채운 뒤 실행하면 해당 포트로 수신 대기하며 터미널을 점유합니다. 연결 테스트가 끝나면 Ctrl+C 로 종료한 뒤 다음 단계를 진행하세요.",
         "desc": "인스턴스 A에서 지정한 포트로 수신 대기 상태로 진입합니다. 다른 VM이 해당 포트로 연결을 시도하면 응답합니다.",
         "info": "포트 번호 예시: 9999 (SSH 22 대신 임의 포트 권장). 이 명령은 터미널을 점유하므로 별도 탭/창을 사용하세요."
       },
@@ -524,6 +535,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "Netplan 설정 편집",
         "command": "sudo vi /etc/netplan/50-cloud-init.yaml",
+        "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "IP 주소, 게이트웨이, nameservers(DNS) 를 설정합니다. (Ubuntu 기준)",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "상단 [설정 파일 뷰어] 버튼으로 편집하는 것이 안전합니다. YAML 은 들여쓰기(공백 2칸)에 민감합니다. 50-cloud-init.yaml 파일은 다른 파일로 대체될 수 있습니다. 파일명을 확인하세요."
@@ -625,6 +637,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "ceph.conf 생성",
         "command": "vi /etc/ceph/ceph.conf",
+        "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "호스트에 설정된 ceph.conf 내용을 참고해 클라이언트용 설정 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "입력 예시:\n[global]\nmon_host = 10.255.41.1, 10.255.41.3, 10.255.41.2"
@@ -632,6 +645,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "키링 파일 생성",
         "command": "vi /etc/ceph/ceph.client.<액세스 경로>.keyring",
+        "warn": "'입력'으로 경로 값을 채운 뒤 실행하면 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "액세스 규칙 생성 시 발급된 액세스 키를 사용해 클라이언트 키링 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "입력 예시:\n[client.meta]\nkey = AQB30kFqxghVCRAA5Tvsspfv4VBTyE4BKcc32w=="
@@ -748,7 +762,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "command": "reboot",
+        "command": "sudo reboot",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
@@ -839,7 +853,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "command": "reboot",
+        "command": "sudo reboot",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
@@ -874,6 +888,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "fstab 등록 제거",
         "command": "sudo vi /etc/fstab",
+        "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요. fstab 오작성 시 부팅 실패에 주의하세요.",
         "desc": "영구적으로 분리하려면 fstab 에서 해당 디스크 줄을 삭제합니다. 안 지우면 재부팅 시 다시 마운트를 시도합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "상단 [설정파일] 버튼으로 편집하는 것이 더 편하고 안전합니다."
@@ -994,6 +1009,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "패키지 목록 업데이트",
         "command": "sudo apt update",
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 설치 전 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
@@ -1006,22 +1022,26 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "쓰기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 쓰기 30초 수행. 결과의 IOPS 값이 QoS 설정치(50)에 근접하면 정상입니다.",
         "info": "--direct=1 로 OS 캐시를 건너뛰고, --ioengine=libaio --iodepth=32 로 충분한 I/O 요청을 동시에 발행해야 QoS 제한치(50 IOPS)까지 실제로 도달할 수 있습니다."
       },
       {
         "title": "읽기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 읽기 30초 수행. 결과의 IOPS 값이 50 근처로 제한되면 read_iops_sec 적용 확인입니다."
       },
       {
         "title": "쓰기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 쓰기 30초 수행. 결과의 BW 값이 약 10 MiB/s(10485760 bytes/s)로 제한되면 write_bytes_sec 적용 확인입니다."
       },
       {
         "title": "읽기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 읽기 30초 수행. 결과의 BW 값이 약 10 MiB/s로 제한되면 read_bytes_sec 적용 확인입니다."
       },
       {
@@ -1051,6 +1071,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "패키지 업데이트",
         "command": "sudo apt update",
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
@@ -1249,6 +1270,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "[클라이언트] 대역폭 측정",
         "command": "iperf3 -c <SERVER_IP> -t 60 -P 4",
+        "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "다른 노드에서 60초간 4개 병렬 스트림으로 TCP 최대 실효 대역폭 측정."
       }
     ]
@@ -1274,11 +1296,13 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "랜덤 쓰기 IOPS",
         "command": "sudo fio --name=randwrite --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 쓰기 IOPS/지연 측정."
       },
       {
         "title": "랜덤 읽기 IOPS",
         "command": "sudo fio --name=randread --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 읽기 IOPS/지연 측정."
       },
       {
@@ -1309,11 +1333,13 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "순차 읽기 대역폭",
         "command": "sudo fio --name=seqread --ioengine=libaio --iodepth=32 --rw=read --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 읽기 처리량 측정."
       },
       {
         "title": "순차 쓰기 대역폭",
         "command": "sudo fio --name=seqwrite --ioengine=libaio --iodepth=32 --rw=write --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 쓰기 처리량 측정."
       },
       {
@@ -1335,7 +1361,8 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "클러스터 상태 확인",
         "command": "ceph -s",
-        "desc": "HEALTH 상태와 down/out 된 OSD 수, PG 상태를 한눈에 확인합니다."
+        "desc": "HEALTH 상태와 down/out 된 OSD 수, PG 상태를 한눈에 확인합니다.",
+        "check": { "passContains": ["HEALTH_OK"], "failContains": ["HEALTH_ERR"] }
       },
       {
         "title": "헬스 상세 확인",
@@ -1423,6 +1450,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "사용자 생성",
         "command": "sudo adduser <사용자명>",
+        "warn": "'입력'으로 사용자명을 채운 뒤 실행하면 비밀번호 설정 및 사용자 정보(Full Name 등) 입력 프롬프트가 순서대로 나타납니다. 프롬프트가 끝날 때까지 값을 입력/Enter 하세요.",
         "desc": "홈 디렉토리와 비밀번호를 설정하며 계정을 만듭니다. 실행하면 대화형 프롬프트가 나오니 안내에 따라 입력하세요."
       },
       {
@@ -1439,6 +1467,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "계정 전환 테스트",
         "command": "su - <사용자명>",
+        "warn": "'입력'으로 사용자명을 채운 뒤 실행하면 대상 계정의 비밀번호를 물어봅니다. 이후 해당 사용자 쉘로 전환되므로, 다음 단계로 넘어가기 전 반드시 'exit' 로 원래 계정으로 돌아오세요.",
         "desc": "새 계정으로 전환해 로그인이 되는지 테스트합니다. (원래 계정으로 돌아오기: exit)"
       }
     ]
@@ -1498,6 +1527,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "sysctl.conf 편집",
         "command": "sudo vi /etc/sysctl.conf",
+        "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "예: net.ipv4.tcp_tw_reuse=1, net.core.somaxconn=1024 등 튜닝 값을 추가합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "상단 [설정파일] 버튼으로 편집 권장. 의미를 모르는 값은 추가하지 마세요."
@@ -1534,7 +1564,8 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "자동 복구 확인",
         "command": "systemctl status <서비스명>",
-        "desc": "systemd 의 Restart 설정에 따라 서비스가 자동 재시작됐는지 확인합니다."
+        "desc": "systemd 의 Restart 설정에 따라 서비스가 자동 재시작됐는지 확인합니다.",
+        "check": { "passRegex": "active \\(running\\)", "failContains": ["failed", "inactive"] }
       },
       {
         "title": "서비스 로그 추적",

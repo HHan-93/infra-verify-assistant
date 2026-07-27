@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { X, Search, RefreshCw, Loader2, ArrowUpDown } from 'lucide-react'
+import ConfirmDialog from './ConfirmDialog'
 
 interface ProcInfo {
   pid: number
@@ -35,6 +36,8 @@ export default function ProcessListModal({ sessionId, onClose }: ProcessListModa
   const [sortKey, setSortKey] = useState<SortKey>('cpu')
   const [sortDesc, setSortDesc] = useState(true)
   const [killingPids, setKillingPids] = useState<Set<number>>(new Set())
+  // 종료 확인 대상 — X 클릭 시 바로 죽이지 않고 확인창을 띄운다.
+  const [confirmKill, setConfirmKill] = useState<{ pid: number; name: string } | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -79,13 +82,17 @@ export default function ProcessListModal({ sessionId, onClose }: ProcessListModa
 
   const killProc = async (pid: number) => {
     setKillingPids((prev) => new Set(prev).add(pid))
-    await window.electronAPI.monitorKillProc(sessionId, pid)
+    const r = await window.electronAPI.monitorKillProc(sessionId, pid)
     setKillingPids((prev) => {
       const s = new Set(prev)
       s.delete(pid)
       return s
     })
-    load()
+    // kill 결과(성공/실패)를 무시하고 있었음 — 권한 부족 등으로 실패해도 아무 안내 없이
+    // 목록만 새로고침돼, 프로세스가 그대로 남아있으면 "삭제가 안 먹힌다"는 인상만 남았다.
+    // load() 가 시작하자마자 error 를 비우므로, 반드시 load 완료 후에 실패 메시지를 채운다.
+    await load()
+    if (!r.ok) setError(r.error || `PID ${pid} 종료에 실패했습니다.`)
   }
 
   return (
@@ -168,7 +175,7 @@ export default function ProcessListModal({ sessionId, onClose }: ProcessListModa
                   </td>
                   <td className="px-2 py-1 text-right">
                     <button
-                      onClick={() => killProc(p.pid)}
+                      onClick={() => setConfirmKill({ pid: p.pid, name: p.name })}
                       disabled={killingPids.has(p.pid)}
                       title={`PID ${p.pid} (${p.name}) 프로세스 종료`}
                       className="rounded p-0.5 text-gray-600 opacity-0 transition-opacity hover:bg-rose-500/20 hover:text-rose-400 group-hover:opacity-100 disabled:opacity-30"
@@ -182,6 +189,20 @@ export default function ProcessListModal({ sessionId, onClose }: ProcessListModa
           </table>
         </div>
       </div>
+
+      {confirmKill && (
+        <ConfirmDialog
+          title="프로세스 종료"
+          message={`PID ${confirmKill.pid} (${confirmKill.name}) 프로세스를 종료할까요?\n실행 중인 작업이 즉시 중단될 수 있습니다.`}
+          confirmLabel="종료"
+          onCancel={() => setConfirmKill(null)}
+          onConfirm={() => {
+            const pid = confirmKill.pid
+            setConfirmKill(null)
+            killProc(pid)
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -19,6 +19,21 @@ const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
   { pattern: /\/etc\/sysctl\.conf$/, command: 'sudo sysctl -p',                          desc: '저장만으로는 커널 파라미터가 반영되지 않습니다. 터미널에서 sysctl -p를 실행해야 적용됩니다.' },
   { pattern: /\/etc\/fstab$/,        command: 'sudo mount -a',                           desc: '저장만으로는 마운트 설정이 반영되지 않습니다. 터미널에서 mount -a를 실행하거나 재부팅해야 적용됩니다.' },
   { pattern: /\/etc\/resolv\.conf$/, command: 'sudo systemctl restart systemd-resolved', desc: '저장만으로는 DNS 설정이 반영되지 않습니다. 터미널에서 systemd-resolved를 재시작해야 적용됩니다.' },
+  // ── OpenStack / HA / 메시징·DB — 설정 저장 후 해당 서비스 재시작 필요 ──
+  { pattern: /\/etc\/masakari-monitors\//, command: 'sudo systemctl restart masakari-*', desc: 'masakari-monitors 설정은 저장만으로 반영되지 않습니다. 관련 데몬을 재시작해야 적용됩니다. (배포판에 따라 유닛명 상이)' },
+  { pattern: /\/etc\/masakari\//,   command: 'sudo systemctl restart masakari-engine masakari-api', desc: 'masakari 설정은 저장만으로 반영되지 않습니다. masakari-engine/api를 재시작해야 적용됩니다. (RHEL: openstack-masakari-*)' },
+  { pattern: /\/etc\/nova\//,       command: 'sudo systemctl restart nova-*',        desc: 'nova 설정은 저장만으로 반영되지 않습니다. 노드 역할에 맞는 nova 서비스를 재시작하세요. (compute: nova-compute, controller: nova-api·conductor·scheduler / RHEL: openstack-nova-*)' },
+  { pattern: /\/etc\/neutron\//,    command: 'sudo systemctl restart neutron-*',     desc: 'neutron 설정은 저장만으로 반영되지 않습니다. 관련 neutron 에이전트/서비스를 재시작하세요.' },
+  { pattern: /\/etc\/cinder\//,     command: 'sudo systemctl restart cinder-*',      desc: 'cinder 설정은 저장만으로 반영되지 않습니다. cinder 서비스를 재시작하세요.' },
+  { pattern: /\/etc\/glance\//,     command: 'sudo systemctl restart glance-*',      desc: 'glance 설정은 저장만으로 반영되지 않습니다. glance 서비스를 재시작하세요.' },
+  { pattern: /\/etc\/keystone\//,   command: 'sudo systemctl restart apache2',       desc: 'keystone 은 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)' },
+  { pattern: /\/etc\/placement\//,  command: 'sudo systemctl restart apache2',       desc: 'placement 는 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)' },
+  { pattern: /\/etc\/octavia\//,    command: 'sudo systemctl restart octavia-*',     desc: 'octavia(로드밸런서) 설정은 저장만으로 반영되지 않습니다. octavia 서비스를 재시작하세요.' },
+  { pattern: /\/etc\/barbican\//,   command: 'sudo systemctl restart barbican-*',    desc: 'barbican 설정은 저장만으로 반영되지 않습니다. barbican 서비스를 재시작하세요.' },
+  { pattern: /\/etc\/heat\//,       command: 'sudo systemctl restart heat-*',        desc: 'heat 설정은 저장만으로 반영되지 않습니다. heat 서비스를 재시작하세요.' },
+  { pattern: /\/etc\/rabbitmq\//,   command: 'sudo systemctl restart rabbitmq-server', desc: 'RabbitMQ 설정은 저장만으로 반영되지 않습니다. rabbitmq-server 를 재시작하세요. (클러스터는 재시작 순서 주의)' },
+  { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.' },
+  { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.' },
 ]
 
 interface FileViewerProps {
@@ -28,29 +43,73 @@ interface FileViewerProps {
   /** 처음 열 때 자동으로 불러올 경로 (선택) */
   initialPath?: string
   onClose: () => void
-  /** 파일 내용을 AI 분석으로 전달 */
-  onAnalyze: (text: string) => void
+  /** 파일 내용을 AI 분석으로 전달. AI 패널이 이미 스트리밍 중이면 무시되고 false 를 반환한다. */
+  onAnalyze: (text: string) => boolean
 }
 
 /** 자주 보는 환경설정 파일 빠른 선택 (카테고리별) */
 const PATH_GROUPS: { group: string; paths: string[] }[] = [
   {
-    group: 'OpenStack',
+    group: 'OpenStack 코어',
     paths: [
       '/etc/nova/nova.conf',
+      '/etc/nova/nova-compute.conf',
+      '/etc/nova/api-paste.ini',
       '/etc/neutron/neutron.conf',
       '/etc/neutron/plugins/ml2/ml2_conf.ini',
+      '/etc/neutron/plugins/ml2/openvswitch_agent.ini',
       '/etc/neutron/l3_agent.ini',
+      '/etc/neutron/dhcp_agent.ini',
+      '/etc/neutron/metadata_agent.ini',
       '/etc/cinder/cinder.conf',
       '/etc/glance/glance-api.conf',
       '/etc/keystone/keystone.conf',
+      '/etc/placement/placement.conf',
       '/etc/heat/heat.conf',
+    ],
+  },
+  {
+    group: 'OpenStack 부가(LB/보안/대시보드)',
+    paths: [
+      '/etc/octavia/octavia.conf',
+      '/etc/barbican/barbican.conf',
+      '/etc/designate/designate.conf',
+      '/etc/manila/manila.conf',
+      '/etc/openstack-dashboard/local_settings',
+      '/etc/openstack-dashboard/local_settings.py',
+    ],
+  },
+  {
+    group: '고가용성(Masakari/Pacemaker)',
+    paths: [
+      '/etc/masakari/masakari.conf',
+      '/etc/masakari-monitors/masakarimonitors.conf',
+      '/etc/masakari/masakari-monitors.conf',
+      '/etc/corosync/corosync.conf',
+      '/etc/pacemaker/pcmk-init.conf',
+    ],
+  },
+  {
+    group: '메시징/DB(RabbitMQ/Galera)',
+    paths: [
       '/etc/rabbitmq/rabbitmq.conf',
+      '/etc/rabbitmq/rabbitmq-env.conf',
+      '/etc/rabbitmq/advanced.config',
+      '/etc/my.cnf',
+      '/etc/mysql/my.cnf',
+      '/etc/mysql/mariadb.conf.d/50-server.cnf',
+      '/etc/mysql/mariadb.conf.d/60-galera.cnf',
+      '/etc/mysql/conf.d/galera.cnf',
     ],
   },
   {
     group: 'Ceph',
-    paths: ['/etc/ceph/ceph.conf', '/etc/ceph/ceph.client.admin.keyring', '/etc/ceph/rbdmap'],
+    paths: [
+      '/etc/ceph/ceph.conf',
+      '/etc/ceph/ceph.client.admin.keyring',
+      '/etc/ceph/rbdmap',
+      '/var/lib/ceph/bootstrap-osd/ceph.keyring',
+    ],
   },
   {
     group: 'Kubernetes',
@@ -248,7 +307,13 @@ export default function FileViewer({
 
   const analyze = () => {
     if (!content) return
-    onAnalyze(`설정파일 ${path.trim()} 의 내용을 분석해 주세요:\n\n${content}`)
+    const started = onAnalyze(`설정파일 ${path.trim()} 의 내용을 분석해 주세요:\n\n${content}`)
+    // AI 패널이 이미 스트리밍 중이면 요청이 조용히 무시되므로, 그 경우 뷰어를 닫지 않고
+    // 안내만 남겨 사용자가 요청이 유실된 줄 모르고 넘어가지 않게 한다.
+    if (!started) {
+      setMsg('AI가 이미 다른 응답을 생성하는 중입니다. 잠시 후 다시 시도하세요.')
+      return
+    }
     onClose()
   }
 
