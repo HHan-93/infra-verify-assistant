@@ -287,7 +287,8 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
         c.command.toLowerCase().includes(q) ||
         (c.desc ?? '').toLowerCase().includes(q)
     )
-  }, [trimmed])
+    // ALL_COMMANDS 는 customPresets 파생값 — 검색 중 프리셋 편집/삭제/재정렬이 결과에 반영되도록 의존성에 포함
+  }, [trimmed, ALL_COMMANDS])
 
   const renderCommand = (
     c: PanelCommand & { solution?: string; subgroup?: string },

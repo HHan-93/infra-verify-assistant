@@ -11,6 +11,7 @@ import {
   ChevronUp,
   ChevronDown,
   Settings,
+  Download,
 } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -59,6 +60,8 @@ export default function LogViewer({ onClose }: LogViewerProps) {
   const [editingRetention, setEditingRetention] = useState(false)
   const [draftDays, setDraftDays] = useState('')
   const [draftEntries, setDraftEntries] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const [exportNote, setExportNote] = useState<string | null>(null)
   const [savingRetention, setSavingRetention] = useState(false)
 
   useEffect(() => {
@@ -265,6 +268,32 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                 </button>
               </div>
             )}
+            {selected && (
+              <button
+                onClick={async () => {
+                  if (exporting) return
+                  setExporting(true)
+                  try {
+                    const r = await window.electronAPI.logsExport(selected.id)
+                    if (r.saved) {
+                      setExportNote('저장됨')
+                      setTimeout(() => setExportNote((n) => (n === '저장됨' ? null : n)), 2000)
+                    } else if (r.error) {
+                      setExportNote('실패')
+                      setTimeout(() => setExportNote((n) => (n === '실패' ? null : n)), 2500)
+                    }
+                  } finally {
+                    setExporting(false)
+                  }
+                }}
+                disabled={exporting}
+                title="이 세션 로그 원본 전체를 파일로 저장"
+                className="flex shrink-0 items-center gap-1 rounded bg-panel-light px-2 py-1 text-[11px] text-gray-300 hover:bg-white/10 disabled:opacity-40"
+              >
+                <Download size={12} />
+                {exportNote ?? '저장'}
+              </button>
+            )}
             <button onClick={onClose} title="닫기" className="shrink-0 text-gray-500 hover:text-gray-300">
               <X size={16} />
             </button>
@@ -388,12 +417,14 @@ function LogTextView({ entry }: { entry: LogIndexEntry }) {
           lines.map((line, i) => {
             const hasMatch = trimmedQuery && line.toLowerCase().includes(trimmedQuery)
             if (hasMatch) matchSeen++
-            const isCurrent = hasMatch && matchSeen === matchIdx
+            // ref 콜백은 커밋 시점에 실행돼 matchSeen 이 최종값이 되므로, 이 줄의 인덱스를 캡처해서 쓴다
+            const seen = matchSeen
+            const isCurrent = hasMatch && seen === matchIdx
             return (
               <div
                 key={i}
                 ref={(el) => {
-                  if (hasMatch) matchRefs.current[matchSeen] = el
+                  if (hasMatch) matchRefs.current[seen] = el
                 }}
                 className={
                   'whitespace-pre-wrap break-all -mx-1 px-1 text-gray-300' +

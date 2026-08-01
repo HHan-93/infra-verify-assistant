@@ -1009,7 +1009,7 @@ export default function FileExplorer({
             </>
           )}
 
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
             {/* 주소 표시줄 (경로 직접 입력 / 상위·홈·루트 이동) */}
             {connected && (
               <div className="flex items-center gap-1 border-b border-white/10 px-3 py-1.5">
@@ -1132,8 +1132,22 @@ export default function FileExplorer({
             )}
 
             <div className="border-t border-white/10 px-4 py-1.5 text-[10px] text-gray-500">
-              체크박스=다중선택 · 폴더 클릭=펼치기 · 파일 더블클릭/드래그=다운로드 · OS→폴더 드롭=업로드
+              체크박스=다중선택 · 폴더 클릭=펼치기 · 파일 더블클릭/드래그=다운로드 · OS 파일 드래그→여기에 놓기=업로드
             </div>
+
+            {/* 드래그드롭 업로드 안내 오버레이 — 파일을 패널 배경(현재 폴더)으로 끌어올 때 표시.
+                pointer-events-none 로 아래 드롭 핸들러가 그대로 동작하게 한다. */}
+            {connected && searchResults === null && dragOver === root && (
+              <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-blue-600/15 backdrop-blur-[1px]">
+                <div className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-blue-400/70 bg-panel/80 px-8 py-6 shadow-2xl">
+                  <Upload size={28} className="text-blue-300" />
+                  <div className="text-sm font-semibold text-blue-100">여기에 놓으면 업로드</div>
+                  <div className="max-w-[300px] truncate font-mono text-[11px] text-gray-300" title={root}>
+                    → {root}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

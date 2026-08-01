@@ -115,13 +115,13 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
-        "command": "virsh list --all",
+        "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
-        "command": "virsh dumpxml <instance_alias> | grep -A 10 iotune",
+        "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 iotune",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <iotune> 블록에 read_iops_sec, write_iops_sec 등이 설정값대로 출력되어야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
       },
@@ -206,13 +206,13 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
-        "command": "virsh list --all",
+        "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
-        "command": "virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
+        "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <interface> 내 <bandwidth> 블록에 inbound/outbound average, peak, burst 값이 출력되어야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
       },
@@ -567,7 +567,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "로컬 리슨 포트 확인",
-        "command": "ss -tunlp",
+        "command": "sudo ss -tunlp",
         "desc": "현재 서버가 어떤 TCP/UDP 포트를 어떤 프로세스로 리슨 중인지 확인합니다. LISTEN 상태의 포트와 연결된 프로세스명을 함께 확인하세요."
       },
       {
@@ -636,7 +636,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "ceph.conf 생성",
-        "command": "vi /etc/ceph/ceph.conf",
+        "command": "sudo vi /etc/ceph/ceph.conf",
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "호스트에 설정된 ceph.conf 내용을 참고해 클라이언트용 설정 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -644,7 +644,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "키링 파일 생성",
-        "command": "vi /etc/ceph/ceph.client.<액세스 경로>.keyring",
+        "command": "sudo vi /etc/ceph/ceph.client.<액세스 경로>.keyring",
         "warn": "'입력'으로 경로 값을 채운 뒤 실행하면 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "액세스 규칙 생성 시 발급된 액세스 키를 사용해 클라이언트 키링 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -652,7 +652,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "마운트 포인트 생성",
-        "command": "mkdir -p /mnt/data",
+        "command": "sudo mkdir -p /mnt/data",
         "desc": "CephFS를 마운트할 디렉토리를 생성합니다."
       },
       {
@@ -667,7 +667,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "파일 쓰기 테스트",
-        "command": "echo \"Test\" > /mnt/data/test.txt",
+        "command": "echo \"Test\" | sudo tee /mnt/data/test.txt",
         "desc": "read-write 규칙이면 정상 쓰기됩니다. read-only 규칙이면 'Read-only file system' 오류가 출력되어 RO 정책이 정상 동작함을 확인할 수 있습니다."
       },
       {
@@ -710,7 +710,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "마운트 폴더 생성",
-        "command": "mkdir -p /mnt/data",
+        "command": "sudo mkdir -p /mnt/data",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -741,12 +741,12 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "파일 및 디렉토리 상태 확인",
-        "command": "du -sh /mnt/data && ls -lh /mnt/data",
+        "command": "sudo du -sh /mnt/data && ls -lh /mnt/data",
         "desc": "디렉토리 총 사용량과 내부 파일 목록 및 크기를 확인합니다."
       },
       {
         "title": "UUID 확인",
-        "command": "blkid /dev/<DISK>",
+        "command": "sudo blkid /dev/<DISK>",
         "desc": "fstab 등록에 사용할 파티션의 UUID를 확인합니다."
       },
       {
@@ -801,7 +801,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "마운트 폴더 생성",
-        "command": "mkdir -p /mnt/data",
+        "command": "sudo mkdir -p /mnt/data",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -832,12 +832,12 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "파일 및 디렉토리 상태 확인",
-        "command": "du -sh /mnt/data && ls -lh /mnt/data",
+        "command": "sudo du -sh /mnt/data && ls -lh /mnt/data",
         "desc": "디렉토리 총 사용량과 내부 파일 목록 및 크기를 확인합니다."
       },
       {
         "title": "UUID 확인",
-        "command": "blkid /dev/<DISK>",
+        "command": "sudo blkid /dev/<DISK>",
         "desc": "fstab 등록에 사용할 볼륨의 UUID를 확인합니다."
       },
       {
@@ -986,13 +986,13 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
-        "command": "virsh list --all",
+        "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias를 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "QoS 적용 여부 확인 (인스턴스 배치 호스트)",
-        "command": "virsh dumpxml <instance_alias> | grep -E -A 5 \"bandwidth|iotune\"",
+        "command": "sudo virsh dumpxml <instance_alias> | grep -E -A 5 \"bandwidth|iotune\"",
         "desc": "위에서 확인한 인스턴스 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 호스트(하이퍼바이저)에 접속해서 실행해야 합니다.\n정상 적용 시 아래와 같이 iotune 블록에 설정값이 출력됩니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>"
       },
@@ -1307,7 +1307,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "테스트 파일 정리",
-        "command": "rm -f randwrite.* randread.*",
+        "command": "sudo rm -f randwrite.* randread.*",
         "desc": "fio 가 생성한 테스트 파일 삭제."
       }
     ]
@@ -1344,7 +1344,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "테스트 파일 정리",
-        "command": "rm -f seqread.* seqwrite.*",
+        "command": "sudo rm -f seqread.* seqwrite.*",
         "desc": "fio 가 생성한 테스트 파일 삭제."
       }
     ]
@@ -1360,28 +1360,28 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "클러스터 상태 확인",
-        "command": "ceph -s",
+        "command": "sudo ceph -s",
         "desc": "HEALTH 상태와 down/out 된 OSD 수, PG 상태를 한눈에 확인합니다.",
         "check": { "passContains": ["HEALTH_OK"], "failContains": ["HEALTH_ERR"] }
       },
       {
         "title": "헬스 상세 확인",
-        "command": "ceph health detail",
+        "command": "sudo ceph health detail",
         "desc": "어떤 OSD/PG 가 문제인지 구체적인 원인을 확인합니다."
       },
       {
         "title": "OSD 트리에서 down 식별",
-        "command": "ceph osd tree",
+        "command": "sudo ceph osd tree",
         "desc": "down 또는 out 상태인 OSD 의 ID 와 위치(호스트)를 식별합니다."
       },
       {
         "title": "크래시 이력 확인",
-        "command": "ceph crash ls",
+        "command": "sudo ceph crash ls",
         "desc": "최근 비정상 종료된 데몬이 있는지 확인합니다."
       },
       {
         "title": "OSD 로그 확인",
-        "command": "tail -n 200 /var/log/ceph/ceph-osd.<OSD_ID>.log",
+        "command": "sudo tail -n 200 /var/log/ceph/ceph-osd.<OSD_ID>.log",
         "desc": "문제 OSD 의 로그에서 다운 원인(디스크 오류, OOM 등)을 확인합니다."
       },
       {
@@ -1392,7 +1392,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "복구 진행 감시",
-        "command": "watch -n 5 'ceph -s'",
+        "command": "watch -n 5 'sudo ceph -s'",
         "desc": "OSD 가 up 으로 전환되고 복구(recovery/backfill)가 진행·완료되는지 실시간 감시합니다. (종료: Ctrl+C)"
       }
     ]
@@ -1508,7 +1508,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "컴퓨트 노드에서 직접 확인",
-        "command": "virsh list --all",
+        "command": "sudo virsh list --all",
         "desc": "컴퓨트 노드에 접속해 KVM/QEMU 레벨에서 도메인(VM) 상태를 직접 확인합니다."
       }
     ]
@@ -1521,7 +1521,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "현재 값 조회",
-        "command": "sysctl -a | grep tcp",
+        "command": "sudo sysctl -a | grep tcp",
         "desc": "현재 적용된 TCP 관련 커널 파라미터 값을 확인합니다."
       },
       {
@@ -1569,12 +1569,12 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "서비스 로그 추적",
-        "command": "journalctl -u <서비스명> -f",
+        "command": "sudo journalctl -u <서비스명> -f",
         "desc": "해당 서비스의 재시작/크래시 로그를 실시간으로 추적합니다. (종료: Ctrl+C)"
       },
       {
         "title": "시스템 로그 추적",
-        "command": "tail -f /var/log/syslog",
+        "command": "sudo tail -f /var/log/syslog",
         "desc": "전체 시스템 로그를 실시간 추적합니다. (RHEL 계열은 /var/log/messages)"
       }
     ]
@@ -1616,7 +1616,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "마운트 포인트 생성",
-        "command": "mkdir -p /mnt/backup",
+        "command": "sudo mkdir -p /mnt/backup",
         "desc": "저장용 디스크를 마운트할 디렉토리를 생성합니다."
       },
       {

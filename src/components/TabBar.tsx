@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Minus, Radio, Copy, ChevronLeft, ChevronRight, XCircle } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Plus, X, Circle, Square, Columns2, Rows2, Grid2x2, Minus, Radio, Copy, ChevronLeft, ChevronRight, ChevronDown, XCircle, Pencil } from 'lucide-react'
 
 export interface TabInfo {
   id: string
@@ -12,6 +13,16 @@ export interface TabInfo {
 
 /** 터미널 배치 레이아웃 — 단일(탭 전환) / 임의 재귀 분할(tmux 스타일, PaneNode 트리로 구성) */
 export type LayoutMode = 'tabs' | 'split'
+
+/** 탭바에 표시할 그리드 그룹 하나 — 활성 그룹(분할 보기 중)은 active=true, 파킹된 그룹은 false. */
+export interface GridGroupInfo {
+  id: string
+  name?: string
+  /** 이 그룹에 속한 세션 id 목록(중복 가능 — 스페어 없이 분할한 경우) */
+  memberIds: string[]
+  /** 현재 분할 보기로 화면에 떠 있는 그룹인지 */
+  active: boolean
+}
 
 interface TabBarProps {
   tabs: TabInfo[]
@@ -33,6 +44,17 @@ interface TabBarProps {
   /** 탭 드래그 시작 (그리드 칸에 배치용 — App 이 칸 드롭 처리) */
   onTabDragStart?: (id: string) => void
   onTabDragEnd?: () => void
+  /** 그리드(분할) 그룹 목록 — 각 그룹의 멤버 세션은 개별 탭 대신 하나의 "그리드 그룹" 칩으로 묶어 표시.
+      여러 그룹이 공존할 수 있고, active=true 인 그룹만 분할 보기로 화면에 뜬다(나머지는 칩만). */
+  gridGroups: GridGroupInfo[]
+  /** 그리드 그룹 칩 클릭 → 그 그룹을 분할 보기로 전환(멤버 id 주면 그 칸을 활성화) */
+  onSelectGrid: (groupId: string, memberId?: string) => void
+  /** 그리드 그룹 해제 → 묶음만 풀기(세션 자체는 유지) */
+  onDissolveGrid: (groupId: string) => void
+  /** 그리드 그룹 X → 그룹에 포함된 세션을 전부 닫기(확인창은 상위에서) */
+  onCloseGrid: (groupId: string) => void
+  /** 그리드 그룹 이름 변경 */
+  onRenameGrid: (groupId: string, name: string) => void
   /** 현재 레이아웃 */
   layout: LayoutMode
   onSetLayout: (m: LayoutMode) => void
@@ -77,6 +99,250 @@ const TAB_COLORS: Record<string, string> = {
   violet:  '#a78bfa',
 }
 
+/** 그리드 그룹 칩 하나 — 이름/멤버 상태점/이름변경/멤버 메뉴(포털)/그룹 닫기. 메뉴·이름편집 상태는 칩 내부 보관. */
+function GridChip({
+  group,
+  tabs,
+  statuses,
+  activeId,
+  loggingIds,
+  onSelect,
+  onDissolve,
+  onClose,
+  onRename,
+  onDuplicate,
+  onCloseMember,
+  editingId,
+  editValue,
+  setEditValue,
+  startRenameMember,
+  commitRenameMember,
+  cancelRenameMember,
+}: {
+  group: GridGroupInfo
+  tabs: TabInfo[]
+  statuses: Record<string, { status: string; msg: string } | undefined>
+  activeId: string
+  loggingIds: Set<string>
+  onSelect: (memberId?: string) => void
+  onDissolve: () => void
+  onClose: () => void
+  onRename: (name: string) => void
+  onDuplicate: (id: string) => void
+  onCloseMember: (id: string) => void
+  editingId: string | null
+  editValue: string
+  setEditValue: (v: string) => void
+  startRenameMember: (t: TabInfo) => void
+  commitRenameMember: () => void
+  cancelRenameMember: () => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState('')
+  const chipRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  // 멤버 메뉴 바깥 클릭 시 닫기 (메뉴는 포털로 body 에 렌더되므로 칩·메뉴 둘 다 바깥일 때만)
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!chipRef.current?.contains(t) && !menuRef.current?.contains(t)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  const members = group.memberIds.map((id) => tabs.find((t) => t.id === id)).filter((t): t is TabInfo => !!t)
+  const active = group.active
+  const beginNameEdit = () => {
+    setEditName(group.name ?? '')
+    setEditing(true)
+  }
+  const commitName = () => {
+    onRename(editName)
+    setEditing(false)
+  }
+
+  return (
+    <div ref={chipRef} className="relative shrink-0">
+      <div
+        onClick={() => onSelect()}
+        className={
+          'group flex cursor-pointer select-none items-center gap-1.5 rounded-md py-1 pl-2 pr-1.5 text-xs ' +
+          (active
+            ? 'bg-blue-600/30 text-blue-100 ring-1 ring-blue-400/40'
+            : 'text-gray-300 hover:bg-white/5 hover:text-gray-100 ring-1 ring-white/10')
+        }
+        title="그리드 보기로 전환"
+        style={{ flexShrink: 0 }}
+      >
+        <Grid2x2 size={12} className="shrink-0" />
+        {editing ? (
+          <input
+            autoFocus
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitName()
+              else if (e.key === 'Escape') setEditing(false)
+            }}
+            placeholder={`그리드 ${members.length}`}
+            className="w-24 rounded bg-panel px-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        ) : (
+          <span
+            className="whitespace-nowrap font-medium"
+            onDoubleClick={(e) => {
+              e.stopPropagation()
+              beginNameEdit()
+            }}
+            title="더블클릭 또는 연필 버튼으로 그룹 이름 변경"
+          >
+            {group.name || `그리드 ${members.length}`}
+          </span>
+        )}
+        <span className="flex items-center gap-0.5">
+          {members.map((m) => (
+            <Circle key={m.id} size={6} className={dotColor(statuses[m.id]?.status) + ' fill-current'} />
+          ))}
+        </span>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            beginNameEdit()
+          }}
+          title="그룹 이름 변경"
+          className="rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+        >
+          <Pencil size={11} />
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            setMenuOpen((v) => !v)
+          }}
+          title="그리드 멤버 관리"
+          className="rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+        >
+          <ChevronDown size={12} />
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            setMenuOpen(false)
+            onClose()
+          }}
+          title="그리드 세션 모두 닫기"
+          className="rounded p-0.5 text-gray-400 hover:bg-red-500/20 hover:text-red-300"
+        >
+          <X size={12} />
+        </button>
+      </div>
+
+      {menuOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{
+              position: 'fixed',
+              top: (chipRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
+              left: chipRef.current?.getBoundingClientRect().left ?? 0,
+            }}
+            className="z-50 min-w-[200px] rounded-md border border-white/10 bg-panel-light py-1 shadow-xl"
+          >
+            {members.map((m) => {
+              const memberEditing = editingId === m.id
+              return (
+                <div
+                  key={m.id}
+                  onClick={() => {
+                    if (!memberEditing) {
+                      onSelect(m.id)
+                      setMenuOpen(false)
+                    }
+                  }}
+                  onDoubleClick={() => startRenameMember(m)}
+                  className={
+                    'group flex cursor-pointer items-center gap-1.5 px-2 py-1 text-xs hover:bg-white/5 ' +
+                    (m.id === activeId && active ? 'text-gray-100' : 'text-gray-300')
+                  }
+                  title="클릭: 해당 칸으로 · 더블클릭: 이름변경"
+                >
+                  <span
+                    className="h-3 w-[3px] shrink-0 rounded-full"
+                    style={{ background: m.color ? TAB_COLORS[m.color] : 'transparent' }}
+                  />
+                  <Circle size={7} className={dotColor(statuses[m.id]?.status) + ' fill-current shrink-0'} />
+                  {memberEditing ? (
+                    <input
+                      autoFocus
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={commitRenameMember}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRenameMember()
+                        else if (e.key === 'Escape') cancelRenameMember()
+                      }}
+                      className="w-28 rounded bg-panel px-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  ) : (
+                    <span className="flex-1 truncate">{m.title}</span>
+                  )}
+                  {loggingIds.has(m.id) && <Circle size={6} className="shrink-0 fill-current text-red-400" />}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onDuplicate(m.id)
+                    }}
+                    title="세션 복제"
+                    className="rounded p-0.5 text-gray-500 opacity-0 hover:bg-white/10 hover:text-gray-200 group-hover:opacity-100"
+                  >
+                    <Copy size={11} />
+                  </button>
+                  {tabs.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onCloseMember(m.id)
+                      }}
+                      title="세션 닫기 (그리드에서 제거)"
+                      className="rounded p-0.5 text-gray-500 opacity-0 hover:bg-white/10 hover:text-gray-200 group-hover:opacity-100"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+            <div className="my-1 border-t border-white/10" />
+            <button
+              type="button"
+              onClick={() => {
+                onDissolve()
+                setMenuOpen(false)
+              }}
+              className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-gray-300 hover:bg-white/5"
+              title="그리드 묶음만 풀고 세션은 개별 탭으로 유지"
+            >
+              <Minus size={12} className="shrink-0" />
+              그룹 해제 (세션 유지)
+            </button>
+          </div>,
+          document.body,
+        )}
+    </div>
+  )
+}
+
 /**
  * 다중 세션 탭바.
  *  - 탭 클릭으로 전환, × 로 닫기, + 로 추가(최대 max개)
@@ -98,6 +364,11 @@ export default function TabBar({
   onDuplicate,
   onTabDragStart,
   onTabDragEnd,
+  gridGroups,
+  onSelectGrid,
+  onDissolveGrid,
+  onCloseGrid,
+  onRenameGrid,
   layout,
   onSetLayout,
   onApplyPreset,
@@ -116,6 +387,10 @@ export default function TabBar({
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // 그리드 그룹: 어떤 그룹이든 그에 속한 세션은 개별 탭에서 빼고 그룹 칩으로 묶는다(활성/파킹 모두).
+  const allGridMemberIds = new Set(gridGroups.flatMap((g) => g.memberIds))
+  const singleTabs = tabs.filter((t) => !allGridMemberIds.has(t.id))
 
   // 탭 컨테이너 스크롤/리사이즈 감지 → 화살표 표시 여부 갱신
   useEffect(() => {
@@ -164,7 +439,31 @@ export default function TabBar({
           className="flex flex-1 items-center gap-1 overflow-x-auto"
           style={{ scrollbarWidth: 'none' }}
         >
-          {tabs.map((t) => {
+          {/* 그리드 그룹 칩들 — 각 그룹(활성/파킹)을 하나의 칩으로. 본문 클릭=그 그룹 분할 보기, ▾=멤버 메뉴, ×=세션 모두 닫기 */}
+          {gridGroups.map((g) => (
+            <GridChip
+              key={g.id}
+              group={g}
+              tabs={tabs}
+              statuses={statuses}
+              activeId={activeId}
+              loggingIds={loggingIds}
+              onSelect={(m) => onSelectGrid(g.id, m)}
+              onDissolve={() => onDissolveGrid(g.id)}
+              onClose={() => onCloseGrid(g.id)}
+              onRename={(n) => onRenameGrid(g.id, n)}
+              onDuplicate={onDuplicate}
+              onCloseMember={onClose}
+              editingId={editingId}
+              editValue={editValue}
+              setEditValue={setEditValue}
+              startRenameMember={startRename}
+              commitRenameMember={commitRename}
+              cancelRenameMember={() => setEditingId(null)}
+            />
+          ))}
+
+          {singleTabs.map((t) => {
             const active = t.id === activeId
             const editing = editingId === t.id
             const colorBorder = t.color ? TAB_COLORS[t.color] : undefined

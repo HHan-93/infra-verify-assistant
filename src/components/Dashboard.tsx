@@ -215,6 +215,20 @@ export default function Dashboard({ sessionId, connected }: Props) {
   const [reporting, setReporting] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
   const reqIdRef = useRef<string | null>(null)
+  const saveMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 저장 안내 메시지를 4초 뒤 지움 — 타이머를 ref 로 잡아 재실행 시 중복/언마운트 후 실행 방지
+  const scheduleSaveClear = () => {
+    if (saveMsgTimerRef.current) clearTimeout(saveMsgTimerRef.current)
+    saveMsgTimerRef.current = setTimeout(() => setSaveMsg(''), 4000)
+  }
+  // 언마운트 시 남은 타이머 정리 (state-update-after-unmount 방지)
+  useEffect(
+    () => () => {
+      if (killErrorTimerRef.current) clearTimeout(killErrorTimerRef.current)
+      if (saveMsgTimerRef.current) clearTimeout(saveMsgTimerRef.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     const offDelta = window.electronAPI.onAiDelta((e) => {
@@ -260,7 +274,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
     })
     if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
     else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
-    if (res.saved) setTimeout(() => setSaveMsg(''), 4000)
+    if (res.saved) scheduleSaveClear()
   }
 
   const savePdfReport = async () => {
@@ -271,7 +285,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
     })
     if (res.saved) setSaveMsg(`저장됨: ${res.path}`)
     else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
-    if (res.saved) setTimeout(() => setSaveMsg(''), 4000)
+    if (res.saved) scheduleSaveClear()
   }
 
   const exportCSV = async () => {
@@ -293,7 +307,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
     })
     if (res.saved) setSaveMsg('CSV 저장됨')
     else if (res.error) setSaveMsg(`저장 실패: ${res.error}`)
-    if (res.saved || res.error) setTimeout(() => setSaveMsg(''), 4000)
+    if (res.saved || res.error) scheduleSaveClear()
   }
 
   const diskPct = Number(latest?.disk.pct ?? 0)

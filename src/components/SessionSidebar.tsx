@@ -488,6 +488,16 @@ export default function SessionSidebar({
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
+                        if (items.length) onOpenMulti(items)
+                      }}
+                      title={`이 폴더의 세션 ${items.length}개를 모두 그리드로 열기`}
+                      className="rounded-md p-0.5 text-blue-400/70 transition hover:bg-blue-500/20 hover:text-blue-200"
+                    >
+                      <LayoutGrid size={13} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
                         openAdd(name)
                       }}
                       title="이 폴더에 세션 추가"

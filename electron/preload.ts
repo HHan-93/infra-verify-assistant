@@ -43,6 +43,9 @@ const electronAPI = {
   // SSH 연결 종료
   sshDisconnect: (sessionId: string): void => ipcRenderer.send('ssh:disconnect', sessionId),
 
+  // 자동 재연결 토글을 백엔드에 반영 (꺼지면 백엔드 재접속도 중단)
+  sshSetAutoReconnect: (enabled: boolean): void => ipcRenderer.send('ssh:setAutoReconnect', enabled),
+
   // 변경된 호스트 키 신뢰(덮어쓰기) 후 재접속용
   sshTrustHost: (host: string, port: number): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('ssh:trustHost', { host, port }),
@@ -75,6 +78,8 @@ const electronAPI = {
   ): Promise<{ ok: boolean; frames?: { t: number; d: string }[]; error?: string }> =>
     ipcRenderer.invoke('logs:readCast', id),
   logsDelete: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('logs:delete', id),
+  logsExport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('logs:export', id),
   logsGetRetentionSettings: (): Promise<LogRetentionSettings> => ipcRenderer.invoke('logs:getRetentionSettings'),
   logsSetRetentionSettings: (settings: LogRetentionSettings): Promise<LogRetentionSettings> =>
     ipcRenderer.invoke('logs:setRetentionSettings', settings),
@@ -337,8 +342,9 @@ const electronAPI = {
     sessionId: string,
     target: LogTailTarget,
     sudoPassword?: string,
+    tailLines?: number,
   ): Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }> =>
-    ipcRenderer.invoke('logtail:start', { sessionId, target, sudoPassword }),
+    ipcRenderer.invoke('logtail:start', { sessionId, target, sudoPassword, tailLines }),
   logtailStop: (sessionId: string, tailId: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('logtail:stop', { sessionId, tailId }),
   onLogtailData: (cb: (d: { sessionId: string; tailId: string; data: string }) => void): (() => void) => {

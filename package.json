@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.okestro.infraverify",
-    "productName": "QA SSH Assistant Tool",
+    "productName": "Q-Term",
     "npmRebuild": false,
     "publish": [
       {

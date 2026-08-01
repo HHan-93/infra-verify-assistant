@@ -1,6 +1,6 @@
 {
   "appId": "com.okestro.infraverify",
-  "productName": "QA SSH Assistant Tool",
+  "productName": "Q-Term",
   "directories": {
     "output": "release"
   },

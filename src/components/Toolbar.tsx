@@ -10,7 +10,7 @@ import {
   Network,
   Circle,
   Settings,
-  GitCompare,
+  HeartPulse,
   SquareTerminal,
   ScrollText,
   Activity,
@@ -39,8 +39,8 @@ interface ToolbarProps {
   onToggleLog: () => void
   /** 외형 설정 열기 */
   onOpenSettings: () => void
-  /** 노드 간 출력 비교 */
-  onCompareNodes: () => void
+  /** 가용성 검증 상태보드 열기 */
+  onOpenStatusBoard: () => void
   /** 터미널에서 선택한 영역을 AI 분석 */
   onAnalyzeSelection: () => void
 }
@@ -64,7 +64,7 @@ export default function Toolbar({
   logging,
   onToggleLog,
   onOpenSettings,
-  onCompareNodes,
+  onOpenStatusBoard,
   onAnalyzeSelection,
 }: ToolbarProps) {
   return (
@@ -109,12 +109,21 @@ export default function Toolbar({
       <IconBtn onClick={onOpenExplorer} title="원격 파일 탐색기 (SFTP)">
         <FolderTree size={15} />
       </IconBtn>
-      <IconBtn onClick={onOpenTunnels} title="포트 포워딩 (터널)">
+      <IconBtn onClick={onOpenTunnels} title="포트 포워딩 (터널)" anchor="tunnel">
         <Network size={15} />
       </IconBtn>
 
       {/* 분석 + 유틸 (우측) */}
       <div className="ml-auto flex items-center gap-1.5">
+        <button
+          onClick={onOpenStatusBoard}
+          data-statusboard-btn
+          title="가용성 검증 상태보드 (host/VIP·masakari·Ceph·파드 실시간 상태)"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+        >
+          <HeartPulse size={14} className="text-blue-300" />
+          가용성 상태보드
+        </button>
         <button
           onClick={onAnalyzeSelection}
           title="드래그로 선택한 텍스트를 AI 분석"
@@ -131,18 +140,10 @@ export default function Toolbar({
           <SquareTerminal size={14} />
           다중 실행
         </button>
-        <button
-          onClick={onCompareNodes}
-          title="노드(세션) 간 출력 비교 (diff)"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
-        >
-          <GitCompare size={14} />
-          세션 비교
-        </button>
 
         <Divider />
 
-        {/* 로그: 실시간 로깅 → 로그 녹화(토글) → 녹화 로그 뷰어 */}
+        {/* 로그: 실시간 로깅 → 녹화(토글) → 녹화 뷰어 */}
         <button
           onClick={onOpenLiveLog}
           title="실시간 로그 보기 (tail -f / kubectl logs -f)"
@@ -162,7 +163,7 @@ export default function Toolbar({
           }
         >
           <Circle size={10} className={logging ? 'fill-current text-red-400' : ''} />
-          {logging ? '녹화 중' : '로그 녹화'}
+          {logging ? '녹화 중' : '녹화'}
         </button>
         <button
           onClick={onOpenLogViewer}
@@ -170,7 +171,7 @@ export default function Toolbar({
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScrollText size={14} />
-          녹화 로그 뷰어
+          녹화 뷰어
         </button>
         <IconBtn onClick={onOpenSettings} title="외형 설정 (글꼴/테마)">
           <Settings size={15} />
@@ -191,12 +192,15 @@ function IconBtn({
   title,
   active,
   activeColor = 'blue',
+  anchor,
   children,
 }: {
   onClick: () => void
   title: string
   active?: boolean
   activeColor?: 'blue' | 'red'
+  /** 다른 UI(상태보드 최소화 칩)가 이 버튼을 기준으로 위치를 잡을 수 있게 하는 앵커 식별자 */
+  anchor?: string
   children: ReactNode
 }) {
   const activeCls =
@@ -207,6 +211,7 @@ function IconBtn({
     <button
       onClick={onClick}
       title={title}
+      data-anchor={anchor}
       className={
         'flex shrink-0 items-center rounded-md border p-1.5 text-gray-200 transition ' +
         (active ? activeCls : 'border-white/10 bg-panel-light hover:bg-white/10')

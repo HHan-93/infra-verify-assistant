@@ -137,12 +137,12 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "OVS 브릿지 상태",
-            "command": "ovs-vsctl show",
+            "command": "sudo ovs-vsctl show",
             "desc": "Open vSwitch의 br-int, br-ex, br-tun 브릿지 및 포트 매핑"
           },
           {
             "label": "OVS 오픈플로우 룰",
-            "command": "ovs-ofctl dump-flows br-int",
+            "command": "sudo ovs-ofctl dump-flows br-int",
             "desc": "VM 간 통신 및 보안 룰이 적용된 OVS OpenFlow 플로우 덤프"
           }
         ]
@@ -237,22 +237,22 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "호스트 KVM VM 상태",
-            "command": "virsh list --all",
+            "command": "sudo virsh list --all",
             "desc": "컴퓨트 노드 쉘에서 하이퍼바이저 레벨의 실제 VM 구동 상태 조회"
           },
           {
             "label": "인스턴스 상태",
-            "command": "virsh dominfo <INSTANCE_ALIAS>",
+            "command": "sudo virsh dominfo <INSTANCE_ALIAS>",
             "desc": "인스턴스의 CPU, 메모리, 상태 등을 조회"
           },
           {
             "label": "VM 디스크 매핑 확인",
-            "command": "virsh domblklist <INSTANCE_NAME>",
+            "command": "sudo virsh domblklist <INSTANCE_NAME>",
             "desc": "VM에 매핑된 실제 블록 디바이스(RBD 경로 등) 식별"
           },
           {
             "label": "xml 설정 파일 직접 확인",
-            "command": "virsh dumpxml <INSTANCE_ALIAS>",
+            "command": "sudo virsh dumpxml <INSTANCE_ALIAS>",
             "desc": "인스턴스에 적용된 모든 설정(네트워크, 디스크, CPU, 메모리 등)을 원본 XML 형태로 조회"
           }
         ]
@@ -262,17 +262,17 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "클러스터 전체 상태",
-            "command": "pcs status",
+            "command": "sudo pcs status",
             "desc": "노드·리소스 상태와 VIP가 어느 노드에서 running 중인지 한눈에 확인"
           },
           {
             "label": "리소스 상태만 압축 조회",
-            "command": "pcs status resources",
+            "command": "sudo pcs status resources",
             "desc": "VIP 등 각 리소스별 현재 실행 노드만 간결하게 확인"
           },
           {
             "label": "클러스터 상세 상태",
-            "command": "pcs status --full",
+            "command": "sudo pcs status --full",
             "desc": "fail count 등을 포함한 노드·리소스 상세 상태 확인"
           }
         ]
@@ -282,17 +282,17 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "Nova 에러 로그",
-            "command": "tail -n 100 /var/log/nova/nova-api.log | grep -i error",
+            "command": "sudo tail -n 100 /var/log/nova/nova-api.log | grep -i error",
             "desc": "VM 생성 실패 시 가장 먼저 확인할 Nova API 최근 에러 로그"
           },
           {
             "label": "Neutron 에러 로그",
-            "command": "tail -n 100 /var/log/neutron/neutron-server.log | grep -i error",
+            "command": "sudo tail -n 100 /var/log/neutron/neutron-server.log | grep -i error",
             "desc": "네트워크/포트 바인딩 실패 시 원인 파악용 에러 로그"
           },
           {
             "label": "Cinder 에러 로그",
-            "command": "tail -n 100 /var/log/cinder/cinder-volume.log | grep -i error",
+            "command": "sudo tail -n 100 /var/log/cinder/cinder-volume.log | grep -i error",
             "desc": "볼륨 생성 및 연결 실패 시 스토리지 연동 에러 로그"
           }
         ]
@@ -307,37 +307,37 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "클러스터 요약(s)",
-            "command": "ceph -s",
+            "command": "sudo ceph -s",
             "desc": "HEALTH, MON/OSD, PG, 용량 상태를 확인하는 최우선 점검 명령"
           },
           {
             "label": "클러스터 헬스 상세",
-            "command": "ceph health detail",
+            "command": "sudo ceph health detail",
             "desc": "WARN/ERR 발생 시 크래시 데몬이나 손상된 PG 등 근본 원인 출력"
           },
           {
             "label": "실시간 이벤트(w)",
-            "command": "ceph -w",
+            "command": "sudo ceph -w",
             "desc": "PG 변경, OSD Up/Down, 리밸런싱 등 실시간 모니터링 (종료: Ctrl+C)"
           },
           {
             "label": "MON 쿼럼 상태",
-            "command": "ceph quorum_status --format json-pretty",
+            "command": "sudo ceph quorum_status --format json-pretty",
             "desc": "모니터 노드 선출 상태 및 쿼럼 정상 형성 딥다이브 (JSON)"
           },
           {
             "label": "MGR 모듈 상태",
-            "command": "ceph mgr module ls",
+            "command": "sudo ceph mgr module ls",
             "desc": "Dashboard, Prometheus 익스포터 등 활성화된 MGR 플러그인 상태"
           },
           {
             "label": "데몬 컨테이너 목록",
-            "command": "ceph orch ps",
+            "command": "sudo ceph orch ps",
             "desc": "Cephadm 오케스트레이터로 배포된 OSD/MON/MGR 데몬 컨테이너 상태"
           },
           {
             "label": "클러스터 에러 로그",
-            "command": "tail -n 200 /var/log/ceph/ceph.log | grep -iE 'err|warn'",
+            "command": "sudo tail -n 200 /var/log/ceph/ceph.log | grep -iE 'err|warn'",
             "desc": "최근 200줄 로그에서 클러스터 에러와 경고 알람만 필터링"
           }
         ]
@@ -347,52 +347,52 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "OSD 트리/가중치",
-            "command": "ceph osd tree",
+            "command": "sudo ceph osd tree",
             "desc": "CRUSH 맵 기반 호스트 노드별 OSD 트리와 weight, up/down 상태"
           },
           {
             "label": "OSD 트리 JSON",
-            "command": "ceph osd tree -f json-pretty",
+            "command": "sudo ceph osd tree -f json-pretty",
             "desc": "OSD 구성도를 JSON으로 출력하여 파싱/자동화 스크립트 연동"
           },
           {
             "label": "디스크 사용률(OSD)",
-            "command": "ceph osd df",
+            "command": "sudo ceph osd df",
             "desc": "OSD별 물리 디스크 사용량, 여유 공간, 데이터 분산 편차(variance)"
           },
           {
             "label": "PG 오토스케일 상태",
-            "command": "ceph osd pool autoscale-status",
+            "command": "sudo ceph osd pool autoscale-status",
             "desc": "각 풀별 데이터 타겟 사이즈 대비 현재 PG 개수의 적절성 및 자동 확장 데몬의 동작 상태 확인"
           },
           {
             "label": "OSD 데몬 성능 지연",
-            "command": "ceph osd perf",
+            "command": "sudo ceph osd perf",
             "desc": "각 OSD의 commit/apply 지연 시간(Latency) 추적 (느린 디스크 색출)"
           },
           {
             "label": "자동 아웃(Out) 방지",
-            "command": "ceph osd set noout",
+            "command": "sudo ceph osd set noout",
             "desc": "노드 재부팅/점검 전 OSD가 Out되어 불필요한 리밸런싱이 발생하지 않도록 홀드"
           },
           {
             "label": "자동 아웃 방지 해제",
-            "command": "ceph osd unset noout",
+            "command": "sudo ceph osd unset noout",
             "desc": "점검 완료 후 noout 플래그 해제하여 정상 관리 상태 복구"
           },
           {
             "label": "강제 딥 스크럽",
-            "command": "ceph osd scrub <OSD_ID>",
+            "command": "sudo ceph osd scrub <OSD_ID>",
             "desc": "특정 OSD 데이터 정합성 검사(Scrub) 강제 수행 예약"
           },
           {
             "label": "OSD 크래시 기록",
-            "command": "ceph crash ls",
+            "command": "sudo ceph crash ls",
             "desc": "비정상 종료되거나 크래시된 OSD 데몬 이력 확인"
           },
           {
             "label": "크래시 알람 초기화",
-            "command": "ceph crash archive-all",
+            "command": "sudo ceph crash archive-all",
             "desc": "확인이 끝난 크래시 로그를 보관 처리하여 클러스터 경고 알람 해제"
           }
         ]
@@ -402,22 +402,22 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "PG 통계 요약",
-            "command": "ceph pg stat",
+            "command": "sudo ceph pg stat",
             "desc": "PG 맵 버전 및 클라이언트 Read/Write IOPS, Throughput 요약"
           },
           {
             "label": "비정상(Stuck) PG",
-            "command": "ceph pg dump_stuck inactive",
+            "command": "sudo ceph pg dump_stuck inactive",
             "desc": "데이터 I/O 처리가 멈춰있는(stuck) Placement Group 확인"
           },
           {
             "label": "복구중(Degraded) PG",
-            "command": "ceph pg dump_stuck degraded",
+            "command": "sudo ceph pg dump_stuck degraded",
             "desc": "노드/OSD 장애로 데이터 리플리케이션이 진행 중인 PG 확인"
           },
           {
             "label": "손상된 PG 수동 복구",
-            "command": "ceph pg repair <PG_ID>",
+            "command": "sudo ceph pg repair <PG_ID>",
             "desc": "Inconsistent 에러가 뜬 특정 PG에 대해 수동 복구 커맨드 전송"
           }
         ]
@@ -427,37 +427,37 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "풀 리스트 상세",
-            "command": "ceph osd pool ls detail",
+            "command": "sudo ceph osd pool ls detail",
             "desc": "전체 풀의 size, min_size, crush rule, pg_num 등 세부 설정값"
           },
           {
             "label": "풀별 용량(ceph df)",
-            "command": "ceph df detail",
+            "command": "sudo ceph df detail",
             "desc": "풀별 사용량, 가용량 및 저장된 오브젝트 수 요약"
           },
           {
             "label": "논리적 데이터 용량",
-            "command": "rados df",
+            "command": "sudo rados df",
             "desc": "풀에 저장된 객체 수, 크기 및 논리/물리적 데이터 사용률 분석"
           },
           {
             "label": "풀 실시간 I/O 부하",
-            "command": "ceph osd pool stats",
+            "command": "sudo ceph osd pool stats",
             "desc": "각 풀에서 발생하는 실시간 Client Read/Write I/O 모니터링"
           },
           {
             "label": "RADOS 성능 벤치마크",
-            "command": "rados bench -p <POOL_NAME> 60 write --no-cleanup",
+            "command": "sudo rados bench -p <POOL_NAME> 60 write --no-cleanup",
             "desc": "특정 풀 대상 60초 쓰기 부하 테스트로 Throughput/IOPS 성능 한계 검증"
           },
           {
             "label": "저장된 오브젝트 리스트",
-            "command": "rados -p <POOL_NAME> ls",
+            "command": "sudo rados -p <POOL_NAME> ls",
             "desc": "특정 풀에 저장된 오브젝트 청크 리스트 실제 조회 (데이터 유실 검증)"
           },
           {
             "label": "오브젝트 OSD 추적",
-            "command": "ceph osd map <POOL_NAME> <OBJECT>",
+            "command": "sudo ceph osd map <POOL_NAME> <OBJECT>",
             "desc": "특정 파일(오브젝트)이 실제 어느 OSD에 나뉘어 저장되는지 매핑 추적"
           }
         ]
@@ -467,27 +467,27 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "RBD 이미지 리스트",
-            "command": "rbd ls -p <POOL_NAME>",
+            "command": "sudo rbd ls -p <POOL_NAME>",
             "desc": "풀에 생성된 블록 디바이스(VM 디스크 등) 이미지 조회"
           },
           {
             "label": "RBD 이미지 상세",
-            "command": "rbd info <IMAGE_NAME> -p <POOL_NAME>",
+            "command": "sudo rbd info <IMAGE_NAME> -p <POOL_NAME>",
             "desc": "RBD 이미지 실제 크기, 객체 크기(기본 4M), 포맷, Lock 상태"
           },
           {
             "label": "RBD 스냅샷 생성",
-            "command": "rbd snap create <POOL_NAME>/<IMAGE_NAME>@<SNAP_NAME>",
+            "command": "sudo rbd snap create <POOL_NAME>/<IMAGE_NAME>@<SNAP_NAME>",
             "desc": "특정 블록 디바이스의 현재 상태를 스냅샷으로 즉각 보존하여 데이터 백업 및 롤백 지점 확보"
           },
           {
             "label": "삭제 대기 중인 RBD",
-            "command": "rbd trash ls -p <POOL_NAME>",
+            "command": "sudo rbd trash ls -p <POOL_NAME>",
             "desc": "삭제 명령 수신 후 백그라운드 정리 대기 중인 이미지 목록"
           },
           {
             "label": "RBD 직접 마운트",
-            "command": "rbd map <IMAGE_NAME> -p <POOL_NAME>",
+            "command": "sudo rbd map <IMAGE_NAME> -p <POOL_NAME>",
             "desc": "특정 RBD 이미지를 클라이언트(호스트) 블록 디바이스로 직접 맵핑"
           }
         ]
@@ -497,17 +497,17 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "CephFS MDS 상태",
-            "command": "ceph mds stat",
+            "command": "sudo ceph mds stat",
             "desc": "파일시스템 메타데이터 서버의 Active/Standby 상태 및 랭크"
           },
           {
             "label": "CephFS 상세 상태",
-            "command": "ceph fs status",
+            "command": "sudo ceph fs status",
             "desc": "MDS 메모리 사용량, 연결된 클라이언트 수 등 파일시스템 종합 헬스"
           },
           {
             "label": "오브젝트 사용자 목록",
-            "command": "radosgw-admin user list",
+            "command": "sudo radosgw-admin user list",
             "desc": "S3/Swift용 RADOS Gateway에 등록된 유저 식별자 리스트"
           }
         ]
@@ -517,17 +517,17 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "클라이언트 키링 상세",
-            "command": "ceph auth get client.admin",
+            "command": "sudo ceph auth get client.admin",
             "desc": "admin 등 클라이언트의 인증 키(Keyring) 값 및 접근 권한 출력"
           },
           {
             "label": "성능 카운터 덤프",
-            "command": "ceph daemon osd.<OSD_ID> perf dump",
+            "command": "sudo ceph daemon osd.<OSD_ID> perf dump",
             "desc": "데몬 소켓 통신으로 내부 성능 카운터/지연 시간 통계 딥다이브 추출"
           },
           {
             "label": "런타임 동적 설정 확인",
-            "command": "ceph config show-with-defaults osd.<OSD_ID>",
+            "command": "sudo ceph config show-with-defaults osd.<OSD_ID>",
             "desc": "특정 데몬의 메모리에 로드된 현재 런타임 설정값 전체 확인"
           }
         ]
@@ -782,12 +782,12 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "kubelet 로그 스트림",
-            "command": "journalctl -u kubelet -f",
+            "command": "sudo journalctl -u kubelet -f",
             "desc": "물리 노드의 kubelet 데몬 로그 추적 (파드 생성 실패 원인, Ctrl+C)"
           },
           {
             "label": "containerd 로그",
-            "command": "journalctl -u containerd -n 100 --no-pager",
+            "command": "sudo journalctl -u containerd -n 100 --no-pager",
             "desc": "컨테이너 런타임의 이미지 풀링 실패나 구동 에러 로그 100줄"
           }
         ]
@@ -817,7 +817,7 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "커널 패닉/OOM(dmesg)",
-            "command": "dmesg -T --level=err,crit,alert,emerg",
+            "command": "sudo dmesg -T --level=err,crit,alert,emerg",
             "desc": "OOM Killer, 디스크 배드섹터 등 치명적인 커널 로그만 추출"
           },
           {
@@ -842,27 +842,27 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "점유 디렉토리 추적(lsof)",
-            "command": "lsof +D /var/log",
+            "command": "sudo lsof +D /var/log",
             "desc": "특정 디렉토리를 점유하여 삭제를 막는 프로세스 식별"
           },
           {
             "label": "포트 점유 추적(lsof)",
-            "command": "lsof -i :80",
+            "command": "sudo lsof -i :80",
             "desc": "특정 포트를 점유 중인 프로세스 식별"
           },
           {
             "label": "부팅 세션 에러 로그",
-            "command": "journalctl -p 3 -xb",
+            "command": "sudo journalctl -p 3 -xb",
             "desc": "현재 부팅 세션에서 발생한 Error 등급(-p 3) 이상의 시스템 로그"
           },
           {
             "label": "런타임 커널 변수",
-            "command": "sysctl -a | grep -i 'net.ipv4\\|vm.swappiness'",
+            "command": "sudo sysctl -a | grep -i 'net.ipv4\\|vm.swappiness'",
             "desc": "메모리 스왑 빈도 및 TCP 네트워크 튜닝 설정 적용 여부"
           },
           {
             "label": "캐시 강제 반환(테스트)",
-            "command": "sync; echo 3 > /proc/sys/vm/drop_caches",
+            "command": "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'",
             "desc": "임계치 테스트를 위해 PageCache/inode 캐시를 비워 가용 메모리 확보"
           }
         ]
@@ -897,12 +897,12 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "패킷 캡처(tcpdump)",
-            "command": "tcpdump -i any port 80 -n -c 100",
+            "command": "sudo tcpdump -i any port 80 -n -c 100",
             "desc": "특정 포트로 인입되는 패킷 헤더와 출발지 IP 100개 캡처"
           },
           {
             "label": "TCP 소켓/포트(ss)",
-            "command": "ss -tunlpo",
+            "command": "sudo ss -tunlpo",
             "desc": "서버의 TCP/UDP 리슨 포트, 바인딩 프로세스, 타이머 상태 출력"
           },
           {
@@ -952,7 +952,7 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "대용량 디렉토리 색출",
-            "command": "du -sh /var/* | sort -rh | head -10",
+            "command": "sudo du -sh /var/* | sort -rh | head -10",
             "desc": "특정 파티션에서 용량을 가장 많이 차지하는 하위 폴더 10개 추출"
           },
           {
@@ -962,12 +962,12 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "물리 메모리(RAM) 스펙",
-            "command": "dmidecode -t memory | grep -i 'size\\|speed'",
+            "command": "sudo dmidecode -t memory | grep -i 'size\\|speed'",
             "desc": "메인보드 뱅크에 장착된 램 모듈의 개별 크기와 동작 클럭"
           },
           {
             "label": "방화벽(Iptables) 룰",
-            "command": "iptables -L -n -v | head -n 30",
+            "command": "sudo iptables -L -n -v | head -n 30",
             "desc": "커널 레벨 패킷 필터링 룰의 Drop/Accept 카운트 확인"
           }
         ]
@@ -1147,27 +1147,27 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "서비스 자동 시작 등록",
-            "command": "systemctl enable --now <서비스명>",
+            "command": "sudo systemctl enable --now <서비스명>",
             "desc": "즉시 시작 + 재부팅 시 자동으로 올라오게 등록"
           },
           {
             "label": "패키지 갱신(Ubuntu)",
-            "command": "apt update",
+            "command": "sudo apt update",
             "desc": "레포지토리에서 설치 가능한 최신 패키지 정보 갱신"
           },
           {
             "label": "패키지 갱신(RHEL)",
-            "command": "dnf check-update",
+            "command": "sudo dnf check-update",
             "desc": "RHEL 계열 최신 패키지 버전/의존성 갱신"
           },
           {
             "label": "프로그램 설치",
-            "command": "apt install -y <패키지>",
+            "command": "sudo apt install -y <패키지>",
             "desc": "터미널 툴(htop, vim 등) 설치 (-y로 묻지 않고 진행)"
           },
           {
             "label": "프로그램 제거",
-            "command": "apt remove <패키지>",
+            "command": "sudo apt remove <패키지>",
             "desc": "불필요한 패키지 제거"
           },
           {
@@ -1201,6 +1201,41 @@ export const PRESETS: PresetGroup[] = [
             "desc": "과거 입력했던 긴 명령어를 다시 찾아서 재사용"
           }
         ]
+      },
+      {
+        "name": "시간·타임존",
+        "commands": [
+          {
+            "label": "시간·타임존 상태",
+            "command": "timedatectl",
+            "desc": "로컬/UTC 시각, 설정된 타임존, NTP 동기화 여부(System clock synchronized / NTP service)를 한 번에 확인"
+          },
+          {
+            "label": "타임존 링크 확인",
+            "command": "ls -l /etc/localtime",
+            "desc": "/etc/localtime 이 가리키는 존 파일(/usr/share/zoneinfo/…)로 현재 설정된 타임존을 확인"
+          },
+          {
+            "label": "타임존 이름(Debian/Ubuntu)",
+            "command": "cat /etc/timezone",
+            "desc": "Debian/Ubuntu 계열에서 설정된 타임존 이름을 텍스트로 확인 (RHEL 계열에는 없을 수 있음)"
+          },
+          {
+            "label": "타임존 목록 검색",
+            "command": "timedatectl list-timezones | grep <지역>",
+            "desc": "설정 가능한 타임존 목록에서 지역 검색. 예: timedatectl list-timezones | grep Seoul"
+          },
+          {
+            "label": "타임존 변경",
+            "command": "sudo timedatectl set-timezone <타임존>",
+            "desc": "시스템 타임존을 변경합니다. 예: sudo timedatectl set-timezone Asia/Seoul"
+          },
+          {
+            "label": "NTP 시간 동기화 켜기",
+            "command": "sudo timedatectl set-ntp true",
+            "desc": "systemd 기반 자동 시간 동기화(NTP)를 활성화합니다. 상태는 timedatectl 로 확인"
+          }
+        ]
       }
     ]
   },
@@ -1212,27 +1247,27 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "[Pacemaker] 클러스터 상태",
-            "command": "pcs status",
+            "command": "sudo pcs status",
             "desc": "OpenStack Internal Server Error 점검 시 가장 먼저 볼 것 — HA 클러스터 전체 상태.\n확인할 것:\n- int_vip, haproxy, openstack_exporter 등 HA 리소스가 Started 상태인지\n- VIP가 의도한 컨트롤러에 올라와 있는지\n- OFFLINE, UNCLEAN, FAILED, not running 리소스가 있는지"
           },
           {
             "label": "[Pacemaker] 리소스 상태",
-            "command": "pcs resource status",
+            "command": "sudo pcs resource status",
             "desc": "리소스 목록만 별도로 확인할 때 (확인할 것은 pcs status와 동일)"
           },
           {
             "label": "[Pacemaker] VIP 다른 노드로 이동",
-            "command": "pcs resource move int_vip <NAME>",
+            "command": "sudo pcs resource move int_vip <NAME>",
             "desc": "예: pcs resource move int_vip con01"
           },
           {
             "label": "[Pacemaker] VIP 벤(이동 금지)",
-            "command": "pcs resource ban int_vip <NAME>",
+            "command": "sudo pcs resource ban int_vip <NAME>",
             "desc": "해당 노드로 VIP가 이동하지 못하도록 차단. 예: pcs resource ban int_vip con02"
           },
           {
             "label": "[Pacemaker] VIP 벤 해제",
-            "command": "pcs resource clear int_vip <NAME>",
+            "command": "sudo pcs resource clear int_vip <NAME>",
             "desc": "ban/move로 걸린 제약 해제. 예: pcs resource clear int_vip con01"
           },
           {
@@ -1243,7 +1278,17 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "[RabbitMQ] 클러스터 상태",
             "command": "rabbitmqctl cluster_status",
-            "desc": "확인할 것:\n- 모든 RabbitMQ 노드가 running_nodes에 포함되는지\n- Network Partitions가 비어 있는지\n- memory/disk alarm이 없는지\n- OpenStack 서비스 로그에 AMQP, Connection refused, timeout 오류가 있는지"
+            "desc": "RabbitMQ 브로커 자체의 상태 확인 (아래 AMQP 오류 로그와는 별개).\n확인할 것:\n- 모든 RabbitMQ 노드가 Running Nodes에 포함되는지\n- Network Partitions가 비어 있는지 (파티션 발생 시 split-brain)\n※ 메모리/디스크 alarm은 `rabbitmqctl list_alarms` 로, 서비스↔브로커 연결 오류는 아래 [OpenStack 서비스 로그 AMQP 오류 검색] 으로 확인."
+          },
+          {
+            "label": "[RabbitMQ] 알람 확인(메모리/디스크)",
+            "command": "rabbitmqctl list_alarms",
+            "desc": "memory high watermark / disk free limit 알람이 걸려 있는지 확인. 결과가 비어 있으면 정상.\n알람이 걸리면 RabbitMQ가 publisher를 블로킹해 OpenStack 서비스가 멈출 수 있습니다."
+          },
+          {
+            "label": "[RabbitMQ] OpenStack 서비스 로그 AMQP 오류 검색",
+            "command": "sudo grep -riE \"AMQP server|is unreachable|Connection refused|MessagingTimeout|Timed out waiting for a reply\" /var/log/nova/ /var/log/neutron/ /var/log/cinder/ 2>/dev/null | tail -n 100",
+            "desc": "OpenStack 서비스(oslo.messaging)가 RabbitMQ 브로커에 정상적으로 붙는지는 브로커가 아니라 '각 서비스 로그'에서 확인해야 합니다.\n확인할 패턴:\n- AMQP server on <host>:5672 is unreachable → 브로커 접속 불가\n- Connection refused → 포트/방화벽/브로커 다운\n- MessagingTimeout / Timed out waiting for a reply → 응답 지연(과부하·파티션)\n결과가 비어 있으면 정상. 로그 경로는 배포에 따라 다르므로 필요 시 /var/log/glance/ /var/log/keystone/ /var/log/heat/ /var/log/masakari/ 등을 추가하세요.\n※ 특정 서비스 로그를 실시간으로 이어 보려면 상단 [실시간 로그] → [파일 경로] 탭에 해당 경로를 넣으세요."
           },
           {
             "label": "[MySQL/Galera] 서비스 상태",
@@ -1299,27 +1344,27 @@ export const PRESETS: PresetGroup[] = [
           },
           {
             "label": "masakari-engine 로그",
-            "command": "tail -f -n 200 /var/log/masakari/masakari-engine.log",
+            "command": "sudo tail -f -n 200 /var/log/masakari/masakari-engine.log",
             "desc": "마사카리 동작(인스턴스 복구/evacuate 처리) 로그.\ncontroller 또는 mixed 노드에서 확인할 수 있습니다."
           },
           {
             "label": "masakari-host-monitor 로그",
-            "command": "tail -f -n 200 /var/log/masakarimonitors/masakari-host-monitor.log",
+            "command": "sudo tail -f -n 200 /var/log/masakarimonitors/masakari-host-monitor.log",
             "desc": "마사카리 notification(호스트 장애 감지) 로그.\ncompute 또는 mixed 노드에서 확인할 수 있습니다."
           },
           {
             "label": "nova-compute 로그",
-            "command": "tail -f -n 200 /var/log/nova/nova-compute.log",
+            "command": "sudo tail -f -n 200 /var/log/nova/nova-compute.log",
             "desc": "컴퓨트 노드의 인스턴스 복구/재배치 처리 로그"
           },
           {
             "label": "nova-conductor 로그",
-            "command": "tail -f -n 200 /var/log/nova/nova-conductor.log",
+            "command": "sudo tail -f -n 200 /var/log/nova/nova-conductor.log",
             "desc": "DB 중계 및 복구 조정 로그"
           },
           {
             "label": "nova-scheduler 로그",
-            "command": "tail -f -n 200 /var/log/nova/nova-scheduler.log",
+            "command": "sudo tail -f -n 200 /var/log/nova/nova-scheduler.log",
             "desc": "재배치 대상 호스트 스케줄링 로그"
           }
         ]
@@ -1329,8 +1374,33 @@ export const PRESETS: PresetGroup[] = [
         "commands": [
           {
             "label": "Ceph 클러스터 상태(실시간)",
-            "command": "watch ceph -s",
+            "command": "sudo watch ceph -s",
             "desc": "controller 또는 mixed 노드에서 확인할 수 있습니다.\n노드를 올린 직후에는 health가 HEALTH_OK로 돌아온 뒤에 다음 작업을 진행할 것.\nHEALTH_WARN 상태에서 clock skew 경고가 뜨거나, pgs: N/M objects misplaced (X%) 처럼 PG가 재배치(rebalance) 중이라면 아직 완료된 게 아니므로, OK가 될 때까지 기다렸다가 넘어갈 것."
+          }
+        ]
+      },
+      {
+        "name": "시간 동기화(NTP) 확인 사항",
+        "commands": [
+          {
+            "label": "[Chrony] NTP 소스 상태(상세)",
+            "command": "chronyc sources -v",
+            "desc": "각 NTP 서버(소스)와의 연결 상태를 상세히 확인합니다.\n확인할 것:\n- 맨 앞 '^*' 표시가 붙은 소스가 현재 동기화 중인 서버\n- '^+' 는 후보, '^?'/'^x' 는 연결 불가/부적합 소스\n- Reach 값이 377(8진수)이면 최근 8회 폴링 모두 성공\n- 소스가 하나도 선택(^*)되지 않으면 시간 동기화가 안 되고 있는 것"
+          },
+          {
+            "label": "[Chrony] 동기화 추적(오차)",
+            "command": "chronyc tracking",
+            "desc": "현재 시계 동기화 품질과 오차를 확인합니다.\n확인할 것:\n- Leap status 가 Normal 인지 (Not synchronised 면 동기화 안 됨)\n- Stratum 값이 비정상적으로 크지 않은지\n- System time / Last offset / RMS offset 이 수 ms 이내로 작은지\n- Ceph HEALTH_WARN 의 clock skew 경고가 뜰 때 노드 간 이 값을 비교"
+          },
+          {
+            "label": "[Chrony] 서비스 상태",
+            "command": "systemctl status chrony",
+            "desc": "chrony 데몬이 정상 기동 중인지 확인합니다.\nUbuntu 계열은 서비스명이 chrony, RHEL/CentOS 계열은 chronyd 입니다 (systemctl status chronyd)."
+          },
+          {
+            "label": "시스템 시간/동기화 상태",
+            "command": "timedatectl",
+            "desc": "노드의 로컬/UTC 시각, 타임존, NTP 동기화 여부를 종합 확인합니다.\n노드 간 타임존이 다르거나 System clock synchronized: no 이면 clock skew 의 원인이 됩니다."
           }
         ]
       }

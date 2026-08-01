@@ -13,7 +13,7 @@ import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm } from 'node:fs/promises'
+import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile } from 'node:fs/promises'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
@@ -143,10 +143,18 @@ function startLocalShell(s: Session) {
       ? process.env.COMSPEC || 'cmd.exe'
       : process.env.SHELL || '/bin/bash'
   try {
+    // 이전(원격) 세션의 프롬프트 잔상이 로컬 셸 배너와 겹쳐 보이지 않도록 화면+스크롤백을 지운 뒤,
+    // 지금 입력이 원격이 아니라 내 PC에서 실행됨을 명확히 알리는 경고 배너를 먼저 출력한다.
+    mainWindow?.webContents.send('terminal:data', {
+      sessionId: s.id,
+      data:
+        '\x1b[2J\x1b[3J\x1b[H' +
+        '\x1b[1;33m*** 로컬 셸로 전환됨 — 원격 아님. 명령은 내 PC에서 실행됩니다 ***\x1b[0m\r\n',
+    })
     s.localPty = pty.spawn(shell, [], {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
+      cols: s.ptySize?.cols ?? 80,
+      rows: s.ptySize?.rows ?? 24,
       cwd: os.homedir(),
       env: process.env as Record<string, string>,
     })
@@ -280,6 +288,8 @@ function cleanupConnection(s: Session) {
 
 // ── SSH 연결 (재사용 가능 함수: 최초 접속 + 자동 재접속 공용) ──────
 const RECONNECT_MAX = 5
+// 렌더러의 "작업 중 끊기면 자동 재연결" 설정과 동기화 — 꺼져 있으면 백엔드도 재접속하지 않고 로컬 셸로 폴백한다.
+let autoReconnectEnabled = true
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectResult> {
@@ -288,6 +298,10 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
   s.wasConnected = false
   s.hadError = false
   killLocalShell(s)
+  // 재연결(이미 연결돼 있던 셀에 다른 호스트를 드롭 등): 기존 연결을 끊자마자 곧바로 새 핸드셰이크를
+  // 시작하면 기존 소켓이 완전히 닫히기 전이라 새 연결이 read ECONNRESET 으로 실패하고 로컬 셸로 튕긴다.
+  // → 기존 클라이언트를 잡아두고, 그 'close' 이후(또는 짧은 폴백 후)에 새 연결을 시작한다.
+  const oldClient = s.client
   cleanupConnection(s)
   s.lastConfig = config
   s.lastPassword = config.password || undefined
@@ -316,8 +330,21 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
             }
             s.shellStream = stream
             s.wasConnected = true
-            stream.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
-            stream.stderr.on('data', (data: Buffer) => pushOutput(s, data.toString('utf-8')))
+            // 로컬 셸 잔상이 원격 프롬프트와 겹치지 않게 화면+스크롤백을 지운 뒤 원격 출력 시작.
+            mainWindow?.webContents.send('terminal:data', {
+              sessionId: s.id,
+              data: '\x1b[2J\x1b[3J\x1b[H',
+            })
+            // 이 연결(conn)이 이미 새 연결로 교체됐으면(끊기는 중인 옛 스트림) 잔여 출력을 버린다 —
+            // 안 그러면 죽는 스트림의 마지막 프롬프트가 새 로컬 셸 화면에 덧그려진다.
+            stream.on('data', (data: Buffer) => {
+              if (s.client !== conn) return
+              pushOutput(s, data.toString('utf-8'))
+            })
+            stream.stderr.on('data', (data: Buffer) => {
+              if (s.client !== conn) return
+              pushOutput(s, data.toString('utf-8'))
+            })
             stream.on('close', () => {
               // 채널 종료 → 연결 종료 유도 (나머지 정리/재접속 판단은 client 'close' 가 담당).
               // 단, 이 스트림이 이미 교체된(옛) 연결의 것이면 새 연결을 끊지 않도록 가드.
@@ -351,9 +378,11 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
           // 이미 새 연결로 교체된 옛 연결의 늦은 close 는 무시 — 안 그러면 이 핸들러가
           // cleanupConnection 으로 갓 맺은 새 연결(s.client)을 끊고 상태를 'closed' 로
           // 덮어써, 드래그-드롭 재연결 시 "기존만 끊기고 새 연결은 안 되는" 문제가 생긴다.
-          if (s.client !== conn) return
+          if (s.client !== conn) {
+            return
+          }
           if (s.reconnecting) return // 재접속 루프가 제어 중
-          const shouldReconnect = !!(s.wasConnected && s.hadError && !s.userClosed && s.lastConfig)
+          const shouldReconnect = autoReconnectEnabled && !!(s.wasConnected && s.hadError && !s.userClosed && s.lastConfig)
           sendStatus(sessionId, {
             status: 'closed',
             message: shouldReconnect ? '연결이 끊겼습니다.' : '연결 종료됨',
@@ -385,6 +414,8 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
       })
     }
 
+    // 실제 새 연결 시작 — 기존 연결이 있었다면 그 소켓이 닫힌 뒤에 실행(ECONNRESET 방지).
+    const begin = () => {
     if (config.jump) {
       // 점프 호스트 먼저 연결 → forwardOut 으로 대상까지 터널 후 connectTarget
       const jump = config.jump
@@ -438,6 +469,22 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
       sendStatus(sessionId, { status: 'connecting', message: `${config.host} 연결 시도 중...` })
       connectTarget()
     }
+    }
+
+    if (oldClient) {
+      // 기존 소켓이 완전히 닫힌 뒤 새 연결 시작. close 가 안 오는 경우를 대비해 250ms 폴백.
+      sendStatus(sessionId, { status: 'connecting', message: '이전 연결 정리 중...' })
+      let started = false
+      const go = () => {
+        if (started) return
+        started = true
+        begin()
+      }
+      oldClient.once('close', go)
+      setTimeout(go, 250)
+    } else {
+      begin()
+    }
   })
 }
 
@@ -447,6 +494,14 @@ async function attemptReconnect(sessionId: string) {
   if (!s.lastConfig || s.reconnecting) return
   s.reconnecting = true
   const cfg = s.lastConfig
+  // connectSession 의 cleanupConnection 이 s.forwards 를 비우기 전에, 열려있던 터널 설정을 스냅샷 → 재접속 성공 후 복원
+  const savedForwards: AddForwardOpts[] = s.forwards.map((f) => ({
+    type: f.type,
+    localHost: f.localHost,
+    localPort: f.localPort,
+    remoteHost: f.remoteHost,
+    remotePort: f.remotePort,
+  }))
   for (let i = 1; i <= RECONNECT_MAX; i++) {
     if (s.userClosed) break
     sendStatus(sessionId, {
@@ -458,6 +513,14 @@ async function attemptReconnect(sessionId: string) {
     const r = await connectSession(sessionId, cfg)
     if (r.success) {
       s.reconnecting = false
+      // 끊기기 전 열어둔 포트포워딩(터널) 재생성 (개별 실패는 무시)
+      for (const fw of savedForwards) {
+        try {
+          await addForward(getSession(sessionId), fw)
+        } catch {
+          /* 무시 */
+        }
+      }
       return
     }
   }
@@ -481,6 +544,11 @@ ipcMain.handle(
     return connectSession(sessionId, config)
   },
 )
+
+// 렌더러의 자동 재연결 토글을 백엔드에 반영 (꺼지면 백엔드 attemptReconnect 도 중단)
+ipcMain.on('ssh:setAutoReconnect', (_evt, enabled: boolean) => {
+  autoReconnectEnabled = !!enabled
+})
 
 // 변경된 호스트 키를 신뢰(덮어쓰기) — 사용자가 경고 확인 후 재접속할 때.
 // 직전 접속에서 거부된 키(대상/점프 포함)를 모두 커밋한다.
@@ -673,6 +741,33 @@ ipcMain.handle('logs:read', async (_evt, id: string) => {
     return { ok: true, content: truncated ? buf.slice(0, MAX) : buf, truncated }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// 세션 로그 원본 전체를 파일로 저장 (5MB 미리보기 제한 없이 원본 그대로 복사).
+ipcMain.handle('logs:export', async (_evt, id: string) => {
+  const entry = (await readLogIndex()).find((e) => e.id === id)
+  if (!entry) return { saved: false, error: '로그를 찾을 수 없습니다.' }
+  const base = (entry.label || entry.host || 'session-log').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '')
+  const d = new Date(entry.startedAt || Date.now())
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    title: '세션 로그 저장',
+    defaultPath: `sessionlog_${base || 'log'}_${stamp}.log`,
+    filters: [
+      { name: 'Log', extensions: ['log'] },
+      { name: 'Text', extensions: ['txt'] },
+      { name: 'Markdown', extensions: ['md'] },
+    ],
+  })
+  if (result.canceled || !result.filePath) return { saved: false }
+  try {
+    // 원본 바이트 그대로 복사 — utf-8 문자열로 읽어 재인코딩하면 비-UTF-8 바이트가 U+FFFD 로 손상된다.
+    await copyFile(entry.path, result.filePath)
+    return { saved: true, path: result.filePath }
+  } catch (e) {
+    return { saved: false, error: e instanceof Error ? e.message : String(e) }
   }
 })
 
@@ -1606,69 +1701,55 @@ ipcMain.handle('tunnel:list', (_evt, { sessionId }: { sessionId: string }) => {
   return { ok: true, forwards: getSession(sessionId).forwards.map(fwView) }
 })
 
-ipcMain.handle(
-  'tunnel:add',
-  async (
-    _evt,
-    {
-      sessionId,
-      type,
-      localHost,
-      localPort,
-      remoteHost,
-      remotePort,
-    }: {
-      sessionId: string
-      type: 'local' | 'remote'
-      localHost: string
-      localPort: number
-      remoteHost: string
-      remotePort: number
-    },
-  ) => {
-    const s = getSession(sessionId)
-    if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
-    const id = `fw${++fwSeq}`
-    if (type === 'local') {
-      // 로컬 포트로 들어온 연결을 원격(remoteHost:remotePort)으로 터널
-      const server = net.createServer((socket) => {
-        s.client!.forwardOut(
-          socket.remoteAddress || '127.0.0.1',
-          socket.remotePort || 0,
-          remoteHost,
-          remotePort,
-          (err, stream) => {
-            if (err) {
-              socket.destroy()
-              return
-            }
-            socket.pipe(stream).pipe(socket)
-          },
-        )
+type AddForwardOpts = {
+  type: 'local' | 'remote'
+  localHost: string
+  localPort: number
+  remoteHost: string
+  remotePort: number
+}
+// 포트포워딩(터널) 1개 생성 — tunnel:add 핸들러와 자동 재연결 후 복원에서 공용으로 사용
+async function addForward(s: Session, o: AddForwardOpts): Promise<{ ok: boolean; id?: string; error?: string }> {
+  if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+  const id = `fw${++fwSeq}`
+  const localHost = o.localHost || '127.0.0.1'
+  if (o.type === 'local') {
+    // 로컬 포트로 들어온 연결을 원격(remoteHost:remotePort)으로 터널
+    const server = net.createServer((socket) => {
+      s.client!.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, o.remoteHost, o.remotePort, (err, stream) => {
+        if (err) {
+          socket.destroy()
+          return
+        }
+        socket.pipe(stream).pipe(socket)
       })
-      return await new Promise((resolve) => {
-        server.once('error', (e: Error) => resolve({ ok: false, error: e.message }))
-        server.listen(localPort, localHost || '127.0.0.1', () => {
-          s.forwards.push({ id, type, localHost: localHost || '127.0.0.1', localPort, remoteHost, remotePort, server })
-          resolve({ ok: true, id })
-        })
+    })
+    return await new Promise((resolve) => {
+      server.once('error', (e: Error) => resolve({ ok: false, error: e.message }))
+      server.listen(o.localPort, localHost, () => {
+        s.forwards.push({ id, type: o.type, localHost, localPort: o.localPort, remoteHost: o.remoteHost, remotePort: o.remotePort, server })
+        resolve({ ok: true, id })
       })
-    } else {
-      // 원격 포트로 들어온 연결을 로컬(localHost:localPort)으로 전달
-      return await new Promise((resolve) => {
-        s.client!.forwardIn(remoteHost || '127.0.0.1', remotePort, (err) => {
-          if (err) {
-            resolve({ ok: false, error: err.message })
-            return
-          }
-          s.forwards.push({ id, type, localHost: localHost || '127.0.0.1', localPort, remoteHost: remoteHost || '127.0.0.1', remotePort })
-          ensureRemoteHandler(s)
-          resolve({ ok: true, id })
-        })
+    })
+  } else {
+    // 원격 포트로 들어온 연결을 로컬(localHost:localPort)으로 전달
+    return await new Promise((resolve) => {
+      s.client!.forwardIn(o.remoteHost || '127.0.0.1', o.remotePort, (err) => {
+        if (err) {
+          resolve({ ok: false, error: err.message })
+          return
+        }
+        s.forwards.push({ id, type: o.type, localHost, localPort: o.localPort, remoteHost: o.remoteHost || '127.0.0.1', remotePort: o.remotePort })
+        ensureRemoteHandler(s)
+        resolve({ ok: true, id })
       })
-    }
-  },
-)
+    })
+  }
+}
+
+ipcMain.handle('tunnel:add', async (_evt, o: AddForwardOpts & { sessionId: string }) => {
+  return addForward(getSession(o.sessionId), o)
+})
 
 ipcMain.handle('tunnel:remove', (_evt, { sessionId, id }: { sessionId: string; id: string }) => {
   const s = getSession(sessionId)
@@ -1955,7 +2036,8 @@ ipcMain.handle('profiles:import', async (): Promise<ProfileImportResult> => {
   if (ext === 'json') {
     let arr: unknown
     try {
-      arr = JSON.parse(text)
+      // 내보내기/템플릿은 엑셀 호환용 BOM(U+FEFF)을 앞에 붙이므로, JSON.parse 전에 제거한다(안 하면 파싱 실패).
+      arr = JSON.parse(text.replace(/^﻿/, ''))
     } catch (e) {
       return { ok: false, error: `JSON 파싱 실패: ${e instanceof Error ? e.message : String(e)}` }
     }
@@ -2187,15 +2269,11 @@ function execSudoPty(
   return new Promise((resolve, reject) => {
     client.exec(`sudo -S -p '' sh -c ${shQuote(innerSh)}`, { pty: true }, (err, stream) => {
       if (err) {
-        console.error('[sudo-pty] exec error:', err.message)
         return reject(err)
       }
       let data = ''
       stream.on('data', (chunk: Buffer) => (data += chunk.toString('utf-8')))
       stream.on('close', (code: number | null) => {
-        // 디버그: 종료코드 + 마커 외 노이즈(주로 sudo 에러)만 일부 기록 (파일내용/비번 제외)
-        const noise = data.replace(MARK_A, '').replace(MARK_B, '').slice(0, 200)
-        console.log(`[sudo-pty] close code=${code} noise=${JSON.stringify(noise)}`)
         resolve({ code: code ?? 0, data })
       })
       // sudo 프롬프트가 준비될 약간의 여유를 준 뒤 비밀번호 주입
@@ -2399,15 +2477,17 @@ async function execEscalatedNoStdin(
 // 일반 exec(execCapture)는 종료(close)돼야 resolve 되므로 tail -f 처럼 끝나지 않는 명령엔 못 쓴다.
 // 채널을 계속 열어두고 데이터가 올 때마다 logtail:data 이벤트로 흘려보내는 전용 스트리밍 실행기.
 // target 종류(파일/파드)에 따라 명령만 다르고, 스트리밍 배관(그레이스 판정/전달/종료처리)은 공용이다.
-function buildTailCommand(target: LogTailTarget, usePty: boolean): string {
+function buildTailCommand(target: LogTailTarget, usePty: boolean, tailLines = 200): string {
+  // 초기 로드 줄 수 — "이전 로그 더 보기"로 늘려 재시작할 수 있게 파라미터화(과도한 값 방지 상한).
+  const n = Math.min(Math.max(Math.floor(tailLines) || 200, 1), 50000)
   if (target.kind === 'file') {
     const q = shQuote(target.path)
-    return usePty ? `sudo -S -p '' tail -f -n 200 ${q}` : `tail -f -n 200 ${q}`
+    return usePty ? `sudo -S -p '' tail -f -n ${n} ${q}` : `tail -f -n ${n} ${q}`
   }
   const podQ = shQuote(target.pod)
   const nsQ = shQuote(target.namespace)
   const containerFlag = target.container ? ` -c ${shQuote(target.container)}` : ''
-  return `kubectl logs -f --tail=200 ${podQ} -n ${nsQ}${containerFlag}`
+  return `kubectl logs -f --tail=${n} ${podQ} -n ${nsQ}${containerFlag}`
 }
 
 ipcMain.handle(
@@ -2418,7 +2498,8 @@ ipcMain.handle(
       sessionId,
       target,
       sudoPassword,
-    }: { sessionId: string; target: LogTailTarget; sudoPassword?: string },
+      tailLines,
+    }: { sessionId: string; target: LogTailTarget; sudoPassword?: string; tailLines?: number },
   ) => {
     const s = getSession(sessionId)
     const client = s.client
@@ -2426,7 +2507,7 @@ ipcMain.handle(
     const tailId = randomUUID()
     // sudo(PTY) 는 파일 tail 에서 권한 문제가 있을 때만 쓴다 — kubectl logs 는 대상이 아님
     const usePty = target.kind === 'file' && !!sudoPassword
-    const cmd = buildTailCommand(target, usePty)
+    const cmd = buildTailCommand(target, usePty, tailLines)
 
     return new Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }>((resolve) => {
       const onStream = (err: Error | undefined, stream: ClientChannel) => {

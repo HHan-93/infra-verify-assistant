@@ -29,9 +29,9 @@ import FileExplorer from './components/FileExplorer'
 import LiveLogViewer from './components/LiveLogViewer'
 import TunnelManager from './components/TunnelManager'
 import MultiRun from './components/MultiRun'
+import StatusBoard from './components/StatusBoard'
 import ScenarioRunner, { type RunnerScenario } from './components/ScenarioRunner'
-import NodeDiff, { type DiffSource } from './components/NodeDiff'
-import TabBar, { type TabInfo, type LayoutMode } from './components/TabBar'
+import TabBar, { type TabInfo, type LayoutMode, type GridGroupInfo } from './components/TabBar'
 import SessionSidebar, { profileKey } from './components/SessionSidebar'
 import Mascot from './components/Mascot'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -68,7 +68,16 @@ const THEMES: Record<string, { name: string; background: string; foreground: str
 /** 활동 발생 후 마스코트를 유지하다 사라지기까지의 유예(ms) */
 const HIDE_GRACE = 5_000
 
-const MAX_SESSIONS = 6
+// 동시 세션(탭) 최대 개수 — 그리드 그룹 여러 개로 나눠 쓸 수 있어 상향(폴더 통째로 그리드 열기 대비).
+// 트리는 개수 제한 없이 균형 분할되므로, 화면 밀도·리소스만 고려한 값이다(필요하면 조절).
+const MAX_SESSIONS = 15
+
+/** 파킹된(비활성) 그리드 그룹 — 화면에는 splitTree(활성 그룹)만 보이고, 나머지는 칩으로만 남겨 둔다. */
+interface ParkedGrid {
+  id: string
+  name?: string
+  tree: PaneNode
+}
 
 interface SessionStatus {
   status: string
@@ -124,7 +133,7 @@ export default function App() {
   // 실시간 로그(tail -f) 뷰어 — 파일탐색기의 "실시간 보기"로 열면 prefillPath 가 채워짐
   const [showLiveLog, setShowLiveLog] = useState(false)
   const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
-  const [diffSources, setDiffSources] = useState<DiffSource[] | null>(null)
+  const [showStatusBoard, setShowStatusBoard] = useState(false)
   // 선택 세션 AI 분석 — 질문 입력 모달 (공용)
   const [analysisPending, setAnalysisPending] = useState<string | null>(null)
   const [analysisLabel, setAnalysisLabel] = useState('선택 세션 AI 분석')
@@ -151,6 +160,9 @@ export default function App() {
   const [pendingConnects, setPendingConnects] = useState<{ id: string; p: SavedProfile }[]>([])
   // 사이드바에서 터미널로 드래그 중인 프로필 (드롭 오버레이 표시)
   const [draggingProfile, setDraggingProfile] = useState<SavedProfile | null>(null)
+  // 드래그 중인 프로필을 ref 로도 유지 — 드롭(onDrop) 시점에 React 상태가 dragend/리렌더 타이밍으로
+  // 잠깐 비어 dropConnect 가 조용히 무시되던 문제(셀이 흰 점/idle 로 남음)를 막는다.
+  const draggingProfileRef = useRef<SavedProfile | null>(null)
   // 드래그가 올라가 있는 터미널 세션 id (하이라이트)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   // 탭을 그리드 칸으로 드래그 중인 탭 id
@@ -213,9 +225,12 @@ export default function App() {
   const [maskDisplay, setMaskDisplay] = useState(() => maskDisplayEnabled())
   const [maskIp, setMaskIp] = useState(() => maskIpEnabled())
   // 유휴 마스코트 등장까지의 시간(ms) — 기본 5분, 외형 설정에서 조절 가능
-  const [idleDelayMs, setIdleDelayMs] = useState(
-    () => Number(localStorage.getItem('mascot_idle_delay_ms')) || 300_000,
-  )
+  const [idleDelayMs, setIdleDelayMs] = useState(() => {
+    // 0('끄기')도 유효값으로 보존 — `|| 기본값` 을 쓰면 0 이 falsy 라 기본값으로 되돌아간다.
+    const raw = localStorage.getItem('mascot_idle_delay_ms')
+    const n = raw == null ? NaN : Number(raw)
+    return Number.isFinite(n) ? n : 300_000
+  })
   const idleDelayRef = useRef(idleDelayMs)
   useEffect(() => {
     idleDelayRef.current = idleDelayMs
@@ -225,7 +240,15 @@ export default function App() {
     localStorage.setItem('mascot_idle_delay_ms', String(ms))
   }
   // 임의 재귀 분할 레이아웃(tmux 스타일) — null 이면 탭 보기와 동일(단일 리프로 취급)
+  // splitTree 는 항상 "활성 그리드 그룹"의 트리다. 나머지 그룹은 parkedGrids 에 칩으로만 보관.
   const [splitTree, setSplitTree] = useState<PaneNode | null>(null)
+  // 파킹된(비활성) 그리드 그룹들 — 칩으로만 존재하고, 클릭하면 활성 그룹과 자리를 바꾼다.
+  const [parkedGrids, setParkedGrids] = useState<ParkedGrid[]>([])
+  // 활성 그룹(=splitTree)의 id. splitTree 가 non-null 이면 반드시 유효한 id 를, null 이면 null 을 유지한다(INVARIANT).
+  const [activeGridId, setActiveGridId] = useState<string | null>(null)
+  // 그리드 그룹 id 채번용
+  const gridSeqRef = useRef(0)
+  const newGridId = () => `grid${++gridSeqRef.current}`
   const termAreaRef = useRef<HTMLDivElement>(null)
   // 분할선 드래그 리사이즈 대상 — 어느 분할(split) 노드의 비율을 조정 중인지
   const resizeDragRef = useRef<{ nodeId: string; dir: 'row' | 'col' } | null>(null)
@@ -258,10 +281,17 @@ export default function App() {
 
   // 분할 모드 여부 — 트리 렌더/브로드캐스트 대상 계산 등에서 공용으로 사용
   const isSplit = layout === 'split'
+  // 활성 그룹(=splitTree)의 멤버 세션 id 목록
+  const activeMembers = splitTree ? collectLeafTabIds(splitTree) : []
+  // 파킹된 그룹들의 멤버 세션 id 목록(모든 파킹 그룹 합산)
+  const parkedMembers = parkedGrids.flatMap((g) => collectLeafTabIds(g.tree))
+  // 모든 그리드 그룹(활성+파킹)에 속한 세션 id — 탭바에서 개별 탭으로 표시하지 않도록 숨긴다.
+  const allGridTabIds = [...activeMembers, ...parkedMembers]
   // 분할 트리가 현재 화면에 보여주는 세션 id 목록 (중복 가능 — 스페어 탭 없이 분할한 경우)
-  const gridIds = isSplit && splitTree ? collectLeafTabIds(splitTree) : []
-  // 동시입력 실제 대상 = 선택된 세션 ∩ 현재 분할 (닫힌/분할 밖 세션 자동 제외)
-  const effectiveTargets = gridIds.filter((id) => broadcastTargets.includes(id))
+  const gridIds = isSplit && splitTree ? activeMembers : []
+  // 동시입력 실제 대상 = 선택된 세션 ∩ 현재 분할 (닫힌/분할 밖 세션 자동 제외).
+  // gridIds 는 스페어 없는 분할 시 같은 id 가 중복될 수 있어 Set 으로 한 번 걸러 이중 입력을 막는다.
+  const effectiveTargets = [...new Set(gridIds.filter((id) => broadcastTargets.includes(id)))]
   // 실제 브로드캐스트 활성 여부 (분할 모드 + 동시입력 ON + 대상 1개 이상)
   const broadcasting = isSplit && broadcast && effectiveTargets.length > 0
   // 분할 가능 여부 — 아직 트리에 없는 스페어 탭이 있거나, 세션을 더 만들 여유가 있으면 항상 분할 가능
@@ -270,8 +300,21 @@ export default function App() {
   // 탭이 아니게 되면(칸이 닫히는 등) 자동으로 무효 처리
   const [zoomedId, setZoomedId] = useState<string | null>(null)
   const zoomActive = isSplit && !!zoomedId && gridIds.includes(zoomedId)
+  // 그리드 그룹 사용자 지정 이름(없으면 "그리드 N"). 그리드가 완전히 해제(splitTree=null)되면 초기화.
+  const [gridLabel, setGridLabel] = useState<string | null>(null)
+  useEffect(() => {
+    if (!splitTree) setGridLabel(null)
+  }, [splitTree])
   // 활성 세션이 분할 트리 안에 있고, 트리에 칸이 2개 이상일 때만 "칸 닫기" 가능
   const canClosePane = isSplit && !!splitTree && splitTree.type === 'split' && !!findLeaf(splitTree, activeId)
+
+  // 탭바에 넘길 그리드 그룹 목록 — 활성 그룹(있으면) + 파킹 그룹들. active 는 현재 분할 보기 중인 그룹만 true.
+  const gridGroups: GridGroupInfo[] = [
+    ...(splitTree
+      ? [{ id: activeGridId!, name: gridLabel ?? undefined, memberIds: activeMembers, active: isSplit }]
+      : []),
+    ...parkedGrids.map((g) => ({ id: g.id, name: g.name, memberIds: collectLeafTabIds(g.tree), active: false })),
+  ]
 
   // 현재 연결되어 있는 프로필 키 집합 (사이드바 '연결중' 표시)
   const connectedKeys = new Set(
@@ -316,6 +359,7 @@ export default function App() {
       const valid = data
         .map((d) => ({ d, p: profiles.find((x) => profileKey(x) === d.key) }))
         .filter((x): x is { d: typeof x.d; p: SavedProfile } => !!x.p)
+        .slice(0, MAX_SESSIONS) // 손상/과다 복원 데이터가 세션 상한을 넘기지 않게 제한
       if (!valid.length) return
       const ids = valid.map((v, i) => {
         const id = i === 0 ? tabs[0].id : createTab()
@@ -509,15 +553,15 @@ export default function App() {
     const timer = setInterval(() => {
       const now = Date.now()
       if (!idleRef.current) {
-        // 미표시 → 충분히 유휴면 등장
-        if (now - lastActivityRef.current > idleDelayRef.current) {
+        // 미표시 → 충분히 유휴면 등장 (idleDelay <= 0 은 '끄기' → 등장 안 함)
+        if (idleDelayRef.current > 0 && now - lastActivityRef.current > idleDelayRef.current) {
           idleRef.current = true
           hideAtRef.current = 0
           setIdle(true)
         }
       } else {
-        // 표시 중 → 예약된 사라짐 시각 지나면 숨김
-        if (hideAtRef.current && now >= hideAtRef.current) {
+        // 표시 중 → '끄기'로 바뀌었거나 예약된 사라짐 시각이 지나면 숨김
+        if (idleDelayRef.current <= 0 || (hideAtRef.current && now >= hideAtRef.current)) {
           idleRef.current = false
           hideAtRef.current = 0
           setIdle(false)
@@ -553,6 +597,7 @@ export default function App() {
       setStatuses((m) => {
         const prev = m[event.sessionId]
         // 연결/연결중일 때만 host 유지, 끊기면 제거 (제목이 기본으로 복귀)
+        // key(프로필 식별자)는 끊겨도 보존 — 자동 재연결(scheduleReconnect)이 이 값으로 프로필을 찾기 때문.
         const keepHost = event.status === 'connected' || event.status === 'connecting'
         return {
           ...m,
@@ -560,7 +605,7 @@ export default function App() {
             status: event.status,
             msg: event.message ?? prev?.msg ?? '',
             host: keepHost ? prev?.host : undefined,
-            key: keepHost ? prev?.key : undefined,
+            key: prev?.key,
             since:
               event.status === 'connected'
                 ? prev?.status === 'connected'
@@ -672,8 +717,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statuses, tabs, autoReconnect])
 
-  // 자동 재연결을 끄면 예약돼 있던 재연결 타이머를 모두 취소 (끈 뒤 뒤늦게 재연결되는 것 방지)
+  // 자동 재연결 설정을 백엔드에 동기화(마운트 포함) + 끄면 예약돼 있던 재연결 타이머를 모두 취소
   useEffect(() => {
+    window.electronAPI.sshSetAutoReconnect(autoReconnect)
     if (autoReconnect) return
     const rc = reconnectRef.current
     Object.values(rc.timers).forEach((t) => clearTimeout(t))
@@ -735,44 +781,143 @@ export default function App() {
     })
     setOpenConnectCellId((cur) => (cur && idleIds.includes(cur) ? null : cur))
     setBroadcastTargets((bt) => bt.filter((id) => !idleIds.includes(id)))
-    // 트리에 빈 세션이 남아있으면 다음에 분할 보기로 돌아왔을 때 존재하지 않는 탭을 가리키는
-    // 빈 칸이 생기므로, 이번에 정리한 이상 트리도 함께 비운다(다음 분할은 새로 구성됨).
-    setSplitTree(null)
+    // 정리하는 idle 탭 중 '트리에 속한' 것만 트리에서 제거한다. 트리와 무관한 스페어 idle 탭 때문에
+    // 멀쩡한 그리드(splitTree)를 통째로 날리면 안 된다(단일 보기로 갔다가 그리드 그룹 칩으로 복귀 가능해야 함).
+    setSplitTree((tree) => {
+      if (!tree) return tree
+      const inTree = idleIds.filter((id) => findLeaf(tree, id))
+      if (!inTree.length) return tree // 트리 밖 idle 탭만 정리 → 그리드 그대로 보존
+      let next: typeof tree | null = tree
+      for (const id of inTree) {
+        if (!next) break
+        next = removeTabId(next, id)
+      }
+      return !next || next.type === 'leaf' ? null : next // 한 칸만 남으면 그리드 아님 → 해제
+    })
   }
 
-  // 기본 제공 프리셋(좌우2분할/상하2분할/4분할) — 활성 세션을 포함해 원클릭으로 균형 트리를 새로 구성.
-  // 기존 트리는 버리고 처음부터 다시 짜므로 항상 예측 가능한 결과가 나온다(임의분할은 이후 보조로 계속 다듬을 수 있음).
+  // ── 그리드 그룹 활성/파킹 헬퍼 ──
+  // INVARIANT: splitTree 가 non-null 이면 activeGridId 도 유효해야 하고, null 이면 둘 다 null.
+  const activateGrid = (tree: PaneNode, id: string, name: string | null) => {
+    setSplitTree(tree)
+    setActiveGridId(id)
+    setGridLabel(name)
+  }
+  const clearActiveGrid = () => {
+    setSplitTree(null)
+    setActiveGridId(null)
+    setGridLabel(null)
+  }
+  // 현재 활성 그룹을 파킹 목록에 넣은(교체) 새 목록을 돌려준다 — 현재 클로저의 splitTree/activeGridId/gridLabel 을 읽는다.
+  const parkActiveInto = (list: ParkedGrid[]): ParkedGrid[] =>
+    splitTree && activeGridId
+      ? [...list.filter((g) => g.id !== activeGridId), { id: activeGridId, name: gridLabel ?? undefined, tree: splitTree }]
+      : list
+
+  // 탭바의 "그리드 그룹" 진입점 — 해당 그룹을 활성(분할 보기)으로 올린다. 다른 그룹이던 것이면 현재 활성 그룹은 파킹.
+  const selectGrid = (groupId?: string, memberId?: string) => {
+    // 활성 그룹(또는 그룹 지정 없음) → 오늘과 동일하게 활성 그룹의 분할 보기로 진입.
+    if (!groupId || groupId === activeGridId) {
+      if (!splitTree) return
+      // 활성 세션이 그리드 밖(스페어 탭 등)이면 분할 진입 시 활성 칸이 하나도 강조되지 않고 입력이
+      // 화면에 없는 터미널로 새므로, 그리드 첫 칸으로 activeId 를 보정한다.
+      const target =
+        memberId && findLeaf(splitTree, memberId)
+          ? memberId
+          : findLeaf(splitTree, activeId)
+            ? activeId
+            : collectLeafTabIds(splitTree)[0]
+      if (target) setActiveId(target)
+      setLayoutMode('split')
+      return
+    }
+    // 파킹된 다른 그룹 → 현재 활성 그룹을 파킹하고, 그 그룹을 활성으로 교체.
+    const target = parkedGrids.find((g) => g.id === groupId)
+    if (!target) return
+    const nextParked = parkActiveInto(parkedGrids.filter((g) => g.id !== groupId))
+    setParkedGrids(nextParked)
+    activateGrid(target.tree, target.id, target.name ?? null)
+    setActiveId(memberId && findLeaf(target.tree, memberId) ? memberId : collectLeafTabIds(target.tree)[0])
+    setLayoutMode('split')
+  }
+  // 그리드 그룹 해제 — 그리드 묶음만 풀고 세션은 개별 탭으로 유지. 활성 그룹이면 트리를 제거하고 단일 보기로,
+  // 파킹 그룹이면 목록에서만 뺀다(멤버는 이미 일반 탭).
+  const dissolveGrid = (groupId?: string) => {
+    if (!groupId || groupId === activeGridId) {
+      // "그룹 해제 (세션 유지)" — 묶음만 풀고 멤버는 개별 탭으로 남겨야 하므로, idle 셀까지 닫는
+      // setLayout('tabs') 의 정리 로직은 쓰지 않는다. 단일 보기로 전환 + 동시입력만 해제.
+      setLayoutMode('tabs')
+      setBroadcast(false)
+      clearActiveGrid() // 활성 트리는 제거(칩도 사라짐), 멤버 탭은 유지
+      return
+    }
+    setParkedGrids((prev) => prev.filter((g) => g.id !== groupId))
+  }
+
+  // 기본 제공 프리셋(좌우2분할/상하2분할/4분할).
+  // 활성 세션이 "활성 그룹 안"이면 그 그룹을 그대로 재배치(기존 id/이름 유지). 활성 세션이 스페어(어느 그룹에도
+  // 없음)면 기존 활성 그룹을 파킹하고, 스페어 세션들로 새 그룹을 만들어 활성화한다(기존 그룹들은 보존).
   const applyPresetLayout = (preset: '2v' | '2h' | '4') => {
     const n = preset === '4' ? 4 : 2
     const dir: 'row' | 'col' = preset === '2h' ? 'col' : 'row'
-    const ids = [activeId]
-    for (const t of tabs) {
+    if (splitTree && findLeaf(splitTree, activeId)) {
+      // 활성 세션이 현재 활성 그룹 안 → 오늘과 동일하게 그 그룹을 재배치(id/이름 유지).
+      const existing = collectLeafTabIds(splitTree)
+      const ids: string[] = [activeId]
+      for (const id of existing) {
+        if (ids.length >= n) break
+        if (!ids.includes(id)) ids.push(id)
+      }
+      let total = tabs.length
+      while (ids.length < n && total < MAX_SESSIONS) {
+        ids.push(createTab())
+        total++
+      }
+      activateGrid(buildBalancedTree(ids, nextPaneId, dir), activeGridId!, gridLabel)
+      setLayoutMode('split')
+      return
+    }
+    // 활성 세션이 스페어 → 새 그룹 생성. 모든 그룹 멤버(활성+파킹)를 제외한 스페어들로 채운다.
+    const allGridMembers = new Set(allGridTabIds)
+    const spares = tabs.map((t) => t.id).filter((id) => !allGridMembers.has(id) && id !== activeId)
+    const ids: string[] = [activeId]
+    for (const id of spares) {
       if (ids.length >= n) break
-      if (!ids.includes(t.id)) ids.push(t.id)
+      if (!ids.includes(id)) ids.push(id)
     }
     let total = tabs.length
     while (ids.length < n && total < MAX_SESSIONS) {
       ids.push(createTab())
       total++
     }
-    setSplitTree(buildBalancedTree(ids, nextPaneId, dir))
+    // 기존 활성 그룹은 파킹하고, 새 그룹을 활성화.
+    setParkedGrids((prev) => parkActiveInto(prev))
+    activateGrid(buildBalancedTree(ids, nextPaneId, dir), newGridId(), null)
     setLayoutMode('split')
   }
 
-  // 활성 세션이 있는 칸을 dir 방향으로 분할 — 아직 트리에 없는 스페어 탭이 있으면 그걸, 없으면 새 세션을 만들어 채운다.
+  // 활성 세션이 있는 칸을 dir 방향으로 분할 — 새로 생기는 칸은 항상 '빈 세션'으로 채운다.
+  // (밖에 열려있는 스페어 세션을 자동으로 끌어오지 않는다 — 필요하면 사용자가 드래그로 직접 합류시킨다.)
   // 탭 보기로 갔다가 트리에 없는 다른 세션으로 바꾼 뒤 분할하면, 기존 트리는 버리고 그 세션 하나부터 새로 시작한다.
   const baseTreeFor = (activeTabId: string): PaneNode =>
     splitTree && findLeaf(splitTree, activeTabId) ? splitTree : { type: 'leaf', id: nextPaneId(), tabId: activeTabId }
   const splitActivePane = (dir: 'row' | 'col') => {
+    // 활성 세션이 현재 활성 그룹 안이면 그 그룹을 제자리 분할(id 유지). 아니면 새 그룹을 시작한다.
+    const inActive = !!(splitTree && findLeaf(splitTree, activeId))
     const baseTree = baseTreeFor(activeId)
     const activeLeaf = findLeaf(baseTree, activeId)
     const leafId = activeLeaf?.id ?? (baseTree.type === 'leaf' ? baseTree.id : null)
     if (!leafId) return
-    const usedIds = new Set(collectLeafTabIds(baseTree))
-    const spare = tabs.find((t) => !usedIds.has(t.id))?.id
-    const newTabId = spare ?? (tabs.length < MAX_SESSIONS ? createTab() : null)
-    if (!newTabId) return // 스페어도 없고 더 만들 여유도 없으면(세션 한도) 분할하지 않음
-    setSplitTree(splitLeaf(baseTree, leafId, dir, nextPaneId(), nextPaneId(), newTabId))
+    const newTabId = tabs.length < MAX_SESSIONS ? createTab() : null
+    if (!newTabId) return // 세션 한도에 도달하면 분할하지 않음
+    const newTree = splitLeaf(baseTree, leafId, dir, nextPaneId(), nextPaneId(), newTabId)
+    if (inActive) {
+      activateGrid(newTree, activeGridId!, gridLabel)
+    } else {
+      // 스페어 세션에서 새 분할을 시작 → 기존 활성 그룹은 파킹하고 새 그룹을 활성화(기존 그룹 보존).
+      setParkedGrids((prev) => parkActiveInto(prev))
+      activateGrid(newTree, newGridId(), null)
+    }
     setLayoutMode('split')
   }
 
@@ -784,8 +929,9 @@ export default function App() {
     const next = closeLeaf(splitTree, activeLeaf.id)
     if (!next || next.type === 'leaf') {
       // 칸이 하나만 남으면 트리를 비우고 탭 보기로 — 남겨두면 다음 분할 시작점이 이 오래된
-      // 단일 리프(다른 세션을 가리킬 수 있음)가 되어 버려서 엉뚱한 세션이 분할되는 문제 방지
-      setSplitTree(null)
+      // 단일 리프(다른 세션을 가리킬 수 있음)가 되어 버려서 엉뚱한 세션이 분할되는 문제 방지.
+      // (파킹된 그룹들은 그대로 칩으로 남는다 — 자동 활성화하지 않는다.)
+      clearActiveGrid()
       setLayoutMode('tabs')
       if (next) setActiveId(next.tabId)
       return
@@ -797,9 +943,15 @@ export default function App() {
   // 사이드바 더블클릭 → 스마트 대상 선택 후 연결
   //  - 활성 탭이 비어있으면 거기 / 다른 빈 탭이 있으면 그 탭 / 없으면 새 탭(여유 시) / 다 차면 활성 탭에서 전환
   const openProfile = (p: SavedProfile) => {
-    // 항상 새 탭으로 연결 — 세션 한도에 걸렸을 때만 예외적으로 비어있는 탭을 재사용.
     const st = (id: string) => statuses[id]?.status ?? 'idle'
     const free = (id: string) => st(id) !== 'connected' && st(id) !== 'connecting'
+    // 분할 보기에서 선택된 활성 칸이 그리드 안의 빈(미접속) 칸이면 새 탭 대신 그 칸에 연결
+    // (사이드바→칸 드래그 연결과 동일한 UX). 연결 중/연결됨 칸은 실수 방지를 위해 덮어쓰지 않고 새 탭으로.
+    if (isSplit && splitTree && findLeaf(splitTree, activeId) && free(activeId)) {
+      setPendingConnects((q) => [...q.filter((pc) => pc.id !== activeId), { id: activeId, p }])
+      return
+    }
+    // 그 외에는 항상 새 탭으로 연결 — 세션 한도에 걸렸을 때만 예외적으로 비어있는 탭을 재사용.
     const target = tabs.length < MAX_SESSIONS ? createTab() : (tabs.find((t) => free(t.id))?.id ?? activeId)
     selectTab(target)
     setPendingConnects((q) => [...q, { id: target, p }])
@@ -838,7 +990,9 @@ export default function App() {
       ...newIds.map((id, i) => ({ id, p: sel[i] })),
     ])
     if (newIds.length >= 2) {
-      setSplitTree(buildBalancedTree(newIds, nextPaneId))
+      // 기존 활성 그룹은 파킹하고, 새 클러스터로 새 그룹을 만들어 활성화(기존 그룹 보존).
+      setParkedGrids((prev) => parkActiveInto(prev))
+      activateGrid(buildBalancedTree(newIds, nextPaneId), newGridId(), null)
       setLayoutMode('split')
       // 동시입력은 기본 비활성 — 켜두면 그리드를 열자마자 여러 세션에 동시 입력되는 게 당황스러움.
       // 대상 목록만 미리 채워둬서, 나중에 수동으로 켜면 바로 이 세션들을 대상으로 쓸 수 있게 한다.
@@ -926,14 +1080,20 @@ export default function App() {
     setProfiles(await window.electronAPI.profilesReorder(list))
   }
 
-  // 사이드바 → 터미널 드롭: 그 터미널의 세션으로 즉시 연결
+  // 사이드바 → 터미널 드롭: 그 터미널의 세션으로 즉시 연결.
+  // 폼 ref 가 이 순간 마운트돼 있으면 바로 연결하고, 없으면(리렌더 타이밍 등으로 잠깐 null) 연결 큐에
+  // 넣어 폼이 뜨는 즉시 연결한다. 예전엔 `?.` 로 조용히 무시돼 "한 번 더 드래그해야 연결되는" 증상이 있었다.
   const dropConnect = (id: string) => {
-    const p = draggingProfile
+    // 상태보다 ref 를 우선 — 드롭 시점에 상태가 잠깐 비어도 프로필을 잃지 않는다.
+    const p = draggingProfileRef.current ?? draggingProfile
+    draggingProfileRef.current = null
     setDraggingProfile(null)
     setDragOverId(null)
     if (!p) return
     setActiveId(id)
-    sshFormRefs.current[id]?.connectProfile(p)
+    const h = sshFormRefs.current[id]
+    if (h) h.connectProfile(p)
+    else setPendingConnects((q) => [...q.filter((pc) => pc.id !== id), { id, p }])
   }
 
   const closeTab = (id: string) => {
@@ -950,7 +1110,8 @@ export default function App() {
       setTabs([{ id: nid, title: '세션 1' }])
       setStatuses({ [nid]: { status: 'idle', msg: '' } })
       setActiveId(nid)
-      setSplitTree(null)
+      clearActiveGrid()
+      setParkedGrids([])
       setLayoutMode('tabs')
       return
     }
@@ -961,13 +1122,19 @@ export default function App() {
       delete c[id]
       return c
     })
+    // 파킹된 그룹들에서도 닫힌 세션을 제거하고, 붕괴(리프/빈)한 그룹은 칩에서 없앤다.
+    setParkedGrids((prev) =>
+      prev
+        .map((g) => ({ ...g, tree: removeTabId(g.tree, id) }))
+        .filter((g): g is ParkedGrid => !!g.tree && g.tree.type === 'split'),
+    )
     // 닫는 탭이 분할 트리 안에 있었다면 그 칸을 제거(안 그러면 존재하지 않는 탭을 가리키는 빈 칸이 남음).
     // 활성 탭을 닫은 경우, 분할 트리에 남은 칸이 있으면 그쪽을 먼저 활성화(보고 있던 그리드 안에서 포커스 유지).
     let nextActive: string | null = null
     if (splitTree) {
       const next = removeTabId(splitTree, id)
       if (!next || next.type === 'leaf') {
-        setSplitTree(null)
+        clearActiveGrid()
         setLayoutMode('tabs')
         if (next) nextActive = next.tabId
       } else {
@@ -981,6 +1148,10 @@ export default function App() {
   // 모든 탭 한 번에 닫기 — 열려 있는 세션이 하나뿐이고 미접속(idle)이면 닫아봐야 잃을 게 없으니
   // 확인창 없이 바로 처리하고, 그 외(연결됨/연결시도 이력 있음/여러 개)에는 확인을 거친다.
   const [confirmCloseAll, setConfirmCloseAll] = useState(false)
+  // 그리드 셀 헤더의 닫기(X) — 확대/축소 버튼 바로 옆이라 실수 방지를 위해 확인창을 거친다.
+  const [confirmCloseCell, setConfirmCloseCell] = useState<string | null>(null)
+  // 그리드 그룹 칩의 닫기(X) — 어떤 그룹을 닫을지(groupId)를 기억한다. null 이면 확인창 닫힘.
+  const [confirmCloseGrid, setConfirmCloseGrid] = useState<string | null>(null)
   const closeAllTabs = () => {
     // 예약된 재연결 타이머를 모두 취소하고 수동 종료로 표시 (뒤늦은 유령 재연결 방지)
     const rc = reconnectRef.current
@@ -995,12 +1166,67 @@ export default function App() {
     setTabs([{ id: nid, title: '세션 1' }])
     setStatuses({ [nid]: { status: 'idle', msg: '' } })
     setActiveId(nid)
-    setSplitTree(null)
+    clearActiveGrid()
+    setParkedGrids([])
     setLayoutMode('tabs')
     setOpenConnectCellId(null)
     setBroadcast(false)
     setBroadcastTargets([])
     setPendingConnects([])
+  }
+
+  // 그리드 그룹 칩의 X — 지정한 그룹(활성/파킹)에 포함된 세션을 전부 닫는다(다른 그룹/단일 탭은 유지).
+  // 남는 탭이 없으면 새 세션 하나로. groupId 미지정/활성 id 면 활성 그룹을 닫는다.
+  const closeGridGroup = (groupId?: string) => {
+    const isActiveTarget = !groupId || groupId === activeGridId
+    const targetTree = isActiveTarget ? splitTree : (parkedGrids.find((g) => g.id === groupId)?.tree ?? null)
+    const ids = targetTree ? collectLeafTabIds(targetTree) : []
+    if (!ids.length) return
+    const rc = reconnectRef.current
+    ids.forEach((id) => {
+      manualClosingRef.current.add(id)
+      if (rc.timers[id]) {
+        clearTimeout(rc.timers[id])
+        delete rc.timers[id]
+      }
+      delete rc.attempts[id]
+      window.electronAPI.sessionClose(id)
+    })
+    const idSet = new Set(ids)
+    const remaining = tabs.filter((t) => !idSet.has(t.id))
+    if (isActiveTarget) {
+      clearActiveGrid()
+      setLayoutMode('tabs')
+    } else {
+      setParkedGrids((prev) => prev.filter((g) => g.id !== groupId))
+    }
+    setBroadcast(false)
+    setBroadcastTargets((bt) => bt.filter((id) => !idSet.has(id)))
+    setPendingConnects((q) => q.filter((pc) => !idSet.has(pc.id)))
+    setOpenConnectCellId((cur) => (cur && idSet.has(cur) ? null : cur))
+    if (remaining.length === 0) {
+      const nid = crypto.randomUUID()
+      setTabs([{ id: nid, title: '세션 1' }])
+      setStatuses({ [nid]: { status: 'idle', msg: '' } })
+      setActiveId(nid)
+    } else {
+      setTabs(remaining)
+      setStatuses((m) => {
+        const c = { ...m }
+        ids.forEach((id) => delete c[id])
+        return c
+      })
+      if (idSet.has(activeId)) setActiveId(remaining[remaining.length - 1].id)
+    }
+  }
+  // 그리드 그룹 이름 변경 — 활성 그룹이면 gridLabel, 파킹 그룹이면 해당 그룹의 name 을 갱신.
+  const renameGrid = (groupId: string, name: string) => {
+    const trimmed = name.trim()
+    if (groupId === activeGridId) {
+      setGridLabel(trimmed || null)
+    } else {
+      setParkedGrids((prev) => prev.map((g) => (g.id === groupId ? { ...g, name: trimmed || undefined } : g)))
+    }
   }
   const requestCloseAllTabs = () => {
     const trivial = tabs.length === 1 && (statuses[tabs[0].id]?.status ?? 'idle') === 'idle'
@@ -1071,25 +1297,6 @@ export default function App() {
     setShowAI(true)
     return aiPanelRef.current?.analyze(text) ?? false
   }
-  // 노드 간 출력 비교 — 연결된 세션들의 선택영역(없으면 최근 출력)을 모아 diff.
-  // 50줄은 sshd_config 같은 설정파일 cat 한 번에도 앞부분이 스크롤아웃돼 비교 대상에서
-  // 빠지기 쉬웠다 — AI 분석과 달리 토큰 비용이 없으니 넉넉하게 잡는다(터미널 scrollback 자체는 5000줄).
-  const compareNodes = () => {
-    const sources: DiffSource[] = tabs
-      .filter((t) => statuses[t.id]?.status === 'connected')
-      .map((t) => {
-        const ref = terminalRefs.current[t.id]
-        const sel = ref?.getSelection() ?? ''
-        const text = sel.trim() ? sel : (ref?.getRecentOutput(500) ?? '')
-        return {
-          id: t.id,
-          label: t.custom ? t.title : (statuses[t.id]?.host ?? t.title),
-          lines: text.replace(/\s+$/, '').split('\n'),
-        }
-      })
-    setDiffSources(sources)
-  }
-
   // 터미널 검색 (활성 세션 대상)
   const doFind = (dir: 'next' | 'prev') => {
     const t = activeTerm()
@@ -1175,8 +1382,12 @@ export default function App() {
           onOpenMulti={openCluster}
           onImport={() => setShowImportGuide(true)}
           onCollapse={() => setShowSidebar(false)}
-          onDragProfileStart={(p) => setDraggingProfile(p)}
+          onDragProfileStart={(p) => {
+            draggingProfileRef.current = p
+            setDraggingProfile(p)
+          }}
           onDragProfileEnd={() => {
+            draggingProfileRef.current = null
             setDraggingProfile(null)
             setDragOverId(null)
           }}
@@ -1258,6 +1469,11 @@ export default function App() {
             setDraggingTabId(null)
             setDragOverId(null)
           }}
+          gridGroups={gridGroups}
+          onRenameGrid={renameGrid}
+          onSelectGrid={selectGrid}
+          onDissolveGrid={dissolveGrid}
+          onCloseGrid={(gid) => setConfirmCloseGrid(gid)}
           layout={layout}
           onSetLayout={setLayout}
           onApplyPreset={applyPresetLayout}
@@ -1326,7 +1542,7 @@ export default function App() {
           logging={loggingSessions.has(activeId)}
           onToggleLog={toggleLog}
           onOpenSettings={() => setShowSettings(true)}
-          onCompareNodes={compareNodes}
+          onOpenStatusBoard={() => setShowStatusBoard(true)}
           onAnalyzeSelection={analyzeSelection}
         />
         {(panel === 'presets' || panel === 'scenarios') && (
@@ -1414,13 +1630,10 @@ export default function App() {
               cls = 'absolute z-40 overflow-hidden rounded-lg border border-white/20 shadow-2xl'
               posStyle = { left: '4%', top: '4%', width: '92%', height: '92%' }
             } else if (leaf) {
-              cls =
-                'absolute overflow-hidden ' +
-                (isTarget
-                  ? 'ring-1 ring-red-500/70'
-                  : t.id === activeId
-                    ? 'ring-1 ring-blue-400'
-                    : 'ring-1 ring-white/10')
+              // 테두리는 ring(box-shadow)으로 그리면 (a) 바깥쪽은 인접 셀에 가려 끊기고 (b) 안쪽은
+              // 자식 터미널 캔버스에 덮여 안 보인다. 그래서 아래에서 별도의 pointer-events-none 오버레이
+              // div 로 터미널 위에 테두리를 그린다. 여기서는 위치/클리핑만 담당.
+              cls = 'absolute overflow-hidden ' + (t.id === activeId ? 'z-20' : '')
               posStyle = {
                 left: `${leaf.left}%`,
                 top: `${leaf.top}%`,
@@ -1515,6 +1728,21 @@ export default function App() {
                       >
                         {zoomedHere ? <Minimize2 size={10} /> : <Maximize2 size={10} />}
                       </button>
+                      {/* 확대 상태에서는 닫기 버튼을 숨긴다(확대/축소 버튼 바로 옆이라 실수로 닫히는 것 방지).
+                          평소에도 닫기는 확인창을 한 번 거친다. */}
+                      {!zoomedHere && (
+                        <button
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setConfirmCloseCell(t.id)
+                          }}
+                          title="이 세션 닫기"
+                          className="flex items-center rounded p-0.5 text-gray-400 hover:bg-red-500/20 hover:text-red-300"
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1590,6 +1818,19 @@ export default function App() {
                     cursor: theme.cursor,
                   }}
                 />
+                {/* 선택/동시입력 테두리 — 터미널 캔버스 위에 그려야 보이므로 별도 오버레이(클릭 통과). */}
+                {isSplit && leaf && (
+                  <div
+                    className={
+                      'pointer-events-none absolute inset-0 z-20 rounded-[1px] ' +
+                      (isTarget
+                        ? 'border-2 border-red-500/80'
+                        : t.id === activeId
+                          ? 'border-2 border-blue-400'
+                          : 'border border-white/10')
+                    }
+                  />
+                )}
                 {/* 그리드 셀 인라인 SSH 연결 폼 — 이 칸에서만 열리고 닫히며, 다른 칸/상단 레이아웃에는 영향 없음 */}
                 {isSplit && leaf && openConnectCellId === t.id && (
                   <div
@@ -1818,9 +2059,17 @@ export default function App() {
       {showLogViewer && <LogViewer onClose={() => setShowLogViewer(false)} />}
       {showHlRules && <HighlightRulesModal onClose={() => setShowHlRules(false)} />}
 
-      {/* 노드 간 출력 비교 모달 */}
-      {diffSources && (
-        <NodeDiff sources={diffSources} onClose={() => setDiffSources(null)} onAnalyze={analyzeText} />
+      {/* 가용성 검증 상태보드 (역할 매핑 → 실시간 상태 폴링) */}
+      {showStatusBoard && (
+        <StatusBoard
+          sessions={tabs.map((t) => ({
+            // 프로필 label 기반 "별칭 (IP)" (그리드 셀 라벨과 동일 규칙)
+            id: t.id,
+            name: gridCellLabel(t),
+            connected: statuses[t.id]?.status === 'connected',
+          }))}
+          onClose={() => setShowStatusBoard(false)}
+        />
       )}
 
       {confirmCloseAll && (
@@ -1832,6 +2081,44 @@ export default function App() {
           onConfirm={() => {
             setConfirmCloseAll(false)
             closeAllTabs()
+          }}
+        />
+      )}
+
+      {confirmCloseGrid !== null && (
+        <ConfirmDialog
+          title="그리드 세션 닫기"
+          message={`그리드에 포함된 세션 ${
+            confirmCloseGrid === activeGridId
+              ? activeMembers.length
+              : (() => {
+                  const t = parkedGrids.find((g) => g.id === confirmCloseGrid)?.tree
+                  return t ? collectLeafTabIds(t).length : 0
+                })()
+          }개를 모두 닫을까요?\n연결된 세션은 연결 해제되며, 그 외 세션은 그대로 유지됩니다.`}
+          confirmLabel="모두 닫기"
+          onCancel={() => setConfirmCloseGrid(null)}
+          onConfirm={() => {
+            const gid = confirmCloseGrid
+            setConfirmCloseGrid(null)
+            closeGridGroup(gid ?? undefined)
+          }}
+        />
+      )}
+
+      {confirmCloseCell !== null && (
+        <ConfirmDialog
+          title="세션 닫기"
+          message={`"${gridCellLabel(tabs.find((t) => t.id === confirmCloseCell) ?? { id: confirmCloseCell, title: confirmCloseCell })}" 세션을 닫을까요?${
+            (statuses[confirmCloseCell]?.status ?? 'idle') === 'connected' ? '\n연결이 해제됩니다.' : ''
+          }`}
+          confirmLabel="닫기"
+          onCancel={() => setConfirmCloseCell(null)}
+          onConfirm={() => {
+            const id = confirmCloseCell
+            setConfirmCloseCell(null)
+            if (zoomedId === id) setZoomedId(null)
+            closeTab(id)
           }}
         />
       )}
@@ -2187,6 +2474,7 @@ export default function App() {
               onChange={(e) => changeIdleDelay(Number(e.target.value))}
               className="mt-1 w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
+              <option value={0}>끄기 (표시 안 함)</option>
               <option value={60_000}>1분</option>
               <option value={180_000}>3분</option>
               <option value={300_000}>5분</option>

@@ -123,6 +123,8 @@ export default function ScenarioRunner({
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  // 스텝별 "복사" 클릭 후 잠깐 체크 표시할 인덱스
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   // 시나리오 전체에서 쓰인 <...> 플레이스홀더 목록 + 사용자가 채운 값
   const allPlaceholders = useMemo(() => {
     const s: string[] = []
@@ -164,19 +166,22 @@ export default function ScenarioRunner({
     setRes(idx, { status: 'running', manual: undefined })
     // 블로킹/대기성 명령(curl 무응답, tail -f 등)이 session:run 을 영영 반환하지 않아
     // 스피너가 무한 회전하는 것을 막기 위해 타임아웃을 건다(서버측 실행은 계속될 수 있음).
+    // sessionRun 이 먼저 끝나면 남는 타임아웃 타이머를 정리한다(대량 실행 시 45초짜리 타이머가 쌓이지 않게)
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
     const r = await Promise.race([
       window.electronAPI.sessionRun(targetId, cmd),
-      new Promise<{ ok: false; error: string }>((resolve) =>
-        setTimeout(
+      new Promise<{ ok: false; error: string }>((resolve) => {
+        timeoutId = setTimeout(
           () =>
             resolve({
               ok: false,
               error: `응답 시간 초과(${RUN_TIMEOUT_MS / 1000}초) — 블로킹/대기성 명령이거나 대상이 응답하지 않아 자동 중단했습니다. 이 스텝은 터미널에서 직접 확인 후 수동 판정하세요.`,
             }),
           RUN_TIMEOUT_MS,
-        ),
-      ),
+        )
+      }),
     ])
+    if (timeoutId) clearTimeout(timeoutId)
     if (!r.ok) {
       setRes(idx, { status: 'error', err: r.error })
       setExpanded((s) => new Set(s).add(idx))
@@ -295,6 +300,26 @@ export default function ScenarioRunner({
       `다음은 인프라 검증 시나리오 실행 리포트입니다. 실패/이상 항목을 중심으로 원인과 조치를 정리해 주세요.\n\n${buildReport()}`,
     )
     setNotice(started ? '' : 'AI가 이미 다른 응답을 생성하는 중입니다. 잠시 후 다시 시도하세요.')
+  }
+
+  // 스텝 하나의 실행 결과(출력값)만 복사 — 명령/판정근거/출력을 포함, 내보내기와 동일하게 마스킹
+  const copyStep = async (idx: number) => {
+    const step = scenario.steps[idx]
+    const r = results[idx]
+    const body = (r?.out || '') + (r?.err ? `\n[stderr]\n${r.err}` : '')
+    const parts: string[] = []
+    if (step.command.trim()) parts.push('$ ' + fillPlaceholders(step.command, phValues))
+    if (r?.reasons?.length) parts.push(`# 판정 근거: ${r.reasons.join(', ')}`)
+    if (typeof r?.code === 'number') parts.push(`# 종료 코드: ${r.code}`)
+    if (r?.status === 'error') parts.push(`⚠ ${r.err}`)
+    else if (body.trim()) parts.push(body)
+    try {
+      await navigator.clipboard.writeText(maskForExport(parts.join('\n')))
+      setCopiedIdx(idx)
+      setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1200)
+    } catch {
+      setNotice('클립보드 복사에 실패했습니다.')
+    }
   }
 
   const anyRun = Object.keys(results).length > 0
@@ -509,9 +534,28 @@ export default function ScenarioRunner({
                           판정 근거: {r.reasons.join(', ')}
                         </div>
                       ) : null}
-                      <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all bg-[#1e1e2e] px-3 py-2 font-mono text-[11px] text-gray-200">
-                        {r?.status === 'error' ? `⚠ ${r.err}` : body.trim() || '(출력 없음)'}
-                      </pre>
+                      <div className="relative">
+                        {(body.trim() || r?.status === 'error') && (
+                          <button
+                            onClick={() => copyStep(idx)}
+                            title="이 단계 실행 결과 복사"
+                            className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded border border-white/10 bg-panel-light/90 px-1.5 py-0.5 text-[10px] text-gray-200 hover:bg-white/10"
+                          >
+                            {copiedIdx === idx ? (
+                              <>
+                                <Check size={11} className="text-emerald-300" /> 복사됨
+                              </>
+                            ) : (
+                              <>
+                                <ClipboardCopy size={11} /> 복사
+                              </>
+                            )}
+                          </button>
+                        )}
+                        <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all bg-[#1e1e2e] px-3 py-2 pr-16 font-mono text-[11px] text-gray-200">
+                          {r?.status === 'error' ? `⚠ ${r.err}` : body.trim() || '(출력 없음)'}
+                        </pre>
+                      </div>
                     </div>
                   )}
                 </li>

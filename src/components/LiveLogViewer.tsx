@@ -19,6 +19,8 @@ import {
   Save,
   Trash2,
   FileText,
+  ChevronsUp,
+  Download,
 } from 'lucide-react'
 import type { LogTailTarget } from '../../electron/shared-types'
 import RemotePathPicker from './RemotePathPicker'
@@ -65,6 +67,21 @@ const PRESETS_KEY = 'livelog_presets'
 const K8S_RECENT_KEY = 'livelog_k8s_recent'
 const MAX_RECENT = 8
 const MAX_LINES = 5000
+
+// ANSI 이스케이프 시퀀스(색상/커서 등) 제거 — masakari 등 원격 로그가 `\x1b[01;36m` 같은
+// 색코드를 포함해 raw 로 지저분하게 보이던 문제 해소. 제거 후 우리 키워드 색상/검색이 깨끗하게 동작.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g
+const stripAnsi = (s: string) => s.replace(ANSI_RE, '')
+
+/** 두 로그 대상이 같은지(경로/파드 기준) — '이전 로그 더 보기'는 같은 대상 재시작이므로 히스토리 줄 수를 유지 */
+function sameLogTarget(a: LogTailTarget | null, b: LogTailTarget): boolean {
+  if (!a || a.kind !== b.kind) return false
+  if (a.kind === 'file' && b.kind === 'file') return a.path === b.path
+  if (a.kind === 'k8s' && b.kind === 'k8s')
+    return a.namespace === b.namespace && a.pod === b.pod && a.container === b.container
+  return false
+}
 
 function loadRecent(): string[] {
   try {
@@ -260,6 +277,16 @@ function LogTailPane({
   const [tailLabel, setTailLabel] = useState('')
   const tailIdRef = useRef<string | null>(null)
   const currentTargetRef = useRef<LogTailTarget | null>(null) // 현재 tail 중인 대상 — 세션 전환 시 같은 대상 재사용
+  const sudoPwRef = useRef<string | undefined>(undefined) // 마지막 성공 sudo 비번 — '이전 로그 더 보기' 재시작 시 재사용
+  // 초기 로드 줄 수 — '이전 로그 더 보기'로 늘려 재시작(과도한 값 방지 상한 20000)
+  const HISTORY_TIERS = [200, 1000, 3000, 8000, 20000]
+  const [historyLines, setHistoryLines] = useState(200)
+  const historyLinesRef = useRef(200)
+  // '이전 로그 더 보기'로 재시작한 경우 true — 로드 완료 후 맨 아래(최신)로 튀지 않고
+  // 새로 불러온 과거 로그의 맨 위로 스크롤해서 사용자가 이전 로그를 바로 보게 한다.
+  const jumpTopAfterLoadRef = useRef(false)
+  // 폰트 크기(px) — 이 뷰어에서 일시적으로 확대/축소 (9~18px, 기본 11)
+  const [fontPx, setFontPx] = useState(11)
   const pendingRef = useRef('') // 줄바꿈으로 안 끝난 마지막 조각(다음 청크와 이어붙임)
   // tailId 가 확정되기 전(= logtailStart invoke 응답이 renderer 에 아직 안 온 시점)에 도착하는
   // 초기 데이터(tail -n 200 의 기존 로그 덤프 등)를 버려지지 않게 잠깐 담아두는 버퍼.
@@ -294,10 +321,12 @@ function LogTailPane({
   const ingest = useCallback((data: string) => {
     const combined = pendingRef.current + data
     const parts = combined.split('\n')
-    pendingRef.current = parts.pop() ?? ''
+    pendingRef.current = parts.pop() ?? '' // 미완성 마지막 조각은 원문 유지(ANSI가 청크 경계에 걸쳐도 안전)
     if (!parts.length) return
+    // 완성된 줄만 ANSI 제거 + 말미 CR 제거 (원격 로그의 색코드/CRLF 정리)
+    const clean = parts.map((l) => stripAnsi(l.replace(/\r$/, '')))
     if (pausedRef.current) {
-      pausedQueueRef.current.push(...parts)
+      pausedQueueRef.current.push(...clean)
       if (pausedQueueRef.current.length > MAX_LINES) {
         pausedQueueRef.current = pausedQueueRef.current.slice(pausedQueueRef.current.length - MAX_LINES)
       }
@@ -305,7 +334,7 @@ function LogTailPane({
       return
     }
     setLines((prev) => {
-      const next = [...prev, ...parts]
+      const next = [...prev, ...clean]
       return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next
     })
   }, [])
@@ -343,23 +372,53 @@ function LogTailPane({
     if (el) el.scrollTop = el.scrollHeight
   }, [lines, autoScroll])
 
-  // 언마운트 시 tail 정리
+  // '이전 로그 더 보기' 로드 완료 시 맨 위로 한 번만 이동 — 더 불러온 과거 로그를 바로 보이게.
+  useEffect(() => {
+    if (!jumpTopAfterLoadRef.current || lines.length === 0) return
+    const el = bodyRef.current
+    if (el) el.scrollTop = 0
+    jumpTopAfterLoadRef.current = false
+  }, [lines])
+
+  // 언마운트 시 tail + 자동완성 디바운스 타이머 정리
   useEffect(() => {
     return () => {
       if (tailIdRef.current) window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+      if (acTimerRef.current) clearTimeout(acTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const startTail = async (target: LogTailTarget, sudoPassword?: string, sessionOverride?: string) => {
+  const startTail = async (
+    target: LogTailTarget,
+    sudoPassword?: string,
+    sessionOverride?: string,
+    jumpTop = false, // true 면 '이전 로그 더 보기' — 로드 후 맨 위로 이동(자동스크롤 끔). 매 호출 명시적으로 세팅.
+  ) => {
     // sessionOverride — 세션 전환 시 setTargetSessionId 는 비동기라, 이번 호출에 쓸 세션을 직접 넘긴다.
     const sid = sessionOverride ?? targetSessionId
+    // 매 시작마다 플래그를 명시적으로 세팅 — 잔류(예: 이전 loadEarlier 가 0줄로 끝나 효과에서 못 지운 경우)로
+    // 다음 무관한 tail 이 맨 위 고정/자동스크롤 꺼짐 상태로 열리는 것을 방지.
+    jumpTopAfterLoadRef.current = jumpTop
+    // 새 tail 을 열기 전에 이전 tail 채널을 반드시 닫는다. 안 그러면 재시작('이전 로그 더 보기')마다
+    // 서버에 tail -f 채널이 누수돼 sshd MaxSessions 한도를 넘겨 "Channel open failure" 가 난다.
+    // (세션 전환/다른 경로 경로는 호출 전에 이미 stop 하고 tailIdRef 를 null 로 비워 중복 stop 되지 않는다.)
+    if (tailIdRef.current) {
+      window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+      tailIdRef.current = null
+    }
+    // 새 대상(다른 파일/파드)으로 열면 히스토리 줄 수를 기본값으로 리셋. 같은 대상 재시작('이전 로그 더 보기')은 유지.
+    if (!sameLogTarget(currentTargetRef.current, target)) {
+      historyLinesRef.current = 200
+      setHistoryLines(200)
+    }
     setStarting(true)
     setStartError('')
-    const r = await window.electronAPI.logtailStart(sid, target, sudoPassword)
+    const r = await window.electronAPI.logtailStart(sid, target, sudoPassword, historyLinesRef.current)
     setStarting(false)
     if (r.ok) {
       tailIdRef.current = r.tailId ?? null
+      sudoPwRef.current = sudoPassword // '이전 로그 더 보기' 재시작 시 sudo 재사용
       setTailLabel(target.kind === 'file' ? target.path : `${target.namespace}/${target.pod}${target.container ? ':' + target.container : ''}`)
       setLines([])
       pendingRef.current = ''
@@ -367,7 +426,8 @@ function LogTailPane({
       setPendingCount(0)
       setPaused(false)
       pausedRef.current = false
-      setAutoScroll(true)
+      // '이전 로그 더 보기' 재시작이면 자동스크롤을 꺼서 맨 아래로 튀지 않게 한다(위쪽 과거 로그를 보여줌).
+      setAutoScroll(!jumpTop)
       setClosedNotice('')
       setNeedSudo(false)
       setSudoPw('')
@@ -520,6 +580,53 @@ function LogTailPane({
     setAutoScroll(true)
     const el = bodyRef.current
     if (el) el.scrollTop = el.scrollHeight
+  }
+
+  // 이전 로그 더 보기 — 초기 로드 줄 수를 다음 단계로 늘려 같은 대상으로 재시작(더 많은 과거 로그 로드).
+  const atMaxHistory = historyLines >= HISTORY_TIERS[HISTORY_TIERS.length - 1]
+  const loadEarlier = () => {
+    const t = currentTargetRef.current
+    if (!t || atMaxHistory) return
+    const next = HISTORY_TIERS.find((n) => n > historyLinesRef.current) ?? HISTORY_TIERS[HISTORY_TIERS.length - 1]
+    historyLinesRef.current = next
+    setHistoryLines(next)
+    // jumpTop=true → 로드 완료 후 맨 위(가장 오래된 줄)로 이동. 같은 대상 → 히스토리 줄 수 유지.
+    startTail(t, sudoPwRef.current, undefined, true)
+  }
+
+  // 폰트 크기 조절(9~18px). 너무 커지지 않게 상한 제한.
+  const FONT_MIN = 9
+  const FONT_MAX = 18
+  const changeFont = (delta: number) =>
+    setFontPx((p) => Math.min(FONT_MAX, Math.max(FONT_MIN, p + delta)))
+
+  // 현재 화면의 로그를 .md/.txt 파일로 저장 (네이티브 저장 다이얼로그, report:save 재사용).
+  // 필터가 걸려 있으면 화면에 보이는(필터된) 줄만, 아니면 버퍼 전체를 저장한다.
+  const [downloadNote, setDownloadNote] = useState<string | null>(null)
+  const downloadLog = async () => {
+    const useFiltered = filterActive
+    // displayLines 는 [index, text] 튜플 배열이므로 텍스트만 뽑아야 한다(안 그러면 각 줄 앞에 "42,"처럼 인덱스가 붙음).
+    const body = useFiltered ? displayLines.map(([, l]) => l) : lines
+    if (!body.length) return
+    const d = new Date()
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`
+    const safe =
+      (tailLabel || 'live-log').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'live-log'
+    const header = [
+      `# 실시간 로그 — ${tailLabel || '(대상 미상)'}`,
+      '',
+      `- 저장 시각: ${d.toLocaleString()}`,
+      `- 줄 수: ${body.length}${useFiltered ? ` (필터 적용됨 · 전체 버퍼 ${lines.length}줄)` : ''}`,
+      '',
+      '```log',
+    ].join('\n')
+    const content = `${header}\n${body.join('\n')}\n\`\`\`\n`
+    const r = await window.electronAPI.saveReport({ defaultName: `livelog_${safe}_${stamp}.md`, content })
+    if (r.saved) {
+      setDownloadNote('저장됨')
+      setTimeout(() => setDownloadNote((n) => (n === '저장됨' ? null : n)), 2000)
+    }
   }
 
   const runAutocomplete = (value: string) => {
@@ -1074,6 +1181,15 @@ function LogTailPane({
             >
               다른 경로
             </button>
+            <button
+              onClick={loadEarlier}
+              disabled={atMaxHistory || starting}
+              title={atMaxHistory ? '최대치까지 불러왔습니다' : `초기 ${historyLines}줄 → 더 많은 과거 로그 로드`}
+              className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-[11px] text-gray-300 hover:bg-white/10 disabled:opacity-40"
+            >
+              <ChevronsUp size={12} />
+              {atMaxHistory ? `이전 로그 최대(${historyLines})` : '이전 로그 더 보기'}
+            </button>
             <div className="relative ml-2 flex-1">
               <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
               <input
@@ -1091,6 +1207,35 @@ function LogTailPane({
                 <ArrowDownToLine size={12} /> 최신으로
               </button>
             )}
+            {/* 폰트 크기 조절 (9~18px) */}
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                onClick={() => changeFont(-1)}
+                disabled={fontPx <= FONT_MIN}
+                title="글자 작게"
+                className="rounded px-1.5 py-1 text-[11px] text-gray-400 hover:bg-white/10 hover:text-gray-200 disabled:opacity-40"
+              >
+                A-
+              </button>
+              <span className="w-6 text-center text-[10px] text-gray-500">{fontPx}</span>
+              <button
+                onClick={() => changeFont(1)}
+                disabled={fontPx >= FONT_MAX}
+                title="글자 크게"
+                className="rounded px-1.5 py-1 text-[11px] text-gray-400 hover:bg-white/10 hover:text-gray-200 disabled:opacity-40"
+              >
+                A+
+              </button>
+            </div>
+            <button
+              onClick={downloadLog}
+              disabled={!lines.length}
+              title={filterActive ? '화면에 보이는(필터된) 로그를 .md 로 저장' : '현재 로그 버퍼를 .md 로 저장'}
+              className="flex shrink-0 items-center gap-1 rounded bg-panel-light px-2 py-1 text-[11px] text-gray-300 hover:bg-white/10 disabled:opacity-40"
+            >
+              <Download size={12} />
+              {downloadNote ?? '저장'}
+            </button>
             <span className="shrink-0 text-[10px] text-gray-500">
               {filterActive ? `${displayLines.length}/${lines.length}줄` : `${lines.length}줄`}
             </span>
@@ -1160,7 +1305,8 @@ function LogTailPane({
           <div
             ref={bodyRef}
             onScroll={onScrollBody}
-            className="min-h-0 flex-1 overflow-auto bg-[#1e1e2e] p-2.5 font-mono text-[11px] leading-relaxed"
+            style={{ fontSize: `${fontPx}px` }}
+            className="min-h-0 flex-1 overflow-auto bg-[#1e1e2e] p-2.5 font-mono leading-relaxed"
           >
             {lines.length === 0 ? (
               <p className="text-gray-500">데이터를 기다리는 중...</p>
