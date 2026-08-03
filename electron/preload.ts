@@ -192,6 +192,9 @@ const electronAPI = {
     ipcRenderer.invoke('profiles:upsert', profile, opts),
   profilesDelete: (key: string): Promise<SavedProfile[]> =>
     ipcRenderer.invoke('profiles:delete', key),
+  /** 여러 세션 한 번에 삭제 (폴더 전체 삭제 등) — 한 번의 쓰기로 처리 */
+  profilesDeleteMany: (keys: string[]): Promise<SavedProfile[]> =>
+    ipcRenderer.invoke('profiles:deleteMany', keys),
   profilesClear: (): Promise<SavedProfile[]> => ipcRenderer.invoke('profiles:clear'),
   profilesRenameGroup: (from: string, to: string): Promise<SavedProfile[]> =>
     ipcRenderer.invoke('profiles:renameGroup', { from, to }),

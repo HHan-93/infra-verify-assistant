@@ -13,7 +13,9 @@ import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile } from 'node:fs/promises'
+import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile, rename } from 'node:fs/promises'
+// 스트림 청크 경계에서 멀티바이트(한글) 문자가 잘려 �로 깨지는 것을 막는다
+import { StringDecoder } from 'node:string_decoder'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
@@ -77,6 +79,14 @@ interface Session {
   hadError?: boolean // 연결 중 오류(네트워크/keepalive) 발생 여부
   userClosed?: boolean // 사용자가 직접 끊었는지 (재접속 안 함)
   reconnecting?: boolean // 자동 재접속 루프 진행 중
+  /**
+   * 연결 세대 번호. ssh:connect(사용자가 이 칸에 새로 접속) 때마다 증가시킨다.
+   * 자동 재접속 루프는 시작 시점의 값을 들고 있다가 매 단계에서 비교해, 값이 달라졌으면
+   * (=사용자가 그 사이 다른 서버로 붙었으면) 즉시 중단한다. 없으면 백오프 대기가 끝난 루프가
+   * 사용자가 방금 연결한 세션을 끊고 '예전 호스트'로 갈아치운다 — 화면 표시와 실제 접속 서버가
+   * 어긋나는 가장 위험한 상황.
+   */
+  connectEpoch?: number
   /** 실시간 로그 뷰어(tail -f / kubectl logs -f) 채널들 — tailId 로 구분해 세션당 여러 개
    *  동시에 유지 가능(듀얼 패널에서 같은 세션의 다른 로그 두 개를 동시에 볼 수 있도록). */
   logTailStreams?: Map<string, ClientChannel>
@@ -215,18 +225,45 @@ let knownHosts: Record<string, string> | null = null // "host:port" → sha256 h
 const pendingHostKey: Record<string, string> = {} // 변경 감지 시 신뢰 대기 중인 새 키
 const hostKeyId = (host: string, port: number) => `${host}:${port}`
 
+// 파일은 있는데 못 읽은 상태. 이때 빈 맵을 저장해 버리면 지금까지 신뢰한 호스트 키가 전부
+// 사라지고(= 호스트 키 변경/중간자 경고가 조용히 꺼짐), 원본 파일까지 덮여 복구도 불가능하다.
+// 그래서 이 상태에서는 '읽기 실패'를 기억해 두고 저장을 아예 하지 않는다.
+let knownHostsLoadFailed = false
+
 async function loadKnownHosts(): Promise<Record<string, string>> {
   if (knownHosts) return knownHosts
+  let raw: string | null = null
   try {
-    const json = decryptStr(await readFile(knownHostsPath(), 'utf-8'))
-    knownHosts = json ? (JSON.parse(json) as Record<string, string>) : {}
+    raw = await readFile(knownHostsPath(), 'utf-8')
   } catch {
+    raw = null // 파일 없음 = 최초 실행 (정상)
+  }
+  if (raw === null) {
     knownHosts = {}
+    return knownHosts
+  }
+  try {
+    const json = decryptStr(raw)
+    if (!json) throw new Error('복호화 불가')
+    knownHosts = JSON.parse(json) as Record<string, string>
+  } catch (e) {
+    knownHostsLoadFailed = true
+    knownHosts = {}
+    console.warn(
+      '[ssh] known-hosts 를 읽지 못했습니다. 이번 실행에서는 호스트 키를 저장하지 않습니다(기존 파일 보존):',
+      e,
+    )
   }
   return knownHosts
 }
+
+/** 원자적 + 직렬화 저장. 동시에 여러 세션이 접속하면 예전엔 같은 파일에 병렬로 써서 깨졌다. */
 function saveKnownHosts() {
-  if (knownHosts) void writeFile(knownHostsPath(), encryptStr(JSON.stringify(knownHosts)), 'utf-8')
+  if (!knownHosts || knownHostsLoadFailed) return // 읽기 실패 상태면 기존 파일을 덮지 않는다
+  const snapshot = JSON.stringify(knownHosts)
+  void withStoreLock('knownHosts', () => writeFileAtomic(knownHostsPath(), encryptStr(snapshot))).catch((e) =>
+    console.warn('[ssh] known-hosts 저장 실패:', e),
+  )
 }
 
 /** SSH 에이전트 소켓/파이프 경로 해석 (없으면 undefined) */
@@ -337,13 +374,19 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
             })
             // 이 연결(conn)이 이미 새 연결로 교체됐으면(끊기는 중인 옛 스트림) 잔여 출력을 버린다 —
             // 안 그러면 죽는 스트림의 마지막 프롬프트가 새 로컬 셸 화면에 덧그려진다.
+            // 청크는 SSH 패킷 경계(~32KB)에서 잘리므로, 한글 등 멀티바이트 문자가 경계에 걸치면
+            // chunk 단위 toString 은 양쪽 다 �로 깨뜨린다. 그 깨진 문자열이 세션 로그·리플레이
+            // 기록에도 그대로 저장돼 영구 손상이 된다. StringDecoder 가 잘린 바이트를 물고 있다가
+            // 다음 청크와 이어붙여 준다.
+            const outDec = new StringDecoder('utf8')
+            const errDec = new StringDecoder('utf8')
             stream.on('data', (data: Buffer) => {
               if (s.client !== conn) return
-              pushOutput(s, data.toString('utf-8'))
+              pushOutput(s, outDec.write(data))
             })
             stream.stderr.on('data', (data: Buffer) => {
               if (s.client !== conn) return
-              pushOutput(s, data.toString('utf-8'))
+              pushOutput(s, errDec.write(data))
             })
             stream.on('close', () => {
               // 채널 종료 → 연결 종료 유도 (나머지 정리/재접속 판단은 client 'close' 가 담당).
@@ -502,14 +545,18 @@ async function attemptReconnect(sessionId: string) {
     remoteHost: f.remoteHost,
     remotePort: f.remotePort,
   }))
+  // 이 루프가 담당하는 '세대'. 도중에 사용자가 새로 연결하면 값이 바뀌어 루프를 접는다.
+  const epoch = s.connectEpoch ?? 0
+  const superseded = () => (s.connectEpoch ?? 0) !== epoch
   for (let i = 1; i <= RECONNECT_MAX; i++) {
-    if (s.userClosed) break
+    if (s.userClosed || superseded()) break
     sendStatus(sessionId, {
       status: 'connecting',
       message: `연결이 끊겼습니다 — 자동 재접속 ${i}/${RECONNECT_MAX}...`,
     })
     await delay(Math.min(1500 * i, 6000))
-    if (s.userClosed) break
+    // 대기 중에 사용자가 이 칸에 다른 서버를 붙였을 수 있다 → 그 연결을 건드리지 않고 종료
+    if (s.userClosed || superseded()) break
     const r = await connectSession(sessionId, cfg)
     if (r.success) {
       s.reconnecting = false
@@ -525,7 +572,9 @@ async function attemptReconnect(sessionId: string) {
     }
   }
   s.reconnecting = false
-  if (!s.userClosed) {
+  // superseded 면 사용자가 이미 새 연결을 만든 상태다. 여기서 error 를 쏘거나 로컬 셸로 되돌리면
+  // 멀쩡히 연결된 세션을 망가뜨린다.
+  if (!s.userClosed && !superseded()) {
     sendStatus(sessionId, { status: 'error', message: '자동 재접속 실패. 수동으로 다시 연결하세요.' })
     const s2 = getSession(sessionId)
     cleanupConnection(s2)
@@ -540,8 +589,19 @@ ipcMain.handle(
     const s = getSession(sessionId)
     s.userClosed = false // 새 연결 시도 → 사용자 종료 플래그 해제
     s.reconnecting = false
+    // 세대 증가 → 진행 중인 자동 재접속 루프는 다음 체크에서 스스로 물러난다
+    s.connectEpoch = (s.connectEpoch ?? 0) + 1
     await loadKnownHosts()
-    return connectSession(sessionId, config)
+    try {
+      return await connectSession(sessionId, config)
+    } catch (e) {
+      // ssh2 는 개인키 파싱/passphrase 오류 때 connect() 에서 동기 throw 한다. 여기서 안 잡으면
+      // 렌더러는 아무 응답도 못 받아 "연결 중..." 에서 영구히 멈추고, 기존 연결 교체 경로에서는
+      // 메인 프로세스 uncaught exception 이 된다.
+      const message = e instanceof Error ? e.message : String(e)
+      sendStatus(sessionId, { status: 'error', message })
+      return { success: false, message }
+    }
   },
 )
 
@@ -573,23 +633,25 @@ ipcMain.handle('ssh:trustHost', async () => {
 const logIndexPath = () => path.join(app.getPath('userData'), 'session-logs-index.json')
 const logCastDir = () => path.join(app.getPath('userData'), 'session-logs')
 
+// 인덱스를 잃으면 녹화 파일(.cast.jsonl)이 목록에서 사라져 사실상 못 찾게 되므로
+// 락 + 원자적 쓰기 + 엄격한 읽기를 적용한다. LOG_LOCK 을 잡은 채 다시 잡으면 교착되므로,
+// 락 안에서 부를 용도의 *Unlocked 함수를 따로 둔다.
+const LOG_LOCK = 'logIndex'
 async function readLogIndex(): Promise<LogIndexEntry[]> {
-  try {
-    const arr = JSON.parse(await readFile(logIndexPath(), 'utf-8'))
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
-  }
+  return readJsonArrayStore<LogIndexEntry>(logIndexPath())
 }
 async function writeLogIndex(list: LogIndexEntry[]): Promise<void> {
-  await writeFile(logIndexPath(), JSON.stringify(list, null, 2), 'utf-8')
+  await writeFileAtomic(logIndexPath(), JSON.stringify(list, null, 2))
 }
-async function upsertLogIndex(entry: LogIndexEntry): Promise<void> {
+async function upsertLogIndexUnlocked(entry: LogIndexEntry): Promise<void> {
   const list = await readLogIndex()
   const idx = list.findIndex((e) => e.id === entry.id)
   if (idx >= 0) list[idx] = entry
   else list.unshift(entry)
   await writeLogIndex(list)
+}
+async function upsertLogIndex(entry: LogIndexEntry): Promise<void> {
+  return withStoreLock(LOG_LOCK, () => upsertLogIndexUnlocked(entry))
 }
 
 // 세션 로그(.cast.jsonl)는 세션마다 하나씩 계속 쌓이므로, 보관기간과 개수 상한을 둘 다 넘는
@@ -600,24 +662,44 @@ const DEFAULT_LOG_RETENTION_DAYS = 30
 const DEFAULT_LOG_MAX_ENTRIES = 50
 const logRetentionSettingsPath = () => path.join(app.getPath('userData'), 'log-retention-settings.json')
 
+const DEFAULT_LOG_RETENTION: LogRetentionSettings = {
+  retentionDays: DEFAULT_LOG_RETENTION_DAYS,
+  maxEntries: DEFAULT_LOG_MAX_ENTRIES,
+}
+
+/**
+ * 보관 설정 읽기 — 정리(삭제) 판단에 쓰이므로 절대 조용히 기본값으로 되돌리면 안 된다.
+ * 사용자가 "500개/365일 보관"으로 늘려놨는데 파일이 손상돼 기본값(50개/30일)으로 읽히면,
+ * 자동 정리가 남겨야 할 녹화 파일을 영구 삭제해 버린다. 그래서 파일이 있는데 이상하면 throw.
+ */
 async function readLogRetentionSettings(): Promise<LogRetentionSettings> {
+  let raw: string
   try {
-    const raw = JSON.parse(await readFile(logRetentionSettingsPath(), 'utf-8'))
-    const retentionDays = Number(raw.retentionDays)
-    const maxEntries = Number(raw.maxEntries)
-    return {
-      retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : DEFAULT_LOG_RETENTION_DAYS,
-      maxEntries: Number.isFinite(maxEntries) && maxEntries > 0 ? maxEntries : DEFAULT_LOG_MAX_ENTRIES,
-    }
+    raw = await readFile(logRetentionSettingsPath(), 'utf-8')
   } catch {
-    return { retentionDays: DEFAULT_LOG_RETENTION_DAYS, maxEntries: DEFAULT_LOG_MAX_ENTRIES }
+    return { ...DEFAULT_LOG_RETENTION } // 아직 설정한 적 없음 (정상)
+  }
+  const parsed = JSON.parse(raw)
+  const retentionDays = Number(parsed?.retentionDays)
+  const maxEntries = Number(parsed?.maxEntries)
+  if (!(Number.isFinite(retentionDays) && retentionDays > 0 && Number.isFinite(maxEntries) && maxEntries > 0)) {
+    throw new Error('log-retention-settings.json: 보관 설정 값이 올바르지 않습니다 (파일 손상 가능성)')
+  }
+  return { retentionDays, maxEntries }
+}
+/** 화면 표시 전용 — 못 읽으면 기본값을 보여준다(여기서는 아무것도 삭제하지 않으므로 안전). */
+async function readLogRetentionSettingsForDisplay(): Promise<LogRetentionSettings> {
+  try {
+    return await readLogRetentionSettings()
+  } catch {
+    return { ...DEFAULT_LOG_RETENTION }
   }
 }
 async function writeLogRetentionSettings(settings: LogRetentionSettings): Promise<void> {
-  await writeFile(logRetentionSettingsPath(), JSON.stringify(settings, null, 2), 'utf-8')
+  await writeFileAtomic(logRetentionSettingsPath(), JSON.stringify(settings, null, 2))
 }
 
-ipcMain.handle('logs:getRetentionSettings', () => readLogRetentionSettings())
+ipcMain.handle('logs:getRetentionSettings', () => readLogRetentionSettingsForDisplay())
 ipcMain.handle('logs:setRetentionSettings', async (_evt, settings: LogRetentionSettings) => {
   const clamped: LogRetentionSettings = {
     retentionDays: Math.max(1, Math.round(settings.retentionDays)),
@@ -628,9 +710,19 @@ ipcMain.handle('logs:setRetentionSettings', async (_evt, settings: LogRetentionS
   return clamped
 })
 
-async function trimSessionLogs(): Promise<void> {
-  const { retentionDays, maxEntries } = await readLogRetentionSettings()
-  const list = await readLogIndex()
+/** 실제 정리 본체 — 반드시 LOG_LOCK 을 잡은 상태에서 호출할 것 */
+async function trimSessionLogsUnlocked(): Promise<void> {
+  let retentionDays: number
+  let maxEntries: number
+  let list: LogIndexEntry[]
+  try {
+    ;({ retentionDays, maxEntries } = await readLogRetentionSettings())
+    list = await readLogIndex()
+  } catch (e) {
+    // 설정/인덱스를 못 읽는 상태에서 정리를 강행하면 남겨야 할 녹화를 지운다. 이번 회차는 건너뛴다.
+    console.warn('[logs] 보관 정리 건너뜀 (설정/인덱스 읽기 실패):', e)
+    return
+  }
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
   const active = list.filter((e) => !e.endedAt)
   const finished = [...list.filter((e) => e.endedAt)].sort((a, b) => b.startedAt - a.startedAt)
@@ -644,6 +736,9 @@ async function trimSessionLogs(): Promise<void> {
   await Promise.all(dropped.map((e) => unlink(e.castPath).catch(() => {})))
   await writeLogIndex([...active, ...kept])
 }
+async function trimSessionLogs(): Promise<void> {
+  return withStoreLock(LOG_LOCK, trimSessionLogsUnlocked)
+}
 
 /** 스트림 종료 + 인덱스에 종료시각/파일크기 반영 (best-effort, 실패해도 세션 종료를 막지 않음) */
 async function finalizeLogSession(s: Session): Promise<void> {
@@ -651,22 +746,26 @@ async function finalizeLogSession(s: Session): Promise<void> {
   s.logCastStream?.end()
   s.logCastStream = undefined
   if (!id) return
-  try {
-    const list = await readLogIndex()
-    const entry = list.find((e) => e.id === id)
-    if (entry) {
-      entry.endedAt = Date.now()
-      try {
-        entry.sizeBytes = (await stat(entry.castPath)).size
-      } catch {
-        /* 무시 */
+  // "탭 전체 닫기"는 세션마다 이 함수를 동시에 부른다. 락 없이 read→수정→write 하면 서로의
+  // 종료시각 기록을 덮어써 endedAt 없는 유령 항목이 남고, 그 항목은 이후 영영 정리되지 않는다.
+  await withStoreLock(LOG_LOCK, async () => {
+    try {
+      const list = await readLogIndex()
+      const entry = list.find((e) => e.id === id)
+      if (entry) {
+        entry.endedAt = Date.now()
+        try {
+          entry.sizeBytes = (await stat(entry.castPath)).size
+        } catch {
+          /* 무시 */
+        }
+        await writeLogIndex(list)
       }
-      await writeLogIndex(list)
+    } catch {
+      /* 무시 — 세션 종료 자체를 막지 않는다 */
     }
-  } catch {
-    /* 무시 */
-  }
-  void trimSessionLogs()
+    await trimSessionLogsUnlocked() // 이미 락 안이므로 Unlocked 판을 부른다(재진입 교착 방지)
+  })
   s.logId = undefined
   s.logStartedAt = undefined
 }
@@ -684,13 +783,24 @@ ipcMain.handle(
     })
     if (r.canceled || !r.filePath) return { ok: false, canceled: true }
     try {
+      // WriteStream 의 'error' 는 비동기로 발생하므로 try/catch 로 못 잡는다. 리스너가 없으면
+      // 디스크 가득참·USB 분리 같은 상황에서 uncaughtException 으로 앱 전체가 즉사하고,
+      // 그 순간 열려 있던 모든 SSH 세션이 함께 날아간다. 기록만 조용히 중단하도록 처리한다.
+      const onStreamError = (what: string) => (e: unknown) => {
+        console.warn(`[logs] ${what} 기록 중단:`, e)
+        s.logStream = undefined
+        s.logCastStream = undefined
+        sendStatus(sessionId, { status: 'error', message: `세션 로그 기록이 중단되었습니다 (${what})` })
+      }
       s.logStream = createWriteStream(r.filePath, { flags: 'a' })
+      s.logStream.on('error', onStreamError('평문 로그'))
       s.logStream.write(`\n===== 로그 시작 ${new Date().toISOString()} =====\n`)
 
       const id = randomUUID()
       await mkdir(logCastDir(), { recursive: true })
       const castPath = path.join(logCastDir(), `${id}.cast.jsonl`)
       s.logCastStream = createWriteStream(castPath, { flags: 'a' })
+      s.logCastStream.on('error', onStreamError('리플레이 기록'))
       s.logId = id
       s.logStartedAt = Date.now()
       await upsertLogIndex({
@@ -795,19 +905,23 @@ ipcMain.handle('logs:readCast', async (_evt, id: string) => {
 })
 
 // 세션 로그 삭제 (인덱스 + 리플레이 기록 파일. 사용자가 고른 평문 로그 원본은 남겨둠)
-ipcMain.handle('logs:delete', async (_evt, id: string) => {
-  const list = await readLogIndex()
-  const entry = list.find((e) => e.id === id)
-  if (entry) {
-    try {
-      await unlink(entry.castPath)
-    } catch {
-      /* 무시 */
+ipcMain.handle('logs:delete', async (_evt, id: string) =>
+  withStoreLock(LOG_LOCK, async () => {
+    // readLogIndex 가 실패하면 여기서 throw 되어 삭제가 중단된다 — 예전엔 [] 로 뭉개진 뒤
+    // 그 빈 목록이 저장돼 로그 하나 지우려다 인덱스 전체가 날아갔다.
+    const list = await readLogIndex()
+    const entry = list.find((e) => e.id === id)
+    if (entry) {
+      try {
+        await unlink(entry.castPath)
+      } catch {
+        /* 무시 */
+      }
     }
-  }
-  await writeLogIndex(list.filter((e) => e.id !== id))
-  return { ok: true }
-})
+    await writeLogIndex(list.filter((e) => e.id !== id))
+    return { ok: true }
+  }),
+)
 
 // 개인키 파일 선택 → 내용 반환 (폼/모달에서 붙여넣기 대체)
 ipcMain.handle('ssh:pickKeyFile', async () => {
@@ -873,6 +987,9 @@ ipcMain.on('session:close', (_evt, sessionId: string) => {
   cleanupConnection(s)
   killLocalShell(s)
   sessions.delete(sessionId)
+  // 모니터 상태도 함께 버린다 — 안 지우면 탭이 사라진 뒤에도 항목이 남아 메모리에 쌓이고,
+  // 같은 세션 id 로 다시 붙었을 때 이전 배포 플래그를 재사용해 에이전트 재배포를 건너뛴다.
+  monitors.delete(sessionId)
 })
 
 // ─────────────────────────────────────────────────────────────
@@ -1086,18 +1203,80 @@ function decryptStr(raw: string): string | null {
   return null
 }
 
+// ── 파일 저장소 공통 유틸 ────────────────────────────────────────
+// 아래 세 가지가 함께 없으면 저장 파일이 통째로 날아간다. 실제로 그렇게 저장된 세션 25개 중
+// 21개를 잃었다. 새 저장소를 추가할 때도 이 세 가지를 반드시 같이 쓸 것.
+//   1) withStoreLock  — read→수정→write 가 겹치지 않도록 파일별로 직렬화
+//   2) writeFileAtomic — 임시파일+rename. '반쯤 쓰인 파일'을 남이 읽는 상황 자체를 없앰
+//   3) readJson*Store — '파일 없음'과 '파일은 있는데 못 읽음'을 구분. 후자를 기본값으로
+//      뭉개면 호출자가 그 기본값을 그대로 저장해 기존 데이터를 전부 덮어쓴다.
+
+/** 경로(또는 논리 키)별 직렬화 락 — 같은 저장소를 건드리는 작업을 한 줄로 세운다. */
+const storeChains = new Map<string, Promise<unknown>>()
+function withStoreLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = storeChains.get(key) ?? Promise.resolve()
+  // 앞선 작업이 실패해도 체인이 끊기지 않도록 성공/실패 모두 이어서 실행한다.
+  const run = prev.then(fn, fn)
+  storeChains.set(
+    key,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  )
+  return run
+}
+
+/** 임시 파일에 쓰고 rename 으로 교체 — 쓰는 도중에 읽어도 이전 내용이 온전히 보인다. */
+async function writeFileAtomic(dest: string, data: string): Promise<void> {
+  const tmp = `${dest}.tmp`
+  await writeFile(tmp, data, 'utf-8')
+  await rename(tmp, dest)
+}
+
+/**
+ * JSON 배열 저장소 읽기.
+ *  - 파일이 아직 없으면 [] (정상 초기 상태)
+ *  - 파일은 있는데 파싱이 안 되면 throw — 절대 [] 로 뭉개지 않는다.
+ *    (뭉개면 호출자가 [] 에 한 건 추가한 목록을 저장해 나머지를 전부 삭제해 버린다)
+ */
+async function readJsonArrayStore<T>(filePath: string): Promise<T[]> {
+  let raw: string
+  try {
+    raw = await readFile(filePath, 'utf-8')
+  } catch {
+    return [] // 아직 파일 없음
+  }
+  const arr = JSON.parse(raw)
+  if (!Array.isArray(arr)) throw new Error(`${path.basename(filePath)}: 배열이 아닙니다 (파일 손상 가능성)`)
+  return arr as T[]
+}
+
+/** 프로필 저장소 락 (기존 호출부 유지용 얇은 래퍼) */
+function withProfilesLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withStoreLock('profiles', fn)
+}
+
 async function readProfiles(): Promise<SavedProfile[]> {
   // 새 목록 파일 우선
+  let raw: string | null = null
   try {
-    const json = decryptStr(await readFile(profilesPath(), 'utf-8'))
+    raw = await readFile(profilesPath(), 'utf-8')
+  } catch {
+    raw = null // 파일 자체가 없음 → 아래 구버전 마이그레이션 경로로
+  }
+  if (raw !== null) {
+    const json = decryptStr(raw)
     if (json) {
       const arr = JSON.parse(json)
       if (Array.isArray(arr)) return arr as SavedProfile[]
     }
-  } catch {
-    /* 파일 없음 */
+    // 파일은 있는데 복호화/파싱이 안 되는 상태. 여기서 빈 목록이나 구버전 1건으로 '성공' 처리하면,
+    // 호출자가 그 짧은 목록을 그대로 다시 write 해서 저장된 세션이 전부 날아간다.
+    // 조용히 뭉개지 말고 실패시켜, 최소한 기존 파일을 덮어쓰지는 않도록 한다.
+    throw new Error('저장된 세션 목록을 읽을 수 없습니다 (파일 손상 가능성)')
   }
-  // 구버전 단일 프로필 → 목록으로 마이그레이션
+  // 구버전 단일 프로필 → 목록으로 마이그레이션 (새 목록 파일이 아예 없을 때만)
   try {
     const json = decryptStr(await readFile(legacyProfilePath(), 'utf-8'))
     if (json) return [JSON.parse(json) as SavedProfile]
@@ -1108,12 +1287,36 @@ async function readProfiles(): Promise<SavedProfile[]> {
 }
 
 async function writeProfiles(list: SavedProfile[]): Promise<void> {
-  await writeFile(profilesPath(), encryptStr(JSON.stringify(list)), 'utf-8')
+  await writeFileAtomic(profilesPath(), encryptStr(JSON.stringify(list)))
 }
 
 // ── 프로필 가져오기(CSV/JSON) ────────────────────────────────────
 //  - 업로드된 파일은 메모리에서만 파싱하며 어디에도 복사/로그하지 않는다.
 //  - 결과로 반환되는 오류/경고 메시지에는 값이 아닌 필드명/행 번호만 담는다.
+
+/**
+ * 업로드된 CSV/JSON 텍스트 디코딩 — 인코딩 자동 판별.
+ * 한국어 Windows 의 Excel 은 "CSV(쉼표로 분리)"로 저장하면 UTF-8 이 아니라 CP949(=euc-kr 확장)로 쓴다.
+ * 이걸 UTF-8 로 읽으면 한글 별칭/폴더명이 전부 깨진 문자로 들어온다. BOM 을 먼저 보고, 없으면
+ * UTF-8 로 엄격 디코딩을 시도한 뒤 실패할 때만 CP949 로 재해석한다(영문만 있는 파일은 그대로 UTF-8).
+ */
+function decodeTextFile(buf: Buffer): string {
+  if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.subarray(3).toString('utf-8') // UTF-8 BOM — 내보내기/템플릿이 붙이는 형태
+  }
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2))
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2))
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    // UTF-8 로 성립하지 않는 바이트열 → CP949 로 간주 (TextDecoder 의 'euc-kr' 라벨이 CP949 디코더)
+    try {
+      return new TextDecoder('euc-kr').decode(buf)
+    } catch {
+      return buf.toString('utf-8')
+    }
+  }
+}
 
 /** RFC4180 스타일 CSV 파서. 따옴표로 감싼 필드 내 콤마·줄바꿈·이스케이프된 큰따옴표("")를 지원 */
 function parseCSV(text: string): string[][] {
@@ -1149,7 +1352,15 @@ function parseCSV(text: string): string[][] {
       continue
     }
     if (c === '"') {
-      inQuotes = true
+      // 따옴표는 '필드 맨 앞'에서만 인용 시작으로 본다. 필드 중간의 따옴표(예: 손으로 적은
+      // 비밀번호 my"pass)를 인용 시작으로 해석하면, 닫는 따옴표가 없어 이후의 쉼표·줄바꿈을
+      // 전부 삼켜 그 아래 행이 통째로 사라진다(오류도 안 나고 조용히 누락).
+      if (field === '') {
+        inQuotes = true
+        i++
+        continue
+      }
+      field += c
       i++
       continue
     }
@@ -1174,12 +1385,18 @@ function parseCSV(text: string): string[][] {
   return rows.filter((r) => !(r.length === 1 && r[0] === ''))
 }
 
+// 비밀·본문 성격의 값은 앞뒤 공백까지 그대로 살려야 한다. 비밀번호 끝의 공백 한 칸을 임의로
+// 지우면 가져온 뒤 인증만 계속 실패하고 원인을 찾기 어렵고, 개인키는 끝 줄바꿈이 잘린다.
+const CSV_VERBATIM_KEYS = new Set(['password', 'passphrase', 'privatekey', 'startup'])
+
 /** CSV 헤더 + 한 행을 소문자 컬럼명 → 값 레코드로 변환 (컬럼 순서 무관) */
 function csvRecordFromRow(header: string[], row: string[]): Record<string, string> {
   const rec: Record<string, string> = {}
   header.forEach((h, idx) => {
     const key = h.trim().toLowerCase()
-    if (key) rec[key] = (row[idx] ?? '').trim()
+    if (!key) return
+    const raw = row[idx] ?? ''
+    rec[key] = CSV_VERBATIM_KEYS.has(key) ? raw : raw.trim()
   })
   return rec
 }
@@ -1241,6 +1458,15 @@ async function csvRowToProfile(
       }
     }
   }
+  // 점프호스트는 JSON 문자열 컬럼으로 왕복한다. 깨져 있으면 그 항목만 점프 없이 가져오고 경고.
+  let jump: unknown
+  if (rec['jump']) {
+    try {
+      jump = JSON.parse(rec['jump'])
+    } catch {
+      warning = `${rowLabel}: 점프호스트 정보를 읽을 수 없습니다 — 점프호스트 없이 가져왔습니다.`
+    }
+  }
   const { profile, error } = normalizeImportedProfile(
     {
       host: rec['host'],
@@ -1254,6 +1480,7 @@ async function csvRowToProfile(
       group: rec['group'],
       startup: rec['startup'],
       color: rec['color'],
+      ...(jump && typeof jump === 'object' ? { jump } : {}),
     },
     rowLabel,
   )
@@ -1316,7 +1543,14 @@ const sftpReaddir = (sftp: SFTPWrapper, p: string) =>
 
 // 재귀 삭제 (디렉토리/파일)
 async function rmrf(sftp: SFTPWrapper, p: string, isDir: boolean) {
-  if (!isDir) {
+  // 심링크는 '가리키는 대상'이 아니라 링크 자체만 지운다.
+  // 호출자가 준 isDir 은 stat 기반(=링크를 따라간 결과)이라, 디렉토리 심링크를 지우려 하면
+  // 원본 폴더로 들어가 내용물을 전부 삭제해 버린다. 그리고 마지막 rmdir 만 실패해서 화면엔
+  // "삭제 실패" 만 뜨므로 사용자는 데이터가 날아간 걸 알지도 못한다 → lstat 으로 직접 확인.
+  const isLink = await new Promise<boolean>((res) =>
+    sftp.lstat(p, (e, st) => res(!e && typeof st?.isSymbolicLink === 'function' && st.isSymbolicLink())),
+  )
+  if (isLink || !isDir) {
     await new Promise<void>((res, rej) => sftp.unlink(p, (e) => (e ? rej(e) : res())))
     return
   }
@@ -1865,70 +2099,92 @@ ipcMain.handle('profiles:list', async () => readProfiles())
 // 저장은 preserveMeta:false 로 호출해, 사용자가 필드를 일부러 비웠을 때 그대로 반영한다.
 ipcMain.handle(
   'profiles:upsert',
-  async (_evt, profile: SavedProfile, opts?: { preserveMeta?: boolean }) => {
-    const preserveMeta = opts?.preserveMeta ?? true
-    const all = await readProfiles()
-    const idx = all.findIndex((p) => profileKey(p) === profileKey(profile))
-    const existing = idx >= 0 ? all[idx] : undefined
-    const merged: SavedProfile = preserveMeta
-      ? {
-          ...profile,
-          label: profile.label ?? existing?.label,
-          group: profile.group ?? existing?.group,
-          jump: profile.jump ?? existing?.jump,
-          startup: profile.startup ?? existing?.startup,
-          color: profile.color ?? existing?.color,
-        }
-      : { ...profile }
-    // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
-    const list = [...all]
-    if (idx >= 0) list[idx] = merged
-    else list.unshift(merged) // 신규 프로필만 맨 앞에 추가
-    await writeProfiles(list)
-    return list
-  },
+  async (_evt, profile: SavedProfile, opts?: { preserveMeta?: boolean }) =>
+    withProfilesLock(async () => {
+      const preserveMeta = opts?.preserveMeta ?? true
+      const all = await readProfiles()
+      const idx = all.findIndex((p) => profileKey(p) === profileKey(profile))
+      const existing = idx >= 0 ? all[idx] : undefined
+      const merged: SavedProfile = preserveMeta
+        ? {
+            ...profile,
+            label: profile.label ?? existing?.label,
+            group: profile.group ?? existing?.group,
+            jump: profile.jump ?? existing?.jump,
+            startup: profile.startup ?? existing?.startup,
+            color: profile.color ?? existing?.color,
+          }
+        : { ...profile }
+      // 기존 프로필은 사이드바에서 드래그로 정한 순서를 그대로 유지한 채 갱신 (자동 저장 때문에 순서가 흐트러지지 않도록)
+      const list = [...all]
+      if (idx >= 0) list[idx] = merged
+      else list.unshift(merged) // 신규 프로필만 맨 앞에 추가
+      await writeProfiles(list)
+      return list
+    }),
 )
 
 // 특정 프로필 삭제 (key = host:port:username)
-ipcMain.handle('profiles:delete', async (_evt, key: string) => {
-  const list = (await readProfiles()).filter((p) => profileKey(p) !== key)
-  await writeProfiles(list)
-  return list
-})
+ipcMain.handle('profiles:delete', async (_evt, key: string) =>
+  withProfilesLock(async () => {
+    const list = (await readProfiles()).filter((p) => profileKey(p) !== key)
+    await writeProfiles(list)
+    return list
+  }),
+)
+
+// 여러 프로필 일괄 삭제 (폴더 전체 삭제 등) — 한 번의 읽기/쓰기로 처리해 부분 삭제 상태가 남지 않게 한다.
+ipcMain.handle('profiles:deleteMany', async (_evt, keys: string[]) =>
+  withProfilesLock(async () => {
+    const all = await readProfiles()
+    if (!Array.isArray(keys) || !keys.length) return all
+    const drop = new Set(keys)
+    const list = all.filter((p) => !drop.has(profileKey(p)))
+    if (list.length !== all.length) await writeProfiles(list)
+    return list
+  }),
+)
 
 // 전체 프로필 순서/그룹 일괄 반영 (사이드바 드래그 재정렬용)
-ipcMain.handle('profiles:reorder', async (_evt, list: SavedProfile[]) => {
-  if (Array.isArray(list)) await writeProfiles(list)
-  return readProfiles()
-})
+ipcMain.handle('profiles:reorder', async (_evt, list: SavedProfile[]) =>
+  withProfilesLock(async () => {
+    if (Array.isArray(list)) await writeProfiles(list)
+    return readProfiles()
+  }),
+)
 
 // 폴더(그룹) 이름 일괄 변경 — 순서 보존, 빈 이름이면 그룹 해제
 ipcMain.handle(
   'profiles:renameGroup',
-  async (_evt, { from, to }: { from: string; to: string }) => {
-    const target = to.trim() || undefined
-    const list = (await readProfiles()).map((p) =>
-      (p.group?.trim() ?? '') === from ? { ...p, group: target } : p,
-    )
-    await writeProfiles(list)
-    return list
-  },
+  async (_evt, { from, to }: { from: string; to: string }) =>
+    withProfilesLock(async () => {
+      const target = to.trim() || undefined
+      const list = (await readProfiles()).map((p) =>
+        (p.group?.trim() ?? '') === from ? { ...p, group: target } : p,
+      )
+      await writeProfiles(list)
+      return list
+    }),
 )
 
 // 전체 기록 삭제
-ipcMain.handle('profiles:clear', async () => {
-  try {
-    await unlink(profilesPath())
-  } catch {
-    /* 없음 */
-  }
-  try {
-    await unlink(legacyProfilePath())
-  } catch {
-    /* 없음 */
-  }
-  return []
-})
+ipcMain.handle('profiles:clear', async () =>
+  // 락 밖에서 지우면, 이미 읽기를 끝낸 자동저장(upsert)이 그 뒤에 rename 으로 목록을 되살려
+  // "전체 삭제"가 조용히 무효가 된다.
+  withProfilesLock(async () => {
+    try {
+      await unlink(profilesPath())
+    } catch {
+      /* 없음 */
+    }
+    try {
+      await unlink(legacyProfilePath())
+    } catch {
+      /* 없음 */
+    }
+    return []
+  }),
+)
 
 // ─────────────────────────────────────────────────────────────
 // 사용자 정의 프리셋 / 시나리오
@@ -1940,75 +2196,74 @@ ipcMain.handle('profiles:clear', async () => {
 const customPresetsPath = () => path.join(app.getPath('userData'), 'custom-presets.json')
 const customScenariosPath = () => path.join(app.getPath('userData'), 'custom-scenarios.json')
 
+// 사용자가 직접 만든 항목이라 잃으면 복구 수단이 없다 → 락 + 원자적 쓰기 + 엄격한 읽기 필수.
 async function readCustomPresets(): Promise<CustomPresetCommand[]> {
-  try {
-    const arr = JSON.parse(await readFile(customPresetsPath(), 'utf-8'))
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
-  }
+  return readJsonArrayStore<CustomPresetCommand>(customPresetsPath())
 }
 async function writeCustomPresets(list: CustomPresetCommand[]): Promise<void> {
-  await writeFile(customPresetsPath(), JSON.stringify(list, null, 2), 'utf-8')
+  await writeFileAtomic(customPresetsPath(), JSON.stringify(list, null, 2))
 }
 async function readCustomScenarios(): Promise<CustomScenario[]> {
-  try {
-    const arr = JSON.parse(await readFile(customScenariosPath(), 'utf-8'))
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
-  }
+  return readJsonArrayStore<CustomScenario>(customScenariosPath())
 }
 async function writeCustomScenarios(list: CustomScenario[]): Promise<void> {
-  await writeFile(customScenariosPath(), JSON.stringify(list, null, 2), 'utf-8')
+  await writeFileAtomic(customScenariosPath(), JSON.stringify(list, null, 2))
 }
 
 ipcMain.handle('customPresets:list', async () => readCustomPresets())
-ipcMain.handle('customPresets:upsert', async (_evt, item: CustomPresetCommand) => {
-  const list = await readCustomPresets()
-  const isNew = !item.id || !list.some((p) => p.id === item.id)
-  // 신규 항목은 생성 시각을 기본 순서로 사용 — 내장 명령어는 배열 인덱스(작은 정수)를 암묵적
-  // 순서로 쓰므로, 훨씬 큰 타임스탬프 값이면 자연히 맨 뒤로 붙는다. 위치 이동은 order 값을
-  // 직접 지정해서 다시 upsert 하는 방식으로 처리(별도 재정렬 API 불필요).
-  const existingOrder = isNew ? undefined : list.find((p) => p.id === item.id)?.order
-  const withId: CustomPresetCommand = {
-    ...item,
-    id: item.id || randomUUID(),
-    order: item.order ?? (isNew ? Date.now() : existingOrder),
-  }
-  const idx = list.findIndex((p) => p.id === withId.id)
-  if (idx >= 0) list[idx] = withId
-  else list.push(withId)
-  await writeCustomPresets(list)
-  return list
-})
-ipcMain.handle('customPresets:delete', async (_evt, id: string) => {
-  const list = (await readCustomPresets()).filter((p) => p.id !== id)
-  await writeCustomPresets(list)
-  return list
-})
+ipcMain.handle('customPresets:upsert', async (_evt, item: CustomPresetCommand) =>
+  withStoreLock('customPresets', async () => {
+    const list = await readCustomPresets()
+    const isNew = !item.id || !list.some((p) => p.id === item.id)
+    // 신규 항목은 생성 시각을 기본 순서로 사용 — 내장 명령어는 배열 인덱스(작은 정수)를 암묵적
+    // 순서로 쓰므로, 훨씬 큰 타임스탬프 값이면 자연히 맨 뒤로 붙는다. 위치 이동은 order 값을
+    // 직접 지정해서 다시 upsert 하는 방식으로 처리(별도 재정렬 API 불필요).
+    const existingOrder = isNew ? undefined : list.find((p) => p.id === item.id)?.order
+    const withId: CustomPresetCommand = {
+      ...item,
+      id: item.id || randomUUID(),
+      order: item.order ?? (isNew ? Date.now() : existingOrder),
+    }
+    const idx = list.findIndex((p) => p.id === withId.id)
+    if (idx >= 0) list[idx] = withId
+    else list.push(withId)
+    await writeCustomPresets(list)
+    return list
+  }),
+)
+ipcMain.handle('customPresets:delete', async (_evt, id: string) =>
+  withStoreLock('customPresets', async () => {
+    const list = (await readCustomPresets()).filter((p) => p.id !== id)
+    await writeCustomPresets(list)
+    return list
+  }),
+)
 
 ipcMain.handle('customScenarios:list', async () => readCustomScenarios())
-ipcMain.handle('customScenarios:upsert', async (_evt, item: CustomScenario) => {
-  const list = await readCustomScenarios()
-  const isNew = !item.id || !list.some((s) => s.id === item.id)
-  const existingOrder = isNew ? undefined : list.find((s) => s.id === item.id)?.order
-  const withId: CustomScenario = {
-    ...item,
-    id: item.id || randomUUID(),
-    order: item.order ?? (isNew ? Date.now() : existingOrder),
-  }
-  const idx = list.findIndex((s) => s.id === withId.id)
-  if (idx >= 0) list[idx] = withId
-  else list.push(withId)
-  await writeCustomScenarios(list)
-  return list
-})
-ipcMain.handle('customScenarios:delete', async (_evt, id: string) => {
-  const list = (await readCustomScenarios()).filter((s) => s.id !== id)
-  await writeCustomScenarios(list)
-  return list
-})
+ipcMain.handle('customScenarios:upsert', async (_evt, item: CustomScenario) =>
+  withStoreLock('customScenarios', async () => {
+    const list = await readCustomScenarios()
+    const isNew = !item.id || !list.some((s) => s.id === item.id)
+    const existingOrder = isNew ? undefined : list.find((s) => s.id === item.id)?.order
+    const withId: CustomScenario = {
+      ...item,
+      id: item.id || randomUUID(),
+      order: item.order ?? (isNew ? Date.now() : existingOrder),
+    }
+    const idx = list.findIndex((s) => s.id === withId.id)
+    if (idx >= 0) list[idx] = withId
+    else list.push(withId)
+    await writeCustomScenarios(list)
+    return list
+  }),
+)
+ipcMain.handle('customScenarios:delete', async (_evt, id: string) =>
+  withStoreLock('customScenarios', async () => {
+    const list = (await readCustomScenarios()).filter((s) => s.id !== id)
+    await writeCustomScenarios(list)
+    return list
+  }),
+)
 
 // CSV/JSON 파일에서 세션 프로필 일괄 가져오기 — 사이드바 목록에 추가만 하며 자동 연결은 하지 않는다.
 // 기존 프로필과 host:port:username 이 겹치거나 같은 파일 내에서 중복되면 건너뛴다.
@@ -2023,7 +2278,7 @@ ipcMain.handle('profiles:import', async (): Promise<ProfileImportResult> => {
 
   let text: string
   try {
-    text = await readFile(filePath, 'utf-8')
+    text = decodeTextFile(await readFile(filePath))
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
@@ -2065,22 +2320,25 @@ ipcMain.handle('profiles:import', async (): Promise<ProfileImportResult> => {
     }
   }
 
-  const existing = await readProfiles()
-  const seen = new Set(existing.map(profileKey))
-  const added: SavedProfile[] = []
-  let skippedCount = 0
-  for (const profile of candidates) {
-    const key = profileKey(profile)
-    if (seen.has(key)) {
-      skippedCount++
-      continue
+  // 읽기~쓰기를 한 덩어리로 잠가, 동시에 들어온 자동저장이 가져온 항목을 덮어쓰지 않게 한다.
+  const { added, skippedCount, list } = await withProfilesLock(async () => {
+    const existing = await readProfiles()
+    const seen = new Set(existing.map(profileKey))
+    const added: SavedProfile[] = []
+    let skippedCount = 0
+    for (const profile of candidates) {
+      const key = profileKey(profile)
+      if (seen.has(key)) {
+        skippedCount++
+        continue
+      }
+      seen.add(key)
+      added.push(profile)
     }
-    seen.add(key)
-    added.push(profile)
-  }
-
-  const list = added.length ? [...existing, ...added] : existing
-  if (added.length) await writeProfiles(list)
+    const list = added.length ? [...existing, ...added] : existing
+    if (added.length) await writeProfiles(list)
+    return { added, skippedCount, list }
+  })
 
   return {
     ok: true,
@@ -2180,7 +2438,9 @@ ipcMain.handle('profiles:export', async (_evt, format: 'csv' | 'json') => {
   try {
     const list = await readProfiles()
     if (isCsv) {
-      const header = ['host', 'port', 'username', 'authMethod', 'password', 'privateKey', 'passphrase', 'label', 'group', 'startup', 'color']
+      // jump(점프호스트)는 객체라 컬럼 하나에 JSON 으로 담는다. 예전엔 아예 빠져 있어서
+      // CSV 로 내보냈다 되가져오면 점프호스트가 조용히 사라진 채 연결이 실패했다.
+      const header = ['host', 'port', 'username', 'authMethod', 'password', 'privateKey', 'passphrase', 'label', 'group', 'startup', 'color', 'jump']
       // 각 컬럼에 어떤 값을 넣는지 보여주는 안내 행 — host 가 '#' 로 시작하면 가져오기 시 건너뛴다.
       const guideRow = [
         '#예시',
@@ -2194,13 +2454,23 @@ ipcMain.handle('profiles:export', async (_evt, format: 'csv' | 'json') => {
         '묶어볼 그룹명(선택)',
         '접속 후 자동 실행할 명령어(선택)',
         '태그 색상 hex 예: #22c55e(선택)',
+        '점프호스트 JSON(선택) 예: {"host":"10.0.0.1","port":"22","username":"root","password":"..."}',
       ].map(csvEscape)
       const rows = list.map((p) =>
-        header.map((h) => csvEscape(String((p as unknown as Record<string, unknown>)[h] ?? ''))).join(','),
+        header
+          .map((h) => {
+            const v = (p as unknown as Record<string, unknown>)[h]
+            if (v == null) return csvEscape('')
+            // 객체(jump)는 JSON 문자열로 직렬화 — String(obj) 는 "[object Object]" 가 되어 값이 사라진다
+            return csvEscape(typeof v === 'object' ? JSON.stringify(v) : String(v))
+          })
+          .join(','),
       )
       await writeFile(r.filePath, BOM + [header.join(','), guideRow.join(','), ...rows].join('\n') + '\n', 'utf-8')
     } else {
-      await writeFile(r.filePath, BOM + JSON.stringify([JSON_GUIDE_ENTRY, ...list], null, 2), 'utf-8')
+      // JSON 에는 BOM 을 붙이지 않는다 — 앞에 U+FEFF 가 있으면 jq/python json.load 등
+      // 표준 파서가 전부 실패한다(BOM 은 엑셀 대응이 필요한 CSV 에만 의미가 있다).
+      await writeFile(r.filePath, JSON.stringify([JSON_GUIDE_ENTRY, ...list], null, 2), 'utf-8')
     }
     return { saved: true, path: r.filePath, count: list.length }
   } catch (e) {
@@ -2228,10 +2498,19 @@ function execCapture(
       if (err) return reject(err)
       let out = ''
       let errOut = ''
-      stream.on('data', (d: Buffer) => (out += d.toString('utf-8')))
-      stream.stderr.on('data', (d: Buffer) => (errOut += d.toString('utf-8')))
-      stream.on('close', (code: number | null) =>
-        resolve({ code: code ?? 0, out, err: errOut }),
+      // 멀티바이트 문자가 청크 경계에 걸려 깨지지 않도록 StringDecoder 사용 (아래 다른 스트림들도 동일)
+      const oDec = new StringDecoder('utf8')
+      const eDec = new StringDecoder('utf8')
+      stream.on('data', (d: Buffer) => (out += oDec.write(d)))
+      stream.stderr.on('data', (d: Buffer) => (errOut += eDec.write(d)))
+      // 시그널로 죽거나 채널이 강제로 끊기면 ssh2 는 code=null 을 준다. 이걸 0(성공)으로
+      // 뭉개면 OOM·연결끊김으로 중단된 명령이 검증 리포트에 '정상'으로 기록된다 → 실패로 본다.
+      stream.on('close', (code: number | null, signal?: string) =>
+        resolve({
+          code: code ?? (signal ? 128 : 255),
+          out,
+          err: errOut + (code == null ? `\n[프로세스가 비정상 종료되었습니다${signal ? ` (signal ${signal})` : ''}]` : ''),
+        }),
       )
       stream.end(stdin ?? '')
     })
@@ -2272,9 +2551,10 @@ function execSudoPty(
         return reject(err)
       }
       let data = ''
-      stream.on('data', (chunk: Buffer) => (data += chunk.toString('utf-8')))
+      const dec = new StringDecoder('utf8')
+      stream.on('data', (chunk: Buffer) => (data += dec.write(chunk)))
       stream.on('close', (code: number | null) => {
-        resolve({ code: code ?? 0, data })
+        resolve({ code: code ?? 0, data: data + dec.end() })
       })
       // sudo 프롬프트가 준비될 약간의 여유를 준 뒤 비밀번호 주입
       setTimeout(() => {
@@ -2522,15 +2802,20 @@ ipcMain.handle(
         const forward = (data: string) => {
           mainWindow?.webContents.send('logtail:data', { sessionId, tailId, data })
         }
+        // 로그는 길고 한글이 섞이기 쉬워 청크 경계 깨짐이 특히 잘 보인다 → StringDecoder 필수
+        const tailOutDec = new StringDecoder('utf8')
+        const tailErrDec = new StringDecoder('utf8')
         stream.on('data', (d: Buffer) => {
-          const text = d.toString('utf-8')
+          const text = tailOutDec.write(d)
+          if (!text) return
           if (!settled) earlyText += text
           else forward(text)
         })
         if (!usePty) {
           // PTY 모드는 stdout/stderr 가 한 스트림으로 합쳐지므로 별도 처리 불필요
           stream.stderr.on('data', (d: Buffer) => {
-            const text = d.toString('utf-8')
+            const text = tailErrDec.write(d)
+            if (!text) return
             if (!settled) earlyText += text
             else forward(text)
           })
@@ -2725,13 +3010,33 @@ ipcMain.handle(
       lastErr = `임시파일 업로드 실패: ${up.error}`
     }
 
+    // 3) 실패 롤백 — 위의 쓰기 경로(SFTP 직접쓰기 / tee / cat >) 는 모두 '열면서 잘라내기'라,
+    //    중간에 끊기면 원본이 0바이트나 반쪽짜리로 남는다. /etc 설정 파일에서는 치명적이므로
+    //    백업이 있으면 되돌린다. (백업이 없으면 cp 가 그냥 실패하고 끝 — 부작용 없음)
+    let restored = false
+    if (bk.ok || up.ok) {
+      const rb = await execEscalatedNoStdin(
+        s,
+        (pfx) => `${pfx}cp -a -- ${shQuote(backupPath)} ${q}`,
+        sudoPw,
+      )
+      restored = rb.ok
+    }
+
     const noSudo = lastErr.includes('sudo 권한이 없습니다')
+    const rollbackNote = restored
+      ? ' 원본은 백업본으로 되돌렸습니다.'
+      : bk.ok || up.ok
+        ? ` 원본 복구에 실패했습니다 — 백업본을 직접 확인하세요: ${backupPath}`
+        : ''
     return {
       ok: false,
       needSudoPassword: !noSudo,
-      error: noSudo
-        ? lastErr
-        : `저장 실패(권한). ${lastErr || 'sudo 비밀번호를 입력해 다시 시도하세요.'}`,
+      restored,
+      backupPath: bk.ok || up.ok ? backupPath : undefined,
+      error:
+        (noSudo ? lastErr : `저장 실패(권한). ${lastErr || 'sudo 비밀번호를 입력해 다시 시도하세요.'}`) +
+        rollbackNote,
     }
   },
 )
@@ -3056,12 +3361,29 @@ app.on('window-all-closed', async () => {
         .map((s) => stopDaemon(s.client!).catch(() => {})),
     )
   }
+  // 기록 중인 세션 로그를 제대로 마무리한다. 이걸 안 하면 인덱스에 endedAt 이 없는 '기록중'
+  // 유령 항목이 남아 자동 보관 정리에서 영구 제외되고(계속 쌓임), 평문 로그 끝부분도 유실된다.
+  await Promise.all(
+    [...sessions.values()].map(async (s) => {
+      try {
+        s.logStream?.end()
+      } catch {
+        /* 무시 */
+      }
+      s.logStream = undefined
+      await finalizeLogSession(s).catch(() => {})
+    }),
+  )
   // 모든 세션의 SSH 연결/로컬 셸 정리
   for (const s of sessions.values()) {
     cleanupConnection(s)
     killLocalShell(s)
+    // 재접속 루프가 창 종료 후에도 살아 getSession 으로 세션을 되살리는 것을 막는다
+    s.userClosed = true
+    s.reconnecting = false
   }
   sessions.clear()
+  monitors.clear()
   if (process.platform !== 'darwin') app.quit()
 })
 

@@ -72,9 +72,20 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     if (!cmd.trim() || !ids.length) return
     setBusy(true)
     setResults(Object.fromEntries(ids.map((id) => [id, { status: 'running' as const }])))
+    // 타임아웃이 없으면 `tail -f`·`top` 같은 블로킹 명령에서 스피너가 영원히 돌고
+    // busy 가 true 로 고착돼 모달을 닫는 것 외에는 복구할 방법이 없다(시나리오 러너와 동일 정책).
+    const RUN_TIMEOUT_MS = 45000
     await Promise.all(
       ids.map(async (id) => {
-        const r = await window.electronAPI.sessionRun(id, cmd)
+        const r = await Promise.race([
+          window.electronAPI.sessionRun(id, cmd),
+          new Promise<{ ok: false; error: string }>((res) =>
+            setTimeout(
+              () => res({ ok: false, error: `${RUN_TIMEOUT_MS / 1000}초 내 응답이 없어 중단했습니다 (계속 실행되는 명령일 수 있습니다)` }),
+              RUN_TIMEOUT_MS,
+            ),
+          ),
+        ])
         setResults((prev) => ({
           ...prev,
           [id]: r.ok

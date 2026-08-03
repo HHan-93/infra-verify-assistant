@@ -45,6 +45,13 @@ interface ChatItem {
   content: string
   /** 'command' 면 명령어 생성 모드의 응답 — 일반 markdown 대신 명령어 카드로 렌더링 */
   mode?: 'command'
+  /**
+   * 이 응답을 만들 때의 대상 세션. 대화는 localStorage 에 남아 앱을 껐다 켜도 복원되므로,
+   * 이 정보가 없으면 "지난주 A서버를 보고 만든 실행 버튼"이 오늘의 활성 세션(=다른 서버)에
+   * 그대로 나간다. 실행 시 지금 대상과 다르면 막기 위해 함께 저장한다.
+   */
+  sessionId?: string
+  sessionLabel?: string
 }
 
 /** "명령어 생성" 모드 응답을 COMMAND:/설명: 고정 형식에서 파싱 (스트리밍 도중에도 부분 매치 허용) */
@@ -130,9 +137,19 @@ interface AIPanelProps {
   onClose?: () => void
   /** 명령어 생성 모드 카드의 "입력"/"실행" 버튼 — 활성 세션(또는 브로드캐스트 대상)에 전달 */
   onRunCommand?: (cmd: string, execute: boolean) => void
+  /** 현재 명령이 나갈 대상 세션 (카드에 표시 + 생성 시점과 달라졌는지 판정) */
+  activeSessionId?: string
+  activeSessionLabel?: string
+  /** 동시입력 ON 여부 — 켜져 있으면 명령이 카드가 겨냥한 세션이 아닌 '대상 집합'으로 나간다 */
+  broadcasting?: boolean
+  /** 활성 세션이 실제로 SSH 연결돼 있는지 — 아니면 로컬 PC 셸로 명령이 나간다 */
+  activeConnected?: boolean
 }
 
-const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand }, ref) => {
+const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
+  { onClose, onRunCommand, activeSessionId, activeSessionLabel, broadcasting, activeConnected },
+  ref,
+) {
   const [messages, setMessages] = useState<ChatItem[]>(loadStoredMessages)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -160,6 +177,11 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
   const messagesRef = useRef<ChatItem[]>([])
   const configRef = useRef({ provider, configs, analysisStyle })
   const scrollRef = useRef<HTMLDivElement>(null)
+  // analyze() 는 ref 로 외부에서 호출되기도 해서, 최신 대상 세션을 ref 로도 들고 있는다.
+  const activeSessionIdRef = useRef(activeSessionId)
+  const activeSessionLabelRef = useRef(activeSessionLabel)
+  activeSessionIdRef.current = activeSessionId
+  activeSessionLabelRef.current = activeSessionLabel
 
   useEffect(() => {
     messagesRef.current = messages
@@ -256,7 +278,18 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
     const assistantId = crypto.randomUUID()
     activeReqRef.current = requestId
     activeAssistantRef.current = assistantId
-    setMessages([...history, { id: assistantId, role: 'assistant', content: '', mode: assistantMode }])
+    setMessages([
+      ...history,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        mode: assistantMode,
+        // 어느 세션을 보고 만든 답인지 새겨 둔다 (실행 시 대상 검증용)
+        sessionId: activeSessionIdRef.current,
+        sessionLabel: activeSessionLabelRef.current,
+      },
+    ])
     setStreaming(true)
     window.electronAPI.aiSend({
       requestId,
@@ -432,15 +465,25 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
     const forProvider = provider
     setModelLoading(true)
     setModelMsg('')
-    const res = await window.electronAPI.aiListModels(provider, cur.key || undefined)
-    if (forProvider !== configRef.current.provider) return
-    setModelLoading(false)
-    if (res.ok && res.models) {
-      setFetchedModels((prev) => ({ ...prev, [provider]: res.models }))
-      setShowCustomModel(false)
-      setModelMsg(`${res.models.length}개 모델 확인됨`)
-    } else {
-      setModelMsg(`불러오기 실패: ${res.error}`)
+    try {
+      const res = await window.electronAPI.aiListModels(provider, cur.key || undefined)
+      // 늦게 온 응답이 지금 보이는 다른 provider 화면을 오염시키지 않게 결과 반영만 건너뛴다.
+      if (forProvider !== configRef.current.provider) return
+      if (res.ok && res.models) {
+        setFetchedModels((prev) => ({ ...prev, [provider]: res.models }))
+        setShowCustomModel(false)
+        setModelMsg(`${res.models.length}개 모델 확인됨`)
+      } else {
+        setModelMsg(`불러오기 실패: ${res.error}`)
+      }
+    } catch (e) {
+      if (forProvider === configRef.current.provider) {
+        setModelMsg(`불러오기 실패: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    } finally {
+      // 예전엔 provider 가 바뀌면 여기까지 오지 못해 modelLoading 이 true 로 고착됐고,
+      // 그 뒤 모든 provider 에서 「불러오기」 버튼이 영구히 비활성 상태가 됐다.
+      setModelLoading(false)
     }
   }
 
@@ -691,6 +734,23 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
                     return <span className="text-gray-500">{streaming ? '명령어 생성 중…' : m.content}</span>
                   }
                   const stillStreaming = streaming && activeAssistantRef.current === m.id
+                  // 이 카드를 만들 때의 대상과 지금 명령이 나갈 대상이 다르면 실행을 막는다.
+                  // (대화는 재시작 후에도 복원되므로, 예전 서버 기준으로 만든 명령이 지금
+                  //  열려 있는 다른 서버에 그대로 나가는 사고를 방지)
+                  // 실행을 허용하는 조건 세 가지가 모두 맞아야 한다.
+                  //  ① 카드를 만든 세션 = 지금 활성 세션 (다른 서버로 나가는 것 방지)
+                  //  ② 동시입력 OFF — 켜져 있으면 명령이 '대상 집합'으로 나가서, 카드에 적힌
+                  //     대상과 실제 대상이 달라진다(활성 세션이 대상에서 빠져 있을 수도 있다)
+                  //  ③ 그 세션이 SSH 연결됨 — 끊긴 칸은 로컬 셸이라 내 PC 에서 실행돼 버린다
+                  const sameTarget = !!m.sessionId && m.sessionId === activeSessionId
+                  const blockReason = !sameTarget
+                    ? 'target'
+                    : broadcasting
+                      ? 'broadcast'
+                      : !activeConnected
+                        ? 'offline'
+                        : null
+                  const blockRun = !onRunCommand || !!blockReason
                   return (
                     <div className="space-y-2">
                       <code className="block break-all rounded-md bg-black/40 px-2.5 py-1.5 font-mono text-[12px] text-pink-200">
@@ -698,24 +758,63 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(({ onClose, onRunCommand
                       </code>
                       {card.explain && <p className="text-[12px] text-gray-400">{card.explain}</p>}
                       {!stillStreaming && (
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => onRunCommand?.(card.command, false)}
-                            disabled={!onRunCommand}
-                            title="터미널에 입력만(실행 안 함) — 확인 후 직접 Enter"
-                            className="flex items-center gap-1 rounded bg-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
-                          >
-                            <CornerDownLeft size={12} /> 입력
-                          </button>
-                          <button
-                            onClick={() => onRunCommand?.(card.command, true)}
-                            disabled={!onRunCommand}
-                            title="터미널에서 바로 실행"
-                            className="flex items-center gap-1 rounded bg-blue-600/80 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
-                          >
-                            <Play size={11} /> 실행
-                          </button>
-                        </div>
+                        <>
+                          {!blockReason ? (
+                            <p className="text-[11px] text-gray-500">
+                              실행 대상: <span className="text-gray-300">{activeSessionLabel || '활성 세션'}</span>
+                            </p>
+                          ) : (
+                            <p className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-relaxed text-amber-200">
+                              {blockReason === 'target' && (
+                                <>
+                                  이 명령은 <span className="font-semibold">{m.sessionLabel || '다른 세션'}</span> 기준으로
+                                  만들어졌는데, 지금 대상은{' '}
+                                  <span className="font-semibold">{activeSessionLabel || '없음'}</span> 입니다. 해당 세션을
+                                  활성화하면 실행할 수 있습니다.
+                                </>
+                              )}
+                              {blockReason === 'broadcast' && (
+                                <>
+                                  <span className="font-semibold">동시입력이 켜져 있습니다.</span> 이 상태로 실행하면 카드에
+                                  적힌 세션이 아니라 선택된 여러 세션에 한꺼번에 나갑니다. 동시입력을 끄고 실행하세요.
+                                </>
+                              )}
+                              {blockReason === 'offline' && (
+                                <>
+                                  이 세션은 <span className="font-semibold">SSH 연결이 끊긴 상태</span>입니다. 지금 실행하면
+                                  서버가 아니라 <span className="font-semibold">내 PC의 로컬 셸</span>에서 실행됩니다.
+                                </>
+                              )}{' '}
+                              실수 방지를 위해 실행을 막았습니다 — 확인이 필요하면 「입력」으로 붙여넣고 직접 실행하세요.
+                            </p>
+                          )}
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => onRunCommand?.(card.command, false)}
+                              disabled={!onRunCommand}
+                              title="터미널에 입력만(실행 안 함) — 확인 후 직접 Enter"
+                              className="flex items-center gap-1 rounded bg-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
+                            >
+                              <CornerDownLeft size={12} /> 입력
+                            </button>
+                            <button
+                              onClick={() => onRunCommand?.(card.command, true)}
+                              disabled={blockRun}
+                              title={
+                                blockReason === 'target'
+                                  ? '생성 시점과 대상 세션이 달라 실행할 수 없습니다'
+                                  : blockReason === 'broadcast'
+                                    ? '동시입력이 켜져 있어 실행할 수 없습니다'
+                                    : blockReason === 'offline'
+                                      ? 'SSH 연결이 끊겨 있어 실행할 수 없습니다'
+                                      : '터미널에서 바로 실행'
+                              }
+                              className="flex items-center gap-1 rounded bg-blue-600/80 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                            >
+                              <Play size={11} /> 실행
+                            </button>
+                          </div>
+                        </>
                       )}
                     </div>
                   )

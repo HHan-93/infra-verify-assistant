@@ -73,11 +73,11 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>((props, ref) 
   const onDataRef = useRef(props.onData)
   const onFindRef = useRef(props.onFind)
   const highlightRef = useRef(props.highlight)
-  useEffect(() => {
-    onDataRef.current = props.onData
-    onFindRef.current = props.onFind
-    highlightRef.current = props.highlight
-  }, [props.onData, props.onFind, props.highlight])
+  // 렌더 중에 바로 갱신한다. useEffect 로 미루면 커밋~이펙트 사이 한 프레임 동안 이전 onData 가
+  // 남아, 동시입력 대상을 방금 바꿨는데 그 순간의 키 입력이 '이전 대상 목록'으로 나갈 수 있다.
+  onDataRef.current = props.onData
+  onFindRef.current = props.onFind
+  highlightRef.current = props.highlight
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)

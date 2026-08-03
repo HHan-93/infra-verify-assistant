@@ -36,6 +36,8 @@ interface SessionSidebarProps {
   onSave: (p: SavedProfile, originalKey?: string) => void
   /** 삭제 */
   onDelete: (p: SavedProfile) => void
+  /** 여러 세션 일괄 삭제 (선택 삭제 / 폴더 전체 삭제) */
+  onDeleteMany: (list: SavedProfile[]) => void
   /** 폴더 이동 (사이드바 내 드래그) — group 미지정 시 분류 없음으로 */
   onMove: (p: SavedProfile, group: string | undefined) => void
   /** 폴더명 일괄 변경 */
@@ -88,6 +90,7 @@ export default function SessionSidebar({
   onConnect,
   onSave,
   onDelete,
+  onDeleteMany,
   onMove,
   onRenameFolder,
   onReorder,
@@ -100,6 +103,8 @@ export default function SessionSidebar({
   // 등록/편집 모달 상태 (null = 닫힘)
   const [editor, setEditor] = useState<{ draft: SavedProfile; originalKey?: string } | null>(null)
   const [confirmDel, setConfirmDel] = useState<SavedProfile | null>(null)
+  // 선택 항목 일괄 삭제 확인 (null = 닫힘). 폴더 전체 삭제도 '그 폴더를 전체 선택한 상태'로 이 경로를 탄다.
+  const [confirmDelMany, setConfirmDelMany] = useState<SavedProfile[] | null>(null)
   // 접힌 폴더 이름 집합
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   // 사이드바 내 드래그 종류 (세션 / 폴더)
@@ -194,6 +199,17 @@ export default function SessionSidebar({
     p.username.toLowerCase().includes(q) ||
     (p.group ?? '').toLowerCase().includes(q)
   const visible = profiles.filter(match)
+  // 목록에서 사라진 프로필의 키가 selected 에 남아 있으면 개수가 부풀고, 나중에 같은
+  // host:port:username 으로 새로 만든 프로필이 저절로 체크된 채 일괄 삭제에 휩쓸릴 수 있다.
+  useEffect(() => {
+    const live = new Set(profiles.map(profileKey))
+    setSelected((s) => {
+      if ([...s].every((k) => live.has(k))) return s
+      return new Set([...s].filter((k) => live.has(k)))
+    })
+  }, [profiles])
+  // 선택돼 있지만 지금 검색 결과에는 안 보이는 항목 수 — 삭제/열기 전에 사용자에게 알려준다.
+  const hiddenSelectedCount = selected.size - visible.filter((p) => selected.has(profileKey(p))).length
 
   // 폴더별 그룹화 + 폴더 없는(루트) 세션 분리
   const folders = new Map<string, SavedProfile[]>()
@@ -368,25 +384,51 @@ export default function SessionSidebar({
         </div>
       </div>
 
-      {/* 다중 선택 액션 바 */}
+      {/* 다중 선택 액션 바 — 사이드바가 좁아도 줄바꿈되지 않도록 아이콘 버튼 + nowrap 으로 압축.
+          설명이 필요한 건 title 툴팁으로 돌리고, 안내 문구는 아래 줄로 분리한다. */}
       {selected.size > 0 && (
-        <div className="flex items-center gap-2 border-b border-blue-500/30 bg-blue-600/15 px-3 py-1.5 text-xs text-blue-100">
-          <span>{selected.size}개 선택</span>
-          <button
-            onClick={() => {
-              onOpenMulti(profiles.filter((p) => selected.has(profileKey(p))))
-              setSelected(new Set())
-            }}
-            className="ml-auto flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-blue-500"
-          >
-            <LayoutGrid size={12} /> 그리드로 열기
-          </button>
-          <button
-            onClick={() => setSelected(new Set())}
-            className="rounded-md px-1.5 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
-          >
-            해제
-          </button>
+        <div className="border-b border-blue-500/30 bg-blue-600/15 px-2 py-1.5 text-blue-100">
+          <div className="flex items-center gap-1">
+            {/* 개수가 길어지면(두 자릿수 등) 버튼을 밀지 않고 이쪽이 줄어들도록 min-w-0 + truncate */}
+            <span className="min-w-0 flex-1 truncate text-xs font-medium">{selected.size}개 선택</span>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                onClick={() => {
+                  onOpenMulti(profiles.filter((p) => selected.has(profileKey(p))))
+                  setSelected(new Set())
+                }}
+                title="선택한 세션을 그리드로 열기"
+                className="flex items-center gap-1 whitespace-nowrap rounded-md bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
+              >
+                <LayoutGrid size={12} /> 그리드로 열기
+              </button>
+              <button
+                onClick={() => {
+                  const list = profiles.filter((p) => selected.has(profileKey(p)))
+                  if (list.length) setConfirmDelMany(list)
+                }}
+                title="선택한 세션을 목록에서 모두 삭제"
+                className="rounded-md border border-red-500/40 p-1 text-red-200 hover:bg-red-600/30"
+              >
+                <Trash2 size={13} />
+              </button>
+              <button
+                onClick={() => setSelected(new Set())}
+                title="선택 해제"
+                className="rounded-md p-1 text-gray-300 hover:bg-white/10"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+          {hiddenSelectedCount > 0 && (
+            <div
+              className="mt-0.5 text-[10px] leading-tight text-amber-300"
+              title="검색어를 바꿔서 지금 목록에 안 보이는 선택 항목입니다"
+            >
+              검색 결과 밖 {hiddenSelectedCount}개 포함
+            </div>
+          )}
         </div>
       )}
 
@@ -488,6 +530,33 @@ export default function SessionSidebar({
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
+                        // 이 폴더가 이미 전부 선택돼 있으면 해제, 아니면 폴더 전체를 선택에 추가.
+                        // (선택 바의 '삭제'로 폴더 통째 삭제까지 이어진다)
+                        const keys = items.map(profileKey)
+                        const allOn = keys.every((k) => selected.has(k))
+                        setSelected((s) => {
+                          const n = new Set(s)
+                          keys.forEach((k) => (allOn ? n.delete(k) : n.add(k)))
+                          return n
+                        })
+                      }}
+                      title={
+                        items.every((p) => selected.has(profileKey(p)))
+                          ? '이 폴더 선택 해제'
+                          : `이 폴더의 세션 ${items.length}개 전체 선택`
+                      }
+                      className={
+                        'rounded-md p-0.5 transition hover:bg-white/10 ' +
+                        (items.length && items.every((p) => selected.has(profileKey(p)))
+                          ? 'text-blue-300'
+                          : 'text-gray-500 opacity-0 hover:text-gray-200 group-hover:opacity-100')
+                      }
+                    >
+                      <CheckSquare size={13} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
                         if (items.length) onOpenMulti(items)
                       }}
                       title={`이 폴더의 세션 ${items.length}개를 모두 그리드로 열기`}
@@ -561,6 +630,60 @@ export default function SessionSidebar({
             setEditor(null)
           }}
         />
+      )}
+
+      {/* 선택 항목 일괄 삭제 확인 */}
+      {confirmDelMany && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setConfirmDelMany(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-2 text-sm font-semibold text-gray-100">세션 {confirmDelMany.length}개 삭제</div>
+            <p className="text-[13px] leading-relaxed text-gray-200">
+              선택한 <span className="font-semibold text-white">{confirmDelMany.length}개</span> 세션을 목록에서
+              삭제할까요? 되돌릴 수 없습니다.
+            </p>
+            {confirmDelMany.some((p) => connectedKeys.has(profileKey(p))) && (
+              <p className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-relaxed text-amber-200">
+                접속 중인 세션이 포함돼 있습니다. 연결 자체는 끊기지 않지만, 목록에서 지워지면{' '}
+                <strong>끊겼을 때 자동 재연결이 되지 않고</strong> 탭 이름도 IP 로만 표시됩니다.
+              </p>
+            )}
+            {/* 목록은 자르지 않는다 — 검색으로 가려진 항목이 섞여 있을 수 있어, 지우기 전에 전부 볼 수 있어야 한다 */}
+            <ul className="mt-2 max-h-40 overflow-y-auto rounded-md border border-white/10 bg-black/20 p-2 text-[11px] text-gray-400">
+              {confirmDelMany.map((p) => (
+                <li key={profileKey(p)} className="flex items-center gap-1 truncate font-mono">
+                  {connectedKeys.has(profileKey(p)) && (
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" title="접속 중" />
+                  )}
+                  <span className="truncate">{p.label?.trim() || `${p.username}@${p.host}`}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDelMany(null)}
+                className="rounded-md border border-white/10 bg-panel-light px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10"
+              >
+                취소
+              </button>
+              <button
+                onClick={() => {
+                  onDeleteMany(confirmDelMany)
+                  setSelected(new Set())
+                  setConfirmDelMany(null)
+                }}
+                className="rounded-md bg-red-600/80 px-3 py-1.5 text-xs text-white hover:bg-red-500"
+              >
+                {confirmDelMany.length}개 삭제
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 삭제 확인 */}

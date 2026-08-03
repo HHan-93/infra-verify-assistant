@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ListChecks,
   X,
@@ -57,12 +57,16 @@ interface StepResult {
 }
 
 /** 스텝의 최종 판정 — 수동 지정이 있으면 그것, 없으면 자동 판정 */
-type Effective = 'pass' | 'fail' | 'info' | 'skip' | 'manual-wait' | 'pending'
+type Effective = 'pass' | 'fail' | 'info' | 'skip' | 'manual-wait' | 'pending' | 'error'
 function effectiveOf(step: RunnerStep, r: StepResult | undefined): Effective {
   if (r?.manual === 'skip') return 'skip'
   if (r?.manual === 'pass') return 'pass'
   if (r?.manual === 'fail') return 'fail'
   if (r?.verdict) return r.verdict
+  // 실행을 시도했는데 오류로 끝난 스텝(연결 끊김/타임아웃 등)은 verdict 가 없다.
+  // 이걸 'pending' 으로 두면 리포트에 "대기(미실행)" 로 찍혀 '아직 안 돌린 것' 과 구별되지 않고
+  // 실패 카운트에서도 빠진다 — 검증 산출물로서 치명적이라 별도 상태로 구분한다.
+  if (r?.status === 'error') return 'error'
   // 명령이 없는 안내 스텝은 사람이 판정해야 함
   if (!step.command.trim()) return 'manual-wait'
   return 'pending'
@@ -75,6 +79,7 @@ const EFFECTIVE_META: Record<Effective, { label: string; cls: string }> = {
   skip: { label: '건너뜀', cls: 'bg-violet-500/20 text-violet-300' },
   'manual-wait': { label: '수동 확인', cls: 'bg-sky-500/20 text-sky-300' },
   pending: { label: '대기', cls: 'bg-white/10 text-gray-500' },
+  error: { label: '실행 오류', cls: 'bg-red-500/25 text-red-300' },
 }
 
 // <...> 플레이스홀더 — 검증 실행 전에 값을 한 번 받아 명령에 치환한다(VIP 등).
@@ -119,6 +124,12 @@ export default function ScenarioRunner({
       ? defaultSessionId
       : sessions[0]?.id ?? '',
   )
+  // 실행 대상이 끊기거나 탭이 닫히면 targetId 가 유령이 되어, 셀렉트가 비고 모든 스텝이
+  // "연결되어 있지 않습니다" 로 실패한다. 목록이 바뀌면 살아있는 세션으로 다시 맞춰준다.
+  useEffect(() => {
+    if (targetId && sessions.some((s) => s.id === targetId)) return
+    setTargetId(sessions[0]?.id ?? '')
+  }, [sessions, targetId])
   const [results, setResults] = useState<Record<number, StepResult>>({})
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -235,17 +246,19 @@ export default function ScenarioRunner({
     setRes(idx, { manual: results[idx]?.manual === v ? undefined : v })
 
   const summary = useMemo(() => {
-    let pass = 0, fail = 0, info = 0, skip = 0, waiting = 0, pending = 0
+    let pass = 0, fail = 0, info = 0, skip = 0, waiting = 0, pending = 0, error = 0
     scenario.steps.forEach((step, idx) => {
       const e = effectiveOf(step, results[idx])
       if (e === 'pass') pass++
       else if (e === 'fail') fail++
+      // 실행 오류는 '미실행' 이 아니라 별도로 세고, 리포트/배지에 따로 표시한다
+      else if (e === 'error') error++
       else if (e === 'info') info++
       else if (e === 'skip') skip++
       else if (e === 'manual-wait') waiting++
       else pending++
     })
-    return { pass, fail, info, skip, waiting, pending }
+    return { pass, fail, info, skip, waiting, pending, error }
   }, [scenario.steps, results])
 
   const buildReport = (): string => {
@@ -256,7 +269,7 @@ export default function ScenarioRunner({
     lines.push(`- 대상 세션: ${targetName}`)
     lines.push(`- 실행 시각: ${now}`)
     lines.push(
-      `- 결과 요약: 정상 ${summary.pass} · 실패 ${summary.fail} · 실행됨 ${summary.info} · 건너뜀 ${summary.skip} · 수동대기 ${summary.waiting} · 미실행 ${summary.pending}`,
+      `- 결과 요약: 정상 ${summary.pass} · 실패 ${summary.fail} · 실행오류 ${summary.error} · 실행됨 ${summary.info} · 건너뜀 ${summary.skip} · 수동대기 ${summary.waiting} · 미실행 ${summary.pending}`,
     )
     lines.push('')
     scenario.steps.forEach((step, idx) => {
@@ -368,6 +381,9 @@ export default function ScenarioRunner({
             <div className="flex items-center gap-1.5 text-[11px]">
               <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">정상 {summary.pass}</span>
               <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-red-300">실패 {summary.fail}</span>
+              {summary.error > 0 && (
+                <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-red-300">실행오류 {summary.error}</span>
+              )}
               {summary.info > 0 && (
                 <span className="flex items-center gap-0.5 text-emerald-300/70">
                   <Info size={11} /> 실행됨 {summary.info}

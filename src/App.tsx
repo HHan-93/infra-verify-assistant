@@ -112,11 +112,15 @@ function dotColor(status?: string): string {
  *  - AI 분석 패널은 공용 (활성 세션 출력 분석)
  */
 export default function App() {
-  const [tabs, setTabs] = useState<TabInfo[]>([{ id: 's1', title: '세션 1' }])
-  const [activeId, setActiveId] = useState('s1')
-  const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({
-    s1: { status: 'idle', msg: '' },
-  })
+  // 첫 탭도 UUID 로 채번한다. 예전엔 's1' 고정이라 앱을 재시작해도 같은 id 가 재사용됐고,
+  // 그 결과 세션 id 로 뭔가를 기억하는 기능들(AI 명령 카드의 대상 검증, 상태보드 역할 매핑)이
+  // '이전 실행의 다른 서버'를 같은 세션으로 착각했다.
+  const [firstTabId] = useState<string>(() => crypto.randomUUID())
+  const [tabs, setTabs] = useState<TabInfo[]>(() => [{ id: firstTabId, title: '세션 1' }])
+  const [activeId, setActiveId] = useState<string>(firstTabId)
+  const [statuses, setStatuses] = useState<Record<string, SessionStatus>>(() => ({
+    [firstTabId]: { status: 'idle', msg: '' },
+  }))
   const [layout, setLayoutMode] = useState<LayoutMode>('tabs')
   const [broadcast, setBroadcast] = useState(false)
   // 동시입력 대상으로 선택된 세션 ID 목록 (그리드 중 일부만 고를 수 있음)
@@ -156,6 +160,9 @@ export default function App() {
   const aiDragRef = useRef(false)
   // 저장된 SSH 세션 프로필 목록 (App 이 단일 소스)
   const [profiles, setProfiles] = useState<SavedProfile[]>([])
+  // 재연결 타이머처럼 '나중에' 실행되는 코드가 최신 프로필을 읽도록 하는 미러
+  const profilesRef = useRef<SavedProfile[]>([])
+  profilesRef.current = profiles
   // 사이드바 더블클릭/클러스터 열기 → 탭 폼이 마운트되면 연결 (지연 연결 큐)
   const [pendingConnects, setPendingConnects] = useState<{ id: string; p: SavedProfile }[]>([])
   // 사이드바에서 터미널로 드래그 중인 프로필 (드롭 오버레이 표시)
@@ -291,7 +298,13 @@ export default function App() {
   const gridIds = isSplit && splitTree ? activeMembers : []
   // 동시입력 실제 대상 = 선택된 세션 ∩ 현재 분할 (닫힌/분할 밖 세션 자동 제외).
   // gridIds 는 스페어 없는 분할 시 같은 id 가 중복될 수 있어 Set 으로 한 번 걸러 이중 입력을 막는다.
-  const effectiveTargets = [...new Set(gridIds.filter((id) => broadcastTargets.includes(id)))]
+  // SSH 로 '연결된' 칸만 대상으로 삼는다. 미연결 칸에는 로컬 셸(cmd.exe/bash)이 붙어 있어서,
+  // 상태를 안 보고 보내면 서버에 칠 명령이 운영자 PC 에서 실행된다(끊긴 칸이 섞이면 특히 위험).
+  const effectiveTargets = [
+    ...new Set(gridIds.filter((id) => broadcastTargets.includes(id) && statuses[id]?.status === 'connected')),
+  ]
+  // 대상으로 골라뒀지만 연결이 끊겨 제외된 칸 수 — 배너에 알려 사용자가 착각하지 않게 한다.
+  const droppedTargetCount = new Set(gridIds.filter((id) => broadcastTargets.includes(id))).size - effectiveTargets.length
   // 실제 브로드캐스트 활성 여부 (분할 모드 + 동시입력 ON + 대상 1개 이상)
   const broadcasting = isSplit && broadcast && effectiveTargets.length > 0
   // 분할 가능 여부 — 아직 트리에 없는 스페어 탭이 있거나, 세션을 더 만들 여유가 있으면 항상 분할 가능
@@ -647,8 +660,7 @@ export default function App() {
     }
     // 이 세션의 프로필 찾기 (상태에 보관된 key → 저장 프로필). 못 찾으면 자동 재연결 불가.
     const key = statuses[id]?.key
-    const profile = key ? profiles.find((p) => profileKey(p) === key) : undefined
-    if (!profile) {
+    if (!key || !profiles.some((p) => profileKey(p) === key)) {
       term?.writeNotice('자동 재연결할 프로필 정보를 찾지 못했습니다. 수동으로 연결하세요.')
       return
     }
@@ -661,6 +673,13 @@ export default function App() {
       // 그 사이 사용자가 탭을 닫았거나 이미 다시 연결됐으면 중단
       if (manualClosingRef.current.has(id)) return
       if (statuses[id]?.status === 'connected' || statuses[id]?.status === 'connecting') return
+      // 대기하는 동안 사용자가 사이드바에서 host/비밀번호를 고쳤을 수 있으므로, 예약 시점에
+      // 붙잡아 둔 값이 아니라 '지금' 저장된 프로필로 다시 찾아서 연결한다.
+      const profile = profilesRef.current.find((p) => profileKey(p) === key)
+      if (!profile) {
+        terminalRefs.current[id]?.writeNotice('자동 재연결할 프로필이 삭제되어 중단합니다. 수동으로 연결하세요.')
+        return
+      }
       terminalRefs.current[id]?.writeNotice('자동 재연결 시도 중…')
       // 폼 ref 마운트 타이밍을 처리하는 지연 연결 큐에 넣는다(끊긴 셀은 SSH 폼이 다시 마운트됨).
       setPendingConnects((prev) => (prev.some((pc) => pc.id === id) ? prev : [...prev, { id, p: profile }]))
@@ -770,7 +789,14 @@ export default function App() {
     setLayoutMode(l)
     if (l !== 'tabs') return
     setBroadcast(false)
-    const idleIds = tabs.filter((t) => t.id !== activeId && (statuses[t.id]?.status ?? 'idle') === 'idle').map((t) => t.id)
+    // 어떤 그리드 그룹(활성이든 파킹이든)에도 속하지 않은 '겉도는' 미접속 탭만 정리한다.
+    // 그리드 칸은 SSH 를 안 붙였어도 로컬 셸로 실제 작업 중일 수 있고(가로/세로 나누기로 만든 칸이
+    // 대표적), 사용자는 칩으로 언제든 그 그룹에 돌아온다. 여기서 지우면 확인창도 없이 작업 내용이
+    // 사라진다 — 그룹 정리는 칩의 X 로만 하도록 한다.
+    const gridMemberIds = new Set(allGridTabIds)
+    const idleIds = tabs
+      .filter((t) => t.id !== activeId && !gridMemberIds.has(t.id) && (statuses[t.id]?.status ?? 'idle') === 'idle')
+      .map((t) => t.id)
     if (!idleIds.length) return
     idleIds.forEach((id) => window.electronAPI.sessionClose(id))
     setTabs((ts) => ts.filter((t) => !idleIds.includes(t.id)))
@@ -781,19 +807,11 @@ export default function App() {
     })
     setOpenConnectCellId((cur) => (cur && idleIds.includes(cur) ? null : cur))
     setBroadcastTargets((bt) => bt.filter((id) => !idleIds.includes(id)))
-    // 정리하는 idle 탭 중 '트리에 속한' 것만 트리에서 제거한다. 트리와 무관한 스페어 idle 탭 때문에
-    // 멀쩡한 그리드(splitTree)를 통째로 날리면 안 된다(단일 보기로 갔다가 그리드 그룹 칩으로 복귀 가능해야 함).
-    setSplitTree((tree) => {
-      if (!tree) return tree
-      const inTree = idleIds.filter((id) => findLeaf(tree, id))
-      if (!inTree.length) return tree // 트리 밖 idle 탭만 정리 → 그리드 그대로 보존
-      let next: typeof tree | null = tree
-      for (const id of inTree) {
-        if (!next) break
-        next = removeTabId(next, id)
-      }
-      return !next || next.type === 'leaf' ? null : next // 한 칸만 남으면 그리드 아님 → 해제
-    })
+    // 아직 폼이 안 뜬 채 닫힌 탭의 예약 연결은 영영 소비되지 않는다. 비밀번호를 품은 채로
+    // 메모리에 남으므로 여기서 함께 버린다.
+    setPendingConnects((q) => q.filter((pc) => !idleIds.includes(pc.id)))
+    // 위에서 그리드 멤버를 제외했으므로 트리에 손댈 일은 없지만, 혹시 모를 잔여 참조는
+    // 죽은 칸 자동 정리 이펙트가 걷어낸다.
   }
 
   // ── 그리드 그룹 활성/파킹 헬퍼 ──
@@ -836,6 +854,9 @@ export default function App() {
     if (!target) return
     const nextParked = parkActiveInto(parkedGrids.filter((g) => g.id !== groupId))
     setParkedGrids(nextParked)
+    // 다른 그룹으로 넘어갈 때 동시입력은 끈다 — 안 끄면 A그룹에서 켜둔 동시입력이 B를 거쳐
+    // A로 돌아왔을 때 사용자가 다시 켠 적도 없는데 살아나 여러 서버에 한꺼번에 입력된다.
+    setBroadcast(false)
     activateGrid(target.tree, target.id, target.name ?? null)
     setActiveId(memberId && findLeaf(target.tree, memberId) ? memberId : collectLeafTabIds(target.tree)[0])
     setLayoutMode('split')
@@ -853,6 +874,57 @@ export default function App() {
     }
     setParkedGrids((prev) => prev.filter((g) => g.id !== groupId))
   }
+
+  // (안전망) 분할 트리가 이미 닫힌 세션을 가리키면, 그 칸은 tabs.map() 렌더에서 아무 엘리먼트도
+  // 만들어지지 않아 '아무것도 안 보이고 클릭도 안 되는 빈 구멍'이 된다. 어떤 경로로 그런 죽은 leaf 가
+  // 생기든 여기서 걷어내, 그리드가 죽은 칸을 안고 살아남지 않도록 한다.
+  useEffect(() => {
+    // INVARIANT: splitTree 가 null 이면 activeGridId 도 null. (splitTree 만 null 로 만드는 경로가
+    // 있으면 activeGridId 가 유령으로 남아 activeGridId! 단언들이 근거를 잃는다)
+    if (!splitTree && activeGridId) setActiveGridId(null)
+    const alive = new Set(tabs.map((t) => t.id))
+    const hasDead = (tree: PaneNode) => collectLeafTabIds(tree).some((id) => !alive.has(id))
+    const prune = (tree: PaneNode): PaneNode | null =>
+      collectLeafTabIds(tree)
+        .filter((id) => !alive.has(id))
+        .reduce<PaneNode | null>((acc, id) => (acc ? removeTabId(acc, id) : null), tree)
+
+    if (splitTree && hasDead(splitTree)) {
+      const next = prune(splitTree)
+      if (!next || next.type === 'leaf') {
+        // 칸이 하나도/하나만 남으면 그룹으로서 의미가 없으므로 해제하고 단일 보기로.
+        // 살아남은 칸이 있으면 그걸 활성으로 — 안 그러면 방금 사라진 칸을 계속 가리킨다.
+        if (next) setActiveId(next.tabId)
+        clearActiveGrid()
+        setLayoutMode('tabs')
+      } else {
+        setSplitTree(next)
+      }
+    }
+    if (parkedGrids.some((g) => hasDead(g.tree))) {
+      setParkedGrids((prev) =>
+        prev
+          .map((g) => (hasDead(g.tree) ? { ...g, tree: prune(g.tree) } : g))
+          .filter((g): g is ParkedGrid => !!g.tree && g.tree.type === 'split'),
+      )
+    }
+  }, [tabs, splitTree, parkedGrids, activeGridId])
+
+  // 세션 id 로 키를 잡는 부수 상태들 정리. 닫기 경로가 여러 개(탭 닫기/전체 닫기/그룹 닫기/
+  // 유휴 정리)라 각각에 정리 코드를 흩뿌리면 또 빠뜨린다 — tabs 를 기준으로 여기서 한 번에 맞춘다.
+  useEffect(() => {
+    const alive = new Set(tabs.map((t) => t.id))
+    setLoggingSessions((s) => {
+      if ([...s].every((id) => alive.has(id))) return s
+      return new Set([...s].filter((id) => alive.has(id)))
+    })
+    // ref 들은 렌더에 영향이 없으므로 그냥 지운다(계속 쌓이면 메모리만 먹는다)
+    for (const id of Object.keys(prevStatuses.current)) if (!alive.has(id)) delete prevStatuses.current[id]
+    for (const id of Object.keys(reconnectRef.current.attempts)) if (!alive.has(id)) delete reconnectRef.current.attempts[id]
+    for (const id of [...manualClosingRef.current]) if (!alive.has(id)) manualClosingRef.current.delete(id)
+    for (const id of Object.keys(terminalRefs.current)) if (!alive.has(id)) delete terminalRefs.current[id]
+    for (const id of Object.keys(sshFormRefs.current)) if (!alive.has(id)) delete sshFormRefs.current[id]
+  }, [tabs])
 
   // 기본 제공 프리셋(좌우2분할/상하2분할/4분할).
   // 활성 세션이 "활성 그룹 안"이면 그 그룹을 그대로 재배치(기존 id/이름 유지). 활성 세션이 스페어(어느 그룹에도
@@ -965,7 +1037,15 @@ export default function App() {
   //    항상 동일한(안정적인) 연결 경로를 타므로 이 레이스가 사라진다.
   //  - room 은 연결 중/연결됨으로 "실제 사용 중"인 탭 수만 제외하고 계산(idle 탭은 어차피 정리하므로).
   const openCluster = (list: SavedProfile[]) => {
-    const idleIds = tabs.filter((t) => (statuses[t.id]?.status ?? 'idle') === 'idle').map((t) => t.id)
+    // 정리 대상은 "어느 그리드 그룹에도 속하지 않은" 겉도는 미접속 탭뿐이다.
+    // 그리드 멤버(활성+파킹)까지 지우면 분할 트리에 죽은 leaf 가 남고, 그 칸은 tabs.map() 렌더에서
+    // 아무 엘리먼트도 만들어지지 않아 클릭도 안 되는 '빈 구멍'이 된다. 특히 가로/세로 나누기로 만든
+    // 칸은 SSH 연결이 없는 로컬셸이라 status 가 항상 idle 이라, 예전엔 새 그리드를 열 때마다 통째로
+    // 날아가면서 기존 그리드에 빈 칸이 생겼다.
+    const gridMemberIds = new Set(allGridTabIds)
+    const idleIds = tabs
+      .filter((t) => !gridMemberIds.has(t.id) && (statuses[t.id]?.status ?? 'idle') === 'idle')
+      .map((t) => t.id)
     const keptCount = tabs.length - idleIds.length
     const room = Math.max(0, MAX_SESSIONS - keptCount)
     const sel = list.slice(0, room)
@@ -998,6 +1078,11 @@ export default function App() {
       // 대상 목록만 미리 채워둬서, 나중에 수동으로 켜면 바로 이 세션들을 대상으로 쓸 수 있게 한다.
       setBroadcast(false)
       setBroadcastTargets(newIds)
+    } else {
+      // 1개만 열 때는 그리드를 만들지 않는다. 그런데 분할 보기 중이었다면 새 세션은 어느 칸에도
+      // 없어 화면에 안 보이는데 activeId 만 그쪽을 가리키게 된다 — 프리셋/시나리오/AI 실행이
+      // '보이지 않는 세션'에 나가는 위험한 상태. 탭 보기로 바꿔 방금 연 세션을 실제로 보여준다.
+      setLayoutMode('tabs')
     }
   }
 
@@ -1013,6 +1098,12 @@ export default function App() {
 
   const deleteProfile = async (p: SavedProfile) => {
     setProfiles(await window.electronAPI.profilesDelete(profileKey(p)))
+  }
+
+  // 선택 항목 / 폴더 전체 일괄 삭제 — 메인에서 한 번의 읽기·쓰기로 처리(부분 삭제 상태가 남지 않음)
+  const deleteProfiles = async (list: SavedProfile[]) => {
+    if (!list.length) return
+    setProfiles(await window.electronAPI.profilesDeleteMany(list.map(profileKey)))
   }
 
   // CSV/JSON 파일에서 세션 프로필 가져오기 — 사이드바에 추가만 하며 연결은 하지 않음 (수동으로 그리드 열기)
@@ -1122,6 +1213,10 @@ export default function App() {
       delete c[id]
       return c
     })
+    // 폼이 마운트되기 전에 탭을 닫으면 예약 연결이 영영 소비되지 않는다. 비밀번호를 담은 채
+    // 메모리에 남고, 나중에 같은 id 의 자동 재연결을 가로막기도 하므로 함께 버린다.
+    setPendingConnects((q) => q.filter((pc) => pc.id !== id))
+    delete reconnectRef.current.attempts[id]
     // 파킹된 그룹들에서도 닫힌 세션을 제거하고, 붕괴(리프/빈)한 그룹은 칩에서 없앤다.
     setParkedGrids((prev) =>
       prev
@@ -1376,6 +1471,7 @@ export default function App() {
           onConnect={openProfile}
           onSave={saveProfile}
           onDelete={deleteProfile}
+          onDeleteMany={deleteProfiles}
           onMove={moveProfile}
           onRenameFolder={renameFolder}
           onReorder={reorderProfiles}
@@ -1578,7 +1674,8 @@ export default function App() {
         {isSplit && broadcast && (
           <div className="bg-red-600/15 px-3 py-0.5 text-center text-[11px] font-medium text-red-300">
             {effectiveTargets.length > 0
-              ? `⚠ 동시입력 ON — 선택된 ${effectiveTargets.length}개 세션에 동시에 입력됩니다`
+              ? `⚠ 동시입력 ON — 선택된 ${effectiveTargets.length}개 세션에 동시에 입력됩니다` +
+                (droppedTargetCount > 0 ? ` (연결이 끊긴 ${droppedTargetCount}개는 제외됨)` : '')
               : '동시입력 ON — 대상 세션을 선택하세요 (셀 헤더의 체크박스)'}
           </div>
         )}
@@ -1952,7 +2049,17 @@ export default function App() {
         <div className="min-h-0 flex-1">
           {/* AIPanel 은 언마운트하면 대화/스트림이 끊기므로 hidden 으로 유지 */}
           <div className={rightTab === 'ai' ? 'h-full' : 'hidden'}>
-            <AIPanel ref={aiPanelRef} onClose={() => setShowAI(false)} onRunCommand={runOnActive} />
+            <AIPanel
+              ref={aiPanelRef}
+              onClose={() => setShowAI(false)}
+              onRunCommand={runOnActive}
+              // 명령 카드가 "어느 서버를 보고 만든 것인지" 새겨두고, 실행 시 지금 대상과 다르면 막기 위해 전달
+              activeSessionId={activeId}
+              // 탭 제목("세션 1")이 아니라 실제 서버가 보이는 라벨("별칭 (IP)")을 넘긴다
+              activeSessionLabel={gridCellLabel(tabs.find((t) => t.id === activeId) ?? { id: activeId, title: '' })}
+              broadcasting={broadcasting}
+              activeConnected={statuses[activeId]?.status === 'connected'}
+            />
           </div>
           {rightTab === 'dashboard' && (
             <div className="h-full">
@@ -1971,7 +2078,10 @@ export default function App() {
                     connected: true,
                   }))}
                 onOpenDashboard={(id) => {
-                  setActiveId(id)
+                  // setActiveId 를 직접 쓰면, 고른 세션이 분할 트리 밖(스페어/파킹 그룹 멤버)일 때
+                  // 화면엔 안 보이면서 activeId 만 그쪽으로 옮겨간다. selectTab 은 그런 경우
+                  // 탭 보기로 전환해 실제로 보여준다.
+                  selectTab(id)
                   setRightTab('dashboard')
                 }}
               />
@@ -2067,6 +2177,8 @@ export default function App() {
             id: t.id,
             name: gridCellLabel(t),
             connected: statuses[t.id]?.status === 'connected',
+            // 역할 매핑 영속화용 안정 키 — 연결이 끊겨도 statuses[].key 는 유지된다
+            profileKey: statuses[t.id]?.key,
           }))}
           onClose={() => setShowStatusBoard(false)}
         />

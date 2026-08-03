@@ -23,6 +23,13 @@ interface BoardSession {
   id: string
   name: string
   connected: boolean
+  /**
+   * 저장된 프로필 키(host:port:username). 역할 매핑을 영속화할 때 쓰는 '안정적인' 식별자.
+   * - 세션 id 는 앱 재시작 시 다른 서버에 재할당될 수 있어 못 쓴다.
+   * - 표시 이름은 연결이 끊기면 "세션 N" 으로 바뀌어 버려서(App.gridCellLabel) 더 위험하다.
+   * 이 값은 끊겨도 유지되므로(App 의 statuses[id].key) 매핑 키로 적합하다.
+   */
+  profileKey?: string
 }
 interface StatusBoardProps {
   sessions: BoardSession[]
@@ -46,7 +53,19 @@ interface BoardConfig {
   osScope: 'abnormal' | 'all' // 비정상(down/disabled)만 / 전체
   intervalSec: number
 }
-const CFG_KEY = 'statusboard_cfg'
+// v2 — 역할 매핑을 '세션 id' 가 아니라 '세션 이름(별칭 (IP))' 으로 저장한다.
+// 세션 id 는 앱을 껐다 켜면 다른 서버에 재할당될 수 있어(특히 첫 탭 id 는 고정값),
+// 저장된 매핑이 엉뚱한 서버에 붙은 채로 pcs/systemctl/kubectl 이 나가는 사고가 났다.
+// 구버전 키(statusboard_cfg)는 위험하므로 읽지 않고 버린다.
+const CFG_KEY = 'statusboard_cfg_v2'
+/** cfg 안에서 세션을 가리키는 필드들 — 저장/복원 시 id ↔ 이름 변환 대상 */
+const SESSION_FIELDS = { lists: ['hosts', 'masakari'] as const, singles: ['ceph', 'pod', 'osSession'] as const }
+function mapCfgSessions(cfg: BoardConfig, convert: (v: string) => string): BoardConfig {
+  const out: BoardConfig = { ...cfg }
+  for (const k of SESSION_FIELDS.lists) out[k] = cfg[k].map((v) => (v ? convert(v) : v))
+  for (const k of SESSION_FIELDS.singles) out[k] = cfg[k] ? convert(cfg[k]) : cfg[k]
+  return out
+}
 // 노드별 서비스 데몬 프리셋 — 역할별 기본 유닛 목록(편집 가능). .service 는 생략.
 // systemd 로 실제 관리되는 데몬만 기본값에 둔다. nova/glance/cinder/mariadb 처럼
 // 컨테이너·WSGI·OpenStack API 로 도는 서비스는 systemctl 로 안 잡혀 오탐이 나므로 제외
@@ -506,14 +525,34 @@ export default function StatusBoard({ sessions, onClose }: StatusBoardProps) {
   const connectedOf = (id: string) => sessionsRef.current.find((s) => s.id === id)?.connected ?? false
   const connected = sessions.filter((s) => s.connected)
 
+  // 저장은 '프로필 키'로. 세션 id 는 재시작 시 다른 서버에 재할당되고, 표시 이름은 연결이
+  // 끊기는 순간 "세션 N" 으로 바뀌어 버려서 둘 다 영속 키로 쓸 수 없다.
+  // 프로필 키가 없는 세션(한 번도 접속 안 한 로컬 탭)은 저장하지 않는다 — 복원할 방법이 없으므로.
+  const keyOf = (id: string) => sessionsRef.current.find((s) => s.id === id)?.profileKey ?? ''
   const saveCfg = (next: BoardConfig) => {
     setCfg(next)
     try {
-      localStorage.setItem(CFG_KEY, JSON.stringify(next))
+      localStorage.setItem(CFG_KEY, JSON.stringify(mapCfgSessions(next, keyOf)))
     } catch {
       /* 무시 */
     }
   }
+
+  // 복원 직후 cfg 의 세션 칸에는 '프로필 키'가 들어있다. 세션 목록과 대조해 id 로 바꾼다.
+  // 아직 그 서버를 안 열었으면 키를 그대로 두고(=미해석), 나중에 열리면 이 이펙트가 다시 채운다.
+  // 매칭 실패를 조용히 빈 값으로 만들면 사용자가 매핑이 사라진 걸 눈치채지 못하므로 유지한다.
+  useEffect(() => {
+    setCfg((cur) => {
+      const next = mapCfgSessions(cur, (v) => {
+        if (sessions.some((s) => s.id === v)) return v // 이미 살아있는 세션 id
+        return sessions.find((s) => s.profileKey && s.profileKey === v)?.id ?? v
+      })
+      // 실제로 바뀐 게 없으면 같은 객체를 돌려줘 무한 렌더를 피한다
+      return JSON.stringify(next) === JSON.stringify(cur) ? cur : next
+    })
+  }, [sessions])
+  /** cfg 값이 현재 열린 세션으로 해석되지 않는 상태(=아직 안 연 서버)인지 */
+  const unresolved = (v: string) => !!v && !sessions.some((s) => s.id === v)
 
   // 보드에서 네임스페이스 카드의 X → 설정에서 제외(다음 폴링부터 미조회) + 현재 화면에서도 즉시 제거
   const removeNamespaceLive = (ns: string) => {
@@ -807,13 +846,23 @@ export default function StatusBoard({ sessions, onClose }: StatusBoardProps) {
         </div>
 
         {view === 'config' ? (
-          <ConfigView
-            cfg={cfg}
-            connected={connected}
-            onChange={saveCfg}
-            canStart={canStart}
-            onStart={start}
-          />
+          <>
+            {/* 저장된 매핑이 아직 열리지 않은 서버를 가리키면, 조용히 비워두지 말고 알려준다.
+                (예전엔 빈 값으로 만들어 사용자가 매핑이 사라진 걸 모른 채 검증을 시작했다) */}
+            {[...cfg.hosts, ...cfg.masakari, cfg.ceph, cfg.pod, cfg.osSession].some(unresolved) && (
+              <div className="mx-4 mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] leading-relaxed text-amber-200">
+                저장된 역할 매핑 중 <strong>아직 접속하지 않은 서버</strong>가 있어 일부 칸이 비어 보입니다. 해당 세션을
+                먼저 연결하면 자동으로 다시 채워집니다.
+              </div>
+            )}
+            <ConfigView
+              cfg={cfg}
+              connected={connected}
+              onChange={saveCfg}
+              canStart={canStart}
+              onStart={start}
+            />
+          </>
         ) : (
           <BoardView state={state} milestones={msRef.current} onRemoveNamespace={removeNamespaceLive} />
         )}
