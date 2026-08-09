@@ -339,6 +339,48 @@ export interface CustomPresetCommand {
   order?: number
 }
 
+/**
+ * 스텝 실행 중 나타나는 대화형 프롬프트에 자동 응답할 규칙.
+ * 영속 셸(PTY)에서만 동작한다 — 출력에 match(정규식, 대소문자 무시)가 나타나면 send 를 입력한다.
+ * 같은 규칙은 스텝당 한 번만 발동한다(프롬프트가 반복 출력될 때 무한 응답 방지).
+ */
+export interface ExpectRule {
+  /** 프롬프트를 알아볼 정규식 (예: "password", "\\[y/N\\]") */
+  match: string
+  /** 보낼 문자열 (개행은 자동으로 붙음). <...> 플레이스홀더 사용 가능 */
+  send: string
+  /** 화면/리포트에 send 값을 가리고 표시 (비밀번호용) */
+  secret?: boolean
+}
+
+/**
+ * 이전 스텝의 출력에서 값을 뽑아 다음 스텝의 <이름> 플레이스홀더로 넘기는 규칙.
+ * 예: name="INSTANCE_IP", regex="inet (\\d+\\.\\d+\\.\\d+\\.\\d+)" → 다음 스텝에서 <INSTANCE_IP> 사용
+ */
+export interface CaptureRule {
+  /** 저장할 변수 이름 (플레이스홀더 <이름> 으로 참조) */
+  name: string
+  /** 캡처 정규식 */
+  regex: string
+  /** 사용할 캡처 그룹 번호 (기본 1, 0 이면 매치 전체) */
+  group?: number
+}
+
+/** 스텝이 실패했을 때 취할 동작 */
+export type OnFailureAction =
+  /** 이후 스텝을 실행하지 않고 전체 실행을 중단 (기본) */
+  | 'stop'
+  /** 실패로 기록하되 다음 스텝을 계속 진행 */
+  | 'continue'
+  /** onFailureCommand 를 실행한 뒤 중단 (롤백/로그수집 등) */
+  | 'run'
+  /**
+   * onFailureCommand 로 원인을 고친 뒤 이 스텝을 **한 번 다시 실행**한다.
+   * 성공하면 그대로 다음 스텝으로 진행하고, 그래도 실패하면 중단.
+   * 예: apt update 가 DNS 문제로 실패 → resolvectl 로 DNS 지정 → apt update 재시도.
+   */
+  | 'retry'
+
 /** 사용자가 앱 내에서 직접 추가한 시나리오(순서가 있는 여러 단계) */
 export interface CustomScenarioStep {
   title: string
@@ -350,6 +392,29 @@ export interface CustomScenarioStep {
   code?: string
   /** 실행 결과 자동 판정 기준 (선택) */
   check?: CommandCheck
+  /**
+   * 이 스텝을 실행할 대상 '역할' 이름 (예: "LB", "client", "server").
+   * 검증 실행 창에서 역할 → 실제 세션을 매핑한다. 비우면 기본 대상에서 실행.
+   *
+   * 쉼표로 여러 역할을 적으면 그 역할들에 매핑된 세션 **전부**에서 실행된다.
+   *   "서버, 클라이언트" → 도구 설치처럼 양쪽에 다 필요한 스텝
+   */
+  target?: string
+  /** 출력에서 값을 뽑아 이후 스텝의 플레이스홀더로 넘김 */
+  capture?: CaptureRule[]
+  /** 대화형 프롬프트 자동 응답 */
+  expect?: ExpectRule[]
+  /** 실패 시 동작 (기본 stop) */
+  onFailure?: OnFailureAction
+  /** onFailure === 'run' 일 때 실행할 명령 (롤백 스크립트 등) */
+  onFailureCommand?: string
+  /**
+   * 이 단계가 만든 변경을 되돌리는 명령 (선택).
+   * 검증이 끝난 뒤 '원복 실행'을 누르면, **실제로 실행된 단계만** 골라 **역순으로** 돌린다.
+   * 되돌릴 필요가 없는 단계(조회만 하는 명령, DNS/패키지 설치처럼 남겨둬도 되는 것)는 비워두면 된다.
+   * 예: `sudo mkdir -p /mnt/config` → `sudo rmdir /mnt/config`
+   */
+  undo?: string
 }
 export interface CustomScenario {
   id: string
@@ -357,6 +422,159 @@ export interface CustomScenario {
   title: string
   summary: string
   steps: CustomScenarioStep[]
+  /**
+   * 입력값을 '역할의 접속 주소'로 자동 채우는 규칙. 예: { "Target_IP": "서버" }
+   *
+   * 역할(서버/클라이언트)을 나눠 세션을 지정해 놓고 그 서버 IP 를 또 손으로 입력하게 하면
+   * 앞뒤가 안 맞는다. 여기에 적어두면 역할 매핑에서 고른 세션의 주소가 바로 들어간다.
+   * 사용자가 직접 입력한 값이 있으면 그쪽이 우선한다.
+   */
+  roleValues?: Record<string, string>
   /** 같은 카테고리 안에서의 표시 순서 — CustomPresetCommand.order 와 동일한 규칙 */
   order?: number
+}
+
+// ─────────────────────────────────────────────────────────────
+// 서비스 포털 응답 감시 (가용성 검증 중 "포털이 언제 다시 쓸 수 있게 되는가")
+//
+// 왜 페이지가 아니라 API 인가:
+//   포털은 SPA 라서 백엔드가 전멸해도 istio 가 HTML/JS 껍데기는 200 으로 내려준다.
+//   그걸 재면 실제보다 한참 이른 시각이 '복구'로 기록된다. 페이지를 그릴 때 실제로
+//   부르는 API 를 재야 의미가 있다 — 브라우저 개발자도구 Network 탭에 찍히는 그 요청들.
+// ─────────────────────────────────────────────────────────────
+
+/** 응답 본문에 대한 정상 조건 하나 */
+export interface PortalCheck {
+  /**
+   * 응답 JSON 안의 위치. 점/대괄호 표기.
+   *   ""            → 본문 전체
+   *   "content"     → { content: [...] } 의 배열
+   *   "data.items"  · "rows[0].status"
+   * JSON 이 아니면(HTML 등) 본문 문자열 자체를 대상으로 본다.
+   */
+  path: string
+  /**
+   * nonEmptyArray  배열이고 1개 이상          — 목록 API 의 기본값
+   * exists         값이 있고 null 이 아님
+   * gte            숫자로 읽어 value 이상
+   * contains       문자열에 value 포함
+   * notContains    문자열에 value 없음        — 에러 문구 배제용
+   * regex          value 를 정규식으로 매칭
+   */
+  op: 'nonEmptyArray' | 'exists' | 'gte' | 'contains' | 'notContains' | 'regex'
+  value?: string
+}
+
+/** 감시 대상 하나 = 포털 페이지가 부르는 API 한 건 */
+export interface PortalTarget {
+  id: string
+  /** 화면에 보일 이름 — "인스턴스 목록", "대시보드 요약" 처럼 페이지 기준으로 */
+  name: string
+  /** 같은 페이지에서 부르는 것들을 묶는 이름 — "인스턴스 상세" 등 */
+  group?: string
+  enabled: boolean
+  method: 'GET' | 'POST' | 'HEAD'
+  /** baseUrl 뒤에 붙일 경로. `http` 로 시작하면 그 주소를 그대로 쓴다(다른 도메인 감시용) */
+  path: string
+  /** POST 본문 (JSON 문자열) */
+  body?: string
+  /** 이 대상에만 추가로 붙일 헤더 */
+  headers?: Record<string, string>
+  /** 로그인 토큰을 붙일지 — 로그인 페이지 자체는 false */
+  auth: boolean
+  /** 정상으로 볼 HTTP 상태 (비우면 200) */
+  expectStatus?: number[]
+  /** 본문 정상 조건 — 전부 통과해야 정상. 비우면 상태 코드만 본다 */
+  checks?: PortalCheck[]
+  /** 이 대상만 연속 성공 횟수를 다르게 (비우면 전역값) */
+  successStreak?: number
+  /** 늦게 복구되는 게 정상인 대상에 남기는 메모 (예: "Thanos 스크랩 주기만큼 지연") */
+  note?: string
+}
+
+/** 토큰 발급 방식 */
+export interface PortalAuth {
+  /**
+   * login  아이디/비밀번호로 로그인 API 호출 — 기본이자 유일하게 오래 버티는 방식
+   * token  발급받은 access token 을 직접 붙여넣음 — 로그인 API 를 아직 모를 때 잠깐 확인용
+   * none   토큰 없이 감시 (공개 페이지만)
+   *
+   * 비밀번호를 프런트에서 암호화해 보내는 포털이라면 (개발자도구 Payload 에
+   * `"password":"NjEzODQz…="` 처럼 찍히면) **그 암호문을 그대로 붙여넣으면 된다.**
+   * AES-CBC 는 복호화에 필요한 IV 를 암호문 앞에 동봉하므로, 캡처한 값을 다시 보내도
+   * 서버는 매번 같은 비밀번호로 복호화한다. 비밀번호를 바꾸기 전까지 계속 통한다.
+   *
+   * 없앤 방식 — 다시 만들지 말 것:
+   *   browser  앱 안에 로그인 창을 띄워 세션 쿠키를 읽는 방식. CONTRABASS 포털은 토큰이
+   *            만료되면 로그인 화면으로 떨어지며 쿠키를 통째로 지운다. 창 새로고침도,
+   *            재발급 API 를 창 안에서 호출하는 것도 새 토큰을 주지 않았다(HTTP 200, 토큰 불변).
+   *   refresh  refresh token 으로 재발급. 이 포털의 /token/verify/refresh 는 `{authenticated}`
+   *            만 답하고 토큰을 주지 않는다. 재발급 API 가 생기면 그때 다시 만든다.
+   */
+  mode: 'none' | 'token' | 'login'
+
+  /** mode='token' 일 때 직접 넣은 값 */
+  token?: string
+  /** mode='login' — 로그인 API 경로/본문 템플릿. 본문의 {{id}} {{pw}} 가 치환된다 */
+  loginPath?: string
+  loginBody?: string
+  username?: string
+  /** 저장 시 safeStorage 로 암호화된다 (평문으로 파일에 남지 않는다) */
+  password?: string
+
+  /** 응답에서 access token 을 꺼낼 위치. 예: "accessToken", "data.accessToken" */
+  tokenPath?: string
+  /** 토큰을 실을 헤더 이름과 형식 */
+  header?: string
+  headerFormat?: string
+  /** 같은 토큰을 쿠키로도 보내야 하는 포털이면 쿠키 이름 (예: accessToken) */
+  cookieName?: string
+  /**
+   * 토큰을 미리 다시 받아오는 주기(분). 0/빈값이면 만료를 겪은 뒤에만(401) 재발급한다.
+   *
+   * 401 자동 재발급만으로도 대개 충분하지만, 만료 직후의 한 주기가 '비정상' 으로 한 번
+   * 찍히면서 연속 성공 카운트가 초기화된다. 토큰 수명을 아는 포털이라면 그보다 짧게
+   * 잡아 두는 편이 측정이 깔끔하다. (예: 수명 10분 → 8)
+   */
+  reissueMinutes?: number
+  /**
+   * 응답 본문에 이 문구가 있으면 HTTP 상태와 무관하게 '토큰 만료'로 본다.
+   *
+   * 포털에 따라 토큰이 죽어도 HTTP 200 에 에러 봉투만 담아 주는 경우가 있다.
+   * 그러면 401 감지가 안 걸려 재발급이 영영 안 돌고, 전 구간이 비정상으로 남는다.
+   * 예: CONTRABASS 는 `{"status":"TOKEN_NOT_VERIFY","returnCode":604,…}` 를 준다.
+   */
+  expiredBodyMatch?: string
+}
+
+export interface PortalConfig {
+  /** 예: https://306ha.bf.okestro.cloud — 도메인이 바뀌면 여기만 고치면 된다 */
+  baseUrl: string
+  /** 사내 자체서명 인증서를 쓰는 포털이면 켠다 */
+  insecureTLS: boolean
+  auth: PortalAuth
+  intervalSec: number
+  timeoutMs: number
+  /**
+   * 몇 번 연속으로 정상이어야 '복구'로 인정할지.
+   * 1 로 두면 안 된다 — 페일오버 중에는 레플리카 한 대만 살아나 200 이 한 번 튀었다가
+   * 다시 503 이 되는 일이 흔하고, 그 첫 200 을 복구 시각으로 적으면 실제보다 이르다.
+   */
+  successStreak: number
+  targets: PortalTarget[]
+}
+
+/** main 프로세스가 실제 HTTP 요청을 하고 돌려주는 결과 */
+export interface PortalHttpResult {
+  ok: boolean
+  status?: number
+  /** 소문자 키로 정규화된 응답 헤더 */
+  headers?: Record<string, string>
+  body?: string
+  /** 요청 시작 → 본문 수신 완료까지 */
+  latencyMs?: number
+  /** X-Envoy-Upstream-Service-Time — istio 가 느린 건지 백엔드가 느린 건지 가른다 */
+  upstreamMs?: number
+  error?: string
+  timedOut?: boolean
 }

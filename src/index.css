@@ -30,3 +30,21 @@ body {
 *::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.28);
 }
+
+/* 드롭다운 펼침 목록(<option>)은 닫힌 상태와 달리 OS 기본 팔레트로 그려진다.
+   그래서 어두운 테마에서 밝은 회색 글씨가 밝은 회색 배경에 얹혀 거의 안 보였다.
+   앱 전체의 <select> 에 적용된다 — 이 문제는 포털 감시뿐 아니라 모든 드롭다운에 있었다. */
+select option,
+select optgroup {
+  background-color: #1e1e2e;
+  color: #e5e7eb;
+}
+select option:checked,
+select option:hover {
+  background-color: #2563eb;
+  color: #ffffff;
+}
+/* 비활성 항목은 확실히 흐리게 — 위 규칙 때문에 활성과 구분이 사라지지 않도록 */
+select option:disabled {
+  color: #6b7280;
+}

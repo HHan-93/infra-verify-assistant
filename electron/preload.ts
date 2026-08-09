@@ -17,6 +17,9 @@ import type {
   LogRetentionSettings,
   MetricSample,
   LogTailTarget,
+  ExpectRule,
+  PortalConfig,
+  PortalHttpResult,
 } from './shared-types'
 
 /** 활성 포트 포워딩 항목 (렌더러 표시용) */
@@ -360,6 +363,38 @@ const electronAPI = {
     ipcRenderer.on('logtail:closed', h)
     return () => ipcRenderer.removeListener('logtail:closed', h)
   },
+
+  // ── 시나리오 검증용 영속 셸 (cd/환경변수 유지 · 대화형 응답 · 타임아웃 시 Ctrl+C) ──
+  runnerOpen: (sessionId: string, runnerId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('runner:open', { sessionId, runnerId }),
+  runnerExec: (
+    runnerId: string,
+    cmd: string,
+    expect?: ExpectRule[],
+    timeoutMs?: number,
+    // ok:false 는 '셸이 닫혔다/이미 실행 중' 처럼 명령을 아예 못 돌린 경우 — 종료코드가 없다
+  ): Promise<{ ok: boolean; error?: string; code?: number; out?: string; timedOut?: boolean; replied?: string[] }> =>
+    ipcRenderer.invoke('runner:exec', { runnerId, cmd, expect, timeoutMs }),
+  runnerInterrupt: (runnerId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('runner:interrupt', { runnerId }),
+  runnerClose: (runnerId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('runner:close', { runnerId }),
+
+  // ── 서비스 포털 응답 감시 ──
+  // 요청 자체는 메인에서 한다(CORS·자체서명 인증서·응답 헤더 때문에 렌더러 fetch 로는 불가).
+  portalRequest: (p: {
+    url: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+    insecure?: boolean
+  }): Promise<PortalHttpResult> => ipcRenderer.invoke('portal:request', p),
+  portalGetConfig: (): Promise<PortalConfig | null> => ipcRenderer.invoke('portal:getConfig'),
+  portalSetConfig: (cfg: PortalConfig): Promise<{ ok: boolean }> => ipcRenderer.invoke('portal:setConfig', cfg),
+
+  // ── TCP 포트 열림 확인 (IPMI 재기동 후 SSH 부활 감시용) ──
+  netProbeTcp: (host: string, port: number, timeoutMs?: number): Promise<{ ok: boolean; open: boolean; error?: string }> =>
+    ipcRenderer.invoke('net:probeTcp', { host, port, timeoutMs }),
 
   // ── Kubernetes 파드 로그 탐색 (네임스페이스/파드/컨테이너 목록) ──
   k8sListNamespaces: (sessionId: string): Promise<{ ok: boolean; namespaces?: string[]; error?: string }> =>

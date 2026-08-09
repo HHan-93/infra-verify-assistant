@@ -337,6 +337,8 @@ export default function App() {
   )
 
   // 그리드(다중 세션) 셀 헤더용 — 여러 세션이 동시에 보일 땐 어떤 세션인지 구분되도록 "별칭 (IP)" 형태로 표시
+  // 세션별 '마지막으로 확인된 표시 이름' — 프로필 키가 유실돼도 이름이 "세션 N" 으로 퇴행하지 않게 한다
+  const lastLabelRef = useRef<Record<string, string>>({})
   const gridCellLabel = (t: TabInfo) => {
     if (t.custom) return t.title
     const host = statuses[t.id]?.host
@@ -344,6 +346,27 @@ export default function App() {
     const key = statuses[t.id]?.key
     const label = key ? profiles.find((p) => profileKey(p) === key)?.label?.trim() : undefined
     return label ? `${label} (${host})` : host
+  }
+
+  /**
+   * 상태보드처럼 '연결이 끊긴 뒤에도' 어떤 서버였는지 계속 보여야 하는 곳을 위한 라벨.
+   * gridCellLabel 은 statuses[].host 에 의존하는데 그 값은 끊기는 순간 지워져(onStatus 핸들러)
+   * "세션 3" 으로 되돌아간다 — 노드를 일부러 죽여놓고 보는 가용성 검증에서는 치명적이다.
+   * 끊겨도 남는 statuses[].key(프로필 키)로 저장 프로필을 직접 찾아 별칭을 유지한다.
+   */
+  const stableSessionLabel = (t: TabInfo) => {
+    if (t.custom) return t.title
+    const key = statuses[t.id]?.key
+    const p = key ? profiles.find((pp) => profileKey(pp) === key) : undefined
+    if (p) {
+      const label = p.label?.trim()
+      const nm = label ? `${label} (${p.host})` : p.host
+      lastLabelRef.current[t.id] = nm
+      return nm
+    }
+    // 프로필을 못 찾아도 "세션 N" 으로 되돌아가지 않는다 — 노드를 죽여놓고 보는 화면에서
+    // 이름이 바뀌면 어느 서버였는지 알 수가 없다. 마지막으로 확인된 이름을 계속 쓴다.
+    return lastLabelRef.current[t.id] ?? gridCellLabel(t)
   }
 
   // 저장된 세션 프로필 로드 (앱 시작 시 1회)
@@ -1582,8 +1605,8 @@ export default function App() {
           loggingIds={loggingSessions}
         />
 
-        {/* 빠른 연결 바 */}
-        <div className="flex items-center gap-2 border-b border-white/10 bg-panel-light px-3 py-1.5">
+        {/* 빠른 연결 바 — shrink-0: 터미널(flex-1, basis 0)이 줄지 않으므로 이 바가 눌리는 걸 막는다 */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 bg-panel-light px-3 py-1.5">
           <span className="text-[11px] text-gray-500">빠른 연결</span>
           <input
             value={quickInput}
@@ -1615,7 +1638,14 @@ export default function App() {
               status={statuses[t.id]?.status ?? 'idle'}
               profiles={profiles}
               onConnected={(p) => handleSessionConnected(t.id, p)}
-              onError={(msg) => setStatuses((m) => ({ ...m, [t.id]: { status: 'error', msg } }))}
+              onError={(msg) =>
+                setStatuses((m) => ({
+                  ...m,
+                  // key/host/since 를 통째로 덮어쓰면 안 된다 — 재부팅 대기 중 연결 시도가
+                  // 실패할 때마다 프로필 키가 지워져, 자동 재연결이 '어느 서버였는지' 를 잃는다.
+                  [t.id]: { ...m[t.id], status: 'error', msg },
+                }))
+              }
               onProfilesChanged={setProfiles}
             />
           </div>
@@ -1950,7 +1980,14 @@ export default function App() {
                       status={statuses[t.id]?.status ?? 'idle'}
                       profiles={profiles}
                       onConnected={(p) => handleSessionConnected(t.id, p)}
-                      onError={(msg) => setStatuses((m) => ({ ...m, [t.id]: { status: 'error', msg } }))}
+                      onError={(msg) =>
+                setStatuses((m) => ({
+                  ...m,
+                  // key/host/since 를 통째로 덮어쓰면 안 된다 — 재부팅 대기 중 연결 시도가
+                  // 실패할 때마다 프로필 키가 지워져, 자동 재연결이 '어느 서버였는지' 를 잃는다.
+                  [t.id]: { ...m[t.id], status: 'error', msg },
+                }))
+              }
                       onProfilesChanged={setProfiles}
                     />
                   </div>
@@ -1963,7 +2000,7 @@ export default function App() {
           const st = statuses[activeId]
           if (!st || st.status !== 'connected') {
             return activeMsg ? (
-              <div className="border-t border-white/10 bg-panel px-3 py-1 text-[11px] text-gray-400">
+              <div className="shrink-0 border-t border-white/10 bg-panel px-3 py-1 text-[11px] text-gray-400">
                 {activeMsg}
               </div>
             ) : null
@@ -1975,7 +2012,9 @@ export default function App() {
           const m = Math.floor((sec % 3600) / 60)
           const dur = h ? `${h}시간 ${m}분` : m ? `${m}분 ${sec % 60}초` : `${sec}초`
           return (
-            <div className="flex items-center gap-3 border-t border-white/10 bg-panel px-3 py-1 text-[11px] text-gray-400">
+            // shrink-0 필수 — 터미널 영역이 flex-1(basis 0)이라 공간이 부족하면 줄지 않고,
+            // 대신 basis auto 인 이 상태바가 눌려 글자가 아래쪽부터 잘려 보인다.
+            <div className="flex shrink-0 items-center gap-3 border-t border-white/10 bg-panel px-3 py-1 text-[11px] text-gray-400">
               <span className="flex items-center gap-1.5 text-green-300">
                 <Circle size={7} className="fill-current" /> 연결됨
               </span>
@@ -2158,7 +2197,12 @@ export default function App() {
           scenario={runnerScenario}
           sessions={tabs
             .filter((t) => statuses[t.id]?.status === 'connected')
-            .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
+            .map((t) => ({
+              id: t.id,
+              name: stableSessionLabel(t),
+              // 스텝/역할별 대상 지정을 다음에 열 때도 복원하려면 세션 id 가 아닌 안정 키가 필요하다
+              profileKey: statuses[t.id]?.key,
+            }))}
           defaultSessionId={activeId}
           onClose={() => setRunnerScenario(null)}
           onAnalyze={analyzeText}
@@ -2173,14 +2217,33 @@ export default function App() {
       {showStatusBoard && (
         <StatusBoard
           sessions={tabs.map((t) => ({
-            // 프로필 label 기반 "별칭 (IP)" (그리드 셀 라벨과 동일 규칙)
+            // 프로필 label 기반 "별칭 (IP)" — 노드를 죽여 연결이 끊겨도 별칭이 유지되는 라벨을 쓴다
             id: t.id,
-            name: gridCellLabel(t),
+            name: stableSessionLabel(t),
             connected: statuses[t.id]?.status === 'connected',
             // 역할 매핑 영속화용 안정 키 — 연결이 끊겨도 statuses[].key 는 유지된다
             profileKey: statuses[t.id]?.key,
           }))}
           onClose={() => setShowStatusBoard(false)}
+          /* IPMI 로 전원을 올린 노드의 22번이 열리면 상태보드가 이 콜백으로 재연결을 요청한다.
+             앱 기본 자동 재연결은 약 41초 만에 포기하므로(부팅은 보통 수 분) 여기서 다시 태운다. */
+          onReconnect={(id) => {
+            if (statuses[id]?.status === 'connected' || statuses[id]?.status === 'connecting') return
+            // 사용자가 방금 직접 끊은 세션은 되살리지 않는다 (자동 재연결과 동일 규칙)
+            if (manualClosingRef.current.has(id)) return
+            const key = statuses[id]?.key
+            const p = key ? profilesRef.current.find((pp) => profileKey(pp) === key) : undefined
+            if (!p) return
+            // 남아있던 백오프 타이머를 걷어내고(중복 연결 방지) 지연 연결 큐에 넣는다
+            const rc = reconnectRef.current
+            if (rc.timers[id]) {
+              clearTimeout(rc.timers[id])
+              delete rc.timers[id]
+            }
+            rc.attempts[id] = 0
+            terminalRefs.current[id]?.writeNotice('노드 SSH 포트가 다시 열렸습니다 — 재연결합니다.')
+            setPendingConnects((prev) => (prev.some((pc) => pc.id === id) ? prev : [...prev, { id, p }]))
+          }}
         />
       )}
 

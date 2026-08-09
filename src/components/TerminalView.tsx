@@ -84,13 +84,18 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>((props, ref) 
   const searchAddonRef = useRef<SearchAddon | null>(null)
 
   // 레이아웃이 안정된 다음 프레임에 fit (높이/너비 변경 직후 호출용)
+  // 두 프레임을 기다린다 — 글꼴 크기가 바뀌면 xterm 이 문자 크기를 '렌더 후'에 다시 재는데,
+  // 한 프레임만 기다리면 옛 셀 높이로 rows 를 계산해 서버에 실제보다 많은 줄 수를 알린다.
+  // 그러면 vi(kubectl edit 등) 전체화면 앱이 화면 아래로 넘겨 그려서 하단이 잘려 보인다.
   const safeFit = () => {
     requestAnimationFrame(() => {
-      try {
-        fitAddonRef.current?.fit()
-      } catch {
-        /* 컨테이너가 아직 0 크기일 때 무시 */
-      }
+      requestAnimationFrame(() => {
+        try {
+          fitAddonRef.current?.fit()
+        } catch {
+          /* 컨테이너가 아직 0 크기일 때 무시 */
+        }
+      })
     })
   }
 

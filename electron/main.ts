@@ -20,6 +20,7 @@ import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
 import { AGENT_SCRIPT } from './agent-script'
+import { portalRequest } from './portal-http'
 import {
   PROVIDER_INFO,
   ANALYSIS_STYLES,
@@ -37,6 +38,9 @@ import {
   type LogIndexEntry,
   type LogRetentionSettings,
   type LogTailTarget,
+  type ExpectRule,
+  type PortalConfig,
+  type PortalHttpResult,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -2517,6 +2521,421 @@ function execCapture(
   })
 }
 
+// ── 시나리오 검증용 영속 셸 (Runner Shell) ───────────────────────
+/**
+ * 시나리오 검증 러너 전용, '유지되는' 셸 채널.
+ *
+ * 왜 필요한가 — 기존에는 스텝마다 exec 채널을 새로 열었는데, 그 방식은 세 가지가 동시에 깨진다.
+ *   1) `cd` 가 다음 스텝에 안 남는다 (정규식으로 cd 를 긁어 앞에 붙이는 땜질을 하고 있었고,
+ *      파이프라인이나 서브셸이 섞이면 그 추출이 틀린다)
+ *   2) export 한 환경변수도 안 남는다
+ *   3) sudo 비밀번호·y/n 같은 대화형 프롬프트에 답할 수단이 없다
+ *   4) 타임아웃 시 클라이언트만 손을 떼서, 원격에는 stress-ng/iperf3 가 좀비로 남는다
+ *
+ * 해결 — 검증 시작 시 PTY 셸을 하나 열어두고 명령을 순차로 밀어 넣는다.
+ *   · cd/환경변수가 자연히 유지된다
+ *   · 프롬프트가 뜨면 expect 규칙으로 응답을 써 넣을 수 있다
+ *   · 타임아웃 시 Ctrl+C(0x03) 를 보내면 PTY 가 포그라운드 프로세스 그룹에 진짜 SIGINT 를 준다
+ *
+ * 종료 코드는 어떻게 아는가 — 셸에 밀어 넣는 방식은 exec 와 달리 exit status 를 안 준다.
+ * 그래서 명령 뒤에 `printf '<마커>:%d:' "$?"` 를 붙여 출력에서 되읽는다(센티넬).
+ * 마커에는 실행마다 다른 난수를 넣어, 사용자 명령이 우연히 같은 문자열을 출력해도 겹치지 않게 한다.
+ */
+interface RunnerShell {
+  stream: ClientChannel
+  /** 이 러너의 고유 마커 토큰 */
+  token: string
+  /** 아직 소비되지 않은 출력 버퍼 */
+  buf: string
+  /** 현재 실행 중인 명령의 대기자 (없으면 유휴) */
+  waiter?: {
+    marker: string
+    /** dead 가 채워지면 '명령의 종료코드' 가 아니라 '셸이 죽었다'는 뜻이다 */
+    resolve: (r: { code: number; out: string; dead?: string }) => void
+    /** 이미 발동한 expect 규칙 인덱스 (프롬프트 반복 시 중복 응답 방지) */
+    fired: Set<number>
+    expect: ExpectRule[]
+    /** 자동응답으로 실제 보낸 내용 요약 (리포트 표시용) */
+    replied: string[]
+    /** sudo 비밀번호를 이미 보냈는지 (반복 전송 방지) */
+    sudoSent?: boolean
+    /** 응답 없는 대화형 프롬프트를 감지해 걸어둔 타이머 */
+    stuckTimer?: ReturnType<typeof setTimeout>
+  }
+  /** 이 세션의 로그인 비밀번호 — sudo 프롬프트 자동 응답에만 쓰고 렌더러로는 절대 내보내지 않는다 */
+  password?: string
+  decoder: StringDecoder
+  closed: boolean
+}
+
+/**
+ * 입력을 기다리는 대화형 프롬프트 패턴 (출력 '끝' 에 있을 때만 의미가 있다).
+ * 이걸 못 알아채면 셸이 조용히 45초를 기다렸다가 "응답 시간 초과" 로 끝나서,
+ * 사용자는 명령이 틀린 줄 알고 엉뚱한 데를 뒤지게 된다.
+ */
+const SUDO_PROMPT_RE = /\[sudo\] password for [^\n:]*:\s*$|^password( for [^\n:]*)?:\s*$/im
+const ANY_PROMPT_RE =
+  /(\[sudo\] password for [^\n:]*:|password( for [^\n:]*)?:|passphrase[^\n:]*:|\[y\/n\]|\[Y\/n\]|\(yes\/no[^)]*\)|Do you want to continue\?|Are you sure[^\n]*\?)\s*$/i
+/** 프롬프트를 감지한 뒤 아무도 답하지 않으면 이만큼 기다렸다가 포기한다 */
+const PROMPT_STUCK_MS = 2500
+const runnerShells = new Map<string, RunnerShell>() // runnerId → shell
+/** 한 명령의 출력 버퍼 상한 — 넘으면 앞부분을 버린다(센티넬은 끝에 오므로 판정에 지장 없음) */
+const RUNNER_BUF_MAX = 4 * 1024 * 1024
+const RUNNER_BUF_KEEP = 2 * 1024 * 1024
+
+/** PTY 가 섞어 넣는 ANSI/커서 제어 시퀀스 제거 (센티넬 매칭과 출력 가독성 확보) */
+// eslint-disable-next-line no-control-regex
+const CTRL_SEQ_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-B]|[\x00\x07\x08\x0b\x0c\x0e\x0f]/g
+const stripCtrl = (s: string) => s.replace(CTRL_SEQ_RE, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+
+/** 러너 셸 열기 — PTY 셸을 띄우고 프롬프트/에코를 끈 뒤 준비될 때까지 기다린다 */
+function openRunnerShell(
+  client: Client,
+  runnerId: string,
+  password?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    // 넓은 창 — 폭이 좁으면 셸이 긴 명령줄을 접어 출력에 섞어 넣는다
+    client.shell({ term: 'dumb', rows: 200, cols: 512 }, (err, stream) => {
+      if (err) return resolve({ ok: false, error: err.message })
+      const token = randomUUID().replace(/-/g, '').slice(0, 12)
+      const sh: RunnerShell = { stream, token, buf: '', decoder: new StringDecoder('utf8'), closed: false, password }
+      runnerShells.set(runnerId, sh)
+
+      const onChunk = (d: Buffer) => {
+        sh.buf += sh.decoder.write(d)
+        // 출력이 아주 큰 명령(대용량 로그 tail 등)에서 버퍼가 무한히 커지지 않게 앞쪽을 잘라낸다.
+        // 센티넬은 항상 끝에 오므로 앞을 버려도 종료코드 판정에는 영향이 없다.
+        if (sh.buf.length > RUNNER_BUF_MAX) {
+          sh.buf = '…(앞부분 생략)\n' + sh.buf.slice(-RUNNER_BUF_KEEP)
+        }
+        pumpRunner(sh)
+      }
+      stream.on('data', onChunk)
+      // PTY 셸은 stderr 도 같은 스트림으로 오지만, 서버 설정에 따라 분리될 수 있어 둘 다 받는다
+      stream.stderr?.on('data', onChunk)
+      const finish = () => {
+        sh.closed = true
+        // 대기 중인 명령이 있으면 실패로 깨워 러너가 영영 멈추지 않게 한다.
+        // 이건 명령이 255 로 끝난 게 아니라 '중간에 연결이 끊긴' 것이므로 dead 로 구분한다 —
+        // 노드를 재부팅하는 스텝에서 늘 일어나는 일이고, 종료코드로 위장하면 '검증 실패' 로 찍힌다.
+        sh.waiter?.resolve({
+          code: 255,
+          out: sh.buf,
+          dead: '명령 실행 중 세션 연결이 끊겼습니다 (노드 재부팅/네트워크 단절).',
+        })
+        sh.waiter = undefined
+        // 이 셸이 아직 그 id 의 '현역'일 때만 지운다.
+        // 재시작(runner:open)은 옛 셸에 exit 를 보내고 곧바로 새 셸을 같은 id 로 등록하는데,
+        // 옛 셸의 close 이벤트는 그 뒤에 도착한다. 무조건 delete 하면 **방금 연 새 셸**이
+        // 맵에서 사라져, 2회차 전체 실행이 전부 "검증용 셸이 닫혔습니다" 로 죽는다.
+        if (runnerShells.get(runnerId) === sh) runnerShells.delete(runnerId)
+      }
+      stream.on('close', finish)
+      stream.on('error', finish)
+
+      // 프롬프트/에코/색상을 없애 출력에 잡음이 안 섞이게 한다.
+      //  - stty -echo: 우리가 써 넣은 명령이 그대로 되돌아오는 것을 막음(센티넬 오탐 방지)
+      //  - PS1/PROMPT_COMMAND 제거: 프롬프트 문자열이 출력에 끼는 것 방지
+      //  - PS2 도 반드시 비운다: 명령을 `{ …여러 줄… } ; printf` 한 덩어리로 보내기 때문에 셸이
+      //    닫는 `}` 를 기다리며 계속 프롬프트("> ")를 찍는다. 그게 매 스텝 출력 맨 앞에
+      //    "> > " 로 섞여 나온다(사용자가 실제 화면에서 발견).
+      stream.write(
+        `PS1=''; PS2=''; PS3=''; PS4=''; PROMPT_COMMAND=''; unset LS_COLORS; stty -echo 2>/dev/null; export TERM=dumb\n`,
+      )
+      // 준비 완료를 센티넬로 확인 — 여기서 센티넬이 안 돌아오면 이 셸로는 종료코드를 읽을 수 없다.
+      // (POSIX 가 아닌 셸, printf 없음, 프롬프트 억제 실패 등) 그런 셸을 ok 로 넘기면 이후 모든
+      // 스텝이 45초씩 타임아웃되므로, 여기서 실패로 처리해 exec 호환 모드로 떨어뜨린다.
+      runnerExec(runnerId, 'true', [], 15000)
+        .then((r) => {
+          if (r.timedOut) {
+            closeRunnerShell(runnerId)
+            return resolve({ ok: false, error: '셸이 응답하지 않습니다(종료코드 확인 실패).' })
+          }
+          if (r.code === 255) {
+            closeRunnerShell(runnerId)
+            return resolve({ ok: false, error: '셸이 즉시 종료되었습니다.' })
+          }
+          resolve({ ok: true })
+        })
+        .catch((e) => {
+          closeRunnerShell(runnerId)
+          resolve({ ok: false, error: e instanceof Error ? e.message : String(e) })
+        })
+    })
+  })
+}
+
+/** 버퍼를 훑어 (1) expect 자동응답, (2) 센티넬 도착 여부를 처리 */
+function pumpRunner(sh: RunnerShell): void {
+  const w = sh.waiter
+  if (!w) return
+  const clean = stripCtrl(sh.buf)
+
+  // 1) 대화형 프롬프트 자동 응답 — 아직 안 쓴 규칙만, 한 번씩
+  w.expect.forEach((rule, i) => {
+    if (w.fired.has(i) || !rule.match) return
+    let re: RegExp
+    try {
+      re = new RegExp(rule.match, 'i')
+    } catch {
+      w.fired.add(i) // 잘못된 정규식은 조용히 건너뛴다(매 청크마다 예외가 나지 않도록)
+      return
+    }
+    if (!re.test(clean)) return
+    w.fired.add(i)
+    w.replied.push(`${rule.match} → ${rule.secret ? '••••••' : rule.send}`)
+    sh.stream.write(rule.send + '\n')
+  })
+
+  // 2) 센티넬 도착 확인 — `<marker>:<코드>:`
+  const m = clean.match(new RegExp(`${w.marker}:(-?\\d+):`))
+  if (m) {
+    if (w.stuckTimer) clearTimeout(w.stuckTimer)
+    const out = clean.slice(0, m.index).replace(/\n+$/, '')
+    sh.buf = ''
+    sh.waiter = undefined
+    w.resolve({ code: parseInt(m[1], 10), out })
+    return
+  }
+
+  // 3) 아직 센티넬이 안 왔다 — 입력을 기다리는 프롬프트에 걸린 건 아닌지 확인한다.
+  //    (프롬프트는 개행 없이 줄 끝에 머무르므로 '버퍼 끝' 기준으로 본다)
+  const tail = clean.slice(-300)
+
+  // sudo 비밀번호는 이 세션에 로그인할 때 쓴 그 비밀번호로 자동 응답한다.
+  // 같은 호스트에 같은 계정으로 보내는 것이라 새로 노출되는 정보가 없고,
+  // 이게 없으면 sudo 가 들어간 스텝은 전부 타임아웃으로 죽는다.
+  if (!w.sudoSent && sh.password && SUDO_PROMPT_RE.test(tail)) {
+    w.sudoSent = true
+    w.replied.push('[sudo] password → ••••••')
+    sh.stream.write(sh.password + '\n')
+    if (w.stuckTimer) {
+      clearTimeout(w.stuckTimer)
+      w.stuckTimer = undefined
+    }
+    return
+  }
+
+  if (ANY_PROMPT_RE.test(tail)) {
+    // 아무도 답하지 않는 프롬프트 — 잠깐 기다렸다가 확실해지면 명확한 메시지로 끝낸다.
+    // 45초 타임아웃까지 끌면 사용자는 "명령이 잘못됐나" 하고 엉뚱한 데를 뒤지게 된다.
+    if (w.stuckTimer) return
+    w.stuckTimer = setTimeout(() => {
+      if (sh.waiter !== w) return
+      const prompt = (stripCtrl(sh.buf).match(ANY_PROMPT_RE)?.[0] ?? '').trim()
+      try {
+        sh.stream.write('\x03') // 프롬프트에서 빠져나오기
+      } catch {
+        /* 이미 닫힘 */
+      }
+      const body = stripCtrl(sh.buf).replace(/\n+$/, '')
+      sh.buf = ''
+      sh.waiter = undefined
+      w.resolve({
+        code: 253,
+        out: `${body}\n\n[입력 대기 상태로 멈춰 있어 중단했습니다 — 프롬프트: "${prompt}"]`,
+      })
+    }, PROMPT_STUCK_MS)
+    return
+  }
+
+  // 프롬프트가 사라졌으면(출력이 더 나왔으면) 걸어둔 타이머는 취소
+  if (w.stuckTimer) {
+    clearTimeout(w.stuckTimer)
+    w.stuckTimer = undefined
+  }
+}
+
+/**
+ * 러너 셸에서 명령 하나 실행.
+ * 타임아웃 시 Ctrl+C 를 보내 원격 프로세스를 실제로 중단시킨다(좀비 방지) — 이게 exec 방식과의 결정적 차이.
+ */
+async function runnerExec(
+  runnerId: string,
+  cmd: string,
+  expect: ExpectRule[],
+  timeoutMs: number,
+): Promise<{ code: number; out: string; timedOut?: boolean; replied: string[]; dead?: string }> {
+  const sh = runnerShells.get(runnerId)
+  // '셸이 죽었다' 는 명령의 실행 결과가 아니다. 종료코드처럼 돌려주면 렌더러가 이를 정상 실행으로
+  // 보고 "종료 코드 255 → 실패" 로 판정해버린다. 노드를 재부팅하는 시나리오에서는 반드시 일어나는
+  // 상황이라, 이후 모든 스텝이 '검증 실패' 로 찍혀 리포트를 통째로 못 믿게 된다. 별도 신호로 구분한다.
+  if (!sh || sh.closed)
+    return { code: 255, out: '', replied: [], dead: '검증용 셸이 닫혔습니다 — 세션 연결이 끊겼을 수 있습니다.' }
+  if (sh.waiter) return { code: 255, out: '', replied: [], dead: '이 세션에서 이전 명령이 아직 실행 중입니다.' }
+
+  const seq = Math.floor(Math.random() * 1e9)
+  const marker = `__QT_${sh.token}_${seq}__`
+  sh.buf = ''
+
+  // 자동응답 기록은 waiter 가 비워진 뒤에도 읽어야 하므로 바깥에 붙잡아 둔다
+  const replied: string[] = []
+  const result = await new Promise<{ code: number; out: string; timedOut?: boolean; dead?: string }>((resolve) => {
+    const w = { marker, resolve, fired: new Set<number>(), expect, replied }
+    sh.waiter = w
+    /**
+     * 타임아웃이 발동해 Ctrl+C 를 보냈는지.
+     *
+     * 이걸 안 들고 있으면 아주 잘못된 결과가 나온다 — htop 처럼 SIGINT 를 받고 **0 으로**
+     * 곱게 끝나는 명령은, Ctrl+C 직후 센티넬이 돌아오면서 "종료 코드 0 · 정상 실행" 으로
+     * 기록된다. 45초를 붙잡고 있다가 강제로 끊긴 것을 성공이라고 말하는 셈이다.
+     */
+    let interrupted = false
+    const timer = setTimeout(() => {
+      if (sh.waiter !== w) return
+      interrupted = true
+      // Ctrl+C → PTY 가 포그라운드 프로세스 그룹에 SIGINT. 그 뒤 센티넬이 오면 정상 회수된다.
+      try {
+        sh.stream.write('\x03')
+      } catch {
+        /* 채널이 이미 죽었으면 무시 */
+      }
+      // SIGINT 로도 안 죽는 명령이 있으므로 잠깐 더 기다렸다가 강제로 깬다
+      setTimeout(() => {
+        if (sh.waiter !== w) return
+        sh.waiter = undefined
+        resolve({ code: 254, out: stripCtrl(sh.buf), timedOut: true })
+      }, 2000)
+    }, timeoutMs)
+    // resolve 를 감싸 타이머 정리. 중단시킨 뒤에 돌아온 결과는 종료코드가 0 이더라도
+    // '시간 초과로 끊은 것' 으로 표시한다 — 그 사실이 결과 해석의 전제다.
+    w.resolve = (r) => {
+      clearTimeout(timer)
+      resolve(interrupted ? { ...r, timedOut: true } : r)
+    }
+    /**
+     * 명령과 종료코드 센티넬을 `{ ... } ; printf` 한 덩어리로 보낸다.
+     *
+     * 예전에는 명령 줄과 printf 줄을 따로 보냈는데, 그러면 **stdin 을 읽는 명령이
+     * printf 줄을 자기 입력으로 먹어버린다.** sudo 비밀번호 프롬프트가 대표적이다 —
+     * 비밀번호 대신 printf 문장이 들어가고, 센티넬은 영영 실행되지 않아 45초 타임아웃이 난다.
+     *
+     * 중괄호 그룹은 셸이 닫는 `}` 까지 **다 읽은 뒤에** 실행하므로, 명령이 도는 시점에는
+     * 입력 버퍼가 비어 있어 프롬프트가 정상적으로 사용자(=우리 자동응답)를 기다린다.
+     * 서브셸이 아니라서 cd/export 가 다음 스텝까지 그대로 유지되는 것도 그대로다.
+     */
+    sh.stream.write(`{\n${cmd}\n} ; printf '\\n${marker}:%d:\\n' "$?"\n`)
+  })
+
+  return { ...result, replied }
+}
+
+function closeRunnerShell(runnerId: string): void {
+  const sh = runnerShells.get(runnerId)
+  if (!sh) return
+  sh.closed = true
+  try {
+    sh.stream.write('\x03')
+    sh.stream.end('exit\n')
+  } catch {
+    /* 이미 닫힘 */
+  }
+  runnerShells.delete(runnerId)
+}
+
+ipcMain.handle('runner:open', async (_evt, { sessionId, runnerId }: { sessionId: string; runnerId: string }) => {
+  const s = getSession(sessionId)
+  if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
+  closeRunnerShell(runnerId) // 재시작 시 이전 셸 정리
+  // sudo 프롬프트 자동 응답에 쓸 로그인 비밀번호를 셸에 붙여둔다(렌더러로는 나가지 않는다)
+  return await openRunnerShell(s.client, runnerId, s.lastConfig?.password)
+})
+
+ipcMain.handle(
+  'runner:exec',
+  async (
+    _evt,
+    { runnerId, cmd, expect, timeoutMs }: { runnerId: string; cmd: string; expect?: ExpectRule[]; timeoutMs?: number },
+  ) => {
+    const r = await runnerExec(runnerId, cmd, expect ?? [], Math.min(Math.max(timeoutMs ?? 45000, 1000), 600000))
+    // 셸 자체가 없거나 죽은 경우는 '실행 실패' 로 올린다 — 명령의 종료코드로 위장하면 안 된다
+    if (r.dead) return { ok: false, error: r.dead }
+    return { ok: true, ...r }
+  },
+)
+
+ipcMain.handle('runner:interrupt', async (_evt, { runnerId }: { runnerId: string }) => {
+  const sh = runnerShells.get(runnerId)
+  if (!sh || sh.closed) return { ok: false, error: '셸이 열려 있지 않습니다.' }
+  try {
+    sh.stream.write('\x03')
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('runner:close', async (_evt, { runnerId }: { runnerId: string }) => {
+  closeRunnerShell(runnerId)
+  return { ok: true }
+})
+
+// ─────────────────────────────────────────────────────────────
+// 서비스 포털 응답 감시 — HTTP 요청은 **메인 프로세스**에서 한다.
+// (요청 함수 자체는 electron 비의존 모듈로 분리해 따로 검증한다 — portal-http.ts)
+// ─────────────────────────────────────────────────────────────
+
+ipcMain.handle(
+  'portal:request',
+  async (
+    _evt,
+    p: { url: string; method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; insecure?: boolean },
+  ): Promise<PortalHttpResult> => {
+    try {
+      return await portalRequest({
+        url: p.url,
+        method: p.method ?? 'GET',
+        headers: p.headers ?? {},
+        body: p.body,
+        timeoutMs: Math.min(Math.max(p.timeoutMs ?? 10000, 1000), 120000),
+        insecure: !!p.insecure,
+      })
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+)
+
+// ── 포털 감시 설정 저장 ────────────────────────────────────────
+// 비밀번호가 들어가므로 SSH 프로필과 같은 규칙을 그대로 따른다:
+// safeStorage 로 암호화 + 파일 락 + 원자적 쓰기.
+const portalCfgPath = () => path.join(app.getPath('userData'), 'portal-watch.dat')
+
+ipcMain.handle('portal:getConfig', async (): Promise<PortalConfig | null> => {
+  return withStoreLock('portal', async () => {
+    let raw: string
+    try {
+      raw = await readFile(portalCfgPath(), 'utf-8')
+    } catch {
+      return null // 아직 설정한 적 없음
+    }
+    const dec = decryptStr(raw)
+    if (dec === null) return null
+    try {
+      return JSON.parse(dec) as PortalConfig
+    } catch {
+      // 파일은 있는데 못 읽는 경우 — null 을 주면 렌더러가 기본값을 저장해 덮어쓸 수 있으므로
+      // 여기서는 던져서 '읽기 실패' 를 분명히 알린다.
+      throw new Error('포털 감시 설정 파일을 읽을 수 없습니다 (손상 가능성).')
+    }
+  })
+})
+
+ipcMain.handle('portal:setConfig', async (_evt, cfg: PortalConfig) => {
+  return withStoreLock('portal', async () => {
+    await writeFileAtomic(portalCfgPath(), encryptStr(JSON.stringify(cfg)))
+    return { ok: true }
+  })
+})
+
+// ── 포털 로그인 창(삭제됨) ─────────────────────────
+//
+// 앞서는 앱 안에 브라우저 창을 띄워 포털에 로그인하고 그 세션 쿠키를 토큰으로 썼다.
+// CONTRABASS 포털은 토큰이 만료되면 로그인 화면으로 떨어지며 쿠키를 통째로 지워서,
+// 창 새로고침도 재발급 API 호출도 새 토큰을 주지 않았다(HTTP 200, 토큰 불변). 11분이면 죽는다.
+// 지금은 아이디/비밀번호 로그인(portal:request 로 로그인 API 호출)만 쓴다.
+
 /** SFTP 직접 읽기 (Promise). 사용 후 반드시 sftp.end() 로 채널 반납(누수 방지) */
 function sftpReadDirect(
   client: Client,
@@ -2857,6 +3276,44 @@ ipcMain.handle('logtail:stop', async (_evt, { sessionId, tailId }: { sessionId: 
   }
   return { ok: true }
 })
+
+// ── TCP 포트 열림 확인 ────────────────────────────────────────
+/**
+ * 지정 host:port 로 TCP 연결만 시도해보고 즉시 끊는다(가용성 검증 상태보드 전용).
+ *
+ * 용도: IPMI 로 전원을 내린 노드를 다시 올렸을 때 SSH(22) 가 살아났는지 감시.
+ * 살아있는 다른 노드에서 `nc` 를 돌리는 방법도 있지만, '죽은 노드를 감시하려고
+ * 멀쩡한 노드에 명령을 쏘는' 구조가 되어 검증 대상에 영향을 준다. PC 에서 직접 확인한다.
+ *
+ * 연결에 성공해도 아무 데이터도 주고받지 않고 바로 destroy 하므로 부작용이 없다.
+ */
+ipcMain.handle(
+  'net:probeTcp',
+  async (_evt, { host, port, timeoutMs }: { host: string; port: number; timeoutMs?: number }) => {
+    if (!host || !Number.isFinite(port)) return { ok: false, open: false, error: '주소가 올바르지 않습니다.' }
+    const limit = Math.min(Math.max(timeoutMs ?? 3000, 500), 15000)
+    const open = await new Promise<boolean>((resolve) => {
+      const sock = new net.Socket()
+      let settled = false
+      const finish = (v: boolean) => {
+        if (settled) return
+        settled = true
+        sock.destroy()
+        resolve(v)
+      }
+      sock.setTimeout(limit)
+      sock.once('connect', () => finish(true))
+      sock.once('timeout', () => finish(false))
+      sock.once('error', () => finish(false))
+      try {
+        sock.connect(port, host)
+      } catch {
+        finish(false)
+      }
+    })
+    return { ok: true, open }
+  },
+)
 
 // ── Kubernetes 파드 로그용 탐색 (네임스페이스/파드/컨테이너 목록) ──────
 // kubectl 이 없거나 클러스터 접근 권한이 없으면 kubectl 자체 에러 메시지를 그대로 보여준다.

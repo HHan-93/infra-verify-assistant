@@ -9,6 +9,7 @@ import {
   ClipboardCheck,
   Search,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   AlertTriangle,
   Plus,
@@ -16,17 +17,30 @@ import {
   Trash2,
 } from 'lucide-react'
 import { SCENARIOS, type Scenario, type ScenarioStep } from '../scenarios'
-import type { CustomScenario, CustomScenarioStep } from '../../electron/shared-types'
+import type {
+  CustomScenario,
+  CustomScenarioStep,
+  CaptureRule,
+  ExpectRule,
+  OnFailureAction,
+} from '../../electron/shared-types'
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
+import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 
 interface ScenarioPanelProps {
   connected: boolean
   onRun: (cmd: string, execute: boolean) => void
   onClose: () => void
   /** 시나리오를 검증 러너로 실행 (순차 실행 + 자동 판정 + 리포트) */
-  onRunScenario?: (scenario: { title: string; summary: string; steps: ScenarioStep[] }) => void
+  onRunScenario?: (scenario: {
+    title: string
+    summary: string
+    steps: ScenarioStep[]
+    /** 입력값 ← 역할 주소 자동 채움 규칙 (러너가 역할 매핑에서 값을 끌어온다) */
+    roleValues?: Record<string, string>
+  }) => void
 }
 
 /**
@@ -35,22 +49,7 @@ interface ScenarioPanelProps {
  */
 type PanelScenario = Scenario & { custom?: boolean; order: number }
 
-// [^<>\n]: heredoc(<< 'EOF')의 << 를 placeholder 시작으로 오인하지 않도록 중첩 < 와 개행을 제외
-const PLACEHOLDER_RE = /<([^<>\n]+)>/g
-const hasPlaceholder = (cmd: string) => /<[^<>\n]+>/.test(cmd)
-
-/** 명령어에서 <플레이스홀더> 목록을 등장 순서대로 중복 없이 추출 */
-const extractPlaceholders = (cmd: string): string[] => {
-  const found: string[] = []
-  for (const m of cmd.matchAll(PLACEHOLDER_RE)) {
-    if (!found.includes(m[1])) found.push(m[1])
-  }
-  return found
-}
-
-/** 명령어의 모든 <플레이스홀더>를 입력값으로 치환 */
-const fillPlaceholders = (cmd: string, values: Record<string, string>) =>
-  cmd.replace(PLACEHOLDER_RE, (full, key) => values[key]?.trim() || full)
+// 자리표시자 규칙은 검증 러너·프리셋과 하나로 쓴다 (src/lib/placeholder.ts)
 
 /** 여러 줄 명령어(heredoc 등)는 배지에 첫 줄만 요약 표시 — 전체를 넣으면 truncate가 깨져 패널이 가로로 늘어남 */
 const commandPreview = (cmd: string) => {
@@ -117,6 +116,43 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
     setCustomScenarios(list)
     setSelectedId(item.id || list[list.length - 1]?.id)
     setEditing(null)
+  }
+  /**
+   * 시나리오 복제 — 내장 시나리오는 자동 생성 파일이라 편집할 수 없다.
+   * 판정 기준·원복 명령 같은 검증 옵션을 붙이려면 사용자 정의로 한 벌 떠서 고쳐야 한다.
+   */
+  const duplicateScenario = async (src: PanelScenario) => {
+    const copy: CustomScenario = {
+      id: '', // 메인에서 새로 발급
+      solution: src.solution,
+      title: `${src.title} (복사본)`,
+      summary: src.summary,
+      steps: src.steps.map((st) => ({
+        title: st.title,
+        command: st.command,
+        desc: st.desc,
+        note: st.note,
+        info: st.info,
+        warn: st.warn,
+        code: st.code,
+        check: st.check,
+        target: st.target,
+        capture: st.capture,
+        expect: st.expect,
+        onFailure: st.onFailure,
+        onFailureCommand: st.onFailureCommand,
+        undo: st.undo,
+      })),
+      roleValues: src.roleValues,
+      order: computeAppendOrder(siblingsOf(src.solution)),
+    }
+    const list = await window.electronAPI.customScenariosUpsert(copy)
+    setCustomScenarios(list)
+    const added = list[list.length - 1]
+    if (added) {
+      setSelectedId(added.id)
+      setEditing({ ...added, custom: true, order: added.order ?? Date.now() })
+    }
   }
   const deleteCustomScenario = async (id: string) => {
     const list = await window.electronAPI.customScenariosDelete(id)
@@ -462,7 +498,12 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
             {onRunScenario && (
               <button
                 onClick={() =>
-                  onRunScenario({ title: scenario.title, summary: scenario.summary, steps: scenario.steps })
+                  onRunScenario({
+                    title: scenario.title,
+                    summary: scenario.summary,
+                    steps: scenario.steps,
+                    roleValues: scenario.roleValues,
+                  })
                 }
                 disabled={!connected}
                 title={connected ? '시나리오를 순차 실행하고 결과를 자동 판정' : 'SSH 연결 필요'}
@@ -471,6 +512,17 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                 <ClipboardCheck size={13} /> 검증 실행
               </button>
             )}
+            <button
+              onClick={() => duplicateScenario(scenario)}
+              title={
+                scenario.custom
+                  ? '이 시나리오를 복사해 새로 만듭니다'
+                  : '내장 시나리오는 수정할 수 없습니다 — 복사본을 만들면 판정 기준·원복 명령을 넣을 수 있습니다'
+              }
+              className="shrink-0 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+            >
+              <Copy size={14} />
+            </button>
             {scenario.custom && (
               <div className="flex shrink-0 items-center gap-1">
                 <button
@@ -698,6 +750,19 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
 }
 
 const emptyStep = (): CustomScenarioStep => ({ title: '', command: '', desc: '' })
+/** "a, b , c" → ["a","b","c"] (빈 항목 제거) */
+const splitCsv = (v: string): string[] => v.split(',').map((x) => x.trim()).filter(Boolean)
+/** 판정 기준이 하나라도 채워져 있는지 — 비어 있으면 저장하지 않는다(빈 객체가 남지 않게) */
+const cleanCheck = (c?: CustomScenarioStep['check']): CustomScenarioStep['check'] => {
+  if (!c) return undefined
+  const out = {
+    ...(c.passContains?.length ? { passContains: c.passContains } : {}),
+    ...(c.failContains?.length ? { failContains: c.failContains } : {}),
+    ...(c.passRegex?.trim() ? { passRegex: c.passRegex.trim() } : {}),
+    ...(c.requireExitZero ? { requireExitZero: true } : {}),
+  }
+  return Object.keys(out).length ? out : undefined
+}
 
 // ── 사용자 정의 시나리오 추가/편집 모달 ───────────────────────
 function ScenarioEditorModal({
@@ -727,6 +792,30 @@ function ScenarioEditorModal({
     setSteps((arr) => arr.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
   const addStep = () => setSteps((arr) => [...arr, emptyStep()])
   const removeStep = (i: number) => setSteps((arr) => arr.filter((_, idx) => idx !== i))
+  // 고급 설정(대상 역할·값 추출·자동 응답·실패 시 동작)은 접어둔다 — 대부분의 단계는 안 쓴다
+  const [advOpen, setAdvOpen] = useState<Set<number>>(new Set())
+  const toggleAdv = (i: number) =>
+    setAdvOpen((s) => {
+      const n = new Set(s)
+      if (n.has(i)) n.delete(i)
+      else n.add(i)
+      return n
+    })
+  /** 이 단계에 고급 설정이 하나라도 채워져 있는지 (접혀 있어도 알 수 있게 표시) */
+  const hasAdv = (s: CustomScenarioStep) =>
+    !!(
+      cleanCheck(s.check) ||
+      s.undo?.trim() ||
+      s.target?.trim() ||
+      s.capture?.length ||
+      s.expect?.length ||
+      (s.onFailure && s.onFailure !== 'stop')
+    )
+
+  const patchCapture = (i: number, ci: number, patch: Partial<CaptureRule>) =>
+    patchStep(i, { capture: (steps[i].capture ?? []).map((c, k) => (k === ci ? { ...c, ...patch } : c)) })
+  const patchExpect = (i: number, ei: number, patch: Partial<ExpectRule>) =>
+    patchStep(i, { expect: (steps[i].expect ?? []).map((x, k) => (k === ei ? { ...x, ...patch } : x)) })
 
   const submit = () => {
     if (!solutionVal.trim() || !title.trim() || !summary.trim()) {
@@ -742,6 +831,28 @@ function ScenarioEditorModal({
         info: s.info?.trim() || undefined,
         warn: s.warn?.trim() || undefined,
         code: s.code?.trim() || undefined,
+        check: cleanCheck(s.check),
+        // 고급 설정 — 빈 행은 저장하지 않는다
+        target: s.target?.trim() || undefined,
+        capture: (s.capture ?? []).filter((c) => c.name?.trim() && c.regex?.trim()).map((c) => ({
+          name: c.name.trim(),
+          regex: c.regex.trim(),
+          ...(typeof c.group === 'number' ? { group: c.group } : {}),
+        })),
+        expect: (s.expect ?? []).filter((x) => x.match?.trim() && x.send !== undefined).map((x) => ({
+          match: x.match.trim(),
+          send: x.send,
+          ...(x.secret ? { secret: true } : {}),
+        })),
+        onFailure: s.onFailure && s.onFailure !== 'stop' ? s.onFailure : undefined,
+        onFailureCommand:
+          s.onFailure === 'run' || s.onFailure === 'retry' ? s.onFailureCommand?.trim() || undefined : undefined,
+        undo: s.undo?.trim() || undefined,
+      }))
+      .map((s) => ({
+        ...s,
+        capture: s.capture.length ? s.capture : undefined,
+        expect: s.expect.length ? s.expect : undefined,
       }))
       .filter((s) => s.title || s.command || s.desc)
     if (!cleanSteps.length) {
@@ -848,6 +959,249 @@ function ScenarioEditorModal({
                     placeholder="이 단계에 대한 설명"
                     className={inputCls}
                   />
+
+                  <button
+                    onClick={() => toggleAdv(i)}
+                    className="mt-1.5 flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-200"
+                  >
+                    {advOpen.has(i) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    고급 설정
+                    {hasAdv(s) && <span className="rounded bg-blue-500/20 px-1.5 text-[10px] text-blue-200">설정됨</span>}
+                  </button>
+
+                  {advOpen.has(i) && (
+                    <div className="mt-1.5 space-y-2 rounded-md border border-white/10 bg-black/20 p-2">
+                      {/* 판정 기준 — 이게 없으면 러너는 '실행됨'까지만 판단하고 정상/실패를 확정하지 못한다 */}
+                      <div>
+                        <label className="mb-1 block text-[10px] text-gray-400">
+                          판정 기준 <span className="text-gray-600">— 비우면 종료 코드·위험 키워드만 보고 '실행됨'으로 표시</span>
+                        </label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <input
+                            value={(s.check?.passContains ?? []).join(', ')}
+                            onChange={(e) =>
+                              patchStep(i, {
+                                check: { ...s.check, passContains: splitCsv(e.target.value) },
+                              })
+                            }
+                            placeholder="정상: 이 문자열이 모두 있어야 통과 (쉼표 구분)"
+                            className={inputCls + ' text-[12px]'}
+                          />
+                          <input
+                            value={(s.check?.failContains ?? []).join(', ')}
+                            onChange={(e) =>
+                              patchStep(i, {
+                                check: { ...s.check, failContains: splitCsv(e.target.value) },
+                              })
+                            }
+                            placeholder="실패: 하나라도 있으면 실패 (쉼표 구분)"
+                            className={inputCls + ' text-[12px]'}
+                          />
+                          <input
+                            value={s.check?.passRegex ?? ''}
+                            onChange={(e) => patchStep(i, { check: { ...s.check, passRegex: e.target.value } })}
+                            placeholder="정상 판정 정규식 (선택)"
+                            className={inputCls + ' font-mono text-[12px]'}
+                          />
+                          <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                            <input
+                              type="checkbox"
+                              checked={!!s.check?.requireExitZero}
+                              onChange={(e) => patchStep(i, { check: { ...s.check, requireExitZero: e.target.checked } })}
+                              className="accent-blue-500"
+                            />
+                            종료 코드 0 을 요구
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* 원복 명령 — 검증이 끝난 뒤 되돌리기용 */}
+                      <div>
+                        <label className="mb-1 block text-[10px] text-gray-400">
+                          원복 명령{' '}
+                          <span className="text-gray-600">
+                            — 이 단계가 만든 변경을 되돌리는 명령. 비우면 원복 대상에서 제외
+                          </span>
+                        </label>
+                        <input
+                          value={s.undo ?? ''}
+                          onChange={(e) => patchStep(i, { undo: e.target.value })}
+                          placeholder="예: sudo umount /mnt/config  (조회만 하는 단계는 비워두세요)"
+                          className={inputCls + ' font-mono text-[12px]'}
+                        />
+                        <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                          검증 후 <strong>&apos;원복 실행&apos;</strong>을 누르면, 실제로 실행된 단계만 골라{' '}
+                          <strong>역순으로</strong> 되돌립니다. DNS 설정·패키지 설치처럼 남겨둬도 되는 것은 비워두면 됩니다.
+                        </p>
+                      </div>
+
+                      {/* 대상 역할 — 검증 실행 창에서 이 역할에 실제 세션을 지정한다 */}
+                      <div>
+                        <label className="mb-1 block text-[10px] text-gray-400">
+                          대상 역할{' '}
+                          <span className="text-gray-600">
+                            — 비우면 기본 대상에서 실행 · 쉼표로 여러 역할을 적으면 그 세션 모두에서 실행
+                          </span>
+                        </label>
+                        <input
+                          value={s.target ?? ''}
+                          onChange={(e) => patchStep(i, { target: e.target.value })}
+                          placeholder="예: 서버  /  서버, 클라이언트"
+                          className={inputCls + ' text-[12px]'}
+                        />
+                      </div>
+
+                      {/* 값 추출 — 이 단계 출력에서 뽑아 다음 단계의 <이름> 으로 넘긴다 */}
+                      <div>
+                        <div className="mb-1 flex items-center justify-between">
+                          <label className="text-[10px] text-gray-400">
+                            값 추출 <span className="text-gray-600">— 출력에서 뽑아 다음 단계 &lt;이름&gt; 으로 전달</span>
+                          </label>
+                          <button
+                            onClick={() => patchStep(i, { capture: [...(s.capture ?? []), { name: '', regex: '' }] })}
+                            className="rounded px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                          >
+                            + 추가
+                          </button>
+                        </div>
+                        {(s.capture ?? []).map((c, ci) => (
+                          <div key={ci} className="mb-1 flex items-center gap-1">
+                            <input
+                              value={c.name}
+                              onChange={(e) => patchCapture(i, ci, { name: e.target.value })}
+                              placeholder="변수명"
+                              className={inputCls + ' w-32 shrink-0 text-[12px]'}
+                            />
+                            <input
+                              value={c.regex}
+                              onChange={(e) => patchCapture(i, ci, { regex: e.target.value })}
+                              placeholder="정규식 (예: inet (\d+\.\d+\.\d+\.\d+))"
+                              className={inputCls + ' font-mono text-[12px]'}
+                            />
+                            <input
+                              type="number"
+                              min={0}
+                              value={c.group ?? 1}
+                              onChange={(e) => patchCapture(i, ci, { group: parseInt(e.target.value, 10) || 0 })}
+                              title="사용할 캡처 그룹 번호 (0 = 매치 전체)"
+                              className={inputCls + ' w-14 shrink-0 text-[12px]'}
+                            />
+                            <button
+                              onClick={() => patchStep(i, { capture: (s.capture ?? []).filter((_, k) => k !== ci) })}
+                              className="shrink-0 rounded p-1 text-gray-500 hover:bg-red-500/20 hover:text-red-300"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* 자동 응답 — sudo 비밀번호나 y/n 확인 프롬프트 처리 */}
+                      <div>
+                        <div className="mb-1 flex items-center justify-between">
+                          <label className="text-[10px] text-gray-400">
+                            자동 응답 <span className="text-gray-600">— 프롬프트가 뜨면 대신 입력</span>
+                          </label>
+                          <button
+                            onClick={() => patchStep(i, { expect: [...(s.expect ?? []), { match: '', send: '' }] })}
+                            className="rounded px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                          >
+                            + 추가
+                          </button>
+                        </div>
+                        {(s.expect ?? []).map((x, ei) => (
+                          <div key={ei} className="mb-1 flex items-center gap-1">
+                            <input
+                              value={x.match}
+                              onChange={(e) => patchExpect(i, ei, { match: e.target.value })}
+                              placeholder="프롬프트 정규식 (예: password, \[y/N\])"
+                              className={inputCls + ' font-mono text-[12px]'}
+                            />
+                            <input
+                              value={x.send}
+                              onChange={(e) => patchExpect(i, ei, { send: e.target.value })}
+                              type={x.secret ? 'password' : 'text'}
+                              placeholder="보낼 값 (예: y, <PASSWORD>)"
+                              className={inputCls + ' w-40 shrink-0 text-[12px]'}
+                            />
+                            <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-400" title="리포트에서 값을 가립니다">
+                              <input
+                                type="checkbox"
+                                checked={!!x.secret}
+                                onChange={(e) => patchExpect(i, ei, { secret: e.target.checked })}
+                                className="accent-blue-500"
+                              />
+                              비밀
+                            </label>
+                            <button
+                              onClick={() => patchStep(i, { expect: (s.expect ?? []).filter((_, k) => k !== ei) })}
+                              className="shrink-0 rounded p-1 text-gray-500 hover:bg-red-500/20 hover:text-red-300"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        ))}
+                        <p className="text-[10px] text-gray-600">
+                          영속 셸이 열린 경우에만 동작합니다. 비밀번호는 시나리오에 그대로 저장되니, 가급적{' '}
+                          <span className="font-mono">&lt;PASSWORD&gt;</span> 처럼 두고 실행 시 입력받으세요.
+                        </p>
+                      </div>
+
+                      {/* 실패 시 동작 */}
+                      <div>
+                        <label className="mb-1 block text-[10px] text-gray-400">실패 시</label>
+                        <div className="flex items-center gap-1">
+                          <select
+                            value={s.onFailure ?? 'stop'}
+                            onChange={(e) => patchStep(i, { onFailure: e.target.value as OnFailureAction })}
+                            className={inputCls + ' w-44 shrink-0 text-[12px]'}
+                          >
+                            <option value="stop">중단 (이후 단계 미실행)</option>
+                            <option value="continue">계속 진행</option>
+                            <option value="run">대응 명령 실행 후 중단</option>
+                            <option value="retry">대응 명령 실행 후 이 단계 재시도</option>
+                          </select>
+                          {(s.onFailure === 'run' || s.onFailure === 'retry') && (
+                            <input
+                              value={s.onFailureCommand ?? ''}
+                              onChange={(e) => patchStep(i, { onFailureCommand: e.target.value })}
+                              placeholder={s.onFailure === 'retry' ? '원인을 고칠 명령 (예: DNS 지정)' : '롤백/로그수집 명령'}
+                              className={inputCls + ' font-mono text-[12px]'}
+                            />
+                          )}
+                        </div>
+                        {(s.onFailure === 'retry' || s.onFailure === 'run') && (
+                          <div className="mt-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+                            <div className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-amber-200">
+                              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                              <span>
+                                <strong>대응 명령은 대상 서버의 상태를 실제로 바꿉니다.</strong> DNS·패키지·서비스 설정을
+                                건드리는 명령이라면 <strong>테스트용으로 만든 인스턴스에서만</strong> 사용하세요. 운영
+                                장비에서는 점검만 하고(실패 시: 중단) 조치는 사람이 판단하는 편이 안전합니다.
+                                <br />
+                                <span className="text-amber-300/80">
+                                  특히 <code>netplan apply</code> 처럼 네트워크를 재시작하는 명령은 넣지 마세요 — SSH 연결이
+                                  끊겨 그 노드에 다시 못 들어갈 수 있습니다.
+                                </span>
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                        {s.onFailure === 'retry' && (
+                          <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                            대응 명령을 실행한 뒤 이 단계를 <strong>한 번만</strong> 다시 실행합니다. 성공하면 다음 단계로
+                            진행하고, 그래도 실패하면 중단합니다.
+                            <br />
+                            예) <code className="text-gray-400">apt update</code> 가 DNS 문제로 실패 → 대응 명령{' '}
+                            <code className="text-gray-400">
+                              sudo resolvectl dns $(ip route show default | awk &apos;{'{'}print $5; exit{'}'}&apos;) 8.8.8.8
+                            </code>{' '}
+                            → 재시도 (재부팅하면 원래 설정으로 돌아가는 런타임 설정이라 비교적 안전합니다)
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

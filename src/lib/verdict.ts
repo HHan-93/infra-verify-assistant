@@ -3,7 +3,7 @@
 //  - 기준이 없으면 위험 키워드/종료코드로 "실패"만 감지하고, 아니면 "정보"(판정 안 함).
 //    → df -h, lscpu 같은 단순 조회에 의미 없는 초록 PASS 를 띄우지 않기 위함.
 import type { CommandCheck } from '../../electron/shared-types'
-import { hasDangerKeyword } from './logDisplay'
+import { dangerKeywordHit } from './logDisplay'
 
 export type Verdict = 'pass' | 'fail' | 'info'
 
@@ -79,14 +79,22 @@ export function judgeOutput(
     return { verdict: 'pass', reasons: reasons.length ? reasons : ['기준 충족'] }
   }
 
-  // 기준 없음 — 실패만 감지, 아니면 정보(판정 안 함)
-  if (hasDangerKeyword(text)) {
-    return { verdict: 'fail', reasons: ['출력에 위험 키워드 감지'] }
+  // 기준 없음 — 실패만 감지, 아니면 정보(판정 안 함).
+  // 근거 문구는 '무엇을 보고 그렇게 판단했는지'를 적는다. 예전엔 '판정 기준 없음' 한 줄이라
+  // 리포트를 봐도 이 스텝이 어떻게 통과했는지 알 수가 없었다.
+  const hit = dangerKeywordHit(text)
+  if (hit) {
+    // 어떤 단어가 어느 줄에서 걸렸는지까지 남긴다 — 이게 없으면 긴 출력을 직접 뒤져야 한다.
+    const line = hit.line.length > 160 ? hit.line.slice(0, 160) + '…' : hit.line
+    return { verdict: 'fail', reasons: [`출력에 위험 키워드 "${hit.word}" — ${line}`] }
   }
   if (typeof code === 'number' && code !== 0) {
     return { verdict: 'fail', reasons: [`종료 코드 ${code} (0 아님)`] }
   }
-  return { verdict: 'info', reasons: ['판정 기준 없음'] }
+  const checked: string[] = []
+  if (typeof code === 'number') checked.push(`종료 코드 ${code}`)
+  checked.push('출력에 위험 키워드 없음')
+  return { verdict: 'info', reasons: checked }
 }
 
 /** 판정 결과 → 배지 표시용 메타(라벨/색 클래스). info 는 "명령은 정상 실행됐으나 판정 기준 없음". */

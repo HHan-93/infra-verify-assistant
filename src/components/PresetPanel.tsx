@@ -5,6 +5,7 @@ import type { CustomPresetCommand } from '../../electron/shared-types'
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
+import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 
 interface PresetPanelProps {
   connected: boolean
@@ -70,22 +71,7 @@ function mergeGroups(builtIn: PresetGroup[], custom: CustomPresetCommand[]): Pan
   return groups
 }
 
-// [^<>\n]: heredoc(<< 'EOF')의 << 를 placeholder 시작으로 오인하지 않도록 중첩 < 와 개행을 제외
-const PLACEHOLDER_RE = /<([^<>\n]+)>/g
-const hasPlaceholder = (cmd: string) => /<[^<>\n]+>/.test(cmd)
-
-/** 명령어에서 <플레이스홀더> 목록을 등장 순서대로 중복 없이 추출 */
-const extractPlaceholders = (cmd: string): string[] => {
-  const found: string[] = []
-  for (const m of cmd.matchAll(PLACEHOLDER_RE)) {
-    if (!found.includes(m[1])) found.push(m[1])
-  }
-  return found
-}
-
-/** 명령어의 모든 <플레이스홀더>를 입력값으로 치환 */
-const fillPlaceholders = (cmd: string, values: Record<string, string>) =>
-  cmd.replace(PLACEHOLDER_RE, (full, key) => values[key]?.trim() || full)
+// 자리표시자 규칙은 검증 러너·시나리오와 하나로 쓴다 (src/lib/placeholder.ts)
 
 function Highlight({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>

@@ -1,7 +1,7 @@
 // 작업 시나리오(플레이북) — 순서가 있는 명령어 흐름.
 // 명령어_편집.md 에서 자동 생성됨. <...> 플레이스홀더는 실행 대신 "입력".
 
-import type { CommandCheck } from '../electron/shared-types'
+import type { CommandCheck, CaptureRule, ExpectRule, OnFailureAction } from '../electron/shared-types'
 
 export interface ScenarioStep {
   title: string
@@ -16,6 +16,27 @@ export interface ScenarioStep {
   code?: string
   /** 실행 결과 자동 판정 기준 (선택) */
   check?: CommandCheck
+  /**
+   * 아래 4개는 검증 실행(러너) 전용 옵션 — CustomScenarioStep 과 같은 의미다.
+   * 내장 시나리오는 대부분 쓰지 않지만, 사용자 정의 시나리오가 같은 타입으로 병합되므로 함께 둔다.
+   */
+  /**
+   * 이 단계를 실행할 '역할' 이름 (실행 창에서 역할 → 세션 매핑).
+   * 쉼표로 여러 역할을 적으면 그 역할들에 매핑된 세션 **전부**에서 실행된다.
+   *   "서버"            → 서버 세션에서만
+   *   "서버, 클라이언트"  → 양쪽 모두 (도구 설치처럼 둘 다 필요한 단계)
+   */
+  target?: string
+  /** 출력에서 값을 뽑아 이후 단계의 <이름> 으로 전달 */
+  capture?: CaptureRule[]
+  /** 대화형 프롬프트 자동 응답 */
+  expect?: ExpectRule[]
+  /** 실패 시 동작 (기본 stop) */
+  onFailure?: OnFailureAction
+  /** onFailure==='run' 일 때 실행할 명령 */
+  onFailureCommand?: string
+  /** 이 단계가 만든 변경을 되돌리는 명령 (검증 후 '원복 실행'에서 역순 수행) */
+  undo?: string
 }
 
 export interface Scenario {
@@ -24,6 +45,11 @@ export interface Scenario {
   title: string
   summary: string
   steps: ScenarioStep[]
+  /**
+   * 입력값을 '역할의 접속 주소'로 자동 채우는 규칙. 예: { "Target_IP": "서버" }
+   * 역할별 대상에서 고른 세션의 주소가 그대로 들어간다(직접 입력하면 그쪽이 우선).
+   */
+  roleValues?: Record<string, string>
 }
 
 export const SCENARIOS: Scenario[] = [
@@ -56,12 +82,29 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/config",
+        "check": { "requireExitZero": true },
+        "undo": "sudo rmdir /mnt/config",
         "desc": "설정 드라이브를 연결할 디렉토리를 생성합니다."
+      },
+      {
+        "title": "마운트 포인트 생성 확인",
+        "command": "ls -ld /mnt/config",
+        "check": { "passContains": ["/mnt/config"], "requireExitZero": true },
+        "desc": "디렉토리가 실제로 만들어졌는지 확인합니다. 마운트 전이라 비어 있는 것이 정상입니다."
       },
       {
         "title": "설정 드라이브 마운트",
         "command": "sudo mount /dev/sr0 /mnt/config",
+        "check": { "requireExitZero": true, "failContains": ["does not exist", "wrong fs type", "no medium found"] },
+        "undo": "sudo umount /mnt/config",
         "desc": "config-2 장치를 /mnt/config 에 마운트합니다. lsblk에서 확인한 장치명이 sr0 가 아닌 경우 해당 이름으로 교체하세요."
+      },
+      {
+        "title": "마운트 상태 확인",
+        "command": "findmnt /mnt/config; df -h /mnt/config",
+        "check": { "passContains": ["/mnt/config"], "requireExitZero": true },
+        "desc": "실제로 마운트됐는지 확인합니다. findmnt 에 /dev/sr0 → /mnt/config 항목이 보이고, df -h 에 iso9660 용량이 잡혀야 정상입니다.",
+        "note": "findmnt 결과가 비어 있으면 mount 명령이 조용히 실패한 것입니다. dmesg | tail 로 원인을 확인하세요."
       },
       {
         "title": "파일 구조 확인",
@@ -137,40 +180,43 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 저장소 업데이트",
-        "command": "sudo apt update",
+        "command": "sudo apt-get update -q",
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "fio 및 libaio 설치",
-        "command": "sudo apt install -y fio libaio1t64 || sudo apt install -y fio libaio1",
+        "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "디스크 성능 테스트 도구 fio와 비동기 I/O 라이브러리 libaio를 설치합니다. Ubuntu 24.04+는 libaio1t64, 이전 버전은 libaio1을 사용합니다."
       },
       {
         "title": "IOPS 쓰기 테스트",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 쓰기로 IOPS를 측정합니다. write_iops_sec 제한값 부근에서 수렴하는지 확인합니다.",
+        "desc": "무작위 4K 쓰기로 IOPS를 측정합니다. write_iops_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다.",
         "info": "--direct=1: 페이지 캐시를 우회하여 디스크 QoS가 직접 측정됩니다.\n--ioengine=libaio: 비동기 I/O 엔진으로 iodepth=32가 실제로 동작합니다."
       },
       {
         "title": "IOPS 읽기 테스트",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 읽기로 IOPS를 측정합니다. read_iops_sec 제한값 부근에서 수렴하는지 확인합니다."
+        "desc": "무작위 4K 읽기로 IOPS를 측정합니다. read_iops_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "대역폭 쓰기 테스트",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하는지 확인합니다."
+        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "대역폭 읽기 테스트",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하는지 확인합니다."
+        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -218,7 +264,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "iperf3 서버 구성 (별도 인스턴스)",
-        "command": "sudo apt update && sudo apt install -y iperf3 && iperf3 -s -D",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3 && iperf3 -s -D",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "QoS가 적용되지 않은 별도 인스턴스(또는 외부 서버)에서 실행합니다. iperf3 서버가 준비되어야 테스트 대상 인스턴스에서 연결할 수 있습니다.",
         "info": "서버 역할 인스턴스는 네트워크 QoS가 없어야 정확한 측정이 가능합니다.\niperf3 서버 기본 포트는 5201입니다. 보안 그룹에서 해당 포트가 허용되어야 합니다."
       },
@@ -229,28 +278,31 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 저장소 업데이트",
-        "command": "sudo apt update",
+        "command": "sudo apt-get update -q",
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "iperf3 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "iperf3 설치",
-        "command": "sudo apt install -y iperf3",
+        "command": "sudo apt-get install -y -q iperf3",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "네트워크 대역폭 측정 도구 iperf3를 설치합니다."
       },
       {
         "title": "아웃바운드(업로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다.",
+        "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
         "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n구간별 Bitrate가 초반에 높다가 이후 수렴하는 것은 burst 소진 후 average 제한이 걸린 정상 동작입니다."
       },
       {
         "title": "인바운드(다운로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5 -R",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "-R 플래그로 트래픽 방향을 역전(서버 → 이 인스턴스)하여 인바운드 대역폭을 측정합니다.",
+        "desc": "-R 플래그로 트래픽 방향을 역전(서버 → 이 인스턴스)하여 인바운드 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
         "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n-R(Reverse): 서버 → 이 인스턴스 방향으로 전송하므로 인바운드 QoS 제한이 측정됩니다."
       }
     ]
@@ -274,13 +326,17 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt-get update",
+        "command": "sudo apt-get update -q",
+        "check": { "requireExitZero": true },
         "desc": "nginx 설치 전 패키지 목록을 최신화합니다. 인스턴스 2대 모두 수행하세요.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "nginx 설치",
-        "command": "sudo apt install -y nginx",
+        "command": "sudo apt-get install -y -q nginx",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "웹서버(nginx)를 설치합니다. 인스턴스 2대 모두 수행하세요."
       },
       {
@@ -320,6 +376,13 @@ export const SCENARIOS: Scenario[] = [
         "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)"
       },
       {
+        "title": "작업 디렉토리 확인",
+        "command": "pwd; ls -la",
+        "check": { "passContains": ["ssl-certs"], "requireExitZero": true },
+        "desc": "현재 위치가 ssl-certs 인지 확인합니다. 이후 인증서 파일들이 모두 이 디렉토리에 생성됩니다.",
+        "note": "검증 실행 창에서는 각 스텝이 같은 셸에서 이어져 실행되므로 cd 가 유지됩니다."
+      },
+      {
         "title": "Root CA 키 생성",
         "command": "openssl genrsa -out ca.key 2048",
         "desc": "Root CA 서명에 사용할 RSA 2048비트 개인 키를 생성합니다."
@@ -328,6 +391,12 @@ export const SCENARIOS: Scenario[] = [
         "title": "CA 키 권한 제한",
         "command": "chmod 600 ca.key",
         "desc": "CA 개인 키를 소유자만 읽을 수 있도록 권한을 제한합니다."
+      },
+      {
+        "title": "ca.key 권한 확인",
+        "command": "ls -l ca.key",
+        "check": { "passContains": ["-rw-------"], "requireExitZero": true },
+        "desc": "개인키 권한이 600(소유자만 읽기/쓰기)인지 확인합니다. 권한이 열려 있으면 일부 도구가 키 사용을 거부합니다."
       },
       {
         "title": "ca.conf 파일 작성",
@@ -354,6 +423,12 @@ export const SCENARIOS: Scenario[] = [
         "title": "서비스 키 권한 제한",
         "command": "chmod 600 service.key",
         "desc": "서비스 개인 키를 소유자만 읽을 수 있도록 권한을 제한합니다."
+      },
+      {
+        "title": "service.key 권한 확인",
+        "command": "ls -l service.key",
+        "check": { "passContains": ["-rw-------"], "requireExitZero": true },
+        "desc": "개인키 권한이 600(소유자만 읽기/쓰기)인지 확인합니다. 권한이 열려 있으면 일부 도구가 키 사용을 거부합니다."
       },
       {
         "title": "service.conf 파일 작성",
@@ -444,14 +519,17 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 목록 업데이트",
-        "command": "sudo apt update",
+        "command": "sudo apt-get update -q",
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "netcat 설치에 앞서 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "netcat 설치",
-        "command": "sudo apt install -y netcat-openbsd",
+        "command": "sudo apt-get install -y -q netcat-openbsd",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "포트 연결 테스트에 사용할 netcat을 설치합니다.",
         "note": "RHEL/CentOS 계열: yum install -y nmap-ncat"
       },
@@ -487,7 +565,7 @@ export const SCENARIOS: Scenario[] = [
         "note": "정상(무중단) 시: Connection to <IP> <port> port [tcp] succeeded! 가 끊기지 않음\n중단 발생 시: nc: connect to <IP> port <port> (tcp) failed: Connection refused 가 일시 출력"
       },
       {
-        "title": "마이그레이션 완료 후 호스트 변경 확인",
+        "title": "[Live] 마이그레이션 완료 후 호스트 변경 확인",
         "command": "",
         "desc": "포털에서 인스턴스 A 상세 페이지로 이동해 마이그레이션 전과 다른 하이퍼바이저 호스트로 변경되었는지 확인합니다."
       },
@@ -504,7 +582,7 @@ export const SCENARIOS: Scenario[] = [
         "note": "인스턴스 A에서 nc -l -p <포트> 를 다시 실행한 뒤 확인하세요."
       },
       {
-        "title": "마이그레이션 완료 후 호스트 변경 확인",
+        "title": "[Cold] 마이그레이션 완료 후 호스트 변경 확인",
         "command": "",
         "desc": "포털에서 인스턴스 A 상세 페이지로 이동해 마이그레이션 전과 다른 하이퍼바이저 호스트로 변경되었는지 확인합니다."
       }
@@ -524,6 +602,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인터페이스 비활성화",
         "command": "sudo ip link set <IFACE> down",
+        "warn": "SSH 접속에 쓰는 인터페이스를 내리면 즉시 연결이 끊기고 콘솔로만 복구할 수 있습니다. 대상 인터페이스가 접속 경로가 아닌지 반드시 확인하세요.",
         "desc": "특정 인터페이스를 내립니다. <IFACE> 는 eth1 등 대상 인터페이스명으로 바꾸세요.",
         "note": "⚠️ SSH 로 접속 중인 인터페이스를 내리면 연결이 끊깁니다. 관리용이 아닌 NIC 에만 사용하세요."
       },
@@ -543,6 +622,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "Netplan 적용",
         "command": "sudo netplan apply",
+        "warn": "설정이 잘못되면 네트워크가 끊겨 SSH로 되돌릴 수 없습니다. 콘솔 접근 수단을 확보한 뒤 진행하세요.",
         "desc": "변경한 Netplan 설정을 적용합니다.",
         "note": "⚠️ 설정 오류 시 네트워크가 끊길 수 있습니다. 원격 작업이면 먼저 `sudo netplan try`(120초 후 자동 롤백)로 검증하세요."
       },
@@ -557,46 +637,81 @@ export const SCENARIOS: Scenario[] = [
     "id": "scn9",
     "solution": "OpenStack",
     "title": "[네트워크] 포트 통신 동작 확인",
-    "summary": "서버의 리슨 포트 현황을 파악하고 nc, nmap 등을 활용해 대상 서버의 TCP/UDP 포트 통신을 다각도로 검증합니다.",
+    "summary": "서버에 테스트 포트를 직접 열어 수신 대기시킨 뒤, 클라이언트에서 TCP·UDP·HTTP 통신이 되는지 확인하고 마지막에 정리합니다.",
+    "roleValues": { "Target_IP": "서버" },
     "steps": [
       {
-        "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y netcat-openbsd nmap",
-        "desc": "포트 점검용 nc(netcat)와 nmap을 설치합니다.",
+        "title": "도구 설치 (서버·클라이언트 양쪽)",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q netcat-openbsd nmap",
+        "target": "서버, 클라이언트",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
+        "desc": "포트 점검용 nc(netcat)와 nmap 을 설치합니다. 역할별 대상에서 고른 서버·클라이언트 두 세션에서 함께 실행되므로 따로 고를 필요가 없습니다.",
         "note": "RHEL/CentOS 계열은 sudo dnf install -y nmap-ncat nmap"
       },
       {
-        "title": "로컬 리슨 포트 확인",
-        "command": "sudo ss -tunlp",
-        "desc": "현재 서버가 어떤 TCP/UDP 포트를 어떤 프로세스로 리슨 중인지 확인합니다. LISTEN 상태의 포트와 연결된 프로세스명을 함께 확인하세요."
+        "title": "[서버] 테스트 포트 열기 (TCP 15001 · UDP 15002 · HTTP 18080)",
+        "command": "(nohup nc -l -k 15001 >/dev/null 2>&1 &); (nohup nc -u -l 15002 >/dev/null 2>&1 &); (cd /tmp && nohup python3 -m http.server 18080 >/dev/null 2>&1 &); sleep 2; echo '테스트 리스너 3개를 띄웠습니다 (TCP 15001 / UDP 15002 / HTTP 18080)'",
+        "target": "서버",
+        "check": { "requireExitZero": true, "passContains": ["띄웠습니다"] },
+        "undo": "pkill -f 'nc -l -k 15001'; pkill -f 'nc -u -l 15002'; pkill -f 'http.server 18080'; true",
+        "desc": "받아줄 쪽이 없으면 뒤의 통신 확인은 무조건 실패합니다. 그래서 여기서 직접 포트를 열어 수신 대기시킵니다. 1024 이상 포트라 root 권한 없이 뜨고, 실제 서비스 포트와도 겹치지 않습니다.",
+        "note": "포트 번호를 바꾸려면 연필 버튼으로 이 단계와 아래 확인 단계들을 함께 고치세요. HTTP 리스너는 python3 기본 모듈을 씁니다."
       },
       {
-        "title": "방화벽 상태 확인",
+        "title": "[서버] 포트가 실제로 열렸는지 확인",
+        "command": "sudo ss -tunlp 2>/dev/null | grep -E ':15001|:15002|:18080' || ss -tunlp | grep -E ':15001|:15002|:18080'",
+        "target": "서버",
+        "check": { "passContains": ["15001", "15002", "18080"] },
+        "desc": "결과에서 볼 것 — 세 줄이 모두 보여야 합니다. tcp LISTEN 15001 / udp UNCONN 15002 / tcp LISTEN 18080. 하나라도 없으면 앞 단계에서 리스너가 못 떴다는 뜻입니다.",
+        "note": "UDP 는 LISTEN 이 아니라 UNCONN 으로 표시되는 것이 정상입니다."
+      },
+      {
+        "title": "[서버] 방화벽 상태 확인",
         "command": "sudo ufw status",
-        "desc": "UFW 방화벽 활성화 여부와 허용/차단 규칙을 확인합니다. 포트가 열려있어도 방화벽이 막고 있으면 통신이 차단됩니다.",
+        "target": "서버",
+        "desc": "결과에서 볼 것 — Status 가 inactive 면 방화벽은 통과입니다. active 인데 15001/15002/18080 허용 규칙이 없으면 다음 단계가 실패하니, 그때는 sudo ufw allow 15001 처럼 열어주세요.",
         "note": "iptables 기반 환경은 sudo iptables -L -n --line-numbers"
       },
       {
-        "title": "TCP 포트 통신 확인",
-        "command": "nc -zv <Target_IP> <Port>",
-        "desc": "대상 서버의 특정 TCP 포트로 연결이 되는지 확인합니다. 'Connection succeeded' 출력이면 정상 통신입니다."
+        "title": "[클라이언트] TCP 포트 통신 확인",
+        "command": "nc -zv -w 5 <Target_IP> 15001",
+        "target": "클라이언트",
+        "check": { "passContains": ["succeeded"] },
+        "desc": "결과에서 볼 것 — 'Connection to ... succeeded!' 문구입니다. <Target_IP> 는 서버 스텝의 대상 주소를 그대로 쓰면 되니, 아래 입력칸의 서버 아이콘을 눌러 '2번 대상'을 선택하세요.",
+        "note": "Connection refused 면 리스너가 죽은 것이고, timed out 이면 방화벽/보안그룹이 막고 있는 것입니다."
       },
       {
-        "title": "UDP 포트 통신 확인",
-        "command": "nc -uzv <Target_IP> <Port>",
-        "desc": "대상 서버의 특정 UDP 포트 통신을 확인합니다.",
-        "note": "UDP는 연결 지향이 아니므로 무응답이 정상인 경우도 있습니다. 결과 해석에 주의하세요."
+        "title": "[클라이언트] UDP 포트 통신 확인",
+        "command": "nc -uzv -w 5 <Target_IP> 15002",
+        "target": "클라이언트",
+        "check": { "passContains": ["succeeded"] },
+        "desc": "결과에서 볼 것 — TCP 와 같은 'succeeded' 문구입니다.",
+        "note": "UDP 는 응답이 없어도 succeeded 로 보일 수 있습니다. 확실히 하려면 앞 단계에서 리스너가 UNCONN 으로 떠 있는지 먼저 확인하세요."
       },
       {
-        "title": "nmap 포트 상태 확인",
-        "command": "nmap -p <Port> <Target_IP>",
-        "desc": "대상 IP의 포트 상태(open / closed / filtered)를 확인합니다. 범위 지정 시 -p 80-443 형식 사용.",
-        "note": "nmap -p- <Target_IP> 로 전체 65535 포트 스캔 가능 (시간 소요)"
+        "title": "[클라이언트] nmap 포트 상태 확인",
+        "command": "nmap -p 15001,18080 <Target_IP>",
+        "target": "클라이언트",
+        "check": { "passContains": ["open"] },
+        "desc": "결과에서 볼 것 — 두 포트가 모두 open 이어야 합니다. closed 는 리스너가 없는 것, filtered 는 방화벽이 막은 것입니다.",
+        "note": "UDP 스캔(-sU)은 root 권한이 필요하고 느려서 여기서는 TCP 만 봅니다."
       },
       {
-        "title": "HTTP 포트 응답 확인",
-        "command": "curl -Iv http://<Target_IP>:<Port>",
-        "desc": "HTTP 서비스가 동작하는 포트에 실제 응답과 헤더 정보를 확인합니다. 응답 코드(200, 301 등)로 서비스 정상 여부를 판단합니다."
+        "title": "[클라이언트] HTTP 응답 확인",
+        "command": "curl -Iv --max-time 10 http://<Target_IP>:18080/",
+        "target": "클라이언트",
+        "check": { "passContains": ["200"] },
+        "desc": "결과에서 볼 것 — 'HTTP/1.0 200 OK' 응답 코드입니다. 포트가 열린 것을 넘어 실제로 서비스가 응답하는지까지 확인하는 단계입니다."
+      },
+      {
+        "title": "[서버] 테스트 포트 정리",
+        "command": "pkill -f 'nc -l -k 15001'; pkill -f 'nc -u -l 15002'; pkill -f 'http.server 18080'; sleep 1; ss -tunlp 2>/dev/null | grep -E ':15001|:15002|:18080' || echo '테스트 리스너가 모두 정리되었습니다'",
+        "target": "서버",
+        "check": { "passContains": ["정리되었습니다"] },
+        "desc": "결과에서 볼 것 — '모두 정리되었습니다' 문구입니다. 포트 목록이 대신 보이면 아직 남은 리스너가 있는 것이니 다시 실행하세요.",
+        "note": "이 단계를 건너뛰었다면 상단 '원복 실행' 버튼으로도 정리됩니다."
       }
     ]
   },
@@ -624,13 +739,17 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt-get update",
+        "command": "sudo apt-get update -q",
+        "check": { "requireExitZero": true },
         "desc": "ceph-common 설치 전 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "Ceph 클라이언트 설치",
-        "command": "sudo apt install -y ceph-common",
+        "command": "sudo apt-get install -y -q ceph-common",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "CephFS 마운트에 필요한 ceph-common 패키지를 설치합니다.",
         "note": "RHEL/CentOS 계열은 sudo dnf install -y ceph-common"
       },
@@ -653,7 +772,15 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/data",
+        "check": { "requireExitZero": true },
+        "undo": "sudo rmdir /mnt/data",
         "desc": "CephFS를 마운트할 디렉토리를 생성합니다."
+      },
+      {
+        "title": "마운트 포인트 생성 확인",
+        "command": "ls -ld /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "requireExitZero": true },
+        "desc": "디렉토리가 실제로 만들어졌는지 확인합니다."
       },
       {
         "title": "CephFS 마운트",
@@ -711,7 +838,15 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
+        "check": { "requireExitZero": true },
+        "undo": "sudo rmdir /mnt/data",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
+      },
+      {
+        "title": "마운트 폴더 생성 확인",
+        "command": "ls -ld /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "requireExitZero": true },
+        "desc": "디렉토리가 실제로 만들어졌는지 확인합니다."
       },
       {
         "title": "디스크 마운트",
@@ -752,17 +887,27 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "fstab 자동 마운트 등록",
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
+        "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
         "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계에서 확인한 UUID를 입력하세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
         "command": "sudo mount -a",
+        "check": { "requireExitZero": true, "failContains": ["can't find", "unknown filesystem", "wrong fs type", "no such"] },
         "desc": "fstab 설정의 문법 오류를 검사하고 전체 항목을 다시 마운트합니다. 오류 없이 완료되면 설정이 정상입니다.",
         "note": "⚠ 오류가 나면 fstab 항목이 잘못된 것입니다. 재부팅 전에 반드시 수정하세요."
       },
       {
+        "title": "fstab 항목 검증 및 마운트 확인",
+        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "failContains": ["unreachable", "not exist"], "requireExitZero": true },
+        "desc": "재부팅 전에 fstab 항목이 실제로 유효한지 확인합니다. findmnt --verify 는 존재하지 않는 장치/경로를 미리 잡아줍니다.",
+        "warn": "⚠ 여기서 오류가 나면 재부팅 시 부팅이 emergency mode 로 빠질 수 있습니다. 반드시 수정한 뒤 다음 단계(재부팅)로 넘어가세요."
+      },
+      {
         "title": "재부팅",
         "command": "sudo reboot",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
@@ -796,13 +941,30 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "파일시스템 생성",
         "command": "sudo mkfs.ext4 /dev/<DISK>",
+        "warn": "지정한 장치의 데이터가 모두 지워집니다. 앞 단계 lsblk 출력에서 장치명이 맞는지 다시 확인하세요.",
+        "check": { "requireExitZero": true },
         "desc": "빈 볼륨에 ext4 파일시스템을 생성합니다. <DISK>에는 장치명을 입력하세요. (예: vdb)",
         "note": "⚠ 해당 볼륨의 기존 데이터가 모두 삭제됩니다. 데이터를 보존해야 한다면 '파티션 있는 경우' 시나리오를 이용하세요."
       },
       {
+        "title": "파일시스템 생성 확인",
+        "command": "sudo blkid /dev/<DISK>; lsblk -f /dev/<DISK>",
+        "check": { "passContains": ["ext4"], "requireExitZero": true },
+        "desc": "TYPE=\"ext4\" 와 UUID 가 표시되는지 확인합니다. 다음 단계 fstab 등록에 이 UUID 를 사용합니다.",
+        "note": "출력이 비어 있으면 포맷이 적용되지 않은 것입니다. 장치명을 다시 확인하세요."
+      },
+      {
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
+        "check": { "requireExitZero": true },
+        "undo": "sudo rmdir /mnt/data",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
+      },
+      {
+        "title": "마운트 폴더 생성 확인",
+        "command": "ls -ld /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "requireExitZero": true },
+        "desc": "디렉토리가 실제로 만들어졌는지 확인합니다."
       },
       {
         "title": "디스크 마운트",
@@ -843,17 +1005,27 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "fstab 자동 마운트 등록",
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
+        "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
         "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계에서 확인한 UUID를 입력하세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
         "command": "sudo mount -a",
+        "check": { "requireExitZero": true, "failContains": ["can't find", "unknown filesystem", "wrong fs type", "no such"] },
         "desc": "fstab 설정의 문법 오류를 검사하고 전체 항목을 다시 마운트합니다.",
         "note": "⚠ 오류가 나면 fstab 항목이 잘못된 것입니다. 재부팅 전에 반드시 수정하세요."
       },
       {
+        "title": "fstab 항목 검증 및 마운트 확인",
+        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "failContains": ["unreachable", "not exist"], "requireExitZero": true },
+        "desc": "재부팅 전에 fstab 항목이 실제로 유효한지 확인합니다. findmnt --verify 는 존재하지 않는 장치/경로를 미리 잡아줍니다.",
+        "warn": "⚠ 여기서 오류가 나면 재부팅 시 부팅이 emergency mode 로 빠질 수 있습니다. 반드시 수정한 뒤 다음 단계(재부팅)로 넘어가세요."
+      },
+      {
         "title": "재부팅",
         "command": "sudo reboot",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
@@ -871,7 +1043,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "사용 중인 프로세스 확인",
-        "command": "sudo lsof /mnt/data",
+        "command": "sudo lsof /mnt/data 2>/dev/null || sudo fuser -vm /mnt/data 2>&1 || echo '사용 중인 프로세스 없음 (또는 lsof/fuser 미설치)'",
         "desc": "해당 경로를 사용 중인 프로세스가 있으면 마운트 해제가 실패합니다. 결과가 있으면 종료 후 진행하세요."
       },
       {
@@ -892,6 +1064,19 @@ export const SCENARIOS: Scenario[] = [
         "desc": "영구적으로 분리하려면 fstab 에서 해당 디스크 줄을 삭제합니다. 안 지우면 재부팅 시 다시 마운트를 시도합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
         "note": "상단 [설정파일] 버튼으로 편집하는 것이 더 편하고 안전합니다."
+      },
+      {
+        "title": "fstab 정리 결과 검증",
+        "command": "cat /etc/fstab; sudo findmnt --verify --verbose",
+        "check": { "failContains": ["unreachable", "not exist", "parse error"], "requireExitZero": true },
+        "desc": "제거한 항목이 실제로 빠졌는지 확인하고, 남은 fstab 항목이 모두 유효한지 검사합니다.",
+        "warn": "⚠ 이 단계를 건너뛰면 다음 재부팅 때 없는 장치를 마운트하려다 부팅이 emergency mode 로 빠질 수 있습니다."
+      },
+      {
+        "title": "재마운트 시험",
+        "command": "sudo mount -a && echo FSTAB_OK",
+        "check": { "passContains": ["FSTAB_OK"], "requireExitZero": true },
+        "desc": "정리된 fstab 으로 전체 재마운트를 시험합니다. 오류 없이 FSTAB_OK 가 출력되면 재부팅해도 안전합니다."
       }
     ]
   },
@@ -903,7 +1088,10 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y lvm2",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q lvm2 xfsprogs",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "LVM 관리 도구를 설치합니다(대개 기본 설치되어 있음).",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y lvm2`"
       },
@@ -915,43 +1103,106 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "물리 볼륨(PV) 생성",
         "command": "sudo pvcreate /dev/<DISK>",
+        "check": { "requireExitZero": true },
         "desc": "디스크를 LVM 물리 볼륨으로 초기화합니다.",
-        "note": "⚠️ 해당 디스크의 기존 데이터가 삭제됩니다."
+        "note": "⚠️ 해당 디스크의 기존 데이터가 삭제됩니다.",
+        "warn": "이 단계부터는 디스크 구조를 바꿉니다. 원복은 데이터 삭제를 동반하므로 자동 원복 대상에 넣지 않았습니다 — 정리하려면 검증 후 수동으로 lvremove → vgremove → pvremove 순서로 진행하세요."
+      },
+      {
+        "title": "PV 생성 확인",
+        "command": "sudo pvs; sudo pvdisplay /dev/<DISK>",
+        "check": { "passContains": ["/dev/"], "requireExitZero": true },
+        "desc": "물리 볼륨 목록에 방금 만든 디스크가 보이는지 확인합니다. PSize(전체 크기)와 PFree(여유)가 정상 표기돼야 합니다."
       },
       {
         "title": "볼륨 그룹(VG) 생성",
         "command": "sudo vgcreate data_vg /dev/<DISK>",
+        "check": { "requireExitZero": true },
         "desc": "PV 들을 묶는 볼륨 그룹 data_vg 를 만듭니다."
+      },
+      {
+        "title": "VG 생성 확인",
+        "command": "sudo vgs; sudo vgdisplay data_vg",
+        "check": { "passContains": ["data_vg"], "requireExitZero": true },
+        "desc": "볼륨 그룹 data_vg 가 만들어졌는지, 용량(VSize/VFree)이 기대한 값인지 확인합니다."
       },
       {
         "title": "논리 볼륨(LV) 생성",
         "command": "sudo lvcreate -l 100%FREE -n data_lv data_vg",
+        "check": { "requireExitZero": true },
         "desc": "VG 의 남은 공간 전부로 논리 볼륨 data_lv 를 만듭니다."
+      },
+      {
+        "title": "LV 생성 확인",
+        "command": "sudo lvs; lsblk /dev/data_vg/data_lv",
+        "check": { "passContains": ["data_lv"], "requireExitZero": true },
+        "desc": "논리 볼륨 data_lv 와 크기(LSize)를 확인합니다. 이 값이 다음 단계 확장 전 기준값이 됩니다."
       },
       {
         "title": "파일시스템 생성",
         "command": "sudo mkfs.xfs /dev/data_vg/data_lv",
+        "warn": "방금 만든 논리 볼륨을 포맷합니다. 기존 데이터가 있는 LV 를 지정하지 않았는지 확인하세요.",
+        "check": { "requireExitZero": true },
         "desc": "LV 에 xfs 파일시스템을 만듭니다. (ext4 를 쓰려면 mkfs.ext4)"
+      },
+      {
+        "title": "파일시스템 생성 확인",
+        "command": "sudo blkid /dev/data_vg/data_lv; lsblk -f /dev/data_vg/data_lv",
+        "check": { "passContains": ["xfs"], "requireExitZero": true },
+        "desc": "TYPE=\"xfs\" 와 UUID 가 보이는지 확인합니다. 비어 있으면 포맷이 실패한 것입니다."
       },
       {
         "title": "마운트",
         "command": "sudo mkdir -p /mnt/data && sudo mount /dev/data_vg/data_lv /mnt/data",
+        "check": { "requireExitZero": true },
+        "undo": "sudo umount /mnt/data 2>/dev/null; sudo rmdir /mnt/data",
         "desc": "마운트 디렉토리를 만들고 LV 를 마운트합니다."
+      },
+      {
+        "title": "마운트 및 용량 확인 (확장 전 기준값)",
+        "command": "findmnt /mnt/data; df -h /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "requireExitZero": true },
+        "desc": "마운트 여부와 현재 용량을 확인합니다. 여기서 본 Size 값이 아래 확장 단계의 비교 기준입니다.",
+        "note": "확장 전후 df -h 의 Size 가 달라지는 것이 이 시나리오의 최종 확인 포인트입니다."
       },
       {
         "title": "(확장) VG 에 디스크 추가",
         "command": "sudo vgextend data_vg /dev/<NEW_DISK>",
+        "check": { "requireExitZero": true },
         "desc": "용량이 부족해지면 새 디스크를 PV 로 만든 뒤 VG 에 추가합니다. (먼저 pvcreate 필요)"
+      },
+      {
+        "title": "(확장) VG 확장 확인",
+        "command": "sudo vgs data_vg; sudo pvs",
+        "check": { "passContains": ["data_vg"], "requireExitZero": true },
+        "desc": "VFree(여유 공간)가 추가한 디스크 크기만큼 늘었는지 확인합니다. 늘지 않았으면 vgextend 가 반영되지 않은 것입니다."
       },
       {
         "title": "(확장) LV 용량 확장",
         "command": "sudo lvextend -l +100%FREE /dev/data_vg/data_lv",
+        "check": { "requireExitZero": true },
         "desc": "VG 의 늘어난 공간만큼 LV 를 확장합니다(무중단)."
+      },
+      {
+        "title": "(확장) LV 확장 확인",
+        "command": "sudo lvs data_vg/data_lv",
+        "check": { "passContains": ["data_lv"], "requireExitZero": true },
+        "desc": "LSize 가 커졌는지 확인합니다. 이 시점에는 아직 파일시스템 크기(df)는 그대로인 것이 정상입니다.",
+        "info": "LV 는 커졌지만 파일시스템은 아직 예전 크기입니다. 다음 단계의 온라인 리사이즈까지 마쳐야 실제 사용 가능 용량이 늘어납니다."
       },
       {
         "title": "(확장) 파일시스템 온라인 리사이즈",
         "command": "sudo xfs_growfs /mnt/data",
+        "check": { "requireExitZero": true },
         "desc": "마운트된 상태에서 파일시스템을 확장합니다. xfs 는 xfs_growfs, ext4 는 resize2fs 사용."
+      },
+      {
+        "title": "(확장) 최종 용량 반영 확인",
+        "command": "df -h /mnt/data; sudo lvs data_vg/data_lv; findmnt /mnt/data",
+        "check": { "passContains": ["/mnt/data"], "requireExitZero": true },
+        "desc": "이 시나리오의 최종 확인 지점입니다. df -h 의 Size 가 확장 전보다 커졌고, LSize 와 비슷한 값이어야 성공입니다.",
+        "note": "df 값이 그대로면 파일시스템 리사이즈가 반영되지 않은 것입니다. xfs 가 아닌 ext4 라면 resize2fs /dev/data_vg/data_lv 를 사용하세요.",
+        "info": "마운트가 유지된 채로 용량이 늘어났다면 무중단 확장이 정상 동작한 것입니다."
       }
     ]
   },
@@ -1008,14 +1259,17 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 목록 업데이트",
-        "command": "sudo apt update",
+        "command": "sudo apt-get update -q",
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 설치 전 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "fio 및 libaio 설치",
-        "command": "sudo apt install -y fio libaio1t64 || sudo apt install -y fio libaio1",
+        "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio와 비동기 I/O 라이브러리(libaio)를 함께 설치합니다. libaio가 없으면 fio가 동기 모드로 폴백되어 IOPS를 제대로 측정할 수 없습니다.",
         "note": "Ubuntu 24.04+는 libaio1t64, 22.04 이하는 libaio1 패키지명을 사용합니다. || 로 두 버전을 순서대로 시도합니다.\nRHEL/CentOS 계열: sudo dnf install -y fio libaio"
       },
@@ -1023,26 +1277,26 @@ export const SCENARIOS: Scenario[] = [
         "title": "쓰기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기 30초 수행. 결과의 IOPS 값이 QoS 설정치(50)에 근접하면 정상입니다.",
+        "desc": "4k 블록 랜덤 쓰기 30초 수행. 결과의 IOPS 값이 QoS 설정치(50)에 근접하면 정상입니다. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다.",
         "info": "--direct=1 로 OS 캐시를 건너뛰고, --ioengine=libaio --iodepth=32 로 충분한 I/O 요청을 동시에 발행해야 QoS 제한치(50 IOPS)까지 실제로 도달할 수 있습니다."
       },
       {
         "title": "읽기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기 30초 수행. 결과의 IOPS 값이 50 근처로 제한되면 read_iops_sec 적용 확인입니다."
+        "desc": "4k 블록 랜덤 읽기 30초 수행. 결과의 IOPS 값이 50 근처로 제한되면 read_iops_sec 적용 확인입니다. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "쓰기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 쓰기 30초 수행. 결과의 BW 값이 약 10 MiB/s(10485760 bytes/s)로 제한되면 write_bytes_sec 적용 확인입니다."
+        "desc": "1M 블록 순차 쓰기 30초 수행. 결과의 BW 값이 약 10 MiB/s(10485760 bytes/s)로 제한되면 write_bytes_sec 적용 확인입니다. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "읽기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 읽기 30초 수행. 결과의 BW 값이 약 10 MiB/s로 제한되면 read_bytes_sec 적용 확인입니다."
+        "desc": "1M 블록 순차 읽기 30초 수행. 결과의 BW 값이 약 10 MiB/s로 제한되면 read_bytes_sec 적용 확인입니다. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1070,14 +1324,17 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt update",
+        "command": "sudo apt-get update -q",
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "커널 헤더 및 빌드 도구 설치",
-        "command": "sudo apt install -y build-essential dkms linux-headers-$(uname -r)",
+        "command": "sudo apt-get install -y -q build-essential dkms linux-headers-$(uname -r)",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "드라이버 컴파일에 필요한 커널 헤더와 빌드 도구를 설치합니다."
       },
       {
@@ -1094,6 +1351,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "재부팅",
         "command": "sudo reboot",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
         "desc": "드라이버 로드를 위해 재부팅합니다."
       },
       {
@@ -1123,11 +1381,13 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "MIG 모드 활성화",
         "command": "sudo nvidia-smi -mig 1",
+        "warn": "MIG 모드 전환은 재부팅이 필요하고, 해당 GPU 를 쓰는 워크로드가 있으면 중단됩니다.",
         "desc": "GPU에 MIG 모드를 활성화합니다. 적용을 위해 이후 재부팅이 필요합니다."
       },
       {
         "title": "재부팅",
         "command": "sudo reboot",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
         "desc": "MIG 모드 변경 사항을 적용하기 위해 재부팅합니다."
       },
       {
@@ -1168,10 +1428,24 @@ export const SCENARIOS: Scenario[] = [
         "desc": "컴퓨트 인스턴스(CI)를 먼저 삭제한 뒤 GPU 인스턴스(GI)를 삭제합니다. 삭제 순서를 반드시 지켜야 합니다."
       },
       {
+        "title": "MIG 인스턴스 삭제 확인",
+        "command": "nvidia-smi mig -lgi; nvidia-smi mig -lci",
+        "check": { "failContains": ["Error", "Failed"] },
+        "desc": "GI/CI 목록이 비었는지 확인합니다. 'No MIG-enabled devices found' 또는 빈 목록이면 정상 삭제된 것입니다."
+      },
+      {
         "title": "MIG 모드 비활성화 (필요 시)",
         "command": "sudo nvidia-smi -mig 0",
+        "warn": "MIG 인스턴스를 모두 삭제한 뒤에만 성공합니다. 앞 단계(-dci/-dgi)를 먼저 수행하세요.",
         "desc": "MIG 모드를 비활성화합니다. 적용을 위해 재부팅이 필요합니다.",
         "note": "MIG 인스턴스가 남아있으면 비활성화가 거부됩니다. 먼저 모든 GI/CI를 삭제하세요."
+      }
+      ,{
+        "title": "MIG 모드 비활성화 확인",
+        "command": "nvidia-smi --query-gpu=name,mig.mode.current --format=csv,noheader",
+        "check": { "passContains": ["Disabled"] },
+        "desc": "mig.mode.current 가 Disabled 로 바뀌었는지 확인합니다. 여전히 Enabled 면 재부팅이 필요합니다.",
+        "note": "MIG 모드 전환은 재부팅해야 반영되는 경우가 많습니다."
       }
     ]
   },
@@ -1182,23 +1456,43 @@ export const SCENARIOS: Scenario[] = [
     "id": "perf-stress-cpu",
     "solution": "성능 · 부하",
     "title": "[부하] stress-ng — CPU",
-    "summary": "CPU 코어에 인위적 부하를 주고 모니터링합니다. (수치는 환경에 맞게 조절)",
+    "summary": "부하 전 기준값을 기록하고, CPU에 부하를 준 뒤 실제로 사용률이 올랐는지 수치로 확인합니다.",
     "steps": [
       {
+        "title": "부하 전 CPU 사용률 확인",
+        "command": "echo \"코어 수: $(nproc)개\"; echo \"모델: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')\"; echo; echo '지금 CPU 사용률 (1초 간격 3회):'; vmstat 1 3 | awk 'NR>3{ printf(\"  %d%%\\n\", $13+0) }'",
+        "check": { "requireExitZero": true },
+        "desc": "결과에서 볼 것 — 맨 아래 'CPU 사용률' 숫자입니다. 보통 아무것도 안 돌면 0~5% 입니다. 이 값이 부하를 준 뒤와 비교할 출발점입니다.",
+        "note": "여기서부터 이미 사용률이 높다면 다른 작업이 돌고 있는 것이니, 부하 검증 결과가 부정확해집니다."
+      },
+      {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y stress-ng htop",
-        "desc": "부하/모니터링 도구 설치.",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
+        "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
       },
       {
-        "title": "CPU 부하 발생",
-        "command": "sudo stress-ng --cpu 4 --timeout 60s",
-        "desc": "CPU 코어 4개에 60초 동안 부하."
+        "title": "부하 중 실시간 관찰 준비 (선택)",
+        "command": "",
+        "desc": "부하가 걸리는 동안 눈으로 보려면 다른 터미널 탭에서 htop 을 띄워 두세요. 다음 단계의 부하 명령은 60초 동안 터미널을 점유하므로 같은 세션에서는 동시에 볼 수 없습니다.",
+        "note": "수치 확인은 다음 단계에서 vmstat 이 자동으로 기록하므로, 이 단계를 건너뛰어도 검증에는 지장이 없습니다."
       },
       {
-        "title": "실시간 모니터링",
-        "command": "htop",
-        "desc": "코어별 CPU 사용률을 실시간 확인. (종료: q)"
+        "title": "CPU 부하 발생 (60초)",
+        "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --cpu 4 --timeout 60s --metrics-brief",
+        "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
+        "desc": "CPU 코어 4개에 60초 부하. 뒤에서 vmstat 이 5초 간격으로 부하 전·중·후를 함께 기록합니다.",
+        "note": "부하 전 구간을 남기려고 6초 기다렸다가 시작합니다. 코어 수는 환경에 맞게 --cpu 값을 조절하세요."
+      },
+      {
+        "title": "부하 결과 확인 (전 → 중 → 후)",
+        "command": "sleep 16; echo 'CPU 사용률 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ v=$13+0; n++; if(n==1) first=v; last=v; if(v>mx) mx=v; b=\"\"; for(i=0;i<int(v/5);i++) b=b \"#\"; printf(\"  %3d%%  %s\\n\", v, b) } END{ printf(\"\\n부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n판정: CPU %s\\n\", first, mx, last, (mx>=50 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
+        "check": { "passContains": ["판정: CPU 정상"] },
+        "desc": "결과에서 볼 것 — 맨 아래 한 줄입니다. '부하 중 최고'가 50% 이상이면 부하가 실제로 걸린 것으로 자동 판정합니다. 위 막대는 시간에 따른 CPU 사용률이라 눈으로도 올랐다 내려온 모양이 보입니다.",
+        "note": "부하 전과 부하 후가 비슷하게 낮고 가운데만 높으면 정상입니다."
       }
     ]
   },
@@ -1206,23 +1500,43 @@ export const SCENARIOS: Scenario[] = [
     "id": "perf-stress-mem",
     "solution": "성능 · 부하",
     "title": "[부하] stress-ng — 메모리",
-    "summary": "메모리(RAM)에 인위적 부하를 주고 모니터링합니다.",
+    "summary": "부하 전 여유 메모리를 기록하고, 메모리를 점유시킨 뒤 실제로 줄었다가 회수되는지 확인합니다.",
     "steps": [
       {
+        "title": "부하 전 메모리 확인",
+        "command": "awk '/MemTotal/{ t=$2 } /MemAvailable/{ a=$2 } END{ printf(\"전체 메모리      %.2f GB\\n지금 쓸 수 있는  %.2f GB\\n\", t/1048576, a/1048576) }' /proc/meminfo; echo; free -h",
+        "check": { "requireExitZero": true },
+        "desc": "결과에서 볼 것 — '지금 쓸 수 있는' 메모리 숫자입니다. 다음 단계에서 2GB 를 점유시키므로 이 값이 2GB 보다 커야 합니다.",
+        "note": "2GB 보다 작으면 다음 단계의 --vm-bytes 값을 낮춰 진행하세요. 그냥 진행하면 다른 프로세스가 강제 종료될 수 있습니다."
+      },
+      {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y stress-ng htop",
-        "desc": "부하/모니터링 도구 설치.",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
+        "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
       },
       {
-        "title": "메모리 부하 발생",
-        "command": "sudo stress-ng --vm 2 --vm-bytes 1G --timeout 60s",
-        "desc": "가상 메모리 워커 2개 ×1GB(총 2GB)를 60초 동안 점유."
+        "title": "부하 중 실시간 관찰 준비 (선택)",
+        "command": "",
+        "desc": "부하가 걸리는 동안 눈으로 보려면 다른 터미널 탭에서 htop 또는 watch -n 1 'free -h' 를 띄워 두세요. 다음 단계의 부하 명령은 60초 동안 터미널을 점유합니다.",
+        "note": "수치 확인은 다음 단계에서 vmstat 이 자동으로 기록하므로, 이 단계를 건너뛰어도 검증에는 지장이 없습니다."
       },
       {
-        "title": "실시간 모니터링",
-        "command": "watch -n 1 'free -h'",
-        "desc": "메모리/스왑 사용량을 1초마다 갱신하며 확인. (종료: Ctrl+C)"
+        "title": "메모리 부하 발생 (60초)",
+        "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --vm 2 --vm-bytes 1G --vm-keep --timeout 60s --metrics-brief",
+        "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
+        "desc": "가상 메모리 워커 2개 ×1GB(총 2GB)를 60초 동안 점유. 뒤에서 vmstat 이 여유 메모리 변화를 기록합니다.",
+        "warn": "여유 메모리보다 큰 값을 주면 OOM Killer 가 다른 프로세스를 죽일 수 있습니다. 앞 단계의 MemAvailable 을 확인하고 --vm-bytes 를 조절하세요."
+      },
+      {
+        "title": "부하 결과 확인 (전 → 중 → 후)",
+        "command": "sleep 16; echo '메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순 · 막대 1칸 = 0.1GB)'; echo; awk 'NR>3{ m=$4/1048576; n++; if(n==1) fm=m; lm=m; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(d*10);i++) b=b \"#\"; printf(\"  %+6.2f GB  %s\\n\", d, b) } END{ printf(\"\\n쓸 수 있는 메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: 메모리 %s\\n\", fm, mn, lm, fm-mn, (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
+        "check": { "passContains": ["판정: 메모리 정상"] },
+        "desc": "결과에서 볼 것 — 맨 아래 '판정: 메모리' 한 줄입니다. 점유량이 1GB 이상이면 정상입니다. 위 막대는 부하 전 대비 얼마나 더 쓰고 있는지라, 부하 구간에서 길어졌다가 끝나면 사라져야 정상입니다.",
+        "note": "'부하 후' 값이 '부하 전'과 비슷하게 돌아왔으면 메모리가 정상 회수된 것입니다. 안 돌아왔다면 누수를 의심할 수 있습니다."
       }
     ]
   },
@@ -1230,23 +1544,43 @@ export const SCENARIOS: Scenario[] = [
     "id": "perf-stress-cpumem",
     "solution": "성능 · 부하",
     "title": "[부하] stress-ng — CPU & 메모리",
-    "summary": "CPU와 메모리에 동시에 부하를 주고 모니터링합니다(알람/스케일링 검증).",
+    "summary": "부하 전 CPU·메모리를 함께 기록하고, 동시에 부하를 준 뒤 두 값이 모두 움직였는지 확인합니다(알람/스케일링 검증).",
     "steps": [
       {
+        "title": "부하 전 CPU·메모리 확인",
+        "command": "echo \"코어 수: $(nproc)개\"; awk '/MemTotal/{ t=$2 } /MemAvailable/{ a=$2 } END{ printf(\"전체 메모리      %.2f GB\\n지금 쓸 수 있는  %.2f GB\\n\", t/1048576, a/1048576) }' /proc/meminfo; echo; echo '지금 CPU 사용률 (1초 간격 3회):'; vmstat 1 3 | awk 'NR>3{ printf(\"  %d%%\\n\", $13+0) }'",
+        "check": { "requireExitZero": true },
+        "desc": "결과에서 볼 것 — 'CPU 사용률'과 '지금 쓸 수 있는' 메모리 두 숫자입니다. 부하를 준 뒤 이 둘과 비교합니다. 알람 임계치를 검증한다면 이 값이 출발점입니다.",
+        "note": "쓸 수 있는 메모리가 2GB 보다 작으면 다음 단계의 --vm-bytes 값을 낮춰 진행하세요."
+      },
+      {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y stress-ng htop",
-        "desc": "부하/모니터링 도구 설치.",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
+        "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
       },
       {
-        "title": "CPU+메모리 부하 발생",
-        "command": "sudo stress-ng --cpu 4 --vm 2 --vm-bytes 1G --timeout 60s",
-        "desc": "CPU 4코어 + 메모리 2GB를 60초 동안 동시 부하."
+        "title": "부하 중 실시간 관찰 준비 (선택)",
+        "command": "",
+        "desc": "부하가 걸리는 동안 눈으로 보려면 다른 터미널 탭에서 htop 을 띄워 두세요. 다음 단계의 부하 명령은 60초 동안 터미널을 점유합니다.",
+        "note": "수치 확인은 다음 단계에서 vmstat 이 자동으로 기록하므로, 이 단계를 건너뛰어도 검증에는 지장이 없습니다."
       },
       {
-        "title": "실시간 모니터링",
-        "command": "htop",
-        "desc": "CPU/메모리/프로세스를 실시간 관찰. (종료: q)"
+        "title": "CPU+메모리 동시 부하 발생 (60초)",
+        "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --cpu 4 --vm 2 --vm-bytes 1G --vm-keep --timeout 60s --metrics-brief",
+        "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
+        "desc": "CPU 4코어 + 메모리 2GB 를 60초 동안 동시 부하. 뒤에서 vmstat 이 CPU·메모리 변화를 함께 기록합니다.",
+        "warn": "여유 메모리보다 큰 값을 주면 OOM Killer 가 다른 프로세스를 죽일 수 있습니다. 앞 단계의 free 출력을 확인하고 --vm-bytes 를 조절하세요."
+      },
+      {
+        "title": "부하 결과 확인 (전 → 중 → 후)",
+        "command": "sleep 16; echo 'CPU 사용률 / 메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ c=$13+0; m=$4/1048576; n++; if(n==1){ fc=c; fm=m } lc=c; lm=m; if(c>mx) mx=c; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(c/5);i++) b=b \"#\"; printf(\"  CPU %3d%%  %-20s  메모리 %+6.2f GB\\n\", c, b, d) } END{ printf(\"\\nCPU      부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: CPU %s / 메모리 %s\\n\", fc, mx, lc, fm, mn, lm, fm-mn, (mx>=50 ? \"정상\" : \"미달\"), (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
+        "check": { "passContains": ["판정: CPU 정상 / 메모리 정상"] },
+        "desc": "결과에서 볼 것 — 맨 아래 '판정' 한 줄입니다. CPU 50% 이상, 메모리 1GB 이상 점유면 정상이고 둘 다 만족해야 통과합니다. 막대는 CPU, 오른쪽 숫자는 부하 전 대비 메모리 사용 증가량입니다.",
+        "note": "부하 전과 부하 후가 비슷하게 돌아왔으면 자원이 정상 회수된 것입니다."
       }
     ]
   },
@@ -1254,24 +1588,42 @@ export const SCENARIOS: Scenario[] = [
     "id": "perf-iperf3-bw",
     "solution": "성능 · 부하",
     "title": "[부하] iperf3 — 네트워크 대역폭(BW)",
-    "summary": "두 노드 간 TCP 실효 대역폭을 측정합니다. (서버/클라이언트 각각 실행)",
+    "summary": "두 노드 간 TCP 실효 대역폭을 측정합니다. 역할별 대상에서 서버·클라이언트 세션을 고르면 접속 주소는 자동으로 채워집니다.",
+    "roleValues": { "SERVER_IP": "서버" },
     "steps": [
       {
-        "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y iperf3",
-        "desc": "iperf3 설치.",
+        "title": "도구 설치 (서버·클라이언트 양쪽)",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3",
+        "target": "서버, 클라이언트",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
+        "desc": "iperf3 를 설치합니다. 역할별 대상에서 고른 서버·클라이언트 두 세션에서 함께 실행되므로 따로 고를 필요가 없습니다.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y iperf3`"
       },
       {
-        "title": "[서버] 리슨 대기",
-        "command": "iperf3 -s -D",
-        "desc": "한쪽 노드에서 iperf3 서버를 백그라운드로 띄웁니다."
+        "title": "[서버] 리슨 대기 시작",
+        "command": "iperf3 -s -D; sleep 1; ss -tlnp 2>/dev/null | grep :5201 || echo 'iperf3 서버가 뜨지 않았습니다'",
+        "target": "서버",
+        "check": { "passContains": ["5201"], "failContains": ["뜨지 않았습니다"] },
+        "undo": "pkill -f 'iperf3 -s'; true",
+        "desc": "결과에서 볼 것 — 5201 포트가 LISTEN 으로 보여야 합니다. -D 는 백그라운드 실행이라 터미널을 점유하지 않습니다.",
+        "note": "이미 떠 있으면 'Address already in use' 가 나올 수 있는데, 5201 이 보이면 정상입니다."
       },
       {
         "title": "[클라이언트] 대역폭 측정",
         "command": "iperf3 -c <SERVER_IP> -t 60 -P 4",
+        "target": "클라이언트",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "다른 노드에서 60초간 4개 병렬 스트림으로 TCP 최대 실효 대역폭 측정."
+        "desc": "60초간 4개 병렬 스트림으로 TCP 최대 실효 대역폭 측정. 결과에서 볼 것 — 맨 아래 [SUM] ... receiver 줄의 Bitrate 값. 이게 실제로 나온 대역폭입니다. sender 줄이 아니라 receiver 줄을 보세요.",
+        "note": "<SERVER_IP> 는 '서버' 역할로 고른 세션의 주소가 자동으로 들어갑니다."
+      },
+      {
+        "title": "[서버] 리슨 종료",
+        "command": "pkill -f 'iperf3 -s'; sleep 1; ss -tlnp 2>/dev/null | grep :5201 || echo 'iperf3 서버를 정리했습니다'",
+        "target": "서버",
+        "check": { "passContains": ["정리했습니다"] },
+        "desc": "결과에서 볼 것 — '정리했습니다' 문구입니다. 측정이 끝난 뒤 서버를 남겨두면 5201 포트를 계속 점유합니다."
       }
     ]
   },
@@ -1283,13 +1635,16 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y fio",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y fio`"
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "cd /mnt/data",
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data",
         "desc": "테스트할 마운트 볼륨 경로로 이동.",
         "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생성됩니다."
       },
@@ -1297,13 +1652,13 @@ export const SCENARIOS: Scenario[] = [
         "title": "랜덤 쓰기 IOPS",
         "command": "sudo fio --name=randwrite --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기 IOPS/지연 측정."
+        "desc": "4k 블록 랜덤 쓰기 IOPS/지연 측정. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다."
       },
       {
         "title": "랜덤 읽기 IOPS",
         "command": "sudo fio --name=randread --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기 IOPS/지연 측정."
+        "desc": "4k 블록 랜덤 읽기 IOPS/지연 측정. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1320,13 +1675,16 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt install -y fio",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y fio`"
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "cd /mnt/data",
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data",
         "desc": "테스트할 마운트 볼륨 경로로 이동.",
         "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생성됩니다."
       },
@@ -1334,13 +1692,13 @@ export const SCENARIOS: Scenario[] = [
         "title": "순차 읽기 대역폭",
         "command": "sudo fio --name=seqread --ioengine=libaio --iodepth=32 --rw=read --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 읽기 처리량 측정."
+        "desc": "1M 블록 순차 읽기 처리량 측정. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "순차 쓰기 대역폭",
         "command": "sudo fio --name=seqwrite --ioengine=libaio --iodepth=32 --rw=write --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 쓰기 처리량 측정."
+        "desc": "1M 블록 순차 쓰기 처리량 측정. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1389,6 +1747,18 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo systemctl restart ceph-osd@<OSD_ID>",
         "desc": "해당 OSD 데몬을 재기동합니다.",
         "note": "⚠️ 디스크 하드웨어 장애가 의심되면 재시작 전에 디스크 상태(SMART 등)를 먼저 점검하세요."
+      },
+      {
+        "title": "OSD 데몬 상태 확인",
+        "command": "sudo systemctl is-active ceph-osd@<OSD_ID>; sudo systemctl status ceph-osd@<OSD_ID> --no-pager -n 20",
+        "check": { "passContains": ["active"], "failContains": ["failed", "inactive"] },
+        "desc": "재시작한 OSD 데몬이 실제로 올라왔는지 확인합니다. active (running) 이어야 정상입니다."
+      },
+      {
+        "title": "OSD 트리 재확인",
+        "command": "sudo ceph osd tree",
+        "check": { "failContains": ["down"] },
+        "desc": "해당 OSD 가 up 으로 돌아왔는지 확인합니다. 여전히 down 이면 로그를 다시 확인해야 합니다."
       },
       {
         "title": "복구 진행 감시",
@@ -1454,6 +1824,12 @@ export const SCENARIOS: Scenario[] = [
         "desc": "홈 디렉토리와 비밀번호를 설정하며 계정을 만듭니다. 실행하면 대화형 프롬프트가 나오니 안내에 따라 입력하세요."
       },
       {
+        "title": "계정 생성 확인",
+        "command": "getent passwd <사용자명>; ls -ld /home/<사용자명>",
+        "check": { "passContains": ["/home/"], "requireExitZero": true },
+        "desc": "계정이 /etc/passwd 에 등록되고 홈 디렉토리가 만들어졌는지 확인합니다."
+      },
+      {
         "title": "sudo 권한 부여",
         "command": "sudo usermod -aG sudo <사용자명>",
         "desc": "사용자를 sudo 그룹에 추가해 관리자 명령을 쓸 수 있게 합니다.",
@@ -1463,6 +1839,13 @@ export const SCENARIOS: Scenario[] = [
         "title": "그룹 확인",
         "command": "id <사용자명>",
         "desc": "해당 계정이 sudo(또는 wheel) 그룹에 포함됐는지 확인합니다."
+      },
+      {
+        "title": "sudo 권한 실제 확인",
+        "command": "sudo -l -U <사용자명>",
+        "check": { "passContains": ["ALL"], "requireExitZero": true },
+        "desc": "그룹에 속한 것과 실제로 sudo 를 쓸 수 있는 것은 다릅니다. sudoers 정책까지 반영된 결과를 확인합니다.",
+        "note": "'may run the following commands' 아래 (ALL : ALL) ALL 이 보이면 정상입니다."
       },
       {
         "title": "계정 전환 테스트",
@@ -1558,6 +1941,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "강제 종료",
         "command": "sudo kill -9 <PID>",
+        "warn": "프로세스를 강제 종료합니다. 운영 중인 서비스의 PID 를 넣으면 실제 장애가 발생하니 테스트 대상인지 확인하세요.",
         "desc": "프로세스를 강제 종료해 장애 상황을 유발합니다.",
         "note": "⚠️ 운영 중인 서비스에는 사용하지 마세요. 테스트/검증 환경에서만 진행하세요."
       },
@@ -1593,7 +1977,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "qemu-img 설치",
-        "command": "sudo apt install -y qemu-utils",
+        "command": "sudo apt-get update -q && sudo apt-get install -y -q qemu-utils",
+        "onFailure": "retry",
+        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "qcow2 이미지 변환에 필요한 qemu-img 도구를 설치합니다.",
         "note": "RHEL/CentOS 계열: sudo yum install -y qemu-img"
       },
@@ -1611,18 +1998,42 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "저장용 디스크 포맷",
         "command": "sudo mkfs.ext4 /dev/vdb",
+        "warn": "/dev/vdb 의 데이터가 모두 지워집니다. 새로 붙인 빈 디스크가 맞는지 앞 단계 lsblk 로 확인하세요.",
         "desc": "이미지 파일을 저장할 추가 디스크(vdb)를 ext4로 포맷합니다. lsblk에서 확인한 디스크명으로 교체하세요.",
         "note": "⚠️ vda는 OS 디스크입니다. 반드시 추가 연결한 디스크(vdb 등)에만 포맷을 진행하세요."
       },
       {
+        "title": "포맷 결과 확인",
+        "command": "sudo blkid /dev/vdb; lsblk -f /dev/vdb",
+        "check": { "passContains": ["ext4"], "requireExitZero": true },
+        "desc": "포맷이 실제로 적용됐는지 확인합니다. TYPE=\"ext4\" 와 UUID 가 보여야 정상입니다."
+      },
+      {
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/backup",
+        "check": { "requireExitZero": true },
+        "undo": "sudo rmdir /mnt/backup",
         "desc": "저장용 디스크를 마운트할 디렉토리를 생성합니다."
+      },
+      {
+        "title": "마운트 포인트 생성 확인",
+        "command": "ls -ld /mnt/backup",
+        "check": { "passContains": ["/mnt/backup"], "requireExitZero": true },
+        "desc": "디렉토리가 실제로 만들어졌는지 확인합니다."
       },
       {
         "title": "저장용 디스크 마운트",
         "command": "sudo mount /dev/vdb /mnt/backup",
+        "check": { "requireExitZero": true, "failContains": ["wrong fs type", "does not exist"] },
+        "undo": "sudo umount /mnt/backup",
         "desc": "/mnt/backup에 저장용 디스크를 마운트합니다. 이후 생성되는 이미지 파일이 이 경로에 저장됩니다."
+      },
+      {
+        "title": "마운트 상태 및 여유 용량 확인",
+        "command": "findmnt /mnt/backup; df -h /mnt/backup",
+        "check": { "passContains": ["/mnt/backup"], "requireExitZero": true },
+        "desc": "마운트 여부와 함께 남은 용량을 확인합니다. 다음 단계에서 OS 디스크 전체를 이미지로 뜨므로, vda 크기보다 여유 공간이 커야 합니다.",
+        "warn": "여유 공간이 부족하면 변환이 중간에 실패합니다. df -h 의 Avail 값을 반드시 확인하세요."
       },
       {
         "title": "vda 디스크를 qcow2 이미지로 변환",
@@ -1640,6 +2051,13 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo qemu-img convert -c -O qcow2 /mnt/backup/ubuntu_image.qcow2 /mnt/backup/ubuntu_image_compressed.qcow2",
         "desc": "생성된 이미지에 압축을 적용해 파일 크기를 줄입니다. 다운로드 시간을 단축하려면 이 단계를 먼저 진행하세요.",
         "note": "압축 옵션(-c)은 변환 시간이 더 걸리지만 파일 크기를 크게 줄여줍니다. 원본 이미지는 삭제해 공간을 확보할 수 있습니다."
+      },
+      {
+        "title": "압축 결과 크기 비교",
+        "command": "ls -lh /mnt/backup/*.qcow2; df -h /mnt/backup",
+        "check": { "passContains": ["qcow2"], "requireExitZero": true },
+        "desc": "원본과 압축본의 파일 크기를 나란히 확인합니다. 압축본이 원본보다 작아야 정상입니다.",
+        "note": "압축본 크기가 0 이거나 원본과 같으면 변환이 실패한 것입니다. 남은 용량(df)도 함께 확인하세요."
       },
       {
         "title": "이미지 파일 확인",

@@ -79,6 +79,18 @@ const stripZeroCounts = (text: string): string => text.replace(ZERO_COUNT_RE, ' 
 export function hasDangerKeyword(text: string): boolean {
   return DANGER_LINE_RE.test(stripZeroCounts(text))
 }
+/**
+ * 위험 키워드에 걸린 '단어와 그 줄'. 판정 근거를 쓸 때 쓴다.
+ * "위험 키워드 감지" 라고만 하면 사용자가 긴 출력을 직접 뒤져야 한다 —
+ * 어떤 단어가 어느 줄에서 걸렸는지까지 말해줘야 바로 원인으로 갈 수 있다.
+ */
+export function dangerKeywordHit(text: string): { word: string; line: string } | null {
+  for (const raw of text.split('\n')) {
+    const m = DANGER_LINE_RE.exec(stripZeroCounts(raw))
+    if (m) return { word: m[1], line: raw.trim() }
+  }
+  return null
+}
 /** 텍스트에 경고 키워드가 하나라도 있으면 true */
 export function hasWarningKeyword(text: string): boolean {
   return WARNING_LINE_RE.test(text)
