@@ -204,6 +204,11 @@ interface NodeSvc {
   name: string
   up: boolean
   states: Record<string, SvcState> // 유닛명 → 상태
+  /**
+   * 이번 주기 조회가 실패해 **직전 값을 그대로 쓴** 경우의 경과 초.
+   * 이게 없으면 조회 실패가 열 전체 '—'(상태 미상)로 보여, 노드가 이상한 것처럼 읽힌다.
+   */
+  staleSec?: number
 }
 interface OsSvc {
   type: 'nova' | 'neutron' | 'cinder'
@@ -221,6 +226,12 @@ interface OsStat {
   disabledCount: number
   total: number
   errors: string[] // 조회 실패한 명령(권한/rc/CLI 문제) 안내
+  /**
+   * 이번 주기에 조회가 실패해 **직전 값을 그대로 쓴** 종류들.
+   * 실패를 빈 결과로 반영하면 행·열이 사라졌다 나타났다 하며 '서비스가 없어졌다'로 읽힌다.
+   * 값은 유지하되, 지금 값이 아니라는 사실은 반드시 화면에 남긴다.
+   */
+  stale: string[]
 }
 /**
  * 복구 타임라인 마일스톤 — 모두 '절대시각(epoch ms)'으로 보관한다.
@@ -235,8 +246,14 @@ interface Milestones {
   masakari?: { at: number; by: string; evac: number }
   /** 워크로드(Deployment/StatefulSet) 단위 파드 정상화 */
   pods: { at: number; ns: string; workload: string }[]
-  /** Ceph degraded + misplaced 가 모두 0 이 된 시점 */
+  /** Ceph degraded + misplaced 가 모두 0 이 된 시점 (= 데이터 복제 복구 완료) */
   ceph?: { at: number }
+  /**
+   * Ceph 이 HEALTH_OK 까지 간 시점.
+   * 위 `ceph` 와 반드시 구분해야 한다 — clock skew 처럼 복제와 무관한 사유로 WARN 이 남으면
+   * degraded·misplaced 가 0 이어도 클러스터는 정상이 아니고, 종합 판정도 통과하지 않는다.
+   */
+  cephHealthy?: { at: number }
   /** IPMI 재기동 후 SSH 세션이 다시 붙은 시점 */
   reconnect?: { at: number; node: string }
   /**
@@ -247,6 +264,19 @@ interface Milestones {
   portal: { at: number; name: string; group?: string; streak?: number }[]
 }
 const emptyMilestones = (): Milestones => ({ pods: [], portal: [] })
+/** 이 회차에서 가장 늦은 마일스톤 시각 (없으면 0) — 이력의 '총 소요' 기준 */
+const lastMilestoneAt = (ms: Milestones): number =>
+  Math.max(
+    0,
+    ms.down?.at ?? 0,
+    ms.vip?.at ?? 0,
+    ms.masakari?.at ?? 0,
+    ms.ceph?.at ?? 0,
+    ms.cephHealthy?.at ?? 0,
+    ms.reconnect?.at ?? 0,
+    ...(ms.pods ?? []).map((p) => p.at),
+    ...(ms.portal ?? []).map((p) => p.at),
+  )
 
 interface BoardState {
   hosts: HostStat[]
@@ -299,10 +329,25 @@ async function run(id: string, cmd: string, timeoutMs = CMD_TIMEOUT_MS): Promise
 const osCmd = (rc: string, sub: string) => `bash -lc '. ${rc} 2>/dev/null; openstack ${sub} -f json 2>&1'`
 
 // ── 파서 ───────────────────────────────────────────────────────
-/** pcs status 출력에서 int_vip 리소스가 붙은 노드명 추출 */
+/** 노드명으로 볼 수 있는 토큰인가 — 대괄호·콜론 같은 서식 문자가 노드명으로 잡히는 걸 막는다 */
+const looksLikeNode = (s: string) => /^[A-Za-z0-9][\w.-]*$/.test(s)
+/**
+ * pcs status 출력에서 int_vip 리소스가 붙은 노드명 추출.
+ *
+ * `Started con02` 만 나오는 게 아니다 — 리소스 종류와 전환 중 상태에 따라
+ * `Started: [ con02 ]` · `Started [ con02 con03 ]` 형태도 나온다.
+ * 예전 정규식(`Started\s+(\S+)`)은 그 형태에서 **`[` 를 노드명으로 잡았고**, 그 값이
+ * 바뀌는 순간(노드가 다시 합류할 때 서식이 변한다) 타임라인에 가짜 'VIP 이동' 이 찍혔다.
+ */
 function parseVipNode(out: string): string {
-  const m = out.match(/int_vip\b[^\n]*?Started\s+(\S+)/i)
-  return m ? m[1].trim() : ''
+  for (const m of out.matchAll(/int_vip\b[^\n]*?Started\b[:\s]*(\[[^\]\n]*\]|\S+)/gi)) {
+    const raw = (m[1] ?? '').trim()
+    // 대괄호 안이면 그 안의 첫 노드명을 쓴다(전환 중에는 여러 노드가 나열될 수 있다)
+    const cands = raw.startsWith('[') ? raw.slice(1, -1).trim().split(/\s+/) : [raw]
+    const node = cands.find(looksLikeNode)
+    if (node) return node
+  }
+  return ''
 }
 /**
  * pcs status 에서 노드별 Online/OFFLINE 목록 추출.
@@ -359,7 +404,8 @@ function matchesVip(vipNode: string, name: string, hostname?: string): boolean {
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 // masakari-engine 의 인스턴스 단위 evacuation 호출 로그 (예: "Call evacuate command for instance <uuid> on host ...")
 const EVAC_RE = new RegExp(`evacuate\\s+command\\s+for\\s+instance\\s+(${UUID})`, 'gi')
-const UUID_RE = new RegExp(UUID, 'i')
+// (예전에 있던 단일 UUID_RE 는 지웠다 — 한 줄에서 첫 UUID 만 집어 요청 id(req-…)를 인스턴스로
+//  착각했다. 폴백은 req 를 지운 뒤 그 줄의 UUID 를 전부 모은다)
 // 로그에 섞인 ANSI 색상 이스케이프 제거
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g
@@ -382,7 +428,7 @@ function parseMasakari(
   out: string,
   t0: number,
   delta: number,
-): { state: MasakariState; detail: string; evac: number } {
+): { state: MasakariState; detail: string; evac: number; at?: number } {
   const all = stripAnsi(out).split('\n').filter(Boolean)
   const recent = all.filter((l) => {
     const ts = lineTs(l)
@@ -396,20 +442,37 @@ function parseMasakari(
     EVAC_RE.lastIndex = 0
     while ((m = EVAC_RE.exec(l)) !== null) uuids.add(m[1].toLowerCase())
   }
-  // 정확한 패턴이 안 잡히면 evacuat 라인의 UUID 로 폴백
+  // 정확한 패턴이 안 잡히면(masakari 버전마다 문구가 다르다) evacuat 라인의 UUID 로 폴백.
+  //
+  // 여기에 함정이 둘 있었다:
+  //  1) masakari 로그는 **모든 줄 앞머리에 요청 id(`req-<uuid>`)** 를 붙인다. 그게 줄마다
+  //     다르므로 인스턴스 id 로 세면 **줄 수만큼 대수가 뛴다.** 먼저 지운다.
+  //  2) 한 줄에서 `match()` 로 **첫 UUID 하나만** 집었다 — 그 첫 값이 바로 위의 req id 였다.
+  //     즉 폴백이 걸리는 환경에서는 대수가 통째로 엉터리였다.
   if (uuids.size === 0) {
+    const REQ_RE = new RegExp(`req-${UUID}`, 'gi')
+    const ALL_UUID_RE = new RegExp(UUID, 'gi')
     for (const l of recent) {
-      if (/evacuat/i.test(l)) {
-        const u = l.match(UUID_RE)
-        if (u) uuids.add(u[0].toLowerCase())
-      }
+      if (!/evacuat/i.test(l)) continue
+      for (const m of l.replace(REQ_RE, '').matchAll(ALL_UUID_RE)) uuids.add(m[0].toLowerCase())
     }
   }
   const evac = uuids.size
   // 완료 판정: 알림이 실제로 종료된 로그만 매칭 ("Notification <uuid> exits with status: finished.")
   //   중복 스킵 WARNING("...current status ... in db is 'finished'")이나 "Processing notification..." 은 완료가 아님.
-  const finished = recent.some((l) => /exits\s+with\s+status:\s*finished/i.test(l))
-  if (finished) return { state: 'finished', detail: evac ? `evacuation 완료 · ${evac}대` : 'evacuation 완료', evac }
+  // 가장 이른 완료 줄을 고른다 — 그 줄의 타임스탬프가 '언제 끝났나' 의 답이다.
+  // (some() 으로 존재만 확인하면 시각을 잃어버려, 마일스톤이 '발견 시각' 으로 찍힌다)
+  const finishedLine = recent.find((l) => /exits\s+with\s+status:\s*finished/i.test(l))
+  if (finishedLine) {
+    const ts = lineTs(finishedLine)
+    return {
+      state: 'finished',
+      detail: evac ? `evacuation 완료 · ${evac}대` : 'evacuation 완료',
+      evac,
+      // delta 를 빼서 호스트 로컬 표기를 절대시각으로 되돌린다(t0 비교와 같은 기준).
+      at: ts != null ? ts - delta : undefined,
+    }
+  }
   // 처리할 알림이 하나도 안 잡혔으면 '진행 중'이 아니라 '아직 아무 일 없음'이다
   if (evac === 0) return { state: 'idle', detail: '검증 시작 후 evacuation 로그 없음', evac }
   return { state: 'progress', detail: `진행 중 · ${evac}대 처리`, evac }
@@ -615,7 +678,8 @@ function parseOpenstack(nova: string, neutron: string, cinder: string): OsStat {
   // evacuation 중 정상적으로 disable 된 nova-compute 가 장애처럼 보인다.
   const downCount = all.filter((s) => !s.up).length
   const disabledCount = all.filter((s) => s.up && !s.enabled).length
-  return { rows: all, abnormalCount, downCount, disabledCount, total: all.length, errors }
+  // stale 은 '이번 주기에 조회가 실패해 직전 값을 썼는가' 라 파서가 알 수 없다 — 호출부가 채운다.
+  return { rows: all, abnormalCount, downCount, disabledCount, total: all.length, errors, stale: [] }
 }
 
 /**
@@ -642,6 +706,12 @@ interface HistoryRecord {
   closedAt: number
   /** 어떤 노드를 죽인 회차인지 */
   node: string
+  /**
+   * 사람이 붙인 회차 이름 (예: `306ha con1 1차`, `IPMI 강제종료 재시험`).
+   * 노드명·시각만으로는 며칠 뒤에 어떤 조건의 회차였는지 구분이 안 된다.
+   * 검증 중에 입력해두면 저장 시 함께 남고, 이력 목록에서 나중에 고칠 수도 있다.
+   */
+  label?: string
   milestones: Milestones
 }
 function loadHistory(): HistoryRecord[] {
@@ -709,6 +779,15 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const [view, setView] = useState<'config' | 'board'>('config')
   const [history, setHistory] = useState<HistoryRecord[]>(loadHistory)
   const [showHistory, setShowHistory] = useState(false)
+  /**
+   * 이번 회차 이름. 검증 중에 입력해두면 이력에 함께 저장된다.
+   * 회차를 시작할 때 비우지 않는다 — '…1차' → '…2차' 처럼 고쳐 쓰는 게 대부분이고,
+   * 헤더에 그대로 보이므로 모르고 지나칠 일은 없다.
+   */
+  const [runLabel, setRunLabel] = useState('')
+  // commitHistory 는 언마운트 정리에서도 불리므로 최신 값을 ref 로 노출한다
+  const runLabelRef = useRef('')
+  runLabelRef.current = runLabel
   const [state, setState] = useState<BoardState | null>(null)
   const [running, setRunning] = useState(false)
   const [minimized, setMinimized] = useState(false)
@@ -761,6 +840,12 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
    * downAtRef 가 지워지는데, 그 시점엔 아직 SSH 가 안 붙어서 재연결 감시가 꺼져버린다.
    */
   const wasDownRef = useRef<Set<string>>(new Set())
+  /**
+   * SSH 가 **실제로 끊긴 것을 관측한** host — '재연결' 을 인정하는 전제 조건이다.
+   * 전원이 갑자기 끊기면 FIN/RST 가 못 나가 소켓이 한동안 살아 있는 것처럼 보이므로,
+   * pcs 가 DOWN 을 보고한 것만으로 재연결을 판정하면 안 된다.
+   */
+  const sshLostRef = useRef<Set<string>>(new Set())
   /** pcs 가 Online 으로 보고한 적이 있는 host — 이 노드의 OFFLINE 만 '전원 다운'으로 신뢰한다 */
   const pcsSeenOnlineRef = useRef<Set<string>>(new Set())
   /** `pcs status` 를 마지막으로 제대로 답해준 host 세션 — 다음 폴링에서 먼저 물어본다 */
@@ -778,8 +863,27 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   }>({ lastFire: {}, state: {} })
   // 이번 검증 회차를 이력으로 이미 저장했는지
   const savedRef = useRef(false)
+  /** 저장 시점에 쓴 '확정 시각' — 갱신할 때 이 값을 유지해 총 소요가 부풀지 않게 한다 */
+  const closedAtRef = useRef(0)
+  /** HEALTH_OK 도달을 이력에 반영했는지 (데이터 복구보다 늦게 오므로 한 번 더 덮어쓴다) */
+  const savedHealthyRef = useRef(false)
   // Ceph 복구 진행률 기준선 — 검증 시작 후 관측된 '남은 객체' 최대값(장애 직후 최대치)
   const cephPeakRef = useRef(0)
+  /**
+   * '남은 객체 0' 을 연속 몇 번 봤는지. 복구 완료 마일스톤은 한 번 박히면 안 지워지므로,
+   * 부분 출력 한 프레임에 속아 가짜로 찍히지 않도록 연속 2회를 요구한다.
+   */
+  const cephDoneHitsRef = useRef(0)
+  /** HEALTH_OK + 남은 객체 0 을 연속 몇 번 봤는지 (위와 같은 이유로 연속 2회 요구) */
+  const cephOkHitsRef = useRef(0)
+  /**
+   * OpenStack 조회 결과의 마지막 성공값 (종류별).
+   * 노드를 죽여 놓은 동안 `openstack ... list` 는 자주 타임아웃한다. 그때 빈 결과로 덮으면
+   * 표의 행·열이 사라졌다 나타났다 해서 읽을 수가 없다 — 직전 값을 유지하고 '몇 초 전 값'만 밝힌다.
+   */
+  const osCacheRef = useRef<Record<string, { out: string; at: number }>>({})
+  /** 노드별 서비스 데몬 상태의 마지막 성공값 — 위와 같은 이유(열 전체가 '—' 로 바뀌는 것 방지) */
+  const svcCacheRef = useRef<Record<string, { states: Record<string, SvcState>; at: number }>>({})
   // host 세션 id → 실제 hostname (VIP 노드명 매칭용, 세션당 1회만 조회)
   const hostnamesRef = useRef<Record<string, string>>({})
   // masakari 세션 id → 로그시각 보정값 { delta(ms), ok } (검증 시작 시 host date 로 1회 산출)
@@ -1009,7 +1113,12 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       }
       // 마일스톤: VIP 이동 — 첫 관측값을 기준으로 두고, 다른 노드로 바뀐 순간만 기록한다.
       // (예전에는 vipNode 가 처음 채워지기만 해도 'VIP 확인'으로 찍혀 항상 00:00 이 나왔다)
-      if (vipNode) {
+      //
+      // 한 겹 더 — pcs 가 알려준 노드 목록에 **없는** 값으로의 변화는 이동이 아니라 파싱 잡음이다.
+      // 파서를 고쳐도 서식이 또 바뀔 수 있으니, '노드 목록에 있는 이름' 이라는 사실로 검증한다.
+      const knownNodes = [...pcs.online, ...pcs.offline]
+      const isKnown = (n: string) => knownNodes.some((k) => k.toLowerCase() === n.toLowerCase())
+      if (vipNode && (knownNodes.length === 0 || isKnown(vipNode))) {
         if (!vipSeenRef.current) vipSeenRef.current = vipNode
         else if (vipSeenRef.current !== vipNode && !msRef.current.vip) {
           msRef.current.vip = { at: now, from: vipSeenRef.current, to: vipNode }
@@ -1023,8 +1132,12 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     const masakariJob = async () => {
       const results = await Promise.all(
         masaIds.map(async (id) => {
-          if (!connectedOf(id)) return { id, state: 'unknown' as MasakariState, detail: '세션 미연결', evac: 0 }
-          const cmd = sudoOr(`sh -c 'tail -n 4000 ${c.logPath} | grep -iE "evacuat|finish|complet|notification" | tail -n 200'`)
+          if (!connectedOf(id))
+            return { id, state: 'unknown' as MasakariState, detail: '세션 미연결', evac: 0, at: undefined as number | undefined }
+          // 마지막 200줄만 보면 **대수가 모자라게 세진다** — 인스턴스 하나가 여러 줄을 남기므로
+          // (get server · unlock server · notification …) VM 이 여러 대면 앞쪽 evacuate 줄이
+          // 밀려 나간다. 전송량은 grep 이 줄이니 여유를 준다.
+          const cmd = sudoOr(`sh -c 'tail -n 20000 ${c.logPath} | grep -iE "evacuat|finish|complet|notification" | tail -n 800'`)
           const r = await run(id, cmd)
           if (r.timedOut) delayed.add('Masakari')
           const p = parseMasakari(r.ok ? (r.out ?? '') : '', t0Ref.current, calibRef.current[id]?.delta ?? 0)
@@ -1038,9 +1151,12 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         detail: m.detail,
         evac: m.evac,
       }))
-      const done = masakari.find((m) => m.state === 'finished')
+      const done = results.find((m) => m.state === 'finished')
       if (!msRef.current.masakari && done) {
-        msRef.current.masakari = { at: Date.now(), by: svcShortName(done.name), evac: done.evac }
+        // 시각은 **로그가 말하는 시각**을 쓴다. Date.now() 를 쓰면 '폴링이 발견한 시각' 이 찍혀
+        // 폴링 주기만큼 늦고, 호스트 시계가 PC 와 어긋나 있으면 그 오차까지 그대로 실린다.
+        // (delta 보정은 TZ 만 잡는다 — 같은 date 호출에서 epoch·로컬표기를 함께 받으므로 시계 오차는 상쇄된다)
+        msRef.current.masakari = { at: done.at ?? Date.now(), by: svcShortName(nameOf(done.id)), evac: done.evac }
       }
       patch({ masakari })
     }
@@ -1061,14 +1177,52 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       const out = r.ok ? (r.out ?? '') : ''
       if (!out) return patch({ ceph: unknownCeph('조회 실패 (권한/명령 확인) — 확인 불가') })
       const parsed = parseCeph(out)
+      /**
+       * 출력은 왔는데 `HEALTH_` 문자열이 없다 = 클러스터가 상태를 답하지 못한 것이다.
+       * mon quorum 이 흔들리는 동안 `ceph -s` 는 이런 걸 돌려준다:
+       *   monclient(hunting): authenticate timed out / [errno 110] RADOS timed out
+       * 이때 degraded·misplaced 는 '0' 이 아니라 **모름**이다. 그대로 계산에 넣으면
+       *   · remain 이 0 이 되어 진행률 바가 100% 초록으로 뒤집히고
+       *   · 아래 마일스톤이 가짜 'Ceph 복구 완료' 를 타임라인에 **영구히** 박는다(한 번 찍히면 안 지워진다)
+       * 빈 출력과 똑같이 '확인 불가' 로 남긴다.
+       */
+      if (parsed.health === 'unknown') {
+        // 원인 추적용 — **받은 응답을 그대로** 남긴다.
+        // 이 상태가 왜 생기는지 화면만 봐서는 알 수 없었다(mon 접속 실패? 권한? 다른 이유?).
+        // 카드 note 에 붙여 바로 보이게 하고, 지나간 것도 볼 수 있게 콘솔에도 남긴다.
+        const peek = out.trim().replace(/\s+/g, ' ').slice(0, 300)
+        console.warn('[StatusBoard] ceph -s 가 HEALTH_ 를 안 줬습니다 — 원문:', out)
+        return patch({ ceph: unknownCeph(`상태를 답하지 못함 — 응답: ${peek}`) })
+      }
       const remain = parsed.degraded + parsed.misplaced
       // 복구 진행률의 기준선(peak)은 폴링 간에 유지돼야 하므로 ref 에 누적한다.
       cephPeakRef.current = Math.max(cephPeakRef.current, remain)
       const ceph = { ...parsed, peakRemain: cephPeakRef.current }
       // 마일스톤: degraded 도 misplaced 도 0 — 단, '한 번이라도 깨진 적이 있어야' 완료로 본다.
       // (검증 시작 시점부터 계속 0 이면 그건 복구가 아니라 애초에 정상이었던 것)
+      //
+      // health 가 OK 인 프레임만 신뢰한다. WARN 인데 remain 0 인 순간은 실제로 존재하고
+      // (다른 사유로 WARN, 복제는 끝남) 그건 완료로 봐도 되지만, 한 번의 관측으로 확정하면
+      // 부분 출력 한 프레임에 속는다 — `session:run` 은 종료코드가 0 이 아니어도 모아둔
+      // 출력만큼 ok:true 로 돌려주므로 degraded 줄이 잘린 반쪽 응답이 올 수 있다.
+      // 연속 2회 관측해야 확정한다.
       if (!msRef.current.ceph && cephPeakRef.current > 0 && remain === 0) {
-        msRef.current.ceph = { at: Date.now() }
+        cephDoneHitsRef.current += 1
+        if (cephDoneHitsRef.current >= 2) msRef.current.ceph = { at: Date.now() }
+      } else {
+        cephDoneHitsRef.current = 0
+      }
+      /**
+       * HEALTH_OK 는 '데이터 복구' 와 **다른 사건**이다.
+       * clock skew 처럼 복제와 무관한 사유로 WARN 이 남으면 degraded·misplaced 가 0 이어도
+       * 클러스터는 정상이 아니다. 종합 판정(cephOk)은 이미 health OK 를 요구하는데
+       * 타임라인만 '복구 완료' 라고 말해 서로 어긋났다 — 같은 기준의 줄을 따로 둔다.
+       */
+      if (!msRef.current.cephHealthy && cephPeakRef.current > 0 && remain === 0 && parsed.health === 'OK') {
+        cephOkHitsRef.current += 1
+        if (cephOkHitsRef.current >= 2) msRef.current.cephHealthy = { at: Date.now() }
+      } else {
+        cephOkHitsRef.current = 0
       }
       patch({ ceph })
     }
@@ -1126,11 +1280,29 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     const svcJob = async () => {
       if (!c.showServices || !svcUnits.length || !hostIds.length) return patch({ serviceUnits: [], services: [] })
       const services = await Promise.all(
-        hostIds.map(async (id) => {
-          if (!connectedOf(id)) return { id, name: nameOf(id), up: false, states: {} as Record<string, SvcState> }
+        hostIds.map(async (id): Promise<NodeSvc> => {
+          if (!connectedOf(id)) return { id, name: nameOf(id), up: false, states: {} }
           const r = await run(id, `systemctl show -p Id -p LoadState -p ActiveState -p SubState ${svcUnits.join(' ')} 2>/dev/null`)
           if (r.timedOut) delayed.add('서비스 데몬')
-          return { id, name: nameOf(id), up: true, states: parseServices(svcUnits, r.ok ? (r.out ?? '') : '') }
+          const out = r.ok ? (r.out ?? '') : ''
+          // 응답이 비면 parseServices 가 모든 유닛을 'unknown' 으로 채워 **열 전체가 '—'** 가 된다.
+          // 사용자에게는 "이 노드가 이상하다" 로 읽히지만, 실제로는 systemctl 조회가 실패한 것뿐이다
+          // (노드 하나가 죽은 동안 pcs·ceph·openstack·kubectl 이 몰려 12초 타임아웃을 넘기기 쉽다).
+          if (!out.trim()) {
+            const cached = svcCacheRef.current[id]
+            if (cached)
+              return {
+                id,
+                name: nameOf(id),
+                up: true,
+                states: cached.states,
+                staleSec: Math.max(1, Math.round((Date.now() - cached.at) / 1000)),
+              }
+            return { id, name: nameOf(id), up: true, states: parseServices(svcUnits, '') }
+          }
+          const states = parseServices(svcUnits, out)
+          svcCacheRef.current[id] = { states, at: Date.now() }
+          return { id, name: nameOf(id), up: true, states }
         }),
       )
       patch({ serviceUnits: svcUnits, services })
@@ -1139,14 +1311,31 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     // ── 6) OpenStack 서비스(API) ────────────────────────────────────────────
     const osJob = async () => {
       if (!c.showOpenstack || !c.osSession || !connectedOf(c.osSession)) return patch({ openstack: null, osScope: c.osScope })
+      const SUBS = [
+        ['nova', 'compute service list'],
+        ['neutron', 'network agent list'],
+        ['cinder', 'volume service list'],
+      ] as const
+      const stale: string[] = []
       const [nova, neutron, cinder] = await Promise.all(
-        ['compute service list', 'network agent list', 'volume service list'].map(async (sub) => {
+        SUBS.map(async ([type, sub]) => {
           const r = await run(c.osSession, osCmd(c.osRc, sub))
           if (r.timedOut) delayed.add('OpenStack')
-          return r.ok ? (r.out ?? '') : ''
+          const out = r.ok ? (r.out ?? '') : ''
+          // **파싱까지 통과한 응답만** 새 값으로 인정한다. 타임아웃·인증만료·CLI 오류를 빈
+          // 문자열로 넘기면 parseOpenstack 이 그 종류를 통째로 건너뛰어(`if (!out.trim()) continue`)
+          // 표에서 행과 열이 사라졌다 나타났다 한다 — 노드가 죽어 있는 동안 특히 잦다.
+          if (out.trim() && parseOsJson(out, type).ok) {
+            osCacheRef.current[type] = { out, at: Date.now() }
+            return out
+          }
+          const cached = osCacheRef.current[type]
+          if (!cached) return '' // 한 번도 성공한 적이 없으면 보여줄 직전 값도 없다
+          stale.push(`${type} ${Math.max(1, Math.round((Date.now() - cached.at) / 1000))}초 전`)
+          return cached.out
         }),
       )
-      patch({ openstack: parseOpenstack(nova, neutron, cinder), osScope: c.osScope })
+      patch({ openstack: { ...parseOpenstack(nova, neutron, cinder), stale }, osScope: c.osScope })
     }
 
     // 시각 보정 안내
@@ -1166,19 +1355,36 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
     // 이력 확정 — Ceph 의 degraded/misplaced 가 모두 복구된 시점을 1회차의 끝으로 본다.
     if (!savedRef.current && msRef.current.ceph) commitHistory(msRef.current.ceph.at)
+    // HEALTH_OK 는 데이터 복구보다 **늦게** 온다(clock skew 같은 다른 사유가 남아 있으면).
+    // 그때 이력을 다시 덮어쓰지 않으면 그 줄이 저장본에서 통째로 빠진다.
+    else if (savedRef.current && msRef.current.cephHealthy && !savedHealthyRef.current) {
+      savedHealthyRef.current = true
+      commitHistory(msRef.current.cephHealthy.at, true)
+    }
   }
 
-  /** 이번 회차의 마일스톤을 이력으로 남긴다(1회만). 마일스톤이 하나도 없으면 저장하지 않는다. */
-  const commitHistory = (closedAt: number) => {
-    if (savedRef.current) return
+  /**
+   * 이번 회차의 마일스톤을 이력으로 남긴다. 마일스톤이 하나도 없으면 저장하지 않는다.
+   *
+   * `refresh` 는 **이미 저장한 회차를 덮어쓸 때** 쓴다. 저장은 Ceph 데이터 복구 시점에 한 번
+   * 일어나는데, 그 뒤에 오는 마일스톤(HEALTH_OK · 늦게 복구된 포털 대상 등)이 있으면
+   * 화면 타임라인에는 보이지만 **저장된 이력에는 빠진다.** 같은 id 를 덮어써 채워 넣는다.
+   */
+  const commitHistory = (closedAt: number, refresh = false) => {
+    if (savedRef.current && !refresh) return
     const ms = msRef.current
     if (!ms.down && !ms.vip && !ms.masakari && !ms.ceph && ms.pods.length === 0 && ms.portal.length === 0) return
+    // 총 소요는 't0 → 마지막 마일스톤' 이어야 한다. 갱신할 때 지금 시각을 쓰면 보드를
+    // 열어둔 시간만큼 부풀고, 처음 값을 그대로 두면 뒤에 온 마일스톤이 소요에 안 잡힌다.
+    if (!savedRef.current) closedAtRef.current = closedAt
+    closedAtRef.current = Math.max(closedAtRef.current, lastMilestoneAt(ms))
     savedRef.current = true
     const rec: HistoryRecord = {
       id: `${t0Ref.current}`,
       t0: t0Ref.current,
-      closedAt,
+      closedAt: closedAtRef.current,
       node: ms.down?.node ?? '(미확인)',
+      label: runLabelRef.current.trim() || undefined,
       // ref 를 그대로 넣으면 이후 폴링이 같은 객체를 계속 수정한다 → 깊은 복사
       milestones: { ...ms, pods: [...ms.pods], portal: [...ms.portal] },
     }
@@ -1211,8 +1417,15 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     await Promise.all(
       hostIds.map(async (id) => {
         if (connectedOf(id)) {
-          // 죽었다가 SSH 가 실제로 다시 붙은 순간을 타임라인에 기록
-          if (wasDownRef.current.has(id)) {
+          // 죽었다가 SSH 가 **실제로 끊겼다가** 다시 붙은 순간만 타임라인에 기록한다.
+          //
+          // sshLost 게이트가 없으면 이렇게 무너진다: 전원이 갑자기 끊긴 호스트는 FIN/RST 를
+          // 보낼 틈이 없어 소켓이 keepalive 타임아웃까지 살아 있는 것처럼 보인다. 그래서 pcs 가
+          // OFFLINE 을 보고한 **직후에도 connected 가 true** 다. 그 순간을 재연결로 읽으면
+          //   · 타임라인에 DOWN 1초 뒤 가짜 '세션 재연결' 이 찍히고
+          //   · 여기서 wasDown 을 지워버려 **진짜 재연결 감시가 통째로 꺼진다**
+          //     (아래 'DOWN 확정 대기 중' 분기에 갇혀 프로브가 영영 안 나간다)
+          if (wasDownRef.current.has(id) && sshLostRef.current.has(id)) {
             // 타임라인 주인공(=DOWN 마일스톤의 노드)이 따로 있으면 그 노드의 재연결을 우선 기록한다.
             const short = svcShortName(nameOf(id))
             const target = msRef.current.down?.node
@@ -1221,11 +1434,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
               msRef.current.reconnect = { at: now, node: short }
             }
             wasDownRef.current.delete(id)
+            sshLostRef.current.delete(id)
             delete probeRef.current.lastFire[id]
             delete probeRef.current.state[id]
           }
           return
         }
+        // 여기 도달했다는 건 지금 SSH 가 끊겨 있다는 뜻 — 위 게이트가 기다리던 관측이다.
+        sshLostRef.current.add(id)
         const st = probeRef.current.state
         const bump = (note: string, ok = false) => (st[id] = { tries: (st[id]?.tries ?? 0) + 1, note, ok })
 
@@ -1286,10 +1502,15 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     t0Ref.current = Date.now()
     msRef.current = emptyMilestones()
     cephPeakRef.current = 0
+    cephDoneHitsRef.current = 0
+    cephOkHitsRef.current = 0
+    osCacheRef.current = {}
+    svcCacheRef.current = {}
     hostnamesRef.current = {}
     calibRef.current = {}
     downAtRef.current = {}
     wasDownRef.current = new Set()
+    sshLostRef.current = new Set()
     pcsSeenOnlineRef.current = new Set()
     pcsSourceRef.current = ''
     seenUpRef.current = new Set()
@@ -1297,6 +1518,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     badWorkloadsRef.current = {}
     probeRef.current = { lastFire: {}, state: {} }
     savedRef.current = false
+    savedHealthyRef.current = false
+    closedAtRef.current = 0
     setState(null)
     runningRef.current = true
     setRunning(true)
@@ -1311,16 +1534,18 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     timerRef.current = null
     if (probeTimerRef.current) clearTimeout(probeTimerRef.current)
     probeTimerRef.current = null
-    // Ceph 를 지정하지 않았거나 중간에 멈춘 회차도 기록이 남도록, 중지 시점에 한 번 확정 시도.
-    // (이미 Ceph 복구로 확정됐다면 savedRef 가 막아 중복 저장되지 않는다)
-    commitHistory(Date.now())
+    // Ceph 를 지정하지 않았거나 중간에 멈춘 회차도 기록이 남도록 중지 시점에 확정한다.
+    // 이미 저장된 회차여도 **덮어쓴다** — 저장 이후에 붙은 마일스톤(HEALTH_OK, 늦게 복구된
+    // 포털 대상 등)이 저장본에서 빠지지 않게. 총 소요는 마지막 마일스톤 기준이라 안 부풀어난다.
+    commitHistory(Date.now(), true)
   }
   useEffect(() => {
     // StrictMode 이중 마운트 시 cleanup 이 mountedRef 를 false 로 만들므로, 마운트마다 true 로 되돌린다.
     mountedRef.current = true
     return () => {
-      // 검증 도중 보드를 그냥 닫아도 그 회차 기록은 남긴다 (중지 버튼을 누르지 않는 경우가 잦다)
-      commitRef.current(Date.now())
+      // 검증 도중 보드를 그냥 닫아도 그 회차 기록은 남긴다 (중지 버튼을 누르지 않는 경우가 잦다).
+      // 저장 이후에 붙은 마일스톤까지 담기도록 덮어쓴다 — 닫는 순간이 가장 완전한 상태다.
+      commitRef.current(Date.now(), true)
       mountedRef.current = false
       runningRef.current = false
       if (timerRef.current) clearTimeout(timerRef.current)
@@ -1450,6 +1675,17 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
               검증 시작 후 <span className="font-semibold text-gray-100">{fmtElapsed(Date.now() - t0Ref.current)}</span> 경과
             </span>
           )}
+          {/* 회차 이름 — 지금 무슨 조건으로 돌리는지 알고 있는 '검증 중'에 적어두는 게 가장 정확하다.
+              (며칠 뒤 이력에서 노드명·시각만 보고는 어떤 회차였는지 구분이 안 된다) */}
+          {view === 'board' && (
+            <input
+              value={runLabel}
+              onChange={(e) => setRunLabel(e.target.value)}
+              placeholder="회차 이름 (이력에 저장됩니다)"
+              title="예: 306ha con1 1차 · IPMI 강제종료 재시험"
+              className="ml-2 w-[190px] shrink-0 rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none"
+            />
+          )}
           <div className="ml-auto flex items-center gap-1.5">
             <button
               onClick={() => setShowHistory(true)}
@@ -1567,6 +1803,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             saveHistory(next)
             setHistory(next)
           }}
+          onRename={(id, label) => {
+            const next = history.map((h) => (h.id === id ? { ...h, label: label.trim() || undefined } : h))
+            saveHistory(next)
+            setHistory(next)
+          }}
         />
       )}
     </div>
@@ -1579,11 +1820,13 @@ function HistoryView({
   onClose,
   onClear,
   onRemove,
+  onRename,
 }: {
   list: HistoryRecord[]
   onClose: () => void
   onClear: () => void
   onRemove: (id: string) => void
+  onRename: (id: string, label: string) => void
 }) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
@@ -1622,6 +1865,15 @@ function HistoryView({
                     <span className="rounded bg-blue-500/20 px-2 py-0.5 font-medium text-blue-200">{h.node}</span>
                     <span className="whitespace-nowrap text-gray-300">{fmtDateTime(h.t0)}</span>
                     <span className="whitespace-nowrap text-gray-500">총 소요 {fmtElapsed(h.closedAt - h.t0)}</span>
+                    {/* 이름은 나중에도 고칠 수 있어야 한다 — 검증 중엔 손이 바빠 못 적고 지나가기 쉽다.
+                        평소엔 테두리 없는 글자처럼 보이고, 올리면 입력칸임이 드러난다. */}
+                    <input
+                      value={h.label ?? ''}
+                      onChange={(e) => onRename(h.id, e.target.value)}
+                      placeholder="이름 입력…"
+                      title="이 회차의 이름 (예: 306ha con1 1차)"
+                      className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 font-medium text-gray-100 placeholder:font-normal placeholder:text-gray-600 hover:border-white/10 focus:border-blue-500/60 focus:bg-black/20 focus:outline-none"
+                    />
                     <button
                       onClick={() => onRemove(h.id)}
                       title="이 회차 삭제"
@@ -2188,7 +2440,8 @@ function BoardView({
       )}
 
       {/* 2. Masakari */}
-      <SectionLabel n={2} text="Masakari evacuation (한쪽만 finished 여도 완료)" />
+      {/* 카드에 적힌 노드명은 '로그를 읽은 호스트' 다 — VM 이 옮겨 간 곳으로 오해하기 쉬워 제목에 밝힌다 */}
+      <SectionLabel n={2} text="Masakari evacuation — 로그 조회 노드 기준 (한쪽만 finished 여도 완료)" />
       {state.tzNote && (
         <div className="mb-1.5 flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-300">
           <AlertTriangle size={12} /> {state.tzNote}
@@ -2293,6 +2546,17 @@ function BoardView({
               </div>
             </div>
             {(() => {
+              /**
+               * 조회를 못 한 프레임에서는 진행률을 그리지 않는다.
+               * degraded·misplaced 가 0 으로 내려오므로 그대로 계산하면 remain=0 → 100% 초록이 되어,
+               * 배지는 회색 `HEALTH_?` 인데 바로 아래 바는 '복구 완료' 로 보이는 모순이 생긴다.
+               */
+              if (ceph.health === 'unknown')
+                return (
+                  <div className="mt-2.5 rounded-md border border-white/5 bg-black/20 px-2.5 py-2 text-[11px] text-gray-500">
+                    복구 진행률 — <span className="text-gray-400">확인 불가</span> · 위 수치는 조회에 실패한 값이라 0 으로 보입니다
+                  </div>
+                )
               const remain = ceph.degraded + ceph.misplaced
               const peak = ceph.peakRemain
               // 복구 진행률 = 장애 직후 최대치(peak) 대비 얼마나 줄었는가.
@@ -2350,7 +2614,10 @@ function BoardView({
                   ? `복구 속도 · 초당 ${Math.round(ceph.rate).toLocaleString()}개 오브젝트`
                   : '복구 중인 오브젝트 없음 (복구 IO 정지)'}
               </span>
-              <span className="shrink-0">{ceph.note}</span>
+              {/* 조회 실패 시 원문이 실려 오므로 길다 — 줄이고 title 로 전문을 남긴다 */}
+              <span className="min-w-0 truncate text-right" title={ceph.note}>
+                {ceph.note}
+              </span>
             </div>
           </>
         ) : (
@@ -2560,8 +2827,21 @@ function ServicePanel({
           </div>
         </div>
       </div>
+      {nodes.some((n) => n.staleSec) && (
+        <p className="mt-2 flex items-start gap-1.5 rounded-md bg-white/[0.04] px-2.5 py-1 text-[10.5px] text-gray-400">
+          <RefreshCw size={11} className="mt-0.5 shrink-0" />
+          <span>
+            조회 실패로 <b className="text-gray-300">직전 값</b>을 표시 중 —{' '}
+            {nodes
+              .filter((n) => n.staleSec)
+              .map((n) => `${svcShortName(n.name)} ${n.staleSec}초 전`)
+              .join(' · ')}
+          </span>
+        </p>
+      )}
       <p className="mt-2 text-[10px] leading-relaxed text-gray-500">
-        <code className="text-gray-400">systemctl show</code> 결과 · active 만 정상. 노드에 없는 유닛은 '없음', SSH 세션이 끊긴 노드는 열 전체 '·'(조회 불가).
+        <code className="text-gray-400">systemctl show</code> 결과 · active 만 정상. 노드에 없는 유닛은 '없음', SSH 세션이 끊긴 노드는 열 전체 '·'(조회 불가),
+        <span className="text-gray-400"> '—'</span> 는 상태를 읽지 못한 유닛(조회 실패)입니다.
       </p>
     </>
   )
@@ -2627,6 +2907,15 @@ function OpenstackPanel({ os, scope }: { os: OsStat; scope: 'abnormal' | 'all' }
           <div className="mb-2 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-300">
             <AlertTriangle size={12} className="mt-0.5 shrink-0" />
             <span>{os.errors.join(' · ')} — rc 경로·권한, openstack CLI 설치를 확인하세요.</span>
+          </div>
+        )}
+        {/* 실패를 빈 결과로 반영하면 행·열이 사라져 '서비스가 없어졌다' 로 읽힌다 — 값은 지키고 사실만 밝힌다 */}
+        {os.stale.length > 0 && (
+          <div className="mb-2 flex items-start gap-1.5 rounded-md bg-white/[0.04] px-2.5 py-1 text-[11px] text-gray-400">
+            <RefreshCw size={12} className="mt-0.5 shrink-0" />
+            <span>
+              이번 주기 조회 실패 — <b className="text-gray-300">{os.stale.join(' · ')}</b> 값을 그대로 표시하고 있습니다.
+            </span>
           </div>
         )}
         {empty ? (
@@ -2750,8 +3039,13 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
     rows.push({
       at: m.masakari.at,
       icon: <CircleCheck size={13} className="text-emerald-400" />,
-      text: `Masakari evacuation 완료 — ${m.masakari.by}`,
-      sub: m.masakari.evac > 0 ? `evacuation ${m.masakari.evac}대` : undefined,
+      /**
+       * `by` 는 **masakari-engine 로그를 읽은 호스트**다 — VM 이 옮겨 간 호스트가 아니다.
+       * 예전에는 `evacuation 완료 — con1` 처럼 노드명이 앞에 붙어, 'con1 으로 이동했다' 로
+       * 읽히기 쉬웠다. 대수를 앞으로 빼고, 노드명은 '로그 출처' 라고 못박아 뒤로 보낸다.
+       */
+      text: `Masakari evacuation 완료${m.masakari.evac > 0 ? ` — ${m.masakari.evac}대` : ''}`,
+      sub: `${m.masakari.by} 의 masakari-engine 로그 기준 (이동 대상 호스트 아님)`,
     })
   for (const [ns, v] of podByNs)
     rows.push({
@@ -2763,8 +3057,16 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
   if (m.ceph)
     rows.push({
       at: m.ceph.at,
+      // HEALTH_OK 까지 안 갔으면 초록으로 칠하지 않는다 — '다 끝났다' 로 읽히면 안 된다.
+      icon: <CircleCheck size={13} className={m.cephHealthy ? 'text-emerald-400' : 'text-amber-400'} />,
+      text: 'Ceph 데이터 복구 완료 — degraded · misplaced 0',
+      sub: m.cephHealthy ? undefined : 'HEALTH_OK 아직 아님 — 복제와 무관한 경고가 남아 있습니다',
+    })
+  if (m.cephHealthy)
+    rows.push({
+      at: m.cephHealthy.at,
       icon: <CircleCheck size={13} className="text-emerald-400" />,
-      text: 'Ceph 복구 완료 — degraded · misplaced 0',
+      text: 'Ceph HEALTH_OK — 경고 해소',
     })
   if (m.reconnect)
     rows.push({

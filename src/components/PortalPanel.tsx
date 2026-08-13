@@ -112,26 +112,18 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     return () => clearInterval(t)
   }, [])
   /**
-   * 접힘/펼침.
+   * 접힘/펼침 — **여는 것은 사람만 한다.**
    *
-   * 예전에는 검증이 시작되면 무조건 펼쳤는데, 대상이 5개면 화면 절반을 먹어
-   * 정작 주인공인 'Host — 전원 상태' 가 아래로 밀렸다. 그래서 평소엔 접힌 한 줄로 두고
-   * **비정상이 하나라도 생기면 스스로 펼친다.** 사용자가 직접 연 건 건드리지 않는다.
+   * 대상이 5개면 펼친 패널이 화면 절반을 먹어 주인공인 'Host — 전원 상태' 가 아래로 밀린다.
+   * 그래서 평소엔 접힌 한 줄로 둔다.
+   *
+   * 비정상이 생기면 자동으로 펼치게 해봤는데 **그게 더 나빴다.** 롤링 검증 중에는 대상이
+   * 깨졌다 붙었다를 반복하고, 그때마다 패널이 열리고 접히며 화면 전체가 위아래로 움직인다.
+   * 지켜보는 사람에게는 그게 장애 정보보다 훨씬 방해가 된다.
+   * 대신 접힌 한 줄을 **빨갛게 물들이고 '펼쳐서 확인' 을 붙인다** — 알림은 눈에 띄게,
+   * 화면은 가만히.
    */
   const [open, setOpen] = useState(false)
-  /** 자동으로 펼친 적이 있는지 — 사용자가 도로 접으면 같은 장애로 또 열지 않는다 */
-  const autoOpenedRef = useRef(false)
-  useEffect(() => {
-    if (!running) {
-      autoOpenedRef.current = false
-      return
-    }
-    if (autoOpenedRef.current) return
-    if (Object.values(states).some((st) => st.last && !st.last.ok)) {
-      autoOpenedRef.current = true
-      setOpen(true)
-    }
-  }, [running, states])
 
   const cfgRef = useRef<PortalConfig | null>(null)
   cfgRef.current = cfg
@@ -514,6 +506,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   // 깨진 대상이 몇 초 뒤 다른 대상으로 넘어가 버리면 정작 봐야 할 걸 놓친다.
   const spotlightPool = bad.length > 0 ? bad : active
   const spot = spotlightPool[spotIdx % spotlightPool.length]
+  /** 접혀 있는데 비정상이 있는 상태 — 패널을 여는 대신 이걸로 알린다 */
+  const alert = bad.length > 0 && !open
   const spotSt = spot ? states[spot.id] : undefined
   const recovered = active
     .map((t) => ({ name: t.name, at: states[t.id]?.recoveredAt ?? null }))
@@ -521,10 +515,19 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     .sort((a, b) => b.at - a.at)[0]
 
   return (
-    <div className="mb-3 rounded-lg border border-white/10 bg-panel-light/40">
+    <div
+      className={
+        'mb-3 rounded-lg border ' +
+        // 접혀 있어도 비정상은 한눈에 보여야 한다 — 패널을 여는 대신 테두리·배경으로 알린다.
+        (alert ? 'border-red-500/50 bg-red-500/[0.07]' : 'border-white/10 bg-panel-light/40')
+      }
+    >
       {/* 헤더 */}
       <div className="flex items-center gap-2 px-3 py-2">
-        <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-[13px] font-medium text-gray-100">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className={'flex items-center gap-1.5 text-[13px] font-medium ' + (alert ? 'text-red-200' : 'text-gray-100')}
+        >
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           서비스 포털 응답
         </button>
@@ -549,13 +552,24 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
             <span className={okCount === seen ? 'text-gray-400' : 'text-red-300'}>
               {okCount}/{active.length} 정상
             </span>
+            {/* 자동으로 펼치지 않는 대신 '여기를 누르면 된다' 를 명시한다 — 화면은 사람이 누를 때만 움직인다 */}
+            {bad.length > 0 && (
+              <button
+                onClick={() => setOpen(true)}
+                title={bad.map((t) => t.name).join(' · ')}
+                className="flex shrink-0 items-center gap-1 rounded bg-red-500/25 px-1.5 py-0.5 font-medium text-red-200 hover:bg-red-500/40"
+              >
+                <AlertTriangle size={10} /> {bad.length}개 비정상 — 펼쳐서 확인
+              </button>
+            )}
             {spot && spotSt?.last && (
               <span className={`truncate ${spotSt.last.ok ? 'text-gray-500' : 'text-red-300'}`}>
                 · {spot.name} {spotSt.last.status ? `${spotSt.last.status}` : '응답없음'}
                 {spotSt.last.latencyMs !== undefined && ` · ${spotSt.last.latencyMs}ms`}
               </span>
             )}
-            {recovered && (
+            {/* 장애가 진행 중인데 지난 복구 시각을 같이 띄우면 지금 상태를 헷갈리게 한다 — 깨진 게 있으면 감춘다 */}
+            {recovered && bad.length === 0 && (
               <span className="truncate text-violet-300/90">
                 · {recovered.name} {fmtClock(recovered.at)} 복구
               </span>
