@@ -1,7 +1,7 @@
 {
   "name": "infra-verify-assistant",
   "private": true,
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "클라우드 인프라(OpenStack, Ceph, CONTRABASS, SDS+) 검증/트러블슈팅용 AI 보조 CLI 데스크톱 앱",
   "author": "Okestro",
   "main": "dist-electron/main.js",
