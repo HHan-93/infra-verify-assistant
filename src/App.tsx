@@ -13,6 +13,7 @@ import {
   Maximize2,
   Minimize2,
   Highlighter,
+  FolderOpen,
 } from 'lucide-react'
 import SSHForm, { type SSHFormHandle } from './components/SSHForm'
 import Toolbar from './components/Toolbar'
@@ -215,6 +216,16 @@ export default function App() {
   const [, setNowTick] = useState(0)
   // 외형 설정 (글꼴 크기 / 테마) — localStorage 보존
   const [showSettings, setShowSettings] = useState(false)
+  /**
+   * 설정·데이터가 저장되는 폴더. 모달을 열 때 한 번만 물어본다.
+   * 경로를 글자로도 보여주는 게 중요하다 — 백업 스크립트에 붙여 쓰거나 탐색기 주소창에
+   * 넣을 수 있어야 한다. ('재설치하면 사라지나?' 라는 걱정이 이걸로 해소된다)
+   */
+  const [dataDir, setDataDir] = useState('')
+  // 모달을 열 때 한 번만 물어본다 (앱 실행 중 바뀌지 않는 값이다)
+  useEffect(() => {
+    if (showSettings && !dataDir) window.electronAPI.userDataPath().then(setDataDir)
+  }, [showSettings, dataDir])
   const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('term_font_size')) || 13)
   const [themeKey, setThemeKey] = useState(() => localStorage.getItem('term_theme') || 'default')
   const theme = THEMES[themeKey] ?? THEMES.default
@@ -2302,7 +2313,6 @@ export default function App() {
       {analysisPending !== null && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => { setAnalysisPending(null); setAnalysisBusyNotice('') }}
         >
           <div
             className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -2346,7 +2356,6 @@ export default function App() {
       {showImportGuide && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setShowImportGuide(false)}
         >
           <div
             className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -2432,7 +2441,6 @@ export default function App() {
       {exportMsg && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setExportMsg(null)}
         >
           <div
             className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -2460,7 +2468,6 @@ export default function App() {
       {importResult && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setImportResult(null)}
         >
           <div
             className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -2504,17 +2511,16 @@ export default function App() {
         </div>
       )}
 
-      {/* 외형 설정 모달 */}
+      {/* 설정 모달 (외형 + 데이터 폴더) */}
       {showSettings && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setShowSettings(false)}
         >
           <div
             className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-3 text-sm font-semibold text-gray-100">외형 설정</div>
+            <div className="mb-3 text-sm font-semibold text-gray-100">설정</div>
 
             <label className="mb-1 block text-[11px] text-gray-400">글꼴 크기: {fontSize}px</label>
             <div className="mb-3 flex items-center gap-2">
@@ -2656,6 +2662,34 @@ export default function App() {
               <option value={600_000}>10분</option>
               <option value={1_200_000}>20분</option>
             </select>
+
+            <div className="mt-3 border-t border-white/10 pt-3">
+              <div className="mb-1.5 text-[11px] font-medium text-gray-300">데이터 폴더</div>
+              <p className="mb-1.5 break-all rounded bg-black/30 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-gray-400">
+                {dataDir || '경로를 확인하는 중…'}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => window.electronAPI.openUserData()}
+                  className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                >
+                  <FolderOpen size={12} /> 폴더 열기
+                </button>
+                <button
+                  onClick={() => dataDir && navigator.clipboard.writeText(dataDir)}
+                  className="rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                >
+                  경로 복사
+                </button>
+              </div>
+              <p className="mt-1.5 text-[10.5px] leading-relaxed text-gray-500">
+                프리셋·시나리오·접속 프로필·세션 로그가 여기 저장됩니다. 설치 폴더 밖이라{' '}
+                <span className="text-gray-400">앱을 다시 설치해도 지워지지 않습니다.</span>
+                <br />
+                파일을 직접 고치려면 <span className="text-amber-300/80">앱을 먼저 닫으세요</span> — 실행 중에
+                고치면 앱이 그 변경을 모른 채 다음 저장 때 덮어씁니다.
+              </p>
+            </div>
 
             <div className="mt-4 flex justify-end">
               <button

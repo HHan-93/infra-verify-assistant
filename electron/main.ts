@@ -35,6 +35,12 @@ import {
   type ProfileImportResult,
   type CustomPresetCommand,
   type CustomScenario,
+  type CustomScenarioStep,
+  type CustomItemsBundle,
+  type CustomItemsImportResult,
+  type CommandCheck,
+  type CaptureRule,
+  type OnFailureAction,
   type LogIndexEntry,
   type LogRetentionSettings,
   type LogTailTarget,
@@ -1181,6 +1187,17 @@ ipcMain.on('shell:openExternal', (_evt, url: string) => {
 })
 
 // ─────────────────────────────────────────────────────────────
+// 설정·데이터가 저장되는 폴더(userData). 프리셋·시나리오·접속 프로필·세션 로그가 여기 있고,
+// **설치 폴더 밖이라 앱을 재설치해도 지워지지 않는다** — 그 사실을 사용자가 눈으로 확인할 수
+// 있게 경로를 문자열로도 돌려준다(백업 스크립트에 붙여 쓸 수 있어야 한다).
+ipcMain.handle('app:userDataPath', () => app.getPath('userData'))
+ipcMain.handle('app:openUserData', async () => {
+  // openPath 는 실패 사유를 문자열로 돌려준다 (빈 문자열이면 성공)
+  const err = await shell.openPath(app.getPath('userData'))
+  return { ok: !err, error: err || undefined }
+})
+
+// ─────────────────────────────────────────────────────────────
 // SSH 접속 정보 저장 (다음 실행 시 자동 채움)
 //  - safeStorage(OS 키체인/DPAPI)로 암호화하여 userData 에 저장.
 //    같은 OS 사용자만 복호화 가능 → 팀원 배포 시 각자 로컬에서 안전.
@@ -2269,6 +2286,300 @@ ipcMain.handle('customScenarios:delete', async (_evt, id: string) =>
   }),
 )
 
+// ── 사용자 정의 항목 내보내기 / 가져오기 ─────────────────────────
+//
+// 앱에서 손으로 만든 항목이라 잃으면 복구 수단이 없고, 팀원에게 넘길 방법도 userData 폴더의
+// JSON 을 직접 복사하는 것뿐이었다.
+//
+// 두 가지를 지킨다.
+//  1) **한 파일에 프리셋·시나리오를 함께** 담는다. 따로 내보내면 넘길 때 한쪽을 빼먹는다.
+//  2) 가져오기는 **병합**이다. 통째로 교체하면 받는 쪽이 자기 항목을 잃는다.
+//     들어온 id 는 그대로 유지한다 — 같은 파일을 두 번 가져와도 중복이 생기지 않고(같은 id 를
+//     덮어쓴다), 보낸 쪽이 고쳐 다시 보낸 파일도 새로 추가되지 않고 갱신된다.
+
+/** 문자열 필드 정리. 문자열이 아니면 빈 값 — 낯선 타입이 그대로 저장되는 것을 막는다 */
+const cleanStr = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+const cleanStrArr = (v: unknown): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined
+  const out = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+  return out.length ? out : undefined
+}
+/**
+ * **자리 순서가 의미를 갖는** 문자열 배열 정리 (예: onFailureDesc).
+ *
+ * cleanStrArr 을 쓰면 안 된다 — 그건 빈 값을 걸러내므로 `['DNS 확인', '', '저장소 추가']` 가
+ * `['DNS 확인', '저장소 추가']` 로 줄어들어 **설명이 한 칸씩 밀려 엉뚱한 단계에 붙는다.**
+ * 여기서는 빈 칸을 그대로 남기고, 전부 비어 있을 때만 없는 것으로 본다.
+ */
+const cleanStrArrKeepGaps = (v: unknown): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined
+  const out = v.map((x) => (typeof x === 'string' ? x.trim() : ''))
+  return out.some(Boolean) ? out : undefined
+}
+/** 정규식이 실제로 컴파일되는지 — 깨진 정규식을 저장하면 그 항목을 쓸 때마다 터진다 */
+const compiles = (src: string): boolean => {
+  try {
+    new RegExp(src)
+    return true
+  } catch {
+    return false
+  }
+}
+/** 판정 기준 정리 — passRegex 가 깨져 있으면 그 필드만 버리고 나머지는 살린다 */
+function cleanCheck(v: unknown): CommandCheck | undefined {
+  if (!v || typeof v !== 'object') return undefined
+  const o = v as Record<string, unknown>
+  const failContains = cleanStrArr(o.failContains)
+  const passContains = cleanStrArr(o.passContains)
+  const rx = cleanStr(o.passRegex)
+  const passRegex = rx && compiles(rx) ? rx : undefined
+  const requireExitZero = typeof o.requireExitZero === 'boolean' ? o.requireExitZero : undefined
+  if (!failContains && !passContains && !passRegex && requireExitZero === undefined) return undefined
+  return {
+    ...(failContains ? { failContains } : {}),
+    ...(passContains ? { passContains } : {}),
+    ...(passRegex ? { passRegex } : {}),
+    ...(requireExitZero !== undefined ? { requireExitZero } : {}),
+  }
+}
+function cleanCapture(v: unknown): CaptureRule[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out: CaptureRule[] = []
+  for (const rv of v) {
+    if (!rv || typeof rv !== 'object') continue
+    const r = rv as Record<string, unknown>
+    const name = cleanStr(r.name)
+    const regex = cleanStr(r.regex)
+    if (!name || !regex || !compiles(regex)) continue
+    const group = typeof r.group === 'number' && Number.isFinite(r.group) ? r.group : undefined
+    out.push({ name, regex, ...(group !== undefined ? { group } : {}) })
+  }
+  return out.length ? out : undefined
+}
+function cleanExpect(v: unknown): ExpectRule[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out: ExpectRule[] = []
+  for (const rv of v) {
+    if (!rv || typeof rv !== 'object') continue
+    const r = rv as Record<string, unknown>
+    const match = cleanStr(r.match)
+    if (!match || !compiles(match)) continue
+    // send 는 **trim 하지 않는다** — 비밀번호나 공백이 의미 있는 응답이 잘려 나간다.
+    // 빈 문자열도 유효하다(엔터만 보내는 응답).
+    const send = typeof r.send === 'string' ? r.send : ''
+    out.push({ match, send, ...(r.secret === true ? { secret: true } : {}) })
+  }
+  return out.length ? out : undefined
+}
+const FAIL_ACTIONS: OnFailureAction[] = ['stop', 'continue', 'run', 'retry']
+
+function cleanPreset(v: unknown): CustomPresetCommand | null {
+  if (!v || typeof v !== 'object') return null
+  const o = v as Record<string, unknown>
+  const solution = cleanStr(o.solution)
+  const subgroup = cleanStr(o.subgroup)
+  const label = cleanStr(o.label)
+  const command = cleanStr(o.command)
+  if (!solution || !subgroup || !label || !command) return null
+  const check = cleanCheck(o.check)
+  // 낯선 필드는 버린다 — 다음 버전에서 의미가 생길 값이 조용히 섞여 들어오면 추적이 어렵다
+  return {
+    id: cleanStr(o.id) || randomUUID(),
+    solution,
+    subgroup,
+    label,
+    command,
+    desc: cleanStr(o.desc),
+    ...(check ? { check } : {}),
+  }
+}
+
+function cleanScenario(v: unknown): CustomScenario | null {
+  if (!v || typeof v !== 'object') return null
+  const o = v as Record<string, unknown>
+  const solution = cleanStr(o.solution)
+  const title = cleanStr(o.title)
+  const steps: CustomScenarioStep[] = []
+  for (const sv of Array.isArray(o.steps) ? o.steps : []) {
+    if (!sv || typeof sv !== 'object') continue
+    const s = sv as Record<string, unknown>
+    const stepTitle = cleanStr(s.title)
+    const command = cleanStr(s.command)
+    if (!stepTitle || !command) continue
+    const check = cleanCheck(s.check)
+    const capture = cleanCapture(s.capture)
+    const expect = cleanExpect(s.expect)
+    const onFailureRaw = cleanStr(s.onFailure) as OnFailureAction
+    const onFailure = FAIL_ACTIONS.includes(onFailureRaw) ? onFailureRaw : undefined
+    steps.push({
+      title: stepTitle,
+      command,
+      desc: cleanStr(s.desc),
+      ...(cleanStr(s.note) ? { note: cleanStr(s.note) } : {}),
+      ...(cleanStr(s.info) ? { info: cleanStr(s.info) } : {}),
+      ...(cleanStr(s.warn) ? { warn: cleanStr(s.warn) } : {}),
+      ...(cleanStr(s.code) ? { code: cleanStr(s.code) } : {}),
+      ...(cleanStr(s.target) ? { target: cleanStr(s.target) } : {}),
+      ...(check ? { check } : {}),
+      ...(capture ? { capture } : {}),
+      ...(expect ? { expect } : {}),
+      ...(onFailure ? { onFailure } : {}),
+      ...(cleanStrArrKeepGaps(s.onFailureDesc)
+        ? { onFailureDesc: cleanStrArrKeepGaps(s.onFailureDesc) }
+        : {}),
+      ...(cleanStr(s.onFailureCommand) ? { onFailureCommand: cleanStr(s.onFailureCommand) } : {}),
+      ...(cleanStr(s.undo) ? { undo: cleanStr(s.undo) } : {}),
+    })
+  }
+  // 스텝이 하나도 없는 시나리오는 실행할 수 없으므로 받지 않는다
+  if (!solution || !title || steps.length === 0) return null
+  let roleValues: Record<string, string> | undefined
+  if (o.roleValues && typeof o.roleValues === 'object') {
+    const rv: Record<string, string> = {}
+    for (const [k, val] of Object.entries(o.roleValues as Record<string, unknown>))
+      if (cleanStr(k) && typeof val === 'string') rv[cleanStr(k)] = val
+    if (Object.keys(rv).length) roleValues = rv
+  }
+  return {
+    id: cleanStr(o.id) || randomUUID(),
+    solution,
+    title,
+    summary: cleanStr(o.summary),
+    steps,
+    ...(roleValues ? { roleValues } : {}),
+  }
+}
+
+ipcMain.handle('customItems:export', async () => {
+  const [presets, scenarios] = await Promise.all([readCustomPresets(), readCustomScenarios()])
+  if (presets.length === 0 && scenarios.length === 0)
+    return { saved: false, error: '내보낼 사용자 정의 항목이 없습니다.' }
+  const stamp = new Date().toISOString().slice(0, 10)
+  const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+    title: '사용자 정의 프리셋·시나리오 내보내기',
+    defaultPath: 'qterm-custom-' + stamp + '.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  const bundle: CustomItemsBundle = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    appVersion: app.getVersion(),
+    presets,
+    scenarios,
+  }
+  try {
+    // BOM 은 붙이지 않는다 — 이 파일은 엑셀이 아니라 이 앱이 다시 읽는다(프로필 CSV 와 다른 점)
+    await writeFile(r.filePath, JSON.stringify(bundle, null, 2), 'utf-8')
+    return { saved: true, path: r.filePath, presets: presets.length, scenarios: scenarios.length }
+  } catch (e) {
+    return { saved: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('customItems:import', async (): Promise<CustomItemsImportResult> => {
+  const zero = { addedPresets: 0, addedScenarios: 0, replaced: 0, skipped: 0, warnings: [] as string[] }
+  const r = await dialog.showOpenDialog(mainWindow ?? undefined!, {
+    properties: ['openFile'],
+    title: '사용자 정의 프리셋·시나리오 가져오기',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true, ...zero }
+
+  let bundle: CustomItemsBundle
+  try {
+    const raw = await readFile(r.filePaths[0], 'utf-8')
+    // 다른 도구를 거쳐 온 파일에 BOM 이 붙어 있으면 JSON.parse 가 그대로 실패한다
+    bundle = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
+  } catch (e) {
+    return {
+      ok: false,
+      error: '파일을 읽지 못했습니다: ' + (e instanceof Error ? e.message : String(e)),
+      ...zero,
+    }
+  }
+  if (
+    !bundle ||
+    typeof bundle !== 'object' ||
+    (!Array.isArray(bundle.presets) && !Array.isArray(bundle.scenarios))
+  )
+    return {
+      ok: false,
+      error: '이 앱에서 내보낸 파일이 아닙니다 (presets · scenarios 를 찾을 수 없습니다).',
+      ...zero,
+    }
+
+  const warnings: string[] = []
+  let addedPresets = 0
+  let addedScenarios = 0
+  let replaced = 0
+  let skipped = 0
+  // 새 항목의 order — 내장 항목은 배열 인덱스(작은 정수)를 쓰므로 타임스탬프면 자연히 맨 뒤로
+  // 붙는다. seq 를 더해 파일에 담긴 순서가 그대로 유지되게 한다(같은 ms 에 몰려 섞이는 것 방지).
+  const base = Date.now()
+  let seq = 0
+  /** 건너뛴 이유는 앞의 몇 건만 남긴다 — 수십 줄을 띄워도 사용자가 읽지 않는다 */
+  const warn = (m: string) => {
+    if (warnings.length < 8) warnings.push(m)
+  }
+
+  try {
+    await withStoreLock('customPresets', async () => {
+      const list = await readCustomPresets()
+      for (const rawItem of (Array.isArray(bundle.presets) ? bundle.presets : []) as unknown[]) {
+        const item = cleanPreset(rawItem)
+        if (!item) {
+          skipped++
+          warn(
+            '프리셋 건너뜀 — 분류·이름·명령어 중 빈 값: ' +
+              (cleanStr((rawItem as Record<string, unknown>)?.label) || '(이름 없음)'),
+          )
+          continue
+        }
+        const idx = list.findIndex((x) => x.id === item.id)
+        if (idx >= 0) {
+          // 덮어쓸 때 순서는 **이쪽 것을 유지**한다 — 남의 파일이 내 목록 배치를 흔들지 않게
+          list[idx] = { ...item, order: list[idx].order }
+          replaced++
+        } else {
+          list.push({ ...item, order: base + seq++ })
+          addedPresets++
+        }
+      }
+      await writeCustomPresets(list)
+    })
+
+    await withStoreLock('customScenarios', async () => {
+      const list = await readCustomScenarios()
+      for (const rawItem of (Array.isArray(bundle.scenarios) ? bundle.scenarios : []) as unknown[]) {
+        const item = cleanScenario(rawItem)
+        if (!item) {
+          skipped++
+          warn(
+            '시나리오 건너뜀 — 분류·제목이 없거나 실행할 스텝이 없음: ' +
+              (cleanStr((rawItem as Record<string, unknown>)?.title) || '(이름 없음)'),
+          )
+          continue
+        }
+        const idx = list.findIndex((x) => x.id === item.id)
+        if (idx >= 0) {
+          list[idx] = { ...item, order: list[idx].order }
+          replaced++
+        } else {
+          list.push({ ...item, order: base + seq++ })
+          addedScenarios++
+        }
+      }
+      await writeCustomScenarios(list)
+    })
+  } catch (e) {
+    // 저장소가 손상돼 읽기가 실패한 경우 — 절대 빈 목록으로 덮어쓰지 않고 그대로 알린다
+    return { ok: false, error: e instanceof Error ? e.message : String(e), ...zero }
+  }
+
+  return { ok: true, addedPresets, addedScenarios, replaced, skipped, warnings }
+})
+
 // CSV/JSON 파일에서 세션 프로필 일괄 가져오기 — 사이드바 목록에 추가만 하며 자동 연결은 하지 않는다.
 // 기존 프로필과 host:port:username 이 겹치거나 같은 파일 내에서 중복되면 건너뛴다.
 ipcMain.handle('profiles:import', async (): Promise<ProfileImportResult> => {
@@ -2492,7 +2803,55 @@ ipcMain.handle('profiles:export', async (_evt, format: 'csv' | 'json') => {
 const shQuote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'"
 
 /** exec 로 명령 실행하고 stdout/stderr/exit code 수집 (stdin 옵션) */
-function execCapture(
+/**
+ * 한 SSH 연결에서 **동시에 열어 두는 exec 채널 수 제한.**
+ *
+ * 왜 필요한가 — `session:run` 은 호출마다 새 exec 채널을 연다. 상태보드 폴링은 한 세션에
+ * 여러 건을 병렬로 던진다(파드 조회만 해도 `kubectl get nodes` 1 + 네임스페이스 N).
+ * 여기에 ceph·서비스 데몬·OpenStack 조회가 겹치면 순간 동시 채널이 10개를 넘고,
+ * OpenSSH 기본값(`MaxSessions 10`)에 걸린 요청은 이렇게 실패한다:
+ *
+ *     (SSH) Channel open failure: open failed
+ *
+ * 이게 화면에서는 "그 네임스페이스 조회 실패 = 확인 불가" 로 보인다 — 실제로는 파드가 아니라
+ * **채널을 못 얻은 것**이라, 멀쩡한 대상이 간헐적으로 장애처럼 찍힌다.
+ *
+ * 그래서 연결별로 슬롯을 두고 초과분은 큐에 세운다. 총 처리량은 거의 그대로다(어차피 서버가
+ * 동시에 그만큼밖에 안 받는다) — 실패가 대기로 바뀌는 것이다.
+ */
+const EXEC_LIMIT = 4
+/**
+ * 슬롯을 붙잡고 안 놓는 명령을 끊는 상한. 이게 없으면 죽은 노드를 향한 조회 하나가 채널을
+ * 영구 점유해, 그 세션의 이후 모든 조회가 큐에서 굶는다(렌더러는 12초에 손을 떼지만
+ * 메인 프로세스의 채널은 그대로 열려 있다).
+ */
+const EXEC_HARD_MS = 60_000
+const execSlots = new WeakMap<Client, { active: number; queue: (() => void)[] }>()
+function acquireExecSlot(client: Client): Promise<() => void> {
+  let s = execSlots.get(client)
+  if (!s) {
+    s = { active: 0, queue: [] }
+    execSlots.set(client, s)
+  }
+  const slot = s
+  const release = () => {
+    slot.active--
+    slot.queue.shift()?.()
+  }
+  if (slot.active < EXEC_LIMIT) {
+    slot.active++
+    return Promise.resolve(release)
+  }
+  return new Promise((resolve) => {
+    slot.queue.push(() => {
+      slot.active++
+      resolve(release)
+    })
+  })
+}
+
+/** exec 실행 본체 (슬롯 관리는 아래 execCapture 가 한다) */
+function execCaptureRaw(
   client: Client,
   cmd: string,
   stdin?: string,
@@ -2505,20 +2864,44 @@ function execCapture(
       // 멀티바이트 문자가 청크 경계에 걸려 깨지지 않도록 StringDecoder 사용 (아래 다른 스트림들도 동일)
       const oDec = new StringDecoder('utf8')
       const eDec = new StringDecoder('utf8')
+      const tid = setTimeout(() => {
+        // 채널을 닫아 슬롯을 돌려준다 — 원격 프로세스가 남더라도 이 연결을 막지는 않게 한다
+        try {
+          stream.close()
+        } catch {
+          /* 이미 닫혔으면 무시 */
+        }
+        reject(new Error(`명령이 ${EXEC_HARD_MS / 1000}초 안에 끝나지 않아 채널을 닫았습니다`))
+      }, EXEC_HARD_MS)
       stream.on('data', (d: Buffer) => (out += oDec.write(d)))
       stream.stderr.on('data', (d: Buffer) => (errOut += eDec.write(d)))
       // 시그널로 죽거나 채널이 강제로 끊기면 ssh2 는 code=null 을 준다. 이걸 0(성공)으로
       // 뭉개면 OOM·연결끊김으로 중단된 명령이 검증 리포트에 '정상'으로 기록된다 → 실패로 본다.
-      stream.on('close', (code: number | null, signal?: string) =>
+      stream.on('close', (code: number | null, signal?: string) => {
+        clearTimeout(tid)
         resolve({
           code: code ?? (signal ? 128 : 255),
           out,
           err: errOut + (code == null ? `\n[프로세스가 비정상 종료되었습니다${signal ? ` (signal ${signal})` : ''}]` : ''),
-        }),
-      )
+        })
+      })
       stream.end(stdin ?? '')
     })
   })
+}
+
+/** exec 실행 — 연결별 동시 채널 수를 지키며 실행한다(위 EXEC_LIMIT 주석 참고) */
+async function execCapture(
+  client: Client,
+  cmd: string,
+  stdin?: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const release = await acquireExecSlot(client)
+  try {
+    return await execCaptureRaw(client, cmd, stdin)
+  } finally {
+    release()
+  }
 }
 
 // ── 시나리오 검증용 영속 셸 (Runner Shell) ───────────────────────

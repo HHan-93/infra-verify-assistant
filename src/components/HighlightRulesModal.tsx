@@ -35,7 +35,7 @@ export default function HighlightRulesModal({ onClose }: { onClose: () => void }
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
       <div
         className="flex max-h-[80vh] w-[560px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}

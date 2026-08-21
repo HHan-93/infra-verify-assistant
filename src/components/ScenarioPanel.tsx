@@ -26,6 +26,8 @@ import type {
 } from '../../electron/shared-types'
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
+import CustomItemsMenu from './CustomItemsMenu'
+import { splitShell } from '../lib/shellSplit'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 
@@ -141,6 +143,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
         expect: st.expect,
         onFailure: st.onFailure,
         onFailureCommand: st.onFailureCommand,
+        onFailureDesc: st.onFailureDesc,
         undo: st.undo,
       })),
       roleValues: src.roleValues,
@@ -335,6 +338,9 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
               <Plus size={13} />
               추가
             </button>
+            <CustomItemsMenu
+              onImported={() => window.electronAPI.customScenariosList().then(setCustomScenarios)}
+            />
             <button
               onClick={onClose}
               title="시나리오 닫기"
@@ -784,8 +790,19 @@ function ScenarioEditorModal({
   )
   const [err, setErr] = useState('')
 
+  /**
+   * 입력칸 공용 클래스. **폭은 여기서 정하지 않는다.**
+   *
+   * 예전에는 여기에 `w-full` 이 들어 있었는데, 사용처에서 `inputCls + ' w-32 '` 처럼 좁은 폭을
+   * 덧붙여도 **적용되지 않았다** — 클래스 문자열의 순서는 우선순위와 무관하고, Tailwind 가
+   * 만드는 CSS 에서 `.w-full` 이 `.w-14`/`.w-32` 보다 뒤에 정의되므로 그쪽이 이긴다.
+   * 그 결과 고급 설정의 값 추출·자동 응답 줄에서 모든 칸이 100% 폭이 되어 한 줄이 창을
+   * 몇 배로 넘고, 가로 스크롤이 생겨 왼쪽 칸이 잘려 보였다.
+   *
+   * min-w-0 은 남긴다 — input 은 기본 최소 폭이 있어 flex 안에서 그 아래로 줄어들지 않는다.
+   */
   const inputCls =
-    'w-full rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-[13px] text-gray-100 ' +
+    'min-w-0 rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-[13px] text-gray-100 ' +
     'placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500'
 
   const patchStep = (i: number, patch: Partial<CustomScenarioStep>) =>
@@ -847,6 +864,13 @@ function ScenarioEditorModal({
         onFailure: s.onFailure && s.onFailure !== 'stop' ? s.onFailure : undefined,
         onFailureCommand:
           s.onFailure === 'run' || s.onFailure === 'retry' ? s.onFailureCommand?.trim() || undefined : undefined,
+        // 대응 명령이 없으면 설명도 남기지 않는다 (붙을 곳이 없는 문구가 저장돼 남는 것을 막는다)
+        onFailureDesc:
+          (s.onFailure === 'run' || s.onFailure === 'retry') && s.onFailureCommand?.trim()
+            ? (s.onFailureDesc ?? []).map((d) => d.trim()).filter(Boolean).length
+              ? (s.onFailureDesc ?? []).map((d) => d.trim())
+              : undefined
+            : undefined,
         undo: s.undo?.trim() || undefined,
       }))
       .map((s) => ({
@@ -873,7 +897,6 @@ function ScenarioEditorModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onCancel}
     >
       <div
         className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -891,7 +914,7 @@ function ScenarioEditorModal({
                 onChange={setSolutionVal}
                 options={solutions}
                 placeholder="기존 선택 또는 새로 입력"
-                className={inputCls}
+                className={inputCls + ' w-full'}
                 newLabel="카테고리"
               />
             </div>
@@ -901,7 +924,7 @@ function ScenarioEditorModal({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="예: [K8s] 파드 재기동 검증"
-                className={inputCls}
+                className={inputCls + ' w-full'}
               />
             </div>
           </div>
@@ -911,7 +934,7 @@ function ScenarioEditorModal({
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
               placeholder="이 시나리오가 검증하는 내용을 한 줄로"
-              className={inputCls}
+              className={inputCls + ' w-full'}
             />
           </div>
 
@@ -937,7 +960,7 @@ function ScenarioEditorModal({
                       value={s.title}
                       onChange={(e) => patchStep(i, { title: e.target.value })}
                       placeholder="단계 제목"
-                      className={inputCls}
+                      className={inputCls + ' w-full'}
                     />
                     <button
                       onClick={() => removeStep(i)}
@@ -951,13 +974,13 @@ function ScenarioEditorModal({
                     value={s.command}
                     onChange={(e) => patchStep(i, { command: e.target.value })}
                     placeholder="명령어 (선택 — 안내만 있는 단계는 비워둘 수 있음)"
-                    className={inputCls + ' mb-1.5 font-mono'}
+                    className={inputCls + ' w-full mb-1.5 font-mono'}
                   />
                   <input
                     value={s.desc}
                     onChange={(e) => patchStep(i, { desc: e.target.value })}
                     placeholder="이 단계에 대한 설명"
-                    className={inputCls}
+                    className={inputCls + ' w-full'}
                   />
 
                   <button
@@ -985,7 +1008,7 @@ function ScenarioEditorModal({
                               })
                             }
                             placeholder="정상: 이 문자열이 모두 있어야 통과 (쉼표 구분)"
-                            className={inputCls + ' text-[12px]'}
+                            className={inputCls + ' w-full text-[12px]'}
                           />
                           <input
                             value={(s.check?.failContains ?? []).join(', ')}
@@ -995,13 +1018,13 @@ function ScenarioEditorModal({
                               })
                             }
                             placeholder="실패: 하나라도 있으면 실패 (쉼표 구분)"
-                            className={inputCls + ' text-[12px]'}
+                            className={inputCls + ' w-full text-[12px]'}
                           />
                           <input
                             value={s.check?.passRegex ?? ''}
                             onChange={(e) => patchStep(i, { check: { ...s.check, passRegex: e.target.value } })}
                             placeholder="정상 판정 정규식 (선택)"
-                            className={inputCls + ' font-mono text-[12px]'}
+                            className={inputCls + ' w-full font-mono text-[12px]'}
                           />
                           <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
                             <input
@@ -1027,7 +1050,7 @@ function ScenarioEditorModal({
                           value={s.undo ?? ''}
                           onChange={(e) => patchStep(i, { undo: e.target.value })}
                           placeholder="예: sudo umount /mnt/config  (조회만 하는 단계는 비워두세요)"
-                          className={inputCls + ' font-mono text-[12px]'}
+                          className={inputCls + ' w-full font-mono text-[12px]'}
                         />
                         <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
                           검증 후 <strong>&apos;원복 실행&apos;</strong>을 누르면, 실제로 실행된 단계만 골라{' '}
@@ -1047,7 +1070,7 @@ function ScenarioEditorModal({
                           value={s.target ?? ''}
                           onChange={(e) => patchStep(i, { target: e.target.value })}
                           placeholder="예: 서버  /  서버, 클라이언트"
-                          className={inputCls + ' text-[12px]'}
+                          className={inputCls + ' w-full text-[12px]'}
                         />
                       </div>
 
@@ -1076,7 +1099,7 @@ function ScenarioEditorModal({
                               value={c.regex}
                               onChange={(e) => patchCapture(i, ci, { regex: e.target.value })}
                               placeholder="정규식 (예: inet (\d+\.\d+\.\d+\.\d+))"
-                              className={inputCls + ' font-mono text-[12px]'}
+                              className={inputCls + ' w-full font-mono text-[12px]'}
                             />
                             <input
                               type="number"
@@ -1115,7 +1138,7 @@ function ScenarioEditorModal({
                               value={x.match}
                               onChange={(e) => patchExpect(i, ei, { match: e.target.value })}
                               placeholder="프롬프트 정규식 (예: password, \[y/N\])"
-                              className={inputCls + ' font-mono text-[12px]'}
+                              className={inputCls + ' w-full font-mono text-[12px]'}
                             />
                             <input
                               value={x.send}
@@ -1166,10 +1189,45 @@ function ScenarioEditorModal({
                               value={s.onFailureCommand ?? ''}
                               onChange={(e) => patchStep(i, { onFailureCommand: e.target.value })}
                               placeholder={s.onFailure === 'retry' ? '원인을 고칠 명령 (예: DNS 지정)' : '롤백/로그수집 명령'}
-                              className={inputCls + ' font-mono text-[12px]'}
+                              className={inputCls + ' w-full font-mono text-[12px]'}
                             />
                           )}
                         </div>
+                        {/* 단계 설명 — 대응 명령이 여러 동작을 이어 붙인 경우에만 의미가 있다.
+                            명령을 최상위 구분자로 쪼갠 조각 수만큼 칸을 보여주고, 순서대로 짝지어
+                            검증 실행 창에 표시한다(비워두면 그 단계는 명령만 보인다). */}
+                        {(s.onFailure === 'run' || s.onFailure === 'retry') &&
+                          (() => {
+                            const segs = splitShell(s.onFailureCommand ?? '')
+                            if (segs.length < 2) return null
+                            return (
+                              <div className="mt-1.5 rounded-md border border-white/10 bg-black/20 p-2">
+                                <div className="mb-1 text-[10px] text-gray-400">
+                                  단계 설명 (선택) — 실행 창에서 이 문구가 명령 조각 앞에 붙습니다
+                                </div>
+                                <div className="space-y-1">
+                                  {segs.map((sg, k) => (
+                                    <div key={k} className="flex items-center gap-1.5">
+                                      <span className="w-9 shrink-0 text-right text-[10px] text-gray-500">
+                                        {k + 1}단계
+                                      </span>
+                                      <input
+                                        value={s.onFailureDesc?.[k] ?? ''}
+                                        onChange={(e) => {
+                                          const next = [...(s.onFailureDesc ?? [])]
+                                          while (next.length < segs.length) next.push('')
+                                          next[k] = e.target.value
+                                          patchStep(i, { onFailureDesc: next })
+                                        }}
+                                        placeholder={sg.cmd.slice(0, 40)}
+                                        className={inputCls + ' w-full text-[11px]'}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          })()}
                         {(s.onFailure === 'retry' || s.onFailure === 'run') && (
                           <div className="mt-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
                             <div className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-amber-200">

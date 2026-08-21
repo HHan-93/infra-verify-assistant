@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Play, CornerDownLeft, Copy, Check, X, Search, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
 import { PRESETS, type PresetGroup } from '../presets'
 import type { CustomPresetCommand } from '../../electron/shared-types'
+import CustomItemsMenu from './CustomItemsMenu'
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
@@ -523,6 +524,9 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               <Plus size={13} />
               추가
             </button>
+            <CustomItemsMenu
+              onImported={() => window.electronAPI.customPresetsList().then(setCustomPresets)}
+            />
             <button
               onClick={onClose}
               title="프리셋 닫기"
@@ -751,7 +755,6 @@ function PresetEditorModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onCancel}
     >
       <div
         className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"

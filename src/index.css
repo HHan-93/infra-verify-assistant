@@ -48,3 +48,11 @@ select option:hover {
 select option:disabled {
   color: #6b7280;
 }
+
+/* 설정파일 뷰어 본문의 선택 영역 — 검색 결과를 '선택'으로 가리키기 때문에
+   기본 파란 선택색보다 눈에 띄는 색을 준다. (textarea 는 매치마다 하이라이트를
+   씌울 DOM 이 없어서 선택 영역이 곧 검색 하이라이트 역할을 한다) */
+.conf-view::selection {
+  background: rgba(250, 204, 21, 0.35);
+  color: #fff7d6;
+}

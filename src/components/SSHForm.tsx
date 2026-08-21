@@ -465,7 +465,6 @@ const SSHForm = forwardRef<SSHFormHandle, SSHFormProps>(function SSHForm(
       {pending && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setPending(null)}
         >
           <div
             className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"

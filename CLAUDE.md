@@ -33,7 +33,7 @@ npm run dist:dir   # 패키징 없이 폴더로만 (빠른 확인용)
 | [electron/preload.ts](electron/preload.ts) | contextBridge — 렌더러는 여기 노출된 API 로만 메인에 접근 |
 | [src/App.tsx](src/App.tsx) (~2.7k줄) | 세션(탭)·레이아웃·전역 상태의 단일 소유자. 모든 패널이 그 자식 |
 
-IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*` `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
+IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*` `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
 
 ### 명령 실행 경로가 셋이다 — 섞지 말 것
 
@@ -49,6 +49,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 - [portal.ts](src/lib/portal.ts) — 포털 응답 정상 판정.
 - [mask.ts](src/lib/mask.ts) — 비밀번호·토큰·키·IP 마스킹. **로그 표시 / 리포트 저장 / AI 외부 전송 세 경로에 공통 적용**된다. 값만 가리고 키 이름은 남긴다.
 - [placeholder.ts](src/lib/placeholder.ts) — 명령어 안 `<입력값>` 규칙. 문자 집합을 좁게 잡은 이유가 주석에 있다(셸 리다이렉션 `>` 오인 방지).
+- [shellSplit.ts](src/lib/shellSplit.ts) — 한 줄 명령을 최상위 `;` `&&` `||` 로 쪼개 단계로 보여주기 위한 분리기. 따옴표·`$( )` 안은 건드리지 않는다(`awk '{print $5; exit}'` 를 반토막 내지 않으려면 정규식 split 으로는 안 된다).
 - [orderedMerge.ts](src/lib/orderedMerge.ts) — 내장 항목(배열 인덱스) + 사용자 정의(소수 `order`) fractional indexing 병합.
 - [paneTree.ts](src/lib/paneTree.ts) — tmux 식 재귀 분할 이진 트리(고정 2/4분할이 아니다).
 - [logDisplay.tsx](src/lib/logDisplay.tsx) / [highlightRules.ts](src/lib/highlightRules.ts) — 심각도 4버킷 색상 + 사용자 하이라이트. 줄 전체가 아니라 키워드 단어만 물들인다.
@@ -58,6 +59,8 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 메인 프로세스가 `app.getPath('userData')` 에 저장한다. **`.dat` = `safeStorage` 암호화**(같은 OS 사용자만 복호화 — 팀 배포 시 각자 로컬에서 안전), `.json` = 평문(비밀정보 아님).
 
 `ssh-profiles.dat` · `known-hosts.dat`(TOFU) · `portal-watch.dat` / `custom-presets.json` · `custom-scenarios.json` · `session-logs-index.json` · `log-retention-settings.json` · `session-logs/`(리플레이용 `.cast.jsonl`) · `metrics-history/`
+
+**폴더 이름이 `Q-Term` 이 아니라 `infra-verify-assistant` 다** — 이게 정상이다. `build.productName` 은 exe·설치본 이름만 정하고, 런타임 앱 이름(=userData 폴더명)은 package.json 최상위 `name` 을 쓴다. Q-Term 은 나중에 붙인 표시명일 뿐이다. **최상위에 `productName` 을 추가하거나 `name` 을 바꾸면 userData 경로가 옮겨가면서 사용자의 프리셋·시나리오·접속 프로필이 전부 사라진 것처럼 보인다** — 리브랜딩 정리를 하다 건드리기 쉬운 곳이니 손대지 말 것. dev 와 설치본이 같은 폴더를 공유한다는 점도 같이 기억할 것(dev 에서 지우면 설치본에서도 지워진다).
 
 **쓰기 규칙**: 임시 파일 → `rename` 교체 + **경로별 직렬화 락**. 여러 세션이 같은 저장소를 동시에 건드려 파일이 깨진 전례가 있어서 도입됐다. 새 저장소를 추가할 때도 이 유틸을 쓸 것.
 
@@ -76,6 +79,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 - **조회 실패 ≠ 장애.** 폴링이 타임아웃했을 때 빈 결과로 덮으면 행·열이 사라져 "서비스가 없어졌다"로 읽힌다. 직전 값을 유지하고 "몇 초 전 값"이라는 사실만 화면에 밝힌다(stale 표시). 진행률·초록 표시도 그 프레임에서는 그리지 않는다.
 - **한 번 튄 성공은 복구가 아니다.** 페일오버 중에는 200 이 한 번 튀었다 다시 503 이 된다. 연속 성공(`successStreak`)을 요구하고, 마일스톤도 연속 관측을 요구한다. `successStreak: 1` 은 쓰지 말 것.
 - **시각은 절대 epoch ms 로 보관**하고 표시할 때만 변환한다. 원격 로그에서 시각을 뽑을 때는 호스트 시계 오차(`delta`)를 빼서 같은 기준으로 맞춘다 — 그러지 않으면 마일스톤이 '발견 시각'으로 찍힌다.
+- **모달은 배경 클릭으로 닫지 않는다.** 닫는 것은 X · 닫기 · 취소 버튼뿐이다. 불러온 파일·입력 중인 값이 손이 스친 클릭에 사라지면 처음부터 다시 해야 한다(상태보드는 원래 이 규칙이었고, 2026-08 에 나머지 모달 23곳을 여기에 맞췄다). **예외는 작은 드롭다운 메뉴** — 닫기 버튼이 없으므로 바깥 클릭이 유일한 취소 수단이다.
 - **화면이 저절로 움직이지 않게 한다.** 장애 감지 시 패널을 자동으로 펼치는 기능은 넣었다가 제거했다(롤링 검증 중 열고 접히기를 반복해 장애 정보보다 방해됐다). 알림은 눈에 띄게, 화면은 가만히 — 여는 것은 사람만.
 - **비슷한 두 상태를 한 이름으로 묶지 않는다.** 예: Ceph 는 `ceph`(degraded·misplaced 0 = 데이터 복제 완료)와 `cephHealthy`(HEALTH_OK)를 분리한다. 복제와 무관한 경고(clock skew 등)가 남으면 전자만 만족해도 클러스터는 정상이 아니다.
 - **정규식으로 CLI 출력을 파싱할 때는 서식 변화를 가정한다.** `pcs status` 의 `Started con02` / `Started: [ con02 ]` 처럼 형태가 바뀌며 `[` 를 노드명으로 잡아 가짜 이벤트를 찍은 전례가 있다. 뽑은 값이 **알려진 목록에 있는지 교차 검증**할 것.

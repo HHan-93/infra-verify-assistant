@@ -13,6 +13,7 @@ import type {
   ProfileImportResult,
   CustomPresetCommand,
   CustomScenario,
+  CustomItemsImportResult,
   LogIndexEntry,
   LogRetentionSettings,
   MetricSample,
@@ -224,6 +225,22 @@ const electronAPI = {
     ipcRenderer.invoke('customScenarios:upsert', item),
   customScenariosDelete: (id: string): Promise<CustomScenario[]> =>
     ipcRenderer.invoke('customScenarios:delete', id),
+  /** 프리셋·시나리오를 한 파일(JSON)로 내보내기 — 팀원에게 넘기거나 백업용 */
+  customItemsExport: (): Promise<{
+    saved: boolean
+    path?: string
+    presets?: number
+    scenarios?: number
+    error?: string
+  }> => ipcRenderer.invoke('customItems:export'),
+  /** 내보낸 파일 가져오기 — 교체가 아니라 병합이다(같은 id 는 덮어쓰고 없으면 추가) */
+  customItemsImport: (): Promise<CustomItemsImportResult> => ipcRenderer.invoke('customItems:import'),
+
+  // ── 앱 데이터 폴더 ────────────────────────────────────────
+  /** 설정·프리셋·프로필이 저장되는 폴더 경로 (설치 폴더 밖이라 재설치해도 남는다) */
+  userDataPath: (): Promise<string> => ipcRenderer.invoke('app:userDataPath'),
+  /** 그 폴더를 탐색기로 열기 */
+  openUserData: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('app:openUserData'),
 
   // ── 클립보드 ─────────────────────────────────────────────
   /** 시스템 클립보드 텍스트 읽기 (터미널 Ctrl+V 붙여넣기용) */

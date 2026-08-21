@@ -18,10 +18,10 @@ export default function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onCancel}
-    >
+    // 배경(어두운 영역)을 눌러도 닫지 않는다 — 이 앱의 모든 모달이 같은 규칙이다.
+    // 설정파일 뷰어처럼 불러온 내용·입력하던 값이 있는 창이 손이 스친 클릭 한 번에 닫혀
+    // 처음부터 다시 하게 되는 일이 잦았다. 닫는 것은 X · 닫기 · 취소 버튼으로만.
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
       <div
         className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
         onClick={(e) => e.stopPropagation()}

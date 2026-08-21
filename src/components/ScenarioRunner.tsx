@@ -25,6 +25,7 @@ import type { CommandCheck, CaptureRule, ExpectRule, OnFailureAction } from '../
 import { judgeOutput, hasCheck, type Verdict } from '../lib/verdict'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 import { maskForExport } from '../lib/mask'
+import { splitShell, opLabel } from '../lib/shellSplit'
 
 export interface RunnerStep {
   title: string
@@ -42,6 +43,8 @@ export interface RunnerStep {
   onFailure?: OnFailureAction
   /** onFailure==='run' 일 때 실행할 명령 */
   onFailureCommand?: string
+  /** 대응 명령의 단계 설명 — 명령 조각과 순서대로 짝지어 보여준다 (scenarios.ts 주석 참고) */
+  onFailureDesc?: string[]
   /** 이 스텝이 만든 변경을 되돌리는 명령 (검증 후 '원복 실행'에서 역순 수행) */
   undo?: string
 }
@@ -598,11 +601,16 @@ export default function ScenarioRunner({
    * 테스트 인스턴스용으로 만든 시나리오가 운영 장비에서 그대로 돌아가는 게 가장 위험하다.
    */
   const mutatingSteps = useMemo(() => {
-    const out: { i: number; kind: string; cmd: string }[] = []
+    const out: { i: number; kind: string; cmd: string; desc?: string[] }[] = []
     scenario.steps.forEach((st, i) => {
       const fix = st.onFailureCommand?.trim()
       if ((st.onFailure === 'run' || st.onFailure === 'retry') && fix)
-        out.push({ i, kind: st.onFailure === 'retry' ? '실패 시 실행 후 재시도' : '실패 시 실행', cmd: fix })
+        out.push({
+          i,
+          kind: st.onFailure === 'retry' ? '실패 시 실행 후 재시도' : '실패 시 실행',
+          cmd: fix,
+          desc: st.onFailureDesc,
+        })
       const un = st.undo?.trim()
       if (un) out.push({ i, kind: '원복', cmd: un })
     })
@@ -1308,12 +1316,11 @@ ${primary?.err ?? ''}`)
   const anyRun = Object.keys(results).length > 0
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
       {/* 원복 확인 — 무엇을 어떤 순서로 되돌릴지 보여준 뒤에만 실행한다 */}
       {undoOpen && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8"
-          onClick={() => setUndoOpen(false)}
         >
           <div
             className="flex max-h-[80vh] w-[640px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
@@ -1661,16 +1668,53 @@ ${primary?.err ?? ''}`)
                 </button>
               </div>
               {mutOpen && (
-                <div className="mt-1 space-y-0.5 border-l-2 border-amber-500/40 pl-2 text-amber-200/85">
-                  {mutatingSteps.map((m) => (
-                    <div key={`${m.i}-${m.kind}`}>
+                <div className="mt-1 space-y-1.5 border-l-2 border-amber-500/40 pl-2 text-amber-200/85">
+                  {mutatingSteps.map((m) => {
+                    /**
+                     * 한 줄에 여러 동작이 이어 붙은 명령은 단계로 펴서 보여준다.
+                     * 조각이 하나뿐이면(대개 원복 명령: `sudo rmdir /mnt/backup`) 번호를 붙이지 않는다 —
+                     * '1단계'만 달린 목록은 읽는 사람에게 아무것도 더 알려주지 않는다.
+                     */
+                    const segs = splitShell(m.cmd)
+                    const head = (
                       <span className="text-amber-300">
-                        {m.i + 1}번 {m.kind} 명령어
+                        {m.i + 1}번 {m.kind}
                       </span>
-                      <span className="mx-1 text-amber-300/60">:</span>
-                      <code className="break-all font-mono text-[10.5px] text-amber-100/90">{m.cmd}</code>
-                    </div>
-                  ))}
+                    )
+                    if (segs.length < 2)
+                      return (
+                        <div key={`${m.i}-${m.kind}`}>
+                          {head}
+                          <span className="mx-1 text-amber-300/60">:</span>
+                          <code className="break-all font-mono text-[10.5px] text-amber-100/90">{m.cmd}</code>
+                        </div>
+                      )
+                    return (
+                      <div key={`${m.i}-${m.kind}`}>
+                        <div>
+                          {head}
+                          <span className="ml-1 text-amber-200/70">— {segs.length}단계로 실행합니다</span>
+                        </div>
+                        <ol className="mt-0.5 space-y-0.5">
+                          {segs.map((sg, k) => (
+                            <li key={k} className="flex gap-1.5">
+                              <span className="w-8 shrink-0 text-right text-amber-300/70">{k + 1}단계</span>
+                              <span className="min-w-0">
+                                {/* 작성자가 적어둔 설명이 있으면 그것을 제목으로 — 없으면 명령만 보여준다 */}
+                                {m.desc?.[k] && <span className="text-amber-100">{m.desc[k]}</span>}
+                                {opLabel(sg.op) && (
+                                  <span className="ml-1 text-amber-300/60">({opLabel(sg.op)})</span>
+                                )}
+                                <code className="ml-1 break-all font-mono text-[10.5px] text-amber-100/70">
+                                  {sg.cmd}
+                                </code>
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>

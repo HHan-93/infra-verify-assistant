@@ -636,7 +636,6 @@ export default function SessionSidebar({
       {confirmDelMany && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setConfirmDelMany(null)}
         >
           <div
             className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -690,7 +689,6 @@ export default function SessionSidebar({
       {confirmDel && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-          onClick={() => setConfirmDel(null)}
         >
           <div
             className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
@@ -806,7 +804,6 @@ function EditorModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onClose}
     >
       <div
         className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"

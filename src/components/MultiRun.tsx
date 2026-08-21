@@ -153,7 +153,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
   )
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
       <div
         className="flex h-[80vh] w-[1000px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}

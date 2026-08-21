@@ -816,7 +816,7 @@ export default function FileExplorer({
     })
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
       <div
         className="relative flex h-[80vh] w-[1040px] max-w-[95vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}

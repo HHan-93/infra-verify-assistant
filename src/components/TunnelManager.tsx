@@ -71,7 +71,7 @@ export default function TunnelManager({ sessionId, connected, onClose }: TunnelM
     'placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
       <div
         className="flex max-h-[80vh] w-[720px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}

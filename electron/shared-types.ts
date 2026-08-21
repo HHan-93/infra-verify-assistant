@@ -406,6 +406,15 @@ export interface CustomScenarioStep {
   expect?: ExpectRule[]
   /** 실패 시 동작 (기본 stop) */
   onFailure?: OnFailureAction
+  /**
+   * 대응 명령의 단계 설명 (선택). 명령을 최상위 `;` `&&` `||` 로 쪼갠 조각과 **순서대로 1:1**
+   * 로 짝지어 검증 실행 창에 보여준다. 한 줄에 여러 동작을 이어 붙인 명령이 그냥 한 줄로
+   * 뿌려지면 "무엇을 어떤 순서로 하는지" 를 읽을 수 없어서 붙였다.
+   *
+   * 비워두면 명령 조각만 번호를 붙여 보여준다 — **셸 텍스트에서 의도를 추측해 자동으로 만들지는
+   * 않는다.** 틀린 설명이 그럴듯하게 박히는 것이 raw 명령어보다 나쁘다.
+   */
+  onFailureDesc?: string[]
   /** onFailure === 'run' 일 때 실행할 명령 (롤백 스크립트 등) */
   onFailureCommand?: string
   /**
@@ -432,6 +441,38 @@ export interface CustomScenario {
   roleValues?: Record<string, string>
   /** 같은 카테고리 안에서의 표시 순서 — CustomPresetCommand.order 와 동일한 규칙 */
   order?: number
+}
+
+/**
+ * 사용자 정의 프리셋·시나리오 내보내기 파일 형식.
+ *
+ * **둘을 한 파일에 담는다.** 따로 내보내면 파일이 두 개가 되고, 팀원에게 줄 때 한쪽을
+ * 빼먹는다(받는 쪽도 두 번 가져와야 한다). 어느 한쪽이 비어 있어도 정상이다.
+ */
+export interface CustomItemsBundle {
+  /** 형식 버전 — 나중에 구조가 바뀌면 이 값으로 갈라 읽는다 */
+  version: 1
+  /** 어디서 온 파일인지 알아보기 위한 정보. 가져오기 판단에는 쓰지 않는다 */
+  exportedAt?: string
+  appVersion?: string
+  presets: CustomPresetCommand[]
+  scenarios: CustomScenario[]
+}
+
+/** customItems:import 결과 — 무엇이 들어왔고 무엇이 버려졌는지 사용자에게 그대로 보여준다 */
+export interface CustomItemsImportResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  /** 새로 추가된 수 */
+  addedPresets: number
+  addedScenarios: number
+  /** 같은 id 가 이미 있어 덮어쓴 수 (같은 파일을 두 번 가져와도 중복이 생기지 않는다) */
+  replaced: number
+  /** 필수 항목이 없거나 형식이 틀려 건너뛴 수 */
+  skipped: number
+  /** 건너뛴 이유 — 사용자가 원본 파일을 고칠 수 있도록 구체적으로 남긴다 */
+  warnings: string[]
 }
 
 // ─────────────────────────────────────────────────────────────

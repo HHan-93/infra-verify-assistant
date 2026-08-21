@@ -33,6 +33,12 @@ export interface ScenarioStep {
   expect?: ExpectRule[]
   /** 실패 시 동작 (기본 stop) */
   onFailure?: OnFailureAction
+  /**
+   * 위 대응 명령의 단계 설명 (선택). 명령을 최상위 구분자로 쪼갠 조각과 순서대로 짝지어
+   * 화면에 보여준다. 없으면 명령 조각만 번호를 붙여 보여준다 — 셸 텍스트에서 의도를
+   * 추측해 자동으로 만들지는 않는다(틀린 설명이 그럴듯하게 박히는 게 더 나쁘다).
+   */
+  onFailureDesc?: string[]
   /** onFailure==='run' 일 때 실행할 명령 */
   onFailureCommand?: string
   /** 이 단계가 만든 변경을 되돌리는 명령 (검증 후 '원복 실행'에서 역순 수행) */
@@ -52,6 +58,22 @@ export interface Scenario {
   roleValues?: Record<string, string>
 }
 
+/**
+ * apt 저장소가 막혔을 때의 표준 대응. **여러 시나리오가 같은 명령을 리터럴로 복붙**하고 있었다 —
+ * 한 번 고치려면 그 전부를 고쳐야 했고, 설명을 붙이려면 또 전부에 붙여야 했다. 여기 한 곳에 둔다.
+ */
+const APT_FIX =
+  "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q"
+/**
+ * 위 명령의 단계 설명. splitShell 이 쪼갠 조각과 **순서대로 1:1** 로 짝지어 화면에 나란히 보여준다.
+ * 조각을 늘리거나 순서를 바꾸면 이 목록도 같이 고쳐야 한다.
+ */
+const APT_FIX_DESC = [
+  'DNS 확인 — archive.ubuntu.com 이름 조회가 되는지 본다',
+  'DNS 임시 변경 — 조회가 실패했으면 현재 인터페이스에 8.8.8.8 · 1.1.1.1 을 붙인다',
+  'universe 저장소 추가',
+  '패키지 목록 갱신 후 재시도',
+]
 export const SCENARIOS: Scenario[] = [
 
   // ───────────────────────── OpenStack ─────────────────────────
@@ -189,7 +211,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "fio 및 libaio 설치",
         "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "디스크 성능 테스트 도구 fio와 비동기 I/O 라이브러리 libaio를 설치합니다. Ubuntu 24.04+는 libaio1t64, 이전 버전은 libaio1을 사용합니다."
       },
@@ -266,7 +289,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "iperf3 서버 구성 (별도 인스턴스)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3 && iperf3 -s -D",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "QoS가 적용되지 않은 별도 인스턴스(또는 외부 서버)에서 실행합니다. iperf3 서버가 준비되어야 테스트 대상 인스턴스에서 연결할 수 있습니다.",
         "info": "서버 역할 인스턴스는 네트워크 QoS가 없어야 정확한 측정이 가능합니다.\niperf3 서버 기본 포트는 5201입니다. 보안 그룹에서 해당 포트가 허용되어야 합니다."
@@ -287,7 +311,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "iperf3 설치",
         "command": "sudo apt-get install -y -q iperf3",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "네트워크 대역폭 측정 도구 iperf3를 설치합니다."
       },
@@ -335,7 +360,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "nginx 설치",
         "command": "sudo apt-get install -y -q nginx",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "웹서버(nginx)를 설치합니다. 인스턴스 2대 모두 수행하세요."
       },
@@ -528,7 +554,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "netcat 설치",
         "command": "sudo apt-get install -y -q netcat-openbsd",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "포트 연결 테스트에 사용할 netcat을 설치합니다.",
         "note": "RHEL/CentOS 계열: yum install -y nmap-ncat"
@@ -645,7 +672,8 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo apt-get update -q && sudo apt-get install -y -q netcat-openbsd nmap",
         "target": "서버, 클라이언트",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "포트 점검용 nc(netcat)와 nmap 을 설치합니다. 역할별 대상에서 고른 서버·클라이언트 두 세션에서 함께 실행되므로 따로 고를 필요가 없습니다.",
         "note": "RHEL/CentOS 계열은 sudo dnf install -y nmap-ncat nmap"
@@ -748,7 +776,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "Ceph 클라이언트 설치",
         "command": "sudo apt-get install -y -q ceph-common",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "CephFS 마운트에 필요한 ceph-common 패키지를 설치합니다.",
         "note": "RHEL/CentOS 계열은 sudo dnf install -y ceph-common"
@@ -1090,7 +1119,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q lvm2 xfsprogs",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "LVM 관리 도구를 설치합니다(대개 기본 설치되어 있음).",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y lvm2`"
@@ -1268,7 +1298,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "fio 및 libaio 설치",
         "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio와 비동기 I/O 라이브러리(libaio)를 함께 설치합니다. libaio가 없으면 fio가 동기 모드로 폴백되어 IOPS를 제대로 측정할 수 없습니다.",
         "note": "Ubuntu 24.04+는 libaio1t64, 22.04 이하는 libaio1 패키지명을 사용합니다. || 로 두 버전을 순서대로 시도합니다.\nRHEL/CentOS 계열: sudo dnf install -y fio libaio"
@@ -1333,7 +1364,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "커널 헤더 및 빌드 도구 설치",
         "command": "sudo apt-get install -y -q build-essential dkms linux-headers-$(uname -r)",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "드라이버 컴파일에 필요한 커널 헤더와 빌드 도구를 설치합니다."
       },
@@ -1469,7 +1501,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
@@ -1513,7 +1546,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
@@ -1557,7 +1591,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "부하 도구 stress-ng 와, 눈으로 볼 때 쓸 htop 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y stress-ng htop` (EPEL 필요할 수 있음)"
@@ -1596,7 +1631,8 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3",
         "target": "서버, 클라이언트",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "iperf3 를 설치합니다. 역할별 대상에서 고른 서버·클라이언트 두 세션에서 함께 실행되므로 따로 고를 필요가 없습니다.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y iperf3`"
@@ -1637,7 +1673,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y fio`"
@@ -1677,7 +1714,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "도구 설치 (필요 시)",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "I/O 벤치마크 도구 fio 설치.",
         "note": "RHEL/CentOS 계열은 `sudo dnf install -y fio`"
@@ -1979,7 +2017,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "qemu-img 설치",
         "command": "sudo apt-get update -q && sudo apt-get install -y -q qemu-utils",
         "onFailure": "retry",
-        "onFailureCommand": "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "qcow2 이미지 변환에 필요한 qemu-img 도구를 설치합니다.",
         "note": "RHEL/CentOS 계열: sudo yum install -y qemu-img"

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FileCode,
   Download,
@@ -12,6 +12,11 @@ import {
   Eye,
   EyeOff,
   AlertCircle,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  Minus,
+  Plus,
 } from 'lucide-react'
 
 const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
@@ -35,6 +40,18 @@ const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
   { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.' },
   { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.' },
 ]
+
+/**
+ * 설정파일 본문 글꼴 — 터미널(Consolas 우선)과 일부러 다르게 잡는다.
+ * conf 는 `key = value` 정렬과 한글 주석이 섞여 있어, 0/O·1/l/I 가 구분되고 한글 글립이
+ * 있는 글꼴이 앞에 와야 읽힌다. 설치돼 있는 첫 글꼴이 쓰이므로 없는 환경에서도 안전하다.
+ */
+const CONF_FONT = "'Cascadia Mono', 'JetBrains Mono', Consolas, 'D2Coding', 'Malgun Gothic', monospace"
+/** 줄간격 배수 — 검색 스크롤 위치 계산이 이 값에 의존하므로 실제 CSS 와 반드시 같아야 한다 */
+const LINE_RATIO = 1.6
+const FONT_KEY = 'fileviewer_font_size'
+/** 검색 매치 상한 — 큰 파일에서 한 글자만 입력했을 때 전부 모으느라 멈추는 것을 막는다 */
+const MAX_MATCHES = 5000
 
 interface FileViewerProps {
   /** SFTP 대상 세션(활성 탭) ID */
@@ -196,6 +213,20 @@ export default function FileViewer({
   const [pwAction, setPwAction] = useState<'read' | 'write' | null>(null)
   const [showPw, setShowPw] = useState(false) // 비밀번호 표시(눈금) 토글
   const [applyNotice, setApplyNotice] = useState<{ command: string; desc: string } | null>(null)
+  // ── 본문 글꼴 크기 ─────────────────────────────────────────
+  // 기본 12px 은 conf 를 오래 들여다보기에 작았다. 13px 로 올리고 눈에 맞게 조절할 수 있게 한다.
+  // 터미널 글꼴 크기(term_font_size)와 별개로 기억한다 — 보는 목적이 다르다.
+  const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem(FONT_KEY)) || 13)
+  const changeFontSize = (n: number) => {
+    const v = Math.max(10, Math.min(28, n))
+    setFontSize(v)
+    localStorage.setItem(FONT_KEY, String(v))
+  }
+  // ── 검색 ───────────────────────────────────────────────────
+  const [query, setQuery] = useState('')
+  /** -1 = 아직 이동 전(개수만 표시) */
+  const [matchIdx, setMatchIdx] = useState(-1)
+  const taRef = useRef<HTMLTextAreaElement>(null)
 
   // 잘못 저장하면 시스템에 치명적인 파일 (강한 경고 대상)
   const RISKY = [/\/etc\/fstab/, /\/etc\/netplan\//, /sshd_config/, /\/etc\/sudoers/, /grub/, /\/boot\//]
@@ -210,6 +241,184 @@ export default function FileViewer({
     return `${BACKUP_BASE}${dir.startsWith('/') ? dir : '/' + dir}/${base}_<날짜시각>`
   }
 
+  // ── 검색 · 섹션 이동 ───────────────────────────────────────
+  // textarea 는 DOM 트리가 아니라 값 하나라서 매치마다 하이라이트를 씌울 수 없다. 그래서
+  // '선택 영역(selection) + 스크롤' 로 현재 매치를 가리킨다. 이때 **포커스는 옮기지 않는다** —
+  // 옮기면 첫 Enter 에 포커스가 본문으로 넘어가 다음 매치로 넘어갈 수 없고, 편집 모드에서는
+  // 그 Enter 가 본문에 개행으로 들어간다.
+  const needle = query.trim().toLowerCase()
+  const matches = useMemo(() => {
+    if (!needle) return []
+    const hay = content.toLowerCase()
+    const out: number[] = []
+    for (
+      let i = hay.indexOf(needle);
+      i !== -1 && out.length < MAX_MATCHES;
+      i = hay.indexOf(needle, i + needle.length)
+    )
+      out.push(i)
+    return out
+  }, [content, needle])
+  /**
+   * `[section]` 헤더 목록. **줄 전체가 대괄호 한 쌍인 줄만** 인정한다 —
+   * 값 안에 들어간 대괄호(`filters = [a, b]`)를 섹션으로 잡으면 목록이 쓰레기가 된다.
+   */
+  const sections = useMemo(() => {
+    const out: { name: string; at: number }[] = []
+    const re = /^[ \t]*\[([^\]\n]+)\][ \t]*$/gm
+    for (let m = re.exec(content); m; m = re.exec(content)) out.push({ name: m[1], at: m.index })
+    return out
+  }, [content])
+  /**
+   * 검색어가 바뀌면 '이동 전' 상태로 되돌린다. 검색어 자체는 지우지 않는다 —
+   * 같은 키를 파일 여러 개에서 확인하는 일이 잦다.
+   *
+   * **content 를 의존성에 넣으면 안 된다** — 편집 모드에서 한 글자 칠 때마다 현재 매치 위치가
+   * 초기화돼, 3번째 매치를 보다 값을 고치면 다시 첫 매치부터 넘겨야 했다.
+   * 새 파일을 불러올 때의 초기화는 load() 가 직접 한다.
+   */
+  useEffect(() => setMatchIdx(-1), [needle])
+
+  /** offset 이 속한 섹션 이름 (섹션 밖이면 빈 문자열) */
+  const sectionOf = (offset: number) => {
+    let name = ''
+    for (const s of sections) {
+      if (s.at > offset) break
+      name = s.name
+    }
+    return name
+  }
+  const lineOf = (offset: number) => content.slice(0, offset).split('\n').length
+
+  /** 해당 범위를 선택하고 화면 가운데로 스크롤 */
+  const jumpTo = (start: number, len: number, place: 'center' | 'top' = 'center') => {
+    const ta = taRef.current
+    if (!ta) return
+    ta.setSelectionRange(start, start + len)
+    const lh = fontSize * LINE_RATIO
+    const y = (lineOf(start) - 1) * lh
+    ta.scrollTop = Math.max(0, place === 'center' ? y - ta.clientHeight / 2 : y - lh)
+  }
+  const go = (dir: 1 | -1) => {
+    if (matches.length === 0) return
+    // 아직 이동 전(-1)이면 방향에 따라 첫/마지막 매치부터 시작한다
+    const next =
+      matchIdx < 0
+        ? dir === 1
+          ? 0
+          : matches.length - 1
+        : (matchIdx + dir + matches.length) % matches.length
+    // 스크롤은 아래 useEffect 한 곳에서만 한다 (모드별로 방법이 다르다)
+    setMatchIdx(next)
+  }
+  /** 섹션 헤더로 이동 — 아래 키 목록을 봐야 하므로 가운데가 아니라 위쪽에 붙인다 */
+  const jumpSection = (at: number) => {
+    const nl = content.indexOf('\n', at)
+    if (editing) {
+      jumpTo(at, (nl === -1 ? content.length : nl) - at, 'top')
+      return
+    }
+    // 읽기 모드에는 textarea 가 없다. 줄 높이가 일정하므로(whitespace-pre) 줄번호 × 줄높이로 맞는다
+    const el = viewRef.current
+    if (el) el.scrollTop = Math.max(0, (lineOf(at) - 1) * lineH - lineH)
+  }
+
+  /**
+   * 읽기 모드 렌더링용 줄 배열과 각 줄의 시작 offset.
+   *
+   * 검색 매치는 파일 전체 기준 offset 으로 갖고 있으므로(섹션·줄번호 표시가 그 값을 쓴다),
+   * 줄 단위로 그릴 때도 같은 기준을 유지해야 '지금 매치'가 어느 것인지 정확히 갈린다.
+   */
+  const lines = useMemo(() => content.split('\n'), [content])
+  const lineStarts = useMemo(() => {
+    let acc = 0
+    return lines.map((l) => {
+      const at = acc
+      acc += l.length + 1 // 개행 1자
+      return at
+    })
+  }, [lines])
+  /** 지금 보고 있는 매치의 절대 offset (-1 = 아직 이동 전) */
+  const curOffset = matchIdx >= 0 && matchIdx < matches.length ? matches[matchIdx] : -1
+  const curRef = useRef<HTMLElement | null>(null)
+  const viewRef = useRef<HTMLDivElement>(null)
+  const lineH = fontSize * LINE_RATIO
+
+  /**
+   * 현재 매치로 스크롤.
+   *  - 읽기 모드: 실제 DOM 요소가 있으니 그걸 화면 가운데로 옮긴다(정확하다).
+   *  - 편집 모드: textarea 라 요소가 없다 → 선택 영역 + 줄 높이 계산으로 옮긴다.
+   */
+  useEffect(() => {
+    if (curOffset < 0) return
+    if (editing) jumpTo(curOffset, needle.length)
+    else curRef.current?.scrollIntoView({ block: 'center' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curOffset, editing])
+
+  /**
+   * 한 줄을 그린다. 검색어가 있으면 매치마다 배경색을 입히고, **지금 매치만 더 진하게** 칠한다.
+   *
+   * 예전에는 읽기 모드도 textarea 였다. textarea 는 값 하나라서 매치에 하이라이트를 씌울 DOM 이
+   * 없고, '선택 영역' 으로 가리키는 게 최선이었다. 그런데 포커스가 검색칸에 있는 동안 Chromium 이
+   * 선택을 옅게 그려, **찾아놓고도 화면에서 눈으로 다시 찾아야 했다.** 그래서 읽기 모드는 줄 단위
+   * 렌더링으로 바꿨다. 편집 모드는 입력이 되어야 하므로 그대로 textarea 다.
+   */
+  const renderLine = (line: string, idx: number) => {
+    if (!needle || !line) return line
+    const lower = line.toLowerCase()
+    const out: (string | JSX.Element)[] = []
+    let from = 0
+    for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + needle.length)) {
+      if (at > from) out.push(line.slice(from, at))
+      const isCur = lineStarts[idx] + at === curOffset
+      out.push(
+        <mark
+          key={at}
+          ref={isCur ? (el) => (curRef.current = el) : undefined}
+          className={isCur ? 'rounded-sm bg-amber-400 text-black' : 'rounded-sm bg-yellow-500/25 text-yellow-100'}
+        >
+          {line.slice(at, at + needle.length)}
+        </mark>,
+      )
+      from = at + needle.length
+    }
+    if (from < line.length) out.push(line.slice(from))
+    return out
+  }
+
+  /**
+   * 그려둔 줄 목록.
+   *
+   * conf 는 주석까지 합쳐 수천 줄이 흔하다. 메모하지 않으면 **경로 입력칸에 한 글자 칠 때마다**
+   * (또는 하단 메시지가 바뀔 때마다) 그 수천 줄이 전부 다시 그려진다. 실제로 다시 그려야 하는
+   * 것은 내용·검색어·현재 매치·글꼴 크기가 바뀔 때뿐이다.
+   */
+  const rows = useMemo(
+    () =>
+      editing
+        ? null // 편집 모드에는 textarea 만 그려진다 — 안 쓰는 수천 줄을 키 입력마다 만들 이유가 없다
+        : lines.map((line, i) => (
+            <div key={i} className="flex" style={{ height: lineH }}>
+              {/* 줄번호 — 검색 결과가 '몇 번째 줄'로 표시되므로 실제 줄과 맞춰볼 수 있어야 한다.
+                  가로로 스크롤해도 따라가도록 왼쪽에 고정한다 */}
+              <span
+                // z-10 필수 — sticky 만으로는 쌓임 순서가 정해지지 않아, 가로로 스크롤하면 본문
+            // 글자가 줄번호 위로 지나가며 겹쳐 보인다(DOM 순서상 본문이 뒤에 오기 때문)
+            className="sticky left-0 z-10 shrink-0 select-none border-r border-white/5 bg-[#11111b] pl-3 pr-3 text-right text-gray-600"
+                // Tailwind 는 box-sizing: border-box 라 지정 폭 안에 패딩(pl-3+pr-3=1.5rem)이
+                // 포함된다 — 자릿수만 주면 숫자가 눌리므로 패딩을 더해 준다
+                style={{ width: `calc(${String(lines.length).length}ch + 1.5rem)` }}
+              >
+                {i + 1}
+              </span>
+              <span className="whitespace-pre">{renderLine(line, i)}</span>
+            </div>
+          )),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lines, needle, curOffset, lineH, editing],
+  )
+
   const load = async (p: string, pw?: string) => {
     if (!p.trim()) return
     if (!connected) {
@@ -223,6 +432,7 @@ export default function FileViewer({
     setOriginal('')
     setLoaded(false)
     setDirty(false)
+    setMatchIdx(-1) // 다른 파일의 매치 위치가 남지 않게
     const res = await window.electronAPI.sftpRead(
       sessionId,
       p.trim(),
@@ -318,10 +528,8 @@ export default function FileViewer({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onClose}
-    >
+    // 배경 클릭으로 닫지 않는다 — 불러온 파일과 편집 중인 내용이 사라진다(ConfirmDialog 주석 참고)
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
       <div
         className="relative flex h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
@@ -380,26 +588,140 @@ export default function FileViewer({
           </button>
         </div>
 
+        {/* 검색 · 섹션 이동 · 글꼴 크기 — 불러온 뒤에만 보인다 */}
+        {loaded && (
+          <div className="flex items-center gap-1.5 border-b border-white/10 px-4 py-1.5">
+            <Search size={12} className="shrink-0 text-gray-500" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.shiftKey ? go(-1) : go(1)
+              }}
+              placeholder="키·값 검색 (Enter 다음 · Shift+Enter 이전)"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-gray-200 outline-none placeholder:text-gray-600"
+            />
+            {needle && (
+              <>
+                <span className="shrink-0 text-[11px] text-gray-500">
+                  {matches.length === 0
+                    ? '없음'
+                    : matchIdx < 0
+                      ? `${matches.length}개${matches.length >= MAX_MATCHES ? '+' : ''}`
+                      : `${matchIdx + 1}/${matches.length}`}
+                </span>
+                <button
+                  onClick={() => go(-1)}
+                  disabled={matches.length === 0}
+                  title="이전 (Shift+Enter)"
+                  className="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-200 disabled:opacity-30"
+                >
+                  <ChevronUp size={13} />
+                </button>
+                <button
+                  onClick={() => go(1)}
+                  disabled={matches.length === 0}
+                  title="다음 (Enter)"
+                  className="shrink-0 rounded p-0.5 text-gray-400 hover:text-gray-200 disabled:opacity-30"
+                >
+                  <ChevronDown size={13} />
+                </button>
+                {/* 찾은 값이 '어느 섹션' 것인지 — conf 는 같은 키가 섹션마다 또 나온다 */}
+                {matchIdx >= 0 && (
+                  <span className="max-w-[240px] shrink-0 truncate text-[11px] text-blue-300">
+                    {sectionOf(matches[matchIdx])
+                      ? `[${sectionOf(matches[matchIdx])}]`
+                      : '(섹션 밖)'}{' '}
+                    · {lineOf(matches[matchIdx])}번째 줄
+                  </span>
+                )}
+              </>
+            )}
+            {sections.length > 0 && (
+              <select
+                value=""
+                onChange={(e) => e.target.value !== '' && jumpSection(Number(e.target.value))}
+                title="섹션으로 이동"
+                className="max-w-[150px] shrink-0 rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11px] text-gray-300 focus:outline-none"
+              >
+                <option value="">섹션 {sections.length}개…</option>
+                {sections.map((s, i) => (
+                  <option key={`${s.at}-${i}`} value={s.at}>
+                    [{s.name}]
+                  </option>
+                ))}
+              </select>
+            )}
+            <div
+              className="flex shrink-0 items-center gap-0.5 border-l border-white/10 pl-1.5"
+              title="본문 글꼴 크기 (Ctrl+휠)"
+            >
+              <button
+                onClick={() => changeFontSize(fontSize - 1)}
+                className="rounded p-0.5 text-gray-400 hover:text-gray-200"
+              >
+                <Minus size={12} />
+              </button>
+              <span className="w-[30px] text-center text-[11px] tabular-nums text-gray-400">{fontSize}px</span>
+              <button
+                onClick={() => changeFontSize(fontSize + 1)}
+                className="rounded p-0.5 text-gray-400 hover:text-gray-200"
+              >
+                <Plus size={12} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* 내용 (기본 읽기 전용 → '편집' 눌러야 수정) */}
         <div className="min-h-0 flex-1 p-2">
-          <textarea
-            value={content}
-            readOnly={!editing}
-            onChange={(e) => {
-              setContent(e.target.value)
-              setDirty(true)
-            }}
-            spellCheck={false}
-            placeholder={
-              connected
-                ? '경로를 입력하고 불러오기를 누르세요.'
-                : 'SSH 연결 후 사용할 수 있습니다.'
-            }
-            className={
-              'h-full w-full resize-none rounded-md bg-[#11111b] p-3 font-mono text-xs leading-relaxed focus:outline-none ' +
-              (editing ? 'text-gray-100 ring-1 ring-amber-500/40' : 'text-gray-300 cursor-default')
-            }
-          />
+          {editing ? (
+            <textarea
+              ref={taRef}
+              value={content}
+              onChange={(e) => {
+                setContent(e.target.value)
+                setDirty(true)
+              }}
+              spellCheck={false}
+              onWheel={(e) => {
+                // Ctrl+휠 확대/축소 — 에디터에서 기대하는 동작이고, '작아서 안 보인다'가 원래 불만이었다
+                if (!e.ctrlKey) return
+                e.preventDefault()
+                changeFontSize(fontSize + (e.deltaY < 0 ? 1 : -1))
+              }}
+              // 글꼴 크기·줄간격은 검색 스크롤 계산(jumpTo)과 같은 값을 써야 하므로 inline style 로 둔다
+              style={{
+                fontFamily: CONF_FONT,
+                fontSize: `${fontSize}px`,
+                lineHeight: `${lineH.toFixed(2)}px`,
+                tabSize: 4,
+              }}
+              className="conf-view h-full w-full resize-none rounded-md bg-[#11111b] p-3 text-gray-100 ring-1 ring-amber-500/40 focus:outline-none"
+            />
+          ) : (
+            /* 읽기 모드 — 매치에 배경색을 입히려면 줄 단위 DOM 이 필요하다(위 renderLine 주석 참고).
+               줄바꿈을 하지 않고(whitespace-pre) 가로로 스크롤한다: 줄 높이가 일정해야 섹션 이동의
+               스크롤 계산이 맞고, conf 는 `key = value` 정렬이 유지되는 편이 읽기 쉽다. */
+            <div
+              ref={viewRef}
+              onWheel={(e) => {
+                if (!e.ctrlKey) return
+                e.preventDefault()
+                changeFontSize(fontSize + (e.deltaY < 0 ? 1 : -1))
+              }}
+              style={{ fontFamily: CONF_FONT, fontSize: `${fontSize}px`, lineHeight: `${lineH.toFixed(2)}px`, tabSize: 4 }}
+              className="h-full w-full overflow-auto rounded-md bg-[#11111b] py-3 pr-3 text-gray-300"
+            >
+              {!loaded ? (
+                <span className="block pl-3 text-gray-600">
+                  {connected ? '경로를 입력하고 불러오기를 누르세요.' : 'SSH 연결 후 사용할 수 있습니다.'}
+                </span>
+              ) : (
+                rows
+              )}
+            </div>
+          )}
         </div>
 
         {/* 하단 액션 */}

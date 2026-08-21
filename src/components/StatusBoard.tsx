@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Activity,
   Globe,
@@ -183,7 +183,12 @@ interface PodRow {
   ready: string // READY 컬럼 (예: "1/1", "0/1")
   status: string
   node: string
-  healthy: boolean // Running + Ready 충족 (또는 Completed)
+  healthy: boolean // Running + Ready 충족 (또는 Completed) · nodeNotReady 면 무조건 false
+  /**
+   * 배치된 노드가 Ready 가 아니다 — 이 파드의 'Running' 은 **낡은 값**이다.
+   * (노드가 죽어도 API 서버는 한동안 Running 을 계속 답한다) 정상으로 세지 않는다.
+   */
+  nodeNotReady?: boolean
 }
 interface PodStat {
   namespace: string
@@ -246,6 +251,13 @@ interface Milestones {
   masakari?: { at: number; by: string; evac: number }
   /** 워크로드(Deployment/StatefulSet) 단위 파드 정상화 */
   pods: { at: number; ns: string; workload: string }[]
+  /**
+   * 네임스페이스의 비정상 워크로드가 **0 이 된** 시점 = 그 네임스페이스의 진짜 '복구 완료'.
+   * 위 pods(워크로드별 복구)의 마지막 시각을 완료로 쓰면, 아직 못 돌아온 워크로드가 있어도
+   * 완료로 적히고 새 복구가 관측될 때마다 시각이 뒤로 밀린다.
+   * 옛 이력에는 이 필드가 없다(undefined) — 표시할 때 그것으로 갈라 예전 모양을 유지한다.
+   */
+  podsDone?: { at: number; ns: string }[]
   /** Ceph degraded + misplaced 가 모두 0 이 된 시점 (= 데이터 복제 복구 완료) */
   ceph?: { at: number }
   /**
@@ -263,7 +275,7 @@ interface Milestones {
    */
   portal: { at: number; name: string; group?: string; streak?: number }[]
 }
-const emptyMilestones = (): Milestones => ({ pods: [], portal: [] })
+const emptyMilestones = (): Milestones => ({ pods: [], podsDone: [], portal: [] })
 /** 이 회차에서 가장 늦은 마일스톤 시각 (없으면 0) — 이력의 '총 소요' 기준 */
 const lastMilestoneAt = (ms: Milestones): number =>
   Math.max(
@@ -275,6 +287,7 @@ const lastMilestoneAt = (ms: Milestones): number =>
     ms.cephHealthy?.at ?? 0,
     ms.reconnect?.at ?? 0,
     ...(ms.pods ?? []).map((p) => p.at),
+    ...(ms.podsDone ?? []).map((p) => p.at),
     ...(ms.portal ?? []).map((p) => p.at),
   )
 
@@ -302,6 +315,12 @@ interface BoardState {
   osScope: 'abnormal' | 'all'
   tzNote: string
   lastAt: number
+  /** Ready 가 아닌 k8s 노드 — 파드 상태를 믿을 수 없는 구간을 화면에 밝히기 위해 들고 있는다 */
+  notReadyNodes: string[]
+  /** 그룹별 마지막 갱신 시각 — 특정 섹션만 갱신이 멈춘 것을 화면에서 알아볼 수 있게 한다 */
+  updatedAt: Record<string, number>
+  /** 그룹별 예외 문구 — 예외를 삼키면 그 섹션이 옛 값에 멈춘 채 아무 표시도 나지 않는다 */
+  jobErrors: Record<string, string>
 }
 
 // sudo -n(비번없이) 먼저 시도 → 실패 시 sudo 없이. root 진입이 기본이라 대개 첫 시도로 통과.
@@ -546,7 +565,47 @@ function parseCeph(out: string): CephStat {
  * 정상(healthy) = Completed 이거나, Running 이면서 READY 가 a/a(모두 준비). 그 외는 비정상.
  * scope='abnormal' → 비정상 행만, 'all' → 전체 행 반환. (abnormalCount 는 항상 계산)
  */
-function parsePods(namespace: string, out: string, scope: 'abnormal' | 'all'): PodStat {
+/**
+ * `kubectl get nodes --no-headers` 에서 **Ready 가 아닌 노드**를 뽑는다.
+ *
+ * 왜 필요한가 — 노드(VM)가 갑자기 죽어도 API 서버는 그 노드의 파드를 한동안 `Running` 으로
+ * 계속 보고한다. 기본값으로 노드가 `NotReady` 가 되기까지 약 40초, 파드 축출이 시작되기까지
+ * 그로부터 5분(`tolerationSeconds`)이다. 그동안 파드 상태만 보면 '정상' 이라, 실제로는
+ * 아무것도 확인되지 않는 구간이 몇 분씩 초록으로 남는다.
+ *
+ * 그래서 노드 상태를 교차 확인한다. **NotReady 노드의 `Running` 은 정상 확인이 아니라 낡은 값이다.**
+ *
+ * STATUS 컬럼은 쉼표로 여러 값이 붙는다: `Ready` · `NotReady` · `Ready,SchedulingDisabled`(cordon)
+ * · `NotReady,SchedulingDisabled`. cordon 만 걸린 노드는 **정상이다** — 스케줄만 막힌 것이다.
+ * 그래서 문자열에 'NotReady' 가 있는지 보는 게 아니라, 토큰에 'Ready' 가 있는지로 가른다.
+ */
+/** kubectl 이 STATUS 컬럼에 쓰는 값 — 이 중 하나도 없으면 노드 줄이 아니다 */
+const KNOWN_NODE_STATUS = ['Ready', 'NotReady', 'Unknown', 'SchedulingDisabled']
+function parseNotReadyNodes(out: string): Set<string> {
+  const bad = new Set<string>()
+  for (const line of out.split('\n')) {
+    const cols = line.trim().split(/\s+/)
+    if (cols.length < 2) continue
+    const name = cols[0]
+    // kubectl 에러 문구가 섞여 들어오면 노드명처럼 보이지 않는다 — 그런 줄은 버린다
+    if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/i.test(name)) continue
+    /**
+     * STATUS 값이 아는 것인지 먼저 본다. 이게 없으면 kubectl 이 에러 문구를 뱉었을 때
+     * 'Unable to connect to the server...' 의 'Unable' 을 노드명으로, 'to' 를 STATUS 로 잡아
+     * **없는 노드가 NotReady 로 화면에 뜬다.** (뽑은 값을 아는 목록과 교차 검증하는 규칙)
+     */
+    const tokens = cols[1].split(',')
+    if (!tokens.some((t) => KNOWN_NODE_STATUS.includes(t))) continue
+    if (!tokens.includes('Ready')) bad.add(name)
+  }
+  return bad
+}
+function parsePods(
+  namespace: string,
+  out: string,
+  scope: 'abnormal' | 'all',
+  notReadyNodes: Set<string>,
+): PodStat {
   const lines = out
     .split('\n')
     .map((l) => l.trim())
@@ -572,8 +631,11 @@ function parsePods(namespace: string, out: string, scope: 'abnormal' | 'all'): P
     }
     const rf = /^(\d+)\/(\d+)$/.exec(ready)
     const readyFull = rf ? rf[1] === rf[2] : true // "a/b" 형태가 아니면 판정 보류(정상 취급)
-    const healthy = /^Completed$/i.test(status) || (/^Running$/i.test(status) && readyFull)
-    all.push({ name, ready, status, node, healthy })
+    // 노드가 Ready 가 아니면 파드 상태와 무관하게 '확인되지 않음' 이다 (parseNotReadyNodes 주석 참고)
+    const nodeNotReady = notReadyNodes.has(node)
+    const healthy =
+      !nodeNotReady && (/^Completed$/i.test(status) || (/^Running$/i.test(status) && readyFull))
+    all.push({ name, ready, status, node, healthy, ...(nodeNotReady ? { nodeNotReady: true } : {}) })
   }
   const abnormalCount = all.filter((p) => !p.healthy).length
   // 비정상(Running 아님/Ready 미충족)을 항상 맨 위로. 전체 보기에서 파드가 수십 개면
@@ -738,6 +800,13 @@ function fmtElapsed(ms: number): string {
   const ss = s % 60
   return `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
 }
+/** '몇 초 전' — 특정 섹션의 갱신이 멈춘 것을 한눈에 알아보게 하는 표기 */
+function fmtAgo(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}초 전`
+  const m = Math.floor(s / 60)
+  return m < 60 ? `${m}분 ${s % 60}초 전` : `${Math.floor(m / 60)}시간 ${m % 60}분 전`
+}
 function fmtEta(sec: number): string {
   if (sec < 60) return `약 ${sec}초`
   return `약 ${Math.round(sec / 60)}분`
@@ -867,6 +936,9 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const closedAtRef = useRef(0)
   /** HEALTH_OK 도달을 이력에 반영했는지 (데이터 복구보다 늦게 오므로 한 번 더 덮어쓴다) */
   const savedHealthyRef = useRef(false)
+  /** 그룹별 마지막 갱신 시각 / 예외 — 폴링 주기 사이에 유지돼야 하므로 ref 에 둔다 */
+  const updatedAtRef = useRef<Record<string, number>>({})
+  const jobErrorsRef = useRef<Record<string, string>>({})
   // Ceph 복구 진행률 기준선 — 검증 시작 후 관측된 '남은 객체' 최대값(장애 직후 최대치)
   const cephPeakRef = useRef(0)
   /**
@@ -992,13 +1064,42 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         ...(prev ?? {
           hosts: [], vipNode: '', delayed: [], pendingHosts: 0, ready: false, masakari: [], ceph: null, pods: [],
           podScope: c.podScope, serviceUnits: [], services: [], openstack: null,
-          osScope: c.osScope, tzNote: '', lastAt: 0,
+          osScope: c.osScope, tzNote: '', lastAt: 0, notReadyNodes: [], updatedAt: {}, jobErrors: {},
         }),
         ...p,
         delayed: Array.from(delayed),
         lastAt: Date.now(),
+        updatedAt: { ...updatedAtRef.current },
+        jobErrors: { ...jobErrorsRef.current },
       }))
     }
+    /**
+     * 그룹(잡) 하나를 감싸 **끝난 시각과 예외를 남긴다.**
+     *
+     * 예전에는 여섯 잡을 그냥 `Promise.all` 에 넣었다. 그러면 한 잡이 예외를 던지는 순간
+     * 그 잡의 patch 는 매 주기 조용히 건너뛰어지고, **화면에는 마지막으로 성공한 값이 계속
+     * 남는다.** 다른 섹션은 정상적으로 갱신되니 화면만 보고는 알아챌 수 없다 — 실제로 파드
+     * 섹션이 페일오버 당시 값(Terminating·Pending)에 멈춰 있는데 Ceph·포털은 멀쩡한 일이 있었다.
+     *
+     * 그래서 잡마다 마지막으로 끝난 시각(updatedAt)과 예외 문구(jobErrors)를 남긴다.
+     * 갱신이 멈추면 화면 위쪽에 '갱신 멈춤' 경고가 뜨고, 파드 섹션 제목에 경과가 붙는다.
+     */
+    const guard = (key: string, fn: () => Promise<unknown>) =>
+      fn().then(
+        () => {
+          updatedAtRef.current[key] = Date.now()
+          delete jobErrorsRef.current[key]
+          patch({})
+        },
+        (e: unknown) => {
+          // 예외를 삼키지 않는다 — 화면에 남기고 콘솔에도 남긴다(원인 추적용)
+          jobErrorsRef.current[key] = e instanceof Error ? e.message : String(e)
+          console.error(`[상태보드] ${key} 조회 중 예외`, e)
+          patch({})
+        },
+      )
+
+
 
     // 각 host 의 실제 hostname 을 (아직 없으면) 한 번만 조회해 pcs 노드명 매칭에 사용
     await Promise.all(
@@ -1230,7 +1331,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     // ── 4) 파드 (네임스페이스별) ────────────────────────────────────────────
     const podJob = async () => {
       // 미설정 → 판정 대상 아님
-      if (!c.pod || !namespaces.length) return patch({ pods: [], podScope: c.podScope })
+      if (!c.pod || !namespaces.length) return patch({ pods: [], podScope: c.podScope, notReadyNodes: [] })
       // 설정했는데 세션이 끊겼으면 '확인 불가'를 남긴다 — 빈 목록으로 두면 every() 가 통과해
       // 파드 상태를 한 번도 못 봤는데 "정상(다음 노드 가능)" 이 된다.
       if (!connectedOf(c.pod))
@@ -1241,13 +1342,26 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           })),
           podScope: c.podScope,
         })
+      /**
+       * 노드 상태를 **파드보다 먼저** 확인한다.
+       *
+       * VM 이 죽어도 API 서버는 그 노드의 파드를 한동안 Running 으로 답한다(기본값으로 노드가
+       * NotReady 가 되기까지 약 40초, 파드 축출까지 그로부터 5분). 파드 상태만 보면 그 몇 분이
+       * 전부 '정상' 으로 남는데, 실제로는 아무것도 확인되지 않은 구간이다.
+       * 노드가 NotReady 인 것은 약 40초에 알 수 있으므로, 그 노드의 파드는 그때부터 '확인 불가' 로 본다.
+       *
+       * 조회가 실패하면 **빈 집합**을 쓴다 — 모르는 정보로 파드를 비정상으로 몰지 않는다.
+       */
+      const nodeRes = await run(c.pod, 'kubectl get nodes --no-headers --request-timeout=5s 2>&1')
+      if (nodeRes.timedOut) delayed.add('노드 상태')
+      const notReady = parseNotReadyNodes(nodeRes.ok ? (nodeRes.out ?? '') : '')
       const pods = await Promise.all(
         namespaces.map(async (ns) => {
           // kubectl 자체 타임아웃을 걸어, 죽은 노드의 apiserver 엔드포인트를 물고 늘어지지 않게 한다
           const r = await run(c.pod, `kubectl get pods -n ${ns} -o wide --no-headers --request-timeout=5s 2>&1`)
           if (r.timedOut) delayed.add(`파드(${ns})`)
           const raw = r.ok ? (r.out ?? '') : ''
-          const p = parsePods(ns, raw, c.podScope)
+          const p = parsePods(ns, raw, c.podScope, notReady)
           // 조회 자체가 실패했는지 — 세션 오류/타임아웃이거나, kubectl 이 에러 문구만 뱉은 경우.
           // (정상적으로 '파드가 하나도 없는' 네임스페이스와 구분해야 한다)
           const failed =
@@ -1263,17 +1377,49 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         // 조회 실패(노드 DOWN 직후 kubectl 타임아웃 등)면 결과가 빈 목록으로 온다.
         // 이걸 그대로 믿으면 비정상이던 워크로드가 전부 '복구됨'으로 잘못 기록되므로 건너뛴다.
         if (p.total === 0) continue
-        const bad = new Set(p.rows.filter((r) => !r.healthy).map((r) => workloadOf(r.name)))
+        /**
+         * 타임라인 기록 기준은 **파드 자체의 증상**(Pending · Terminating · Ready 미충족)이다.
+         * 노드가 NotReady 라서 비정상으로 센 것(nodeNotReady)은 여기서 제외한다.
+         *
+         * 왜 — 노드 하나가 죽으면 그 노드의 파드가 전부 비정상이 되는데, 거기엔 모든 노드에
+         * 하나씩 있는 DaemonSet(cilium · kube-proxy · node-local-dns …)이 반드시 포함된다.
+         * DaemonSet 은 재배치가 없어 그 노드가 돌아와야 다시 뜨므로, 그 복구 시각은 곧
+         * '노드 복귀 시각' 이다. 그대로 기록하면 타임라인이 **노드 복귀를 네임스페이스 수만큼
+         * 반복해 적은 줄**로 덮이고, 정작 봐야 할 앱 워크로드의 페일오버 시각이 묻힌다.
+         *
+         * 반대로 Deployment 는 다른 노드에 새 파드가 Pending 으로 뜨므로 파드 수준 증상이 남는다
+         * → 워크로드 종류를 따로 조회하지 않고도 이 기준만으로 둘이 갈린다.
+         *
+         * **판정과 화면 표시는 그대로 nodeNotReady 를 비정상으로 본다** — 확인하지 못한 구간을
+         * 초록으로 넘기지 않는다는 원칙은 유지하고, '무엇을 복구 시각으로 측정할지' 만 좁힌 것이다.
+         */
+        const bad = new Set(
+          p.rows.filter((r) => !r.healthy && !r.nodeNotReady).map((r) => workloadOf(r.name)),
+        )
         // 전체 보기 모드에서는 rows 에 정상 파드도 섞여 있으므로 비정상만 추린 위 집합이 정답이다.
         const prev = badWorkloadsRef.current[p.namespace]
         if (prev) {
           for (const w of prev) {
             if (!bad.has(w)) msRef.current.pods.push({ at: now, ns: p.namespace, workload: w })
           }
+          /**
+           * 비정상 워크로드가 **하나도 안 남은 순간**이 그 네임스페이스의 진짜 '복구 완료' 다.
+           *
+           * 워크로드별 복구 시각의 마지막 값을 완료로 쓰면 안 된다 — 아직 복구되지 않은 워크로드가
+           * 남아 있어도 '완료' 로 적히고, 그 뒤에 하나가 더 복구될 때마다 시각이 뒤로 밀린다.
+           * (7개 중 5개만 돌아왔는데 5번째 시각에 '완료' 가 찍히던 문제)
+           *
+           * 다시 깨졌다 또 복구되면 그 시각으로 갱신되는 게 맞으므로, 전이마다 기록하고
+           * 표시할 때 가장 늦은 것을 쓴다.
+           */
+          if (prev.size > 0 && bad.size === 0) {
+            if (!msRef.current.podsDone) msRef.current.podsDone = []
+            msRef.current.podsDone.push({ at: now, ns: p.namespace })
+          }
         }
         badWorkloadsRef.current[p.namespace] = bad
       }
-      patch({ pods, podScope: c.podScope })
+      patch({ pods, podScope: c.podScope, notReadyNodes: [...notReady] })
     }
 
     // ── 5) 노드별 서비스 데몬 (systemctl) ───────────────────────────────────
@@ -1349,7 +1495,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     }
     patch({ tzNote })
 
-    await Promise.all([hostJob(), masakariJob(), cephJob(), podJob(), svcJob(), osJob()])
+    await Promise.all([
+      guard('host', hostJob),
+      guard('masakari', masakariJob),
+      guard('ceph', cephJob),
+      guard('파드', podJob),
+      guard('서비스', svcJob),
+      guard('OpenStack', osJob),
+    ])
     // 모든 그룹이 한 번씩 응답한 뒤에야 판정/보드를 켠다 (거짓 초록 방지)
     patch({ ready: true })
 
@@ -1502,6 +1655,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     t0Ref.current = Date.now()
     msRef.current = emptyMilestones()
     cephPeakRef.current = 0
+    updatedAtRef.current = {}
+    jobErrorsRef.current = {}
     cephDoneHitsRef.current = 0
     cephOkHitsRef.current = 0
     osCacheRef.current = {}
@@ -1573,8 +1728,16 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     return () => clearInterval(t)
   }, [running])
 
-  // 종합 판정
-  const verdict = useMemo(() => {
+  /**
+   * 종합 판정 배지.
+   *
+   * **label 은 짧게 유지해야 한다.** 예전에는 확인 불가인 네임스페이스를 전부 나열해
+   * `확인 불가 — 파드(boot-factory, ceph, cicd, cilium, …)` 처럼 길어졌는데, 그러면 헤더의
+   * 다른 항목이 눌려 글자가 줄바꿈되고 헤더 높이가 늘어난다. 다음 폴링에 정상으로 돌아오면
+   * 다시 한 줄로 줄어들어, 폴링마다 화면 전체가 위아래로 튀었다(사용자에게는 깜빡임으로 보인다).
+   * 자세한 목록은 `detail`(툴팁)과 파드 섹션의 각 카드에 있다.
+   */
+  const verdict = useMemo((): { label: string; cls: string; detail?: string } => {
     // ready 이전에는 섹션들이 비어 있어(hosts=[]·ceph=null) 조건이 전부 통과해버린다 → 판정 보류
     if (!state || !state.ready) return { label: '대기', cls: 'bg-white/10 text-gray-300' }
     // 미설정(지정 안 한) 섹션은 판정을 막지 않는다(= skip). 설정된 항목만 조건에 반영.
@@ -1606,9 +1769,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     const unsure: string[] = []
     if (state.ceph?.health === 'unknown') unsure.push('Ceph')
     const unknownNs = state.pods.filter((p) => p.unknown).map((p) => p.namespace)
-    if (unknownNs.length) unsure.push(`파드(${unknownNs.join(', ')})`)
+    // 개수만 적는다 — 이름 나열은 툴팁으로 (위 주석 참고)
+    if (unknownNs.length) unsure.push(unknownNs.length === 1 ? `파드 ${unknownNs[0]}` : `파드 ${unknownNs.length}개`)
     if (unsure.length && downCount === 0)
-      return { label: `확인 불가 — ${unsure.join(' · ')}`, cls: 'bg-red-500/20 text-red-300' }
+      return {
+        label: `확인 불가 — ${unsure.join(' · ')}`,
+        cls: 'bg-red-500/20 text-red-300',
+        detail: unknownNs.length ? `확인 불가 네임스페이스: ${unknownNs.join(', ')}` : undefined,
+      }
     return { label: '복구 진행 중', cls: 'bg-amber-500/20 text-amber-300' }
   }, [state])
 
@@ -1628,7 +1796,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       >
         <HeartPulse size={15} className="text-blue-400" />
         <span className="text-xs font-medium text-gray-100">가용성 상태보드</span>
-        {state && <span className={'rounded px-1.5 py-0.5 text-[10px] font-medium ' + verdict.cls}>{verdict.label}</span>}
+        {state && (
+          <span
+            title={verdict.detail ?? verdict.label}
+            className={'max-w-[240px] truncate whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium ' + verdict.cls}
+          >
+            {verdict.label}
+          </span>
+        )}
         {running && (
           <span className="flex items-center gap-1 text-[11px] text-gray-400">
             <RefreshCw size={10} className="animate-spin" /> 경과 {fmtElapsed(Date.now() - t0Ref.current)}
@@ -1658,20 +1833,30 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         }
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 헤더 */}
-        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
-          <HeartPulse size={16} className="text-blue-400" />
-          <span className="text-sm font-semibold text-gray-100">가용성 검증 상태보드</span>
+        {/* 헤더 — 폴링마다 문구 길이가 바뀌므로, 항목들이 서로를 밀어 줄바꿈되지 않게 고정한다.
+            (shrink-0 + whitespace-nowrap 이 없으면 긴 배지 하나에 헤더가 3줄로 부풀며 화면이 튄다) */}
+        <div className="flex flex-nowrap items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <HeartPulse size={16} className="shrink-0 text-blue-400" />
+          <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-gray-100">가용성 검증 상태보드</span>
           {view === 'board' && (
-            <span className={'ml-1 rounded px-2 py-0.5 text-[11px] font-medium ' + verdict.cls}>{verdict.label}</span>
+            // 유일하게 줄어드는 항목 — 길면 잘리고 전문은 툴팁으로 본다
+            <span
+              title={verdict.detail ?? verdict.label}
+              className={
+                'ml-1 min-w-0 max-w-[420px] truncate whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ' +
+                verdict.cls
+              }
+            >
+              {verdict.label}
+            </span>
           )}
           {view === 'board' && running && (
-            <span className="flex items-center gap-1 text-[11px] text-gray-400">
+            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-gray-400">
               <RefreshCw size={11} className="animate-spin" /> {cfg.intervalSec}초 갱신
             </span>
           )}
           {view === 'board' && (
-            <span className="ml-2 flex items-center gap-1 text-[12px] text-gray-300">
+            <span className="ml-2 flex shrink-0 items-center gap-1 whitespace-nowrap text-[12px] text-gray-300">
               검증 시작 후 <span className="font-semibold text-gray-100">{fmtElapsed(Date.now() - t0Ref.current)}</span> 경과
             </span>
           )}
@@ -1686,7 +1871,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
               className="ml-2 w-[190px] shrink-0 rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none"
             />
           )}
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             <button
               onClick={() => setShowHistory(true)}
               title="지난 검증 회차의 복구 타임라인 보기"
@@ -1787,6 +1972,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             t0={t0Ref.current}
             resolveName={(id, fb) => sessions.find((s) => s.id === id)?.name ?? fb}
             onRemoveNamespace={removeNamespaceLive}
+            intervalSec={cfg.intervalSec}
+            running={running}
           />
         )}
       </div>
@@ -1829,7 +2016,7 @@ function HistoryView({
   onRename: (id: string, label: string) => void
 }) {
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
       <div
         className="flex h-[78vh] w-[840px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
@@ -2133,19 +2320,24 @@ function ConfigView({
             <button
               onClick={addAllNs}
               disabled={!cfg.pod || nsLoading || nsOptions.length === 0 || nsOptions.every((ns) => cfg.namespaces.includes(ns))}
-              className="rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
+              className="shrink-0 whitespace-nowrap rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
             >
               전체 추가 ({nsOptions.length})
             </button>
             {cfg.namespaces.length > 0 && (
               <button
                 onClick={() => onChange({ ...cfg, namespaces: [] })}
-                className="rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-400 hover:bg-white/10"
+                className="shrink-0 whitespace-nowrap rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-400 hover:bg-white/10"
               >
                 전체 해제
               </button>
             )}
-            {nsErr && <span className="text-[10px] text-amber-300">{nsErr}</span>}
+            {/* 오류 문구가 길어도 버튼을 밀지 않게 — 이 항목만 줄어들고 전문은 툴팁으로 본다 */}
+            {nsErr && (
+              <span className="min-w-0 truncate text-[10px] text-amber-300" title={nsErr}>
+                {nsErr}
+              </span>
+            )}
           </div>
           {/* 표시 범위: 비정상만 / 전체 파드 */}
           <div className="mt-2.5 flex items-center gap-2">
@@ -2331,6 +2523,8 @@ function BoardView({
   t0,
   resolveName,
   onRemoveNamespace,
+  intervalSec,
+  running,
 }: {
   state: BoardState | null
   milestones: Milestones
@@ -2342,6 +2536,13 @@ function BoardView({
    */
   resolveName: (id: string, fallback: string) => string
   onRemoveNamespace: (ns: string) => void
+  /** 갱신이 '멈춤' 인지 판단하는 기준을 주기에서 뽑기 위해 받는다 */
+  intervalSec: number
+  /**
+   * 폴링이 돌고 있는지. 중지 상태에서는 갱신이 안 되는 게 당연하므로 '갱신 멈춤' 을 띄우지 않는다
+   * (중지 후 결과를 들여다보는 동안 모든 섹션이 빨갛게 경고로 덮이던 문제)
+   */
+  running: boolean
 }) {
   // 첫 주기가 끝나기 전에 그리면 '파드 없음 · host 미지정' 같은 빈 상태가 잠깐 보여 오해를 준다.
   if (!state || !state.ready) {
@@ -2351,6 +2552,30 @@ function BoardView({
       </div>
     )
   }
+  /**
+   * 갱신이 멈춘 그룹 찾기.
+   *
+   * 한 그룹이 예외로 죽으면 그 섹션만 옛 값에 멈추고 다른 섹션은 정상 갱신된다 —
+   * 화면만 보고는 알 수 없어서, 주기의 4배(최소 15초)를 넘기면 여기서 밝힌다.
+   */
+  const now = Date.now()
+  const staleLimit = Math.max(15_000, intervalSec * 4000)
+  const jobErrs = Object.entries(state.jobErrors ?? {})
+  /**
+   * 지금 문제인 항목만. 오류는 '오류' 한 마디로만 적는다 — 예외 원문은 길어서 헤더를 밀어내고,
+   * 사용자가 바로 할 수 있는 일도 아니다(원문은 title 과 개발자도구 콘솔에 남긴다).
+   * 오류가 난 잡은 대개 갱신도 멈춰 있으므로 중복해서 적지 않는다.
+   */
+  const problems = !running
+    ? []
+    : [
+        ...jobErrs.map(([k]) => `${k} 오류`),
+        ...Object.entries(state.updatedAt ?? {})
+          .filter(([k, at]) => now - at > staleLimit && !state.jobErrors?.[k])
+          .map(([k, at]) => `${k} ${fmtAgo(now - at)}`),
+      ]
+  const podsAt = state.updatedAt?.['파드']
+
   const ceph = state.ceph
   const hasServices = state.serviceUnits.length > 0 && state.services.length > 0
   const hasOpenstack = state.openstack != null
@@ -2361,6 +2586,15 @@ function BoardView({
   return (
     <div className="flex min-h-0 flex-1">
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      {problems.length > 0 && (
+        <div
+          title={jobErrs.map(([k, msg]) => `${k}: ${msg}`).join('\n') || undefined}
+          className="mb-2.5 flex items-center gap-1.5 rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] text-red-200"
+        >
+          <AlertTriangle size={12} className="shrink-0" />
+          <span className="min-w-0 truncate">갱신 멈춤 (지금 값 아님) — {problems.join(' · ')}</span>
+        </div>
+      )}
       {state.delayed.length > 0 && (
         <div className="mb-2.5 flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-300">
           <Hourglass size={12} /> 응답이 늦어 이번 주기에 갱신하지 못한 항목: {state.delayed.join(', ')} — 직전 값을 표시 중입니다.
@@ -2626,7 +2860,26 @@ function BoardView({
       </div>
 
       {/* 4. 파드 — 네임스페이스별 카드 (Running 이 아닌 것만 · 배치 NODE) */}
-      <SectionLabel n={4} text="네임스페이스별 파드 조회" />
+      <SectionLabel
+        n={4}
+        text="네임스페이스별 파드 조회"
+        right={
+          podsAt ? (
+            <span className={now - podsAt > staleLimit ? 'text-[11px] text-red-300' : 'text-[11px] text-gray-500'}>
+              갱신 {fmtAgo(now - podsAt)}
+            </span>
+          ) : undefined
+        }
+      />
+      {state.notReadyNodes?.length > 0 && (
+        <div className="mb-2 flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] text-red-200">
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          <span>
+            Ready 아닌 노드: <b>{state.notReadyNodes.join(', ')}</b> — 이 노드의 파드는 상태가 'Running' 으로 보여도
+            확인된 것이 아닙니다(노드가 죽어도 API 서버는 한동안 Running 을 답합니다).
+          </span>
+        </div>
+      )}
       {state.pods.length === 0 ? (
         <div className="mb-4 rounded-xl border border-white/10 bg-panel-light p-3.5 text-[12px] text-gray-500">
           파드 세션/네임스페이스가 지정되지 않았습니다.
@@ -2740,6 +2993,14 @@ function PodNsCard({ p, scope, onRemove }: { p: PodStat; scope: 'abnormal' | 'al
               >
                 {pod.status}
               </span>
+              {pod.nodeNotReady && (
+                <span
+                  title="배치된 노드가 Ready 가 아닙니다 — 이 파드 상태는 낡은 값입니다"
+                  className="shrink-0 rounded-full bg-red-500/25 px-2 py-0.5 text-[11px] text-red-200"
+                >
+                  노드 NotReady
+                </span>
+              )}
               <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-gray-400" title={pod.node}>
                 <Server size={12} className="shrink-0" />
                 <span className="max-w-[110px] truncate">{pod.node}</span>
@@ -2958,11 +3219,12 @@ function OpenstackPanel({ os, scope }: { os: OsStat; scope: 'abnormal' | 'all' }
   )
 }
 
-function SectionLabel({ n, text }: { n: number; text: string }) {
+function SectionLabel({ n, text, right }: { n: number; text: string; right?: ReactNode }) {
   return (
     <div className="mb-1.5 flex items-center gap-1.5 text-[13px] text-gray-300">
       <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600/40 text-[11px] text-blue-100">{n}</span>
       {text}
+      {right && <span className="ml-auto shrink-0">{right}</span>}
     </div>
   )
 }
@@ -3008,12 +3270,27 @@ function TimelineRow({
  */
 function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0: number; showDate?: boolean }) {
   // 파드 복구는 워크로드가 많으면 줄이 폭주하므로 네임스페이스별 '마지막 복구 시각'으로 접는다
-  const podByNs = new Map<string, { at: number; count: number; sample: string }>()
+  // 네임스페이스별 첫 복구 / 마지막 복구 / 복구된 워크로드 수
+  const podByNs = new Map<string, { first: number; last: number; count: number; sample: string }>()
   for (const p of m.pods) {
     const cur = podByNs.get(p.ns)
-    if (!cur) podByNs.set(p.ns, { at: p.at, count: 1, sample: p.workload })
-    else podByNs.set(p.ns, { at: Math.max(cur.at, p.at), count: cur.count + 1, sample: cur.sample })
+    if (!cur) podByNs.set(p.ns, { first: p.at, last: p.at, count: 1, sample: p.workload })
+    else
+      podByNs.set(p.ns, {
+        first: Math.min(cur.first, p.at),
+        last: Math.max(cur.last, p.at),
+        count: cur.count + 1,
+        sample: cur.sample,
+      })
   }
+  /** 네임스페이스별 '비정상 0이 된' 시각 — 여러 번 있었으면 가장 늦은 것 */
+  const doneByNs = new Map<string, number>()
+  for (const d of m.podsDone ?? []) doneByNs.set(d.ns, Math.max(doneByNs.get(d.ns) ?? 0, d.at))
+  /**
+   * 예전에 저장된 이력에는 podsDone 자체가 없다(필드가 생기기 전 회차).
+   * 그 회차는 예전 방식 그대로 한 줄로 그린다 — 지난 기록의 모양이 바뀌면 비교가 안 된다.
+   */
+  const legacyPods = m.podsDone === undefined
   const rows: { at: number; icon: React.ReactNode; text: string; sub?: string }[] = [
     { at: t0, icon: <Play size={13} className="text-gray-400" />, text: '검증 시작' },
   ]
@@ -3047,13 +3324,33 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
       text: `Masakari evacuation 완료${m.masakari.evac > 0 ? ` — ${m.masakari.evac}대` : ''}`,
       sub: `${m.masakari.by} 의 masakari-engine 로그 기준 (이동 대상 호스트 아님)`,
     })
-  for (const [ns, v] of podByNs)
+  for (const [ns, v] of podByNs) {
+    const detail = v.count > 1 ? `워크로드 ${v.count}개 (${v.sample} 외)` : v.sample
+    if (legacyPods) {
+      // 옛 회차 — 완료 시각을 알 수 없어 '마지막으로 관측된 복구' 를 그대로 쓴다
+      rows.push({
+        at: v.last,
+        icon: <Server size={13} className="text-sky-400" />,
+        text: `${ns} : 파드 복구 완료`,
+        sub: detail,
+      })
+      continue
+    }
+    const done = doneByNs.get(ns)
     rows.push({
-      at: v.at,
-      icon: <Server size={13} className="text-sky-400" />,
-      text: `${ns} : 파드 복구 완료`,
-      sub: v.count > 1 ? `워크로드 ${v.count}개 (${v.sample} 외)` : v.sample,
+      at: v.first,
+      icon: <Server size={13} className="text-sky-400/60" />,
+      text: `${ns} : 파드 복구 시작`,
+      sub: done ? `첫 복구 ${v.sample}` : `아직 완료 아님 — 워크로드 ${v.count}개 복구됨`,
     })
+    if (done)
+      rows.push({
+        at: done,
+        icon: <Server size={13} className="text-sky-400" />,
+        text: `${ns} : 파드 복구 완료`,
+        sub: `비정상 워크로드 0 · ${detail}`,
+      })
+  }
   if (m.ceph)
     rows.push({
       at: m.ceph.at,
