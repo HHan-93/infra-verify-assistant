@@ -14,6 +14,10 @@ import type {
   CustomPresetCommand,
   CustomScenario,
   CustomItemsImportResult,
+  ConfigMapRef,
+  ConfigMapDetail,
+  ConfigMapPatchResult,
+  ConfigMapBackup,
   LogIndexEntry,
   LogRetentionSettings,
   MetricSample,
@@ -421,6 +425,50 @@ const electronAPI = {
     namespace: string,
   ): Promise<{ ok: boolean; pods?: string[]; error?: string }> =>
     ipcRenderer.invoke('k8s:listPods', { sessionId, namespace }),
+  // ── ConfigMap 보기 / 수정 (설정 뷰어의 ConfigMap 모드) ──────
+  k8sListConfigMaps: (
+    sessionId: string,
+    namespace: string,
+  ): Promise<{ ok: boolean; items?: ConfigMapRef[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:listConfigMaps', { sessionId, namespace }),
+  k8sGetConfigMap: (
+    sessionId: string,
+    namespace: string,
+    name: string,
+  ): Promise<{ ok: boolean; detail?: ConfigMapDetail; error?: string }> =>
+    ipcRenderer.invoke('k8s:getConfigMap', { sessionId, namespace, name }),
+  /** 읽기 전용 YAML 전문 */
+  k8sGetConfigMapYaml: (
+    sessionId: string,
+    namespace: string,
+    name: string,
+  ): Promise<{ ok: boolean; yaml?: string; error?: string }> =>
+    ipcRenderer.invoke('k8s:getConfigMapYaml', { sessionId, namespace, name }),
+  /** 바꾼 키만 한 번에 적용 — 백업 후 patch, resourceVersion 이 바뀌었으면 적용하지 않는다 */
+  k8sPatchConfigMap: (payload: {
+    sessionId: string
+    namespace: string
+    name: string
+    changes: Record<string, string>
+    baseResourceVersion: string
+  }): Promise<ConfigMapPatchResult> => ipcRenderer.invoke('k8s:patchConfigMap', payload),
+  /** 백업 이력 (내 PC userData 에 암호화 저장된 것) */
+  k8sCmBackupList: (
+    namespace: string,
+    name: string,
+  ): Promise<{ ok: boolean; items?: ConfigMapBackup[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:cmBackupList', { namespace, name }),
+  /** 모든 ConfigMap 의 백업을 시각 역순으로 (최근에 무엇을 바꿨는지 보기) */
+  k8sCmBackupListAll: (): Promise<{ ok: boolean; items?: ConfigMapBackup[]; configMaps?: number; error?: string }> =>
+    ipcRenderer.invoke('k8s:cmBackupListAll'),
+  /** 백업을 평문 YAML 로 내보내기 (복원용) */
+  k8sCmBackupExport: (
+    namespace: string,
+    name: string,
+    file: string,
+  ): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('k8s:cmBackupExport', { namespace, name, file }),
+
   k8sListContainers: (
     sessionId: string,
     namespace: string,

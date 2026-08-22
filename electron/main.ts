@@ -38,6 +38,10 @@ import {
   type CustomScenarioStep,
   type CustomItemsBundle,
   type CustomItemsImportResult,
+  type ConfigMapRef,
+  type ConfigMapDetail,
+  type ConfigMapPatchResult,
+  type ConfigMapBackup,
   type CommandCheck,
   type CaptureRule,
   type OnFailureAction,
@@ -3753,6 +3757,284 @@ ipcMain.handle(
 
 // 설정파일 백업을 모으는 고정 베이스 경로 (원본 디렉토리를 더럽히지 않도록 분리).
 // 이 아래에 원본 경로 구조를 그대로 미러링해 저장한다. (변경하려면 이 값만 수정)
+// ── Kubernetes ConfigMap 보기 / 수정 ──────────────────────────────
+//
+// 설정파일 뷰어의 'ConfigMap 모드' 백엔드. 파일(SFTP) 경로와 다른 점이 셋이다.
+//  1) 쓰기는 **바꾼 키만** `kubectl patch --type merge` 로 보낸다. 나머지 키는 요청에 들어가지도
+//     않으므로 실수로 지워지지 않는다. 여러 키를 고쳐도 **한 번만** 보낸다(중간 상태·중복 롤아웃 방지).
+//  2) 적용 직전에 resourceVersion 을 다시 읽어 그 사이 바뀌었으면 **적용하지 않는다.**
+//  3) 백업은 그 서버가 아니라 **내 PC(userData)** 에 남긴다. ConfigMap 은 클러스터 객체라
+//     kubectl 이 있던 호스트에 두면 이력이 흩어지고, /var/tmp 는 청소되는 곳이다.
+
+const cmBackupDir = () => path.join(app.getPath('userData'), 'configmap-backups')
+/** ns__name 을 파일 시스템에 안전한 폴더명으로 (k8s 이름은 소문자·숫자·`-`·`.` 만 쓰지만 방어적으로) */
+const cmBackupKey = (ns: string, name: string) => `${ns}__${name}`.replace(/[^a-zA-Z0-9._-]/g, '_')
+/** cm 하나당 보관 개수 — 무한정 쌓이지 않게. 오래된 것부터 지운다 */
+const CM_BACKUP_KEEP = 20
+
+/** kubectl 을 그 세션에서 실행 — 실패 메시지는 kubectl 원문을 그대로 올린다(권한·컨텍스트 문제를 감추지 않는다) */
+async function kubectlJson(
+  sessionId: string,
+  args: string,
+): Promise<{ ok: true; json: unknown } | { ok: false; error: string }> {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+  const r = await execCapture(client, `kubectl ${args} 2>&1`)
+  const out = (r.out ?? '').trim()
+  if (r.code !== 0) return { ok: false, error: out || 'kubectl 실행 실패' }
+  try {
+    return { ok: true, json: JSON.parse(out) }
+  } catch {
+    // JSON 을 기대했는데 아닌 경우 = kubectl 이 에러 문구만 뱉은 것. 앞부분을 그대로 보여준다.
+    return { ok: false, error: out.slice(0, 300) || '응답을 해석할 수 없습니다.' }
+  }
+}
+
+ipcMain.handle('k8s:listConfigMaps', async (_evt, { sessionId, namespace }: { sessionId: string; namespace: string }) => {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+  try {
+    // NAME DATA AGE 세 컬럼. custom-columns 로 고정해 서식 변화에 흔들리지 않게 한다.
+    const r = await execCapture(
+      client,
+      `kubectl get cm -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name,:metadata.creationTimestamp 2>&1`,
+    )
+    const out = (r.out ?? '').trim()
+    if (r.code !== 0) return { ok: false, error: out || 'ConfigMap 조회 실패' }
+    const items: ConfigMapRef[] = []
+    for (const line of out.split('\n')) {
+      const cols = line.trim().split(/\s+/)
+      if (cols.length < 2) continue
+      // 이름 형태가 아니면 kubectl 에러 문구다 (뽑은 값을 형태로 교차 검증)
+      if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(cols[0])) continue
+      items.push({ name: cols[0], keys: 0, age: cols[1] })
+    }
+    return { ok: true, items }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+})
+
+ipcMain.handle(
+  'k8s:getConfigMap',
+  async (_evt, { sessionId, namespace, name }: { sessionId: string; namespace: string; name: string }) => {
+    try {
+      // -o json 으로 받는다. YAML 을 직접 파싱하면 들여쓰기·인용 규칙을 우리가 다시 구현해야 한다.
+      const r = await kubectlJson(sessionId, `get cm ${shQuote(name)} -n ${shQuote(namespace)} -o json`)
+      if (!r.ok) return { ok: false, error: r.error }
+      const o = r.json as {
+        metadata?: { resourceVersion?: string; creationTimestamp?: string }
+        data?: Record<string, unknown>
+        binaryData?: Record<string, unknown>
+      }
+      const data: Record<string, string> = {}
+      for (const [k, v] of Object.entries(o.data ?? {})) if (typeof v === 'string') data[k] = v
+      const detail: ConfigMapDetail = {
+        namespace,
+        name,
+        data,
+        binaryKeys: Object.keys(o.binaryData ?? {}),
+        resourceVersion: o.metadata?.resourceVersion ?? '',
+        creationTimestamp: o.metadata?.creationTimestamp ?? '',
+      }
+      return { ok: true, detail }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+/** 읽기 전용 YAML 전문 — 편집은 하지 않는다(kubectl edit 과 달리 우리 화면엔 문법 검증이 없다) */
+ipcMain.handle(
+  'k8s:getConfigMapYaml',
+  async (_evt, { sessionId, namespace, name }: { sessionId: string; namespace: string; name: string }) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      const r = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml 2>&1`)
+      const out = r.out ?? ''
+      if (r.code !== 0) return { ok: false, error: out.trim() || 'YAML 조회 실패' }
+      return { ok: true, yaml: out }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+ipcMain.handle(
+  'k8s:patchConfigMap',
+  async (
+    _evt,
+    payload: {
+      sessionId: string
+      namespace: string
+      name: string
+      /** 바꿀 키만. 값은 문자열(ConfigMap data 는 전부 문자열이어야 한다) */
+      changes: Record<string, string>
+      /** 불러온 시점의 resourceVersion — 이 값이 달라졌으면 적용하지 않는다 */
+      baseResourceVersion: string
+    },
+  ): Promise<ConfigMapPatchResult> => {
+    const { sessionId, namespace, name, changes, baseResourceVersion } = payload
+    const keys = Object.keys(changes)
+    if (keys.length === 0) return { ok: false, error: '변경할 항목이 없습니다.' }
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      // 1) 적용 직전 원본 YAML 확보 — 백업과 충돌 검사를 같은 스냅샷으로 한다
+      const cur = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml 2>&1`)
+      const yaml = cur.out ?? ''
+      if (cur.code !== 0) return { ok: false, error: (yaml.trim() || '원본 조회 실패') }
+      // resourceVersion 은 YAML 에서 뽑는다(별도 조회를 또 하면 그 사이가 다시 벌어진다)
+      const rvLine = yaml.split('\n').find((l) => l.trim().startsWith('resourceVersion:'))
+      const nowRv = rvLine ? rvLine.split(':')[1].trim().replace(/"/g, '') : ''
+      if (baseResourceVersion && nowRv && nowRv !== baseResourceVersion)
+        return {
+          ok: false,
+          conflict: true,
+          error: `불러온 뒤 이 ConfigMap 이 바뀌었습니다 (resourceVersion ${baseResourceVersion} → ${nowRv}). 다시 불러와 확인하세요.`,
+        }
+
+      // 2) 백업을 **먼저** 남긴다. 실패하면 적용하지 않는다 — 되돌릴 수단 없이 클러스터를 바꾸지 않는다.
+      //    (파일 저장도 같은 규칙이다: 백업 실패 시 저장 중단)
+      const dir = path.join(cmBackupDir(), cmBackupKey(namespace, name))
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const backupPath = path.join(dir, `${stamp}.dat`)
+      try {
+        await mkdir(dir, { recursive: true })
+        // 값에 토큰·비밀번호가 그대로 들어 있다 → 평문으로 두지 않는다
+        await writeFileAtomic(backupPath, encryptStr(yaml))
+      } catch (e) {
+        return { ok: false, error: '백업에 실패해 적용하지 않았습니다: ' + cleanErrorMessage(e) }
+      }
+
+      // 3) 바꾼 키만 한 번에 보낸다. --type merge 는 data 안의 키를 병합하므로 나머지는 그대로 남는다.
+      const patch = JSON.stringify({ data: changes })
+      const r = await execCapture(
+        client,
+        `kubectl patch cm ${shQuote(name)} -n ${shQuote(namespace)} --type merge -p ${shQuote(patch)} 2>&1`,
+      )
+      const out = (r.out ?? '').trim()
+      if (r.code !== 0) return { ok: false, error: out || 'patch 실패', backupPath }
+
+      // 4) 보관 개수 초과분 정리 (오래된 것부터)
+      try {
+        const files = (await readdir(dir)).filter((f) => f.endsWith('.dat')).sort()
+        for (const f of files.slice(0, Math.max(0, files.length - CM_BACKUP_KEEP)))
+          await unlink(path.join(dir, f)).catch(() => undefined)
+      } catch {
+        /* 정리 실패는 적용 결과에 영향을 주지 않는다 */
+      }
+
+      const after = await execCapture(
+        client,
+        `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o jsonpath={.metadata.resourceVersion} 2>&1`,
+      )
+      return {
+        ok: true,
+        applied: keys.length,
+        backupPath,
+        resourceVersion: after.code === 0 ? (after.out ?? '').trim() : undefined,
+      }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+/** 백업 이력 — 되돌릴 것을 고르기 위한 목록 */
+ipcMain.handle('k8s:cmBackupList', async (_evt, { namespace, name }: { namespace: string; name: string }) => {
+  const dir = path.join(cmBackupDir(), cmBackupKey(namespace, name))
+  try {
+    const files = (await readdir(dir)).filter((f) => f.endsWith('.dat'))
+    const out: ConfigMapBackup[] = []
+    for (const f of files) {
+      const st = await stat(path.join(dir, f)).catch(() => null)
+      // 파일을 쓴 시각이 곧 백업 시각이다 — 파일명을 되파싱하지 않는다
+      out.push({
+        at: st?.mtimeMs ?? 0,
+        file: f,
+        namespace,
+        name,
+        sizeBytes: st?.size ?? 0,
+      })
+    }
+    return { ok: true, items: out.sort((a, b) => b.at - a.at) }
+  } catch {
+    return { ok: true, items: [] } // 폴더가 아직 없는 것은 오류가 아니다
+  }
+})
+
+/**
+ * **모든** ConfigMap 의 백업을 한 목록으로. "최근에 내가 어디를 바꿨지" 를 답하기 위한 것이라
+ * cm 별로 묶지 않고 시각 역순으로 준다.
+ *
+ * 폴더명은 `ns__name` 이다. k8s 이름에는 `_` 를 쓸 수 없으므로(DNS-1123: 소문자·숫자·`-`·`.`)
+ * `__` 는 되돌리기 안전한 구분자다 — 이름 안에 `__` 가 들어갈 수 없기 때문이다.
+ */
+ipcMain.handle('k8s:cmBackupListAll', async () => {
+  const base = cmBackupDir()
+  const out: ConfigMapBackup[] = []
+  let dirs: string[]
+  try {
+    dirs = await readdir(base)
+  } catch {
+    return { ok: true, items: [], configMaps: 0 } // 폴더가 아직 없는 것은 오류가 아니다
+  }
+  for (const d of dirs) {
+    const sep = d.indexOf('__')
+    if (sep <= 0) continue // 우리가 만든 폴더가 아니다
+    const namespace = d.slice(0, sep)
+    const name = d.slice(sep + 2)
+    let files: string[]
+    try {
+      files = (await readdir(path.join(base, d))).filter((f) => f.endsWith('.dat'))
+    } catch {
+      continue
+    }
+    for (const f of files) {
+      const st = await stat(path.join(base, d, f)).catch(() => null)
+      out.push({ at: st?.mtimeMs ?? 0, file: f, namespace, name, sizeBytes: st?.size ?? 0 })
+    }
+  }
+  out.sort((a, b) => b.at - a.at)
+  // 화면에 200 건 넘게 뿌릴 이유가 없다. 잘렸다는 사실은 개수로 드러난다(configMaps · items.length)
+  return { ok: true, items: out.slice(0, 200), configMaps: new Set(out.map((b) => `${b.namespace}/${b.name}`)).size }
+})
+
+/**
+ * 백업을 평문 YAML 로 내보낸다. **평문이 되는 순간은 사용자가 명시적으로 고른 이 시점뿐이다** —
+ * 되돌리려면 결국 평문이 필요하지만, 그 파일을 어디에 둘지는 사용자가 정해야 한다.
+ */
+ipcMain.handle(
+  'k8s:cmBackupExport',
+  async (_evt, { namespace, name, file }: { namespace: string; name: string; file: string }) => {
+    // 경로 조작 방어 — 파일명만 받는다
+    if (file.includes('/') || file.includes('\\') || file.includes('..')) return { saved: false, error: '잘못된 파일명입니다.' }
+    const src = path.join(cmBackupDir(), cmBackupKey(namespace, name), file)
+    let yaml: string
+    try {
+      yaml = decryptStr(await readFile(src, 'utf-8')) ?? ''
+      if (!yaml) return { saved: false, error: '백업을 복호화할 수 없습니다 (다른 OS 사용자가 만든 파일일 수 있습니다).' }
+    } catch (e) {
+      return { saved: false, error: cleanErrorMessage(e) }
+    }
+    const r = await dialog.showSaveDialog(mainWindow ?? undefined!, {
+      title: 'ConfigMap 백업 내보내기',
+      defaultPath: `${name}-${file.replace(/\.dat$/, '')}.yaml`,
+      filters: [{ name: 'YAML', extensions: ['yaml', 'yml'] }],
+    })
+    if (r.canceled || !r.filePath) return { saved: false }
+    try {
+      await writeFile(r.filePath, yaml, 'utf-8')
+      return { saved: true, path: r.filePath }
+    } catch (e) {
+      return { saved: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+
 const BACKUP_BASE = '/var/tmp/ivk-backups'
 
 // 파일 쓰기(저장) — 저장 전 자동 백업(별도 베이스 경로) → SFTP → sudo tee 폴백

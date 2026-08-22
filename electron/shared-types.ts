@@ -476,6 +476,76 @@ export interface CustomItemsImportResult {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Kubernetes ConfigMap 보기 / 수정
+//
+// 왜 파일 뷰어에 붙이면서도 별도 타입으로 두는가 —
+// ConfigMap 은 **문서가 아니라 키-값 맵**이다(실제 운영 cm 에 키가 110 개인 것을 봤다).
+// 파일처럼 텍스트 한 덩어리로 다루면 YAML 들여쓰기 하나에 전체가 흔들리고, 값의 인용(따옴표)을
+// 사람이 관리해야 한다. 그래서 값은 문자열 맵으로 주고받고, 쓰기는 **바꾼 키만** 보낸다.
+//
+// `kubectl edit` 을 쓰지 않는 이유: 대화형 에디터를 띄우는 명령이라 exec 로는 동작하지 않는다.
+// 그리고 kubectl edit 은 문법이 깨지면 반영을 거부해 주지만, 우리가 textarea 를 주면 그 안전장치가
+// 없다 — 그래서 YAML 전문은 **읽기 전용**으로만 보여준다.
+// ─────────────────────────────────────────────────────────────
+
+/** 목록에 뜨는 ConfigMap 한 건 */
+export interface ConfigMapRef {
+  name: string
+  /** data 키 개수 (kubectl 의 DATA 컬럼) */
+  keys: number
+  age: string
+}
+
+/** 선택한 ConfigMap 의 내용 */
+export interface ConfigMapDetail {
+  namespace: string
+  name: string
+  /** 문자열 키-값. ConfigMap 의 data 는 값이 모두 문자열이어야 한다(그래서 타입 걱정이 없다) */
+  data: Record<string, string>
+  /**
+   * binaryData 의 키 이름들. 값은 base64 라 이 화면에서 편집하지 않는다 —
+   * 목록에만 드러내고 '이 화면에서 수정 불가' 로 표시한다(조용히 빠지면 없는 줄 안다).
+   */
+  binaryKeys: string[]
+  /**
+   * 불러온 시점의 resourceVersion. 적용 직전에 다시 읽어 **값이 그대로인지 확인**한다.
+   * 그 사이 남이(또는 GitOps 가) 바꿨으면 덮어쓰지 않고 알린다.
+   */
+  resourceVersion: string
+  creationTimestamp: string
+}
+
+/** k8s:patchConfigMap 결과 */
+export interface ConfigMapPatchResult {
+  ok: boolean
+  /** 불러온 뒤 다른 곳에서 바뀌어 적용하지 않았다 — 사용자가 다시 불러와 확인해야 한다 */
+  conflict?: boolean
+  error?: string
+  /** 적용된 키 수 */
+  applied?: number
+  /** 남긴 백업 파일 경로 (로컬 userData) */
+  backupPath?: string
+  /** 새 resourceVersion — 이어서 더 고칠 수 있게 돌려준다 */
+  resourceVersion?: string
+}
+
+/**
+ * 백업 한 건. **내 PC(userData)에 남긴다** — 그 서버가 아니다.
+ * ConfigMap 은 클러스터 객체라 '마침 kubectl 이 있던 호스트' 에 두면 이력이 호스트별로 흩어지고,
+ * `/var/tmp` 는 systemd-tmpfiles 가 청소하는 곳이라 백업 장소로 부적합하다.
+ * 값에 토큰·비밀번호가 그대로 들어 있으므로 safeStorage 로 암호화해 `.dat` 로 쓴다(평문 금지).
+ * 복원용 평문은 사용자가 '내보내기' 를 눌렀을 때만 만든다.
+ */
+export interface ConfigMapBackup {
+  /** 파일명에서 뽑은 저장 시각 (epoch ms) */
+  at: number
+  file: string
+  namespace: string
+  name: string
+  sizeBytes: number
+}
+
+// ─────────────────────────────────────────────────────────────
 // 서비스 포털 응답 감시 (가용성 검증 중 "포털이 언제 다시 쓸 수 있게 되는가")
 //
 // 왜 페이지가 아니라 API 인가:

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import ConfigMapView from './ConfigMapView'
 import {
   FileCode,
   Download,
@@ -17,6 +18,8 @@ import {
   ChevronDown,
   Minus,
   Plus,
+  FileText,
+  Boxes,
 } from 'lucide-react'
 
 const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
@@ -52,6 +55,22 @@ const LINE_RATIO = 1.6
 const FONT_KEY = 'fileviewer_font_size'
 /** 검색 매치 상한 — 큰 파일에서 한 글자만 입력했을 때 전부 모으느라 멈추는 것을 막는다 */
 const MAX_MATCHES = 5000
+
+/** 설정 관리 창의 두 모드 — 라벨·아이콘·툴팁을 한곳에 둔다 */
+const MODES = [
+  {
+    key: 'file' as const,
+    label: '서버 설정파일',
+    Icon: FileText,
+    hint: '접속한 서버의 파일을 직접 열고 고칩니다 (/etc/nova/nova.conf 등)',
+  },
+  {
+    key: 'cm' as const,
+    label: '파드 ConfigMap',
+    Icon: Boxes,
+    hint: '클러스터의 ConfigMap 을 키-값으로 보고 고칩니다 — kubectl 이 설치된 서버에 접속해 있어야 합니다',
+  },
+]
 
 interface FileViewerProps {
   /** SFTP 대상 세션(활성 탭) ID */
@@ -185,7 +204,10 @@ const PATH_GROUPS: { group: string; paths: string[] }[] = [
 ]
 
 /**
- * SFTP 기반 설정파일 뷰어/편집기 (모달).
+ * 설정 관리 (모달) — 서버 설정파일(SFTP)과 파드 ConfigMap(kubectl) 두 소스를 한 창에서 다룬다.
+ *
+ * 이름이 '뷰어' 가 아닌 이유: 조회만 하는 창이 아니다 — 편집·저장(백업 포함)·검색·ConfigMap patch 가
+ * 전부 여기 있다. 앱 자체 환경설정(글꼴·테마)은 툴바의 '앱 설정' 이고 이 창과 다르다.
  *  - 경로 입력/빠른선택 → 불러오기(읽기)
  *  - 편집 후 저장(쓰기)
  *  - 내용을 우측 AI 패널로 보내 분석
@@ -213,6 +235,11 @@ export default function FileViewer({
   const [pwAction, setPwAction] = useState<'read' | 'write' | null>(null)
   const [showPw, setShowPw] = useState(false) // 비밀번호 표시(눈금) 토글
   const [applyNotice, setApplyNotice] = useState<{ command: string; desc: string } | null>(null)
+  /**
+   * 보는 대상. 파일(SFTP)과 ConfigMap(k8s)은 **읽고 쓰는 방식이 다르다**(문서 vs 키-값 맵,
+   * 백업 위치도 서버 vs 내 PC) — 그래서 한 화면에서 모드로 가르고, 로직은 섞지 않는다.
+   */
+  const [mode, setMode] = useState<'file' | 'cm'>('file')
   // ── 본문 글꼴 크기 ─────────────────────────────────────────
   // 기본 12px 은 conf 를 오래 들여다보기에 작았다. 13px 로 올리고 눈에 맞게 조절할 수 있게 한다.
   // 터미널 글꼴 크기(term_font_size)와 별개로 기억한다 — 보는 목적이 다르다.
@@ -536,17 +563,58 @@ export default function FileViewer({
       >
         {/* 헤더 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
-          <FileCode size={18} className="text-blue-400" />
-          <span className="text-sm font-semibold text-gray-100">설정파일 뷰어 (SFTP)</span>
-          {dirty && <span className="text-[11px] text-amber-300">● 수정됨</span>}
+          <FileCode size={18} className="shrink-0 text-blue-400" />
+          <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-gray-100">설정 관리</span>
+          {/* 두 모드는 '그 설정이 어디에 있는가' 로 가른다 — 서버 안의 파일이냐, 클러스터의 오브젝트냐.
+              전송 수단(SFTP)은 사용자가 고르는 대상이 아니라 라벨에서 뺐고, ConfigMap 은 kubectl 을
+              쓰는 사람에게 가장 정확한 이름이라 그대로 두고 '파드' 만 앞에 붙였다. */}
+          <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/30 p-0.5">
+            {MODES.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setMode(t.key)}
+                title={t.hint}
+                className={
+                  'flex items-center gap-1 whitespace-nowrap rounded px-2.5 py-0.5 text-[12px] ' +
+                  (mode === t.key ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200')
+                }
+              >
+                <t.Icon size={12} />
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {mode === 'file' && dirty && <span className="shrink-0 text-[11px] text-amber-300">● 수정됨</span>}
+          <div
+            className="ml-auto flex shrink-0 items-center gap-0.5"
+            title="본문 글꼴 크기 (파일 모드에서는 Ctrl+휠 도 됩니다)"
+          >
+            <button
+              onClick={() => changeFontSize(fontSize - 1)}
+              className="rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+            >
+              <Minus size={12} />
+            </button>
+            <span className="w-[30px] text-center text-[11px] tabular-nums text-gray-400">{fontSize}px</span>
+            <button
+              onClick={() => changeFontSize(fontSize + 1)}
+              className="rounded p-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
           <button
             onClick={onClose}
-            className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+            className="shrink-0 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
           >
             <X size={16} />
           </button>
         </div>
 
+        {mode === 'cm' ? (
+          <ConfigMapView sessionId={sessionId} connected={connected} fontSize={fontSize} />
+        ) : (
+          <>
         {/* 경로 입력 줄 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
           <input
@@ -652,24 +720,6 @@ export default function FileViewer({
                 ))}
               </select>
             )}
-            <div
-              className="flex shrink-0 items-center gap-0.5 border-l border-white/10 pl-1.5"
-              title="본문 글꼴 크기 (Ctrl+휠)"
-            >
-              <button
-                onClick={() => changeFontSize(fontSize - 1)}
-                className="rounded p-0.5 text-gray-400 hover:text-gray-200"
-              >
-                <Minus size={12} />
-              </button>
-              <span className="w-[30px] text-center text-[11px] tabular-nums text-gray-400">{fontSize}px</span>
-              <button
-                onClick={() => changeFontSize(fontSize + 1)}
-                className="rounded p-0.5 text-gray-400 hover:text-gray-200"
-              >
-                <Plus size={12} />
-              </button>
-            </div>
           </div>
         )}
 
@@ -784,6 +834,9 @@ export default function FileViewer({
             )}
           </div>
         </div>
+
+          </>
+        )}
 
         {/* 저장 확인 (앱 내부 다이얼로그 — 네이티브 confirm 미사용) */}
         {confirmOpen && (

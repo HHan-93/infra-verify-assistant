@@ -2703,7 +2703,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 설정파일 뷰어 (SFTP) 모달 — 활성 세션 대상 */}
+      {/* 설정 관리 모달 (서버 설정파일 · 파드 ConfigMap) — 활성 세션 대상 */}
       {showFiles && (
         <FileViewer
           sessionId={activeId}

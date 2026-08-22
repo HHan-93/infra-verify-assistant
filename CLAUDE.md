@@ -33,7 +33,7 @@ npm run dist:dir   # 패키징 없이 폴더로만 (빠른 확인용)
 | [electron/preload.ts](electron/preload.ts) | contextBridge — 렌더러는 여기 노출된 API 로만 메인에 접근 |
 | [src/App.tsx](src/App.tsx) (~2.7k줄) | 세션(탭)·레이아웃·전역 상태의 단일 소유자. 모든 패널이 그 자식 |
 
-IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*` `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
+IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*`(파드 로그 탐색 + ConfigMap 조회·patch) `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
 
 ### 명령 실행 경로가 셋이다 — 섞지 말 것
 
@@ -58,7 +58,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 
 메인 프로세스가 `app.getPath('userData')` 에 저장한다. **`.dat` = `safeStorage` 암호화**(같은 OS 사용자만 복호화 — 팀 배포 시 각자 로컬에서 안전), `.json` = 평문(비밀정보 아님).
 
-`ssh-profiles.dat` · `known-hosts.dat`(TOFU) · `portal-watch.dat` / `custom-presets.json` · `custom-scenarios.json` · `session-logs-index.json` · `log-retention-settings.json` · `session-logs/`(리플레이용 `.cast.jsonl`) · `metrics-history/`
+`ssh-profiles.dat` · `known-hosts.dat`(TOFU) · `portal-watch.dat` / `custom-presets.json` · `custom-scenarios.json` · `session-logs-index.json` · `log-retention-settings.json` · `session-logs/`(리플레이용 `.cast.jsonl`) · `metrics-history/` · `configmap-backups/`(ConfigMap 적용 직전 YAML, `.dat` 암호화·cm 당 20개)
 
 **폴더 이름이 `Q-Term` 이 아니라 `infra-verify-assistant` 다** — 이게 정상이다. `build.productName` 은 exe·설치본 이름만 정하고, 런타임 앱 이름(=userData 폴더명)은 package.json 최상위 `name` 을 쓴다. Q-Term 은 나중에 붙인 표시명일 뿐이다. **최상위에 `productName` 을 추가하거나 `name` 을 바꾸면 userData 경로가 옮겨가면서 사용자의 프리셋·시나리오·접속 프로필이 전부 사라진 것처럼 보인다** — 리브랜딩 정리를 하다 건드리기 쉬운 곳이니 손대지 말 것. dev 와 설치본이 같은 폴더를 공유한다는 점도 같이 기억할 것(dev 에서 지우면 설치본에서도 지워진다).
 

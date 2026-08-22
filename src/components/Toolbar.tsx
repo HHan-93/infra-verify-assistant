@@ -21,7 +21,7 @@ interface ToolbarProps {
   onTogglePresets: () => void
   showScenarios: boolean
   onToggleScenarios: () => void
-  /** 설정파일 뷰어 열기 */
+  /** 설정 관리 창 열기 */
   onOpenFiles: () => void
   /** 원격 파일 탐색기 열기 */
   onOpenExplorer: () => void
@@ -103,7 +103,7 @@ export default function Toolbar({
       <Divider />
 
       {/* 원격 도구 (아이콘) */}
-      <IconBtn onClick={onOpenFiles} title="설정 파일 뷰어 (SFTP)">
+      <IconBtn onClick={onOpenFiles} title="설정 관리 — 서버 설정파일 · 파드 ConfigMap">
         <FileCode size={15} />
       </IconBtn>
       <IconBtn onClick={onOpenExplorer} title="원격 파일 탐색기 (SFTP)">
@@ -173,7 +173,7 @@ export default function Toolbar({
           <ScrollText size={14} />
           녹화 뷰어
         </button>
-        <IconBtn onClick={onOpenSettings} title="외형 설정 (글꼴/테마)">
+        <IconBtn onClick={onOpenSettings} title="앱 설정 (글꼴·테마·데이터 폴더)">
           <Settings size={15} />
         </IconBtn>
       </div>
