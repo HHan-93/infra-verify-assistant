@@ -243,6 +243,10 @@ export default function FileViewer({
    * 백업 위치도 서버 vs 내 PC) — 그래서 한 화면에서 모드로 가르고, 로직은 섞지 않는다.
    */
   const [mode, setMode] = useState<'file' | 'cm'>('file')
+  /** ConfigMap 탭의 대기 중인 변경 개수 — 창을 닫으면 사라지므로 닫기 전에 물어본다 */
+  const [cmPending, setCmPending] = useState(0)
+  /** 닫기 확인창 — 저장하지 않은 것이 있을 때만 뜬다 */
+  const [confirmClose, setConfirmClose] = useState(false)
   // ── 본문 글꼴 크기 ─────────────────────────────────────────
   // 기본 12px 은 conf 를 오래 들여다보기에 작았다. 13px 로 올리고 눈에 맞게 조절할 수 있게 한다.
   // 터미널 글꼴 크기(term_font_size)와 별개로 기억한다 — 보는 목적이 다르다.
@@ -557,6 +561,20 @@ export default function FileViewer({
     onClose()
   }
 
+  /**
+   * 닫기 요청. 저장하지 않은 것이 있으면 **먼저 물어본다.**
+   *
+   * X 는 배경 클릭과 달리 사용자가 의도한 동작이지만, 그렇다고 편집 중인 파일 내용과 ConfigMap
+   * 대기 변경을 말없이 버릴 이유는 없다 — 여러 키를 고쳐 둔 뒤라면 처음부터 다시 해야 한다.
+   */
+  const requestClose = () => {
+    if ((dirty && loaded) || cmPending > 0) {
+      setConfirmClose(true)
+      return
+    }
+    onClose()
+  }
+
   return (
     // 배경 클릭으로 닫지 않는다 — 불러온 파일과 편집 중인 내용이 사라진다(ConfirmDialog 주석 참고)
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
@@ -607,16 +625,31 @@ export default function FileViewer({
             </button>
           </div>
           <button
-            onClick={onClose}
+            onClick={requestClose}
             className="shrink-0 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
           >
             <X size={16} />
           </button>
         </div>
 
-        {mode === 'cm' ? (
-          <ConfigMapView sessionId={sessionId} connected={connected} fontSize={fontSize} sessionLabel={sessionLabel} />
-        ) : (
+        {/*
+          두 탭을 **둘 다 마운트해 둔 채** 하나만 보여준다.
+          ConfigMap 쪽을 조건부로 렌더하면 탭을 옮기는 순간 컴포넌트가 사라져 **대기 중인 변경이
+          말없이 버려졌다.** (대상을 바꿀 때는 물어보게 해 뒀는데 탭 전환에는 그 장치가 없었다)
+          파일 쪽 상태는 이 컴포넌트가 갖고 있어 원래부터 남았으므로, 이제 양쪽이 같게 동작한다.
+          보이지 않는 동안 조회가 나가지 않는 것은 ConfigMapView 가 active 로 지킨다.
+        */}
+        <div className={(mode === 'cm' ? 'flex' : 'hidden') + ' min-h-0 flex-1 flex-col'}>
+          <ConfigMapView
+            sessionId={sessionId}
+            connected={connected}
+            fontSize={fontSize}
+            sessionLabel={sessionLabel}
+            active={mode === 'cm'}
+            onPendingChange={setCmPending}
+          />
+        </div>
+        {mode === 'cm' ? null : (
           <>
         {/* 경로 입력 줄 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
@@ -839,6 +872,39 @@ export default function FileViewer({
         </div>
 
           </>
+        )}
+
+        {/* 닫기 확인 — 저장하지 않은 파일 편집·ConfigMap 대기 변경이 있을 때만 */}
+        {confirmClose && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-6">
+            <div className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl">
+              <div className="mb-2 text-sm font-semibold text-gray-100">저장하지 않은 변경이 있습니다</div>
+              <p className="mb-3 whitespace-pre-line text-[12.5px] leading-relaxed text-gray-300">
+                {[
+                  dirty && loaded ? `· 서버 설정파일 ${path.trim() || ''} 편집 중` : '',
+                  cmPending > 0 ? `· 파드 ConfigMap 대기 중인 변경 ${cmPending}건 (아직 클러스터에 보내지 않았습니다)` : '',
+                ]
+                  .filter(Boolean)
+                  .join('\n')}
+                {'\n'}
+                창을 닫으면 위 내용은 사라집니다.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setConfirmClose(false)}
+                  className="rounded-md border border-white/10 bg-panel-light px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10"
+                >
+                  계속 편집
+                </button>
+                <button
+                  onClick={onClose}
+                  className="rounded-md bg-red-600/80 px-3 py-1.5 text-xs text-white hover:bg-red-500"
+                >
+                  버리고 닫기
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* 저장 확인 (앱 내부 다이얼로그 — 네이티브 confirm 미사용) */}

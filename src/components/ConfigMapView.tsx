@@ -34,6 +34,8 @@ export default function ConfigMapView({
   connected,
   fontSize,
   sessionLabel,
+  active,
+  onPendingChange,
 }: {
   sessionId: string
   connected: boolean
@@ -41,6 +43,19 @@ export default function ConfigMapView({
   fontSize: number
   /** 탭에 보이는 세션 이름 "별칭 (IP)" — 백업 이력에 "어느 세션에서 고쳤는지" 로 남는다 */
   sessionLabel?: string
+  /**
+   * 이 탭이 화면에 보이는가.
+   *
+   * 두 탭은 **둘 다 마운트된 채** 하나만 보인다(탭을 옮겨도 대기 중인 변경이 사라지지 않게).
+   * 그래서 "보이지 않는 동안에는 아무것도 조회하지 않는다" 를 여기서 지켜야 한다 —
+   * 서버 설정파일만 보려고 창을 연 사람에게 kubectl 이 나가면 안 된다.
+   */
+  active: boolean
+  /**
+   * 대기 중인 변경 개수를 부모에게 알린다.
+   * 창을 닫으면 이 값들이 사라지므로, 닫기 전에 물어보는 것은 부모(창)의 몫이다.
+   */
+  onPendingChange?: (count: number) => void
 }) {
   const [namespaces, setNamespaces] = useState<string[]>([])
   const [ns, setNs] = useState('')
@@ -56,6 +71,8 @@ export default function ConfigMapView({
   const [editKey, setEditKey] = useState<string | null>(null)
   const [editVal, setEditVal] = useState('')
   const editRef = useRef<HTMLInputElement>(null)
+  /** 여러 줄 값 편집기 — 한 줄 값과 엘리먼트가 달라 ref 도 따로 둔다 */
+  const editAreaRef = useRef<HTMLTextAreaElement>(null)
 
   const [query, setQuery] = useState('')
   const [maskOn, setMaskOn] = useState(true)
@@ -83,18 +100,18 @@ export default function ConfigMapView({
    */
   const [env, setEnv] = useState<CmBackupOrigin | null>(null)
 
-  // 네임스페이스 목록은 세션이 붙어 있을 때 한 번만
+  /** 네임스페이스 목록을 이미 가져온 세션 — 탭을 왔다갔다 할 때마다 다시 묻지 않는다 */
+  const nsFetchedRef = useRef('')
+  // 네임스페이스 목록은 **이 탭을 처음 열 때** 한 번만 (세션이 붙어 있어야 한다)
   useEffect(() => {
-    if (!connected) return
+    if (!connected || !active) return
+    if (nsFetchedRef.current === sessionId) return
+    nsFetchedRef.current = sessionId
     window.electronAPI.k8sListNamespaces(sessionId).then((r) => {
       if (r.ok && r.namespaces) setNamespaces(r.namespaces)
       else setMsg(r.error ?? '네임스페이스를 가져오지 못했습니다.')
     })
-    // 환경은 조회에 실패해도 그냥 비워 둔다 — 그러면 '다른 환경' 경고만 뜨지 않고 나머지는 그대로 쓴다
-    window.electronAPI.k8sCmEnv(sessionId, sessionLabel).then((r) => setEnv(r.origin ?? null))
-    // sessionLabel 은 탭 이름이라 사용자가 바꿀 수 있지만, 그때마다 다시 물을 이유는 없다
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, connected])
+  }, [sessionId, connected, active])
 
   const loadCms = async (namespace: string) => {
     setNs(namespace)
@@ -193,10 +210,17 @@ export default function ConfigMapView({
   const pendingKeys = Object.keys(pending)
   const dirty = pendingKeys.length > 0
 
+  // 부모(설정 관리 창)가 '닫으면 사라진다' 를 물어볼 수 있게 개수만 올려 준다
+  useEffect(() => {
+    onPendingChange?.(pendingKeys.length)
+    // onPendingChange 는 부모가 매 렌더마다 새로 만드는 함수일 수 있어 의존성에 넣지 않는다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKeys.length])
+
   const startEdit = (k: string) => {
     setEditKey(k)
     setEditVal(pending[k] ?? detail?.data[k] ?? '')
-    setTimeout(() => editRef.current?.focus(), 0)
+    setTimeout(() => (editRef.current ?? editAreaRef.current)?.focus(), 0)
   }
   const commitEdit = () => {
     if (!editKey || !detail) return
@@ -253,6 +277,13 @@ export default function ConfigMapView({
   }
   const loadBackups = async (scope: 'one' | 'all') => {
     setBkScope(scope)
+    /**
+     * 이력을 열 때마다 환경을 다시 읽는다.
+     * 마운트 때 한 번만 읽으면, 세션에서 `kubectl config use-context` 로 클러스터를 갈아탄 뒤에는
+     * **옛 컨텍스트와 비교해** 경고가 반대로 나온다. 조회에 실패하면 비워 두고 경고만 하지 않는다
+     * (모르는 것을 근거로 '다른 환경'이라고 말하지 않는다).
+     */
+    window.electronAPI.k8sCmEnv(sessionId, sessionLabel).then((r) => setEnv(r.origin ?? null))
     if (scope === 'all') {
       const r = await window.electronAPI.k8sCmBackupListAll()
       setBkCms(r.configMaps ?? 0)
@@ -283,6 +314,17 @@ export default function ConfigMapView({
   }
   /** 별칭이 있으면 별칭("이름 (IP)" 형태라 host 를 또 붙이지 않는다), 없으면 host */
   const envName = (o?: CmBackupOrigin) => o?.alias?.trim() || o?.host || ''
+
+  /**
+   * 여러 줄 값인가.
+   *
+   * ConfigMap 에는 env 형태의 한 줄 값만 있는 게 아니라 **파일 한 덩어리**가 값으로 들어 있는 키도
+   * 흔하다(`nginx.conf`, `logback.xml`, `application.yaml`). 그런 값을 `<input>` 으로 편집하면
+   * 브라우저가 값에서 개행을 지우기 때문에(HTML 값 정규화) 한 글자만 타이핑해도 **파일 전체가
+   * 한 줄로 눌려서 저장된다.** 그래서 여러 줄 값은 textarea 로 편집한다.
+   */
+  const isMulti = (v: string) => v.includes('\n')
+  const lineCount = (v: string) => v.split('\n').length
 
   const valueOf = (k: string) => pending[k] ?? detail?.data[k] ?? ''
   const hidden = (k: string) => maskOn && isSecretKey(k) && !revealed.has(k)
@@ -421,7 +463,8 @@ export default function ConfigMapView({
                 <div
                   key={k}
                   className={
-                    'flex items-center gap-2 px-2 py-1.5 ' +
+                    'flex gap-2 px-2 py-1.5 ' +
+                    (editing ? 'items-start ' : 'items-center ') +
                     (changed
                       ? 'border-l-2 border-emerald-400 bg-emerald-500/10'
                       : editing
@@ -434,20 +477,39 @@ export default function ConfigMapView({
                   </span>
                   {editing ? (
                     <>
-                      <input
-                        ref={editRef}
-                        value={editVal}
-                        onChange={(e) => setEditVal(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') commitEdit()
-                          if (e.key === 'Escape') setEditKey(null)
-                        }}
-                        className="min-w-0 flex-1 rounded border border-blue-500/60 bg-[#11111b] px-2 py-0.5 text-gray-100 outline-none"
-                      />
-                      <span className="shrink-0 whitespace-nowrap text-[10.5px] text-gray-500">
-                        Enter 확정 · Esc 취소
+                      {isMulti(editVal) ? (
+                        /* 여러 줄 값 — Enter 는 줄바꿈이어야 하므로 확정은 Ctrl+Enter 와 체크 버튼으로만 */
+                        <textarea
+                          ref={editAreaRef}
+                          value={editVal}
+                          onChange={(e) => setEditVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) commitEdit()
+                            if (e.key === 'Escape') setEditKey(null)
+                          }}
+                          spellCheck={false}
+                          rows={Math.min(16, lineCount(editVal) + 1)}
+                          className="min-w-0 flex-1 resize-y whitespace-pre rounded border border-blue-500/60 bg-[#11111b] px-2 py-1 text-gray-100 outline-none"
+                        />
+                      ) : (
+                        <input
+                          ref={editRef}
+                          value={editVal}
+                          onChange={(e) => setEditVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitEdit()
+                            if (e.key === 'Escape') setEditKey(null)
+                          }}
+                          className="min-w-0 flex-1 rounded border border-blue-500/60 bg-[#11111b] px-2 py-0.5 text-gray-100 outline-none"
+                        />
+                      )}
+                      <span className="shrink-0 self-start whitespace-nowrap pt-1 text-[10.5px] text-gray-500">
+                        {isMulti(editVal) ? `${lineCount(editVal)}줄 · Ctrl+Enter 확정 · Esc 취소` : 'Enter 확정 · Esc 취소'}
                       </span>
-                      <button onClick={commitEdit} className="shrink-0 rounded p-0.5 text-emerald-300 hover:bg-white/10">
+                      <button
+                        onClick={commitEdit}
+                        className="shrink-0 self-start rounded p-0.5 text-emerald-300 hover:bg-white/10"
+                      >
                         <Check size={13} />
                       </button>
                     </>
@@ -462,8 +524,21 @@ export default function ConfigMapView({
                         className={'min-w-0 flex-1 truncate ' + (changed ? 'text-emerald-200' : 'text-gray-100')}
                         title={hidden(k) ? '값이 가려져 있습니다' : valueOf(k)}
                       >
-                        {hidden(k) ? maskedValue() : valueOf(k)}
+                        {hidden(k)
+                          ? maskedValue()
+                          : isMulti(valueOf(k))
+                            ? valueOf(k).split('\n')[0]
+                            : valueOf(k)}
                       </span>
+                      {/* 파일 한 덩어리가 값인 키 — 한 줄만 보이니 그 사실을 밝힌다(첫 줄만 보고 전체로 오해하지 않게) */}
+                      {isMulti(valueOf(k)) && !hidden(k) && (
+                        <span
+                          className="shrink-0 whitespace-nowrap rounded bg-white/5 px-1.5 text-[10px] text-gray-400"
+                          title="여러 줄 값입니다 — 연필을 누르면 여러 줄 편집기로 열립니다"
+                        >
+                          {lineCount(valueOf(k))}줄
+                        </span>
+                      )}
                       {isSecretKey(k) && maskOn && (
                         <button
                           onClick={() =>
@@ -736,12 +811,20 @@ export default function ConfigMapView({
               {pendingKeys.map((k) => (
                 <div key={k} className="flex items-center gap-2">
                   <span className="w-[220px] shrink-0 truncate text-emerald-200/90">{k}</span>
-                  <span className="shrink-0 text-gray-500 line-through">
-                    {isSecretKey(k) ? maskedValue() : detail.data[k]}
+                  <span className="shrink-0 truncate text-gray-500 line-through">
+                    {isSecretKey(k)
+                      ? maskedValue()
+                      : isMulti(detail.data[k] ?? '')
+                        ? `(${lineCount(detail.data[k] ?? '')}줄)`
+                        : detail.data[k]}
                   </span>
                   <span className="shrink-0 text-emerald-400">→</span>
                   <span className="min-w-0 flex-1 truncate text-emerald-200">
-                    {isSecretKey(k) ? maskedValue() : pending[k]}
+                    {isSecretKey(k)
+                      ? maskedValue()
+                      : isMulti(pending[k] ?? '')
+                        ? `(${lineCount(pending[k] ?? '')}줄)`
+                        : pending[k]}
                   </span>
                 </div>
               ))}
@@ -749,7 +832,7 @@ export default function ConfigMapView({
 
             <div className="mb-2.5 rounded bg-black/40 px-2.5 py-2">
               <div className="mb-1 text-[10.5px] text-gray-500">실행될 명령 — 한 번만 나갑니다</div>
-              <code className="block break-all font-mono text-[11px] leading-relaxed text-green-300/85">
+              <code className="block max-h-24 overflow-y-auto break-all font-mono text-[11px] leading-relaxed text-green-300/85">
                 {`kubectl patch cm ${detail.name} -n ${detail.namespace} --type merge -p '${JSON.stringify({
                   data: Object.fromEntries(pendingKeys.map((k) => [k, isSecretKey(k) ? '••••' : pending[k]])),
                 })}'`}

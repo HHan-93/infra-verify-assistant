@@ -3959,6 +3959,11 @@ ipcMain.handle(
     const client = sessions.get(sessionId)?.client
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
     try {
+      // 0) 환경(host·kubectl context)을 **먼저** 읽는다.
+      //    원본 YAML 을 읽은 뒤에 하면 그 kubectl 호출만큼 '조회 → patch' 사이가 벌어져
+      //    남이 끼어들 창이 넓어진다. 이 값은 조회 결과와 무관하므로 앞에서 구해도 된다.
+      const origin = await cmOriginOf(sessionId, alias)
+
       // 1) 적용 직전 원본 YAML 확보 — 백업과 충돌 검사를 같은 스냅샷으로 한다
       const cur = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml 2>&1`)
       const yaml = cur.out ?? ''
@@ -3976,7 +3981,6 @@ ipcMain.handle(
       // 2) 백업을 **먼저** 남긴다. 실패하면 적용하지 않는다 — 되돌릴 수단 없이 클러스터를 바꾸지 않는다.
       //    (파일 저장도 같은 규칙이다: 백업 실패 시 저장 중단)
       //    환경(host·context)까지 폴더에 넣어 다른 클러스터의 백업과 섞이지 않게 한다.
-      const origin = await cmOriginOf(sessionId, alias)
       const dir = path.join(cmBackupDir(), cmBackupKey(origin, namespace, name))
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const backupPath = path.join(dir, `${stamp}.dat`)
