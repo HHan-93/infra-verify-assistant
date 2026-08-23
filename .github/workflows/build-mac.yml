@@ -1,8 +1,20 @@
 name: Build macOS
 
+# Actions 목록에 남는 실행 제목. 빌드가 여러 개 쌓였을 때 "몇 번 버전의 무슨 빌드인지" 를
+# 제목만 보고 가릴 수 있어야 한다 — 수동 실행이면 입력값으로 `Q-Term(2.6.0)_주요 내용` 형태로 짓고,
+# 푸시로 돌아간 경우는 비워 두어 GitHub 기본값(커밋 제목)을 그대로 쓴다.
+run-name: ${{ inputs.version && format('Q-Term({0})_{1}', inputs.version, inputs.summary) || '' }}
+
 # 수동 실행(Actions 탭의 "Run workflow") 또는 v* 태그 푸시 시 빌드
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '버전 (예: 2.6.0) — 실행 제목에 들어간다'
+        required: false
+      summary:
+        description: '주요 업데이트 내용 (한 줄)'
+        required: false
   push:
     branches:
       - main
