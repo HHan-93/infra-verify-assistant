@@ -76,6 +76,8 @@ interface FileViewerProps {
   /** SFTP 대상 세션(활성 탭) ID */
   sessionId: string
   connected: boolean
+  /** 탭에 보이는 세션 이름 "별칭 (IP)" — ConfigMap 백업 이력에 어느 환경에서 고쳤는지로 남는다 */
+  sessionLabel?: string
   /** 처음 열 때 자동으로 불러올 경로 (선택) */
   initialPath?: string
   onClose: () => void
@@ -215,6 +217,7 @@ const PATH_GROUPS: { group: string; paths: string[] }[] = [
 export default function FileViewer({
   sessionId,
   connected,
+  sessionLabel,
   initialPath,
   onClose,
   onAnalyze,
@@ -612,7 +615,7 @@ export default function FileViewer({
         </div>
 
         {mode === 'cm' ? (
-          <ConfigMapView sessionId={sessionId} connected={connected} fontSize={fontSize} />
+          <ConfigMapView sessionId={sessionId} connected={connected} fontSize={fontSize} sessionLabel={sessionLabel} />
         ) : (
           <>
         {/* 경로 입력 줄 */}

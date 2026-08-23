@@ -536,6 +536,27 @@ export interface ConfigMapPatchResult {
  * 값에 토큰·비밀번호가 그대로 들어 있으므로 safeStorage 로 암호화해 `.dat` 로 쓴다(평문 금지).
  * 복원용 평문은 사용자가 '내보내기' 를 눌렀을 때만 만든다.
  */
+/**
+ * 백업을 만든 환경 — **어느 클러스터를 고쳤는지**.
+ *
+ * 같은 이름의 네임스페이스·ConfigMap 이 환경마다 있다(개발/운영의 `boot-factory/boot-factory-auth-env`).
+ * 이 값이 없으면 이력에서 둘을 구분할 수 없고, 내보내 `kubectl apply -f` 할 때 **다른 환경의
+ * YAML 을 복원**할 수 있다. 그래서 표시용이 아니라 저장 폴더를 가르는 키로도 쓴다.
+ */
+export interface CmBackupOrigin {
+  /** SSH 접속 대상(IP·호스트명) — 사용자가 바꾸지 않는 정체 */
+  host?: string
+  /**
+   * `kubectl config current-context`.
+   * 한 점프 서버에서 kubeconfig 컨텍스트만 바꿔 여러 클러스터를 다루므로 host 만으로는 부족하다.
+   */
+  context?: string
+  /** 세션 별칭 "운영-306ha (10.20.30.41)" — 사람이 알아보는 이름. 바뀔 수 있어 키로는 쓰지 않는다 */
+  alias?: string
+  /** 접속 계정 */
+  user?: string
+}
+
 export interface ConfigMapBackup {
   /** 파일명에서 뽑은 저장 시각 (epoch ms) */
   at: number
@@ -543,6 +564,13 @@ export interface ConfigMapBackup {
   namespace: string
   name: string
   sizeBytes: number
+  /**
+   * 저장 폴더 이름. 환경이 다르면 폴더도 다르므로 (namespace, name) 만으로는 파일을 찾을 수 없다 —
+   * 내보내기는 이 값으로 찾는다.
+   */
+  dir: string
+  /** v2.6.0 이전 백업에는 없다(그때는 환경을 기록하지 않았다). 없으면 '환경 미기록'으로 보여준다 */
+  origin?: CmBackupOrigin
 }
 
 // ─────────────────────────────────────────────────────────────

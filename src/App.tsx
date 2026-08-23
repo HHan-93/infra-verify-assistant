@@ -2708,6 +2708,7 @@ export default function App() {
         <FileViewer
           sessionId={activeId}
           connected={connected}
+          sessionLabel={gridCellLabel(tabs.find((t) => t.id === activeId) ?? { id: activeId, title: '' })}
           onClose={() => {
             setShowFiles(false)
             setTimeout(() => activeTerm()?.focus(), 0)

@@ -18,6 +18,7 @@ import type {
   ConfigMapDetail,
   ConfigMapPatchResult,
   ConfigMapBackup,
+  CmBackupOrigin,
   LogIndexEntry,
   LogRetentionSettings,
   MetricSample,
@@ -451,7 +452,12 @@ const electronAPI = {
     name: string
     changes: Record<string, string>
     baseResourceVersion: string
+    /** 세션 별칭 — 백업 이력에 "어느 세션에서 고쳤는지" 로 남는다 */
+    alias?: string
   }): Promise<ConfigMapPatchResult> => ipcRenderer.invoke('k8s:patchConfigMap', payload),
+  /** 지금 세션이 가리키는 환경(host·kubectl context) — 이력에서 다른 환경을 가려내는 데 쓴다 */
+  k8sCmEnv: (sessionId: string, alias?: string): Promise<{ ok: boolean; origin?: CmBackupOrigin }> =>
+    ipcRenderer.invoke('k8s:cmEnv', { sessionId, alias }),
   /** 백업 이력 (내 PC userData 에 암호화 저장된 것) */
   k8sCmBackupList: (
     namespace: string,
@@ -462,12 +468,13 @@ const electronAPI = {
   k8sCmBackupListAll: (): Promise<{ ok: boolean; items?: ConfigMapBackup[]; configMaps?: number; error?: string }> =>
     ipcRenderer.invoke('k8s:cmBackupListAll'),
   /** 백업을 평문 YAML 로 내보내기 (복원용) */
+  /** dir 은 목록이 돌려준 저장 폴더명 — 환경마다 폴더가 달라 (namespace, name) 만으로는 못 찾는다 */
   k8sCmBackupExport: (
-    namespace: string,
-    name: string,
+    dir: string,
     file: string,
+    name: string,
   ): Promise<{ saved: boolean; path?: string; error?: string }> =>
-    ipcRenderer.invoke('k8s:cmBackupExport', { namespace, name, file }),
+    ipcRenderer.invoke('k8s:cmBackupExport', { dir, file, name }),
 
   k8sListContainers: (
     sessionId: string,

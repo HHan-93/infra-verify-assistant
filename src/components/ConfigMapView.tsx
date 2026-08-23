@@ -12,8 +12,9 @@ import {
   FileCode,
   History,
   ExternalLink,
+  Server,
 } from 'lucide-react'
-import type { ConfigMapDetail, ConfigMapRef, ConfigMapBackup } from '../../electron/shared-types'
+import type { ConfigMapDetail, ConfigMapRef, ConfigMapBackup, CmBackupOrigin } from '../../electron/shared-types'
 import { isSecretKey, maskedValue } from '../lib/cmSecret'
 
 /**
@@ -32,11 +33,14 @@ export default function ConfigMapView({
   sessionId,
   connected,
   fontSize,
+  sessionLabel,
 }: {
   sessionId: string
   connected: boolean
   /** 파일 모드와 같은 글꼴 크기를 쓴다 (뷰어 상단에서 조절) */
   fontSize: number
+  /** 탭에 보이는 세션 이름 "별칭 (IP)" — 백업 이력에 "어느 세션에서 고쳤는지" 로 남는다 */
+  sessionLabel?: string
 }) {
   const [namespaces, setNamespaces] = useState<string[]>([])
   const [ns, setNs] = useState('')
@@ -72,6 +76,12 @@ export default function ConfigMapView({
   const [bkScope, setBkScope] = useState<'one' | 'all'>('one')
   /** 'all' 일 때의 ConfigMap 개수 (몇 곳을 건드렸는지) */
   const [bkCms, setBkCms] = useState<number | null>(null)
+  /**
+   * 지금 세션이 가리키는 환경(host · kubectl context).
+   * 이력의 백업이 **다른 클러스터의 것**인지 가려내는 기준이다 — 같은 이름의 cm 이 환경마다
+   * 있으므로, 이것 없이는 내보내기 버튼 옆에서 잘못된 YAML 을 고를 수 있다.
+   */
+  const [env, setEnv] = useState<CmBackupOrigin | null>(null)
 
   // 네임스페이스 목록은 세션이 붙어 있을 때 한 번만
   useEffect(() => {
@@ -80,6 +90,10 @@ export default function ConfigMapView({
       if (r.ok && r.namespaces) setNamespaces(r.namespaces)
       else setMsg(r.error ?? '네임스페이스를 가져오지 못했습니다.')
     })
+    // 환경은 조회에 실패해도 그냥 비워 둔다 — 그러면 '다른 환경' 경고만 뜨지 않고 나머지는 그대로 쓴다
+    window.electronAPI.k8sCmEnv(sessionId, sessionLabel).then((r) => setEnv(r.origin ?? null))
+    // sessionLabel 은 탭 이름이라 사용자가 바꿀 수 있지만, 그때마다 다시 물을 이유는 없다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, connected])
 
   const loadCms = async (namespace: string) => {
@@ -212,6 +226,7 @@ export default function ConfigMapView({
       name: detail.name,
       changes: pending,
       baseResourceVersion: detail.resourceVersion,
+      alias: sessionLabel,
     })
     setApplying(false)
     setConfirmOpen(false)
@@ -249,6 +264,25 @@ export default function ConfigMapView({
     const r = await window.electronAPI.k8sCmBackupList(detail.namespace, detail.name)
     setBackups(r.items ?? [])
   }
+
+  /**
+   * 이 백업이 **지금 접속한 환경**에서 만든 것인가.
+   *
+   * 아는 값만 비교한다 — host·context 를 모르는 옛 백업(또는 kubeconfig 를 못 읽은 세션)을
+   * '다른 환경'으로 몰면 경고가 상시로 떠서 정작 진짜 경고가 안 읽힌다.
+   * 반대로 host 는 같은데 context 가 다르면 **다른 클러스터다**(같은 점프 서버에서 갈아탄 경우).
+   */
+  const sameEnv = (o?: CmBackupOrigin) => {
+    if (!o || !env) return true
+    const hostKnown = !!o.host && !!env.host
+    const ctxKnown = !!o.context && !!env.context
+    if (!hostKnown && !ctxKnown) return true
+    if (hostKnown && o.host !== env.host) return false
+    if (ctxKnown && o.context !== env.context) return false
+    return true
+  }
+  /** 별칭이 있으면 별칭("이름 (IP)" 형태라 host 를 또 붙이지 않는다), 없으면 host */
+  const envName = (o?: CmBackupOrigin) => o?.alias?.trim() || o?.host || ''
 
   const valueOf = (k: string) => pending[k] ?? detail?.data[k] ?? ''
   const hidden = (k: string) => maskOn && isSecretKey(k) && !revealed.has(k)
@@ -553,9 +587,16 @@ export default function ConfigMapView({
                 {backups.length}건
               </span>
             </div>
-            <p className="mb-2.5 text-[10.5px] leading-relaxed text-gray-400">
+            <p className="mb-1.5 text-[10.5px] leading-relaxed text-gray-400">
               적용 직전 YAML 전문을 <b className="text-gray-300">내 PC</b>에 암호화해 남깁니다(그 서버가 아닙니다).
-              ConfigMap 당 최근 20개까지 보관합니다.
+              ConfigMap 당 최근 20개까지 보관하며, <b className="text-gray-300">환경(서버·컨텍스트)별로 따로</b> 셉니다.
+            </p>
+            {/* 무엇과 비교해 '다른 환경'이라고 하는지 밝힌다 — 기준이 안 보이면 경고를 믿을 수 없다 */}
+            <p className="mb-2.5 flex items-center gap-1.5 text-[10.5px] text-gray-500">
+              <Server size={10} className="shrink-0" />
+              지금 세션:
+              <span className="text-gray-300">{envName(env ?? undefined) || '(확인 불가)'}</span>
+              {env?.context && <span className="font-mono text-gray-400">ctx {env.context}</span>}
             </p>
             <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto">
               {backups.length === 0 ? (
@@ -567,16 +608,18 @@ export default function ConfigMapView({
               ) : (
                 backups.map((b) => {
                   const isOpen = detail?.namespace === b.namespace && detail?.name === b.name
+                  const foreign = !sameEnv(b.origin)
                   return (
                     <div
-                      key={`${b.namespace}/${b.name}/${b.file}`}
+                      key={`${b.dir}/${b.file}`}
                       className={
-                        'flex items-center gap-2 px-2 py-1.5 ' +
+                        'px-2 py-1.5 ' +
                         (isOpen && bkScope === 'all'
                           ? 'border-l-2 border-blue-400 bg-blue-500/10'
                           : 'border-b border-white/5')
                       }
                     >
+                    <div className="flex items-center gap-2">
                       <span className="shrink-0 whitespace-nowrap text-[12px] text-gray-200">
                         {new Date(b.at).toLocaleString()}
                       </span>
@@ -609,14 +652,55 @@ export default function ConfigMapView({
                       )}
                       <button
                         onClick={async () => {
-                          const r = await window.electronAPI.k8sCmBackupExport(b.namespace, b.name, b.file)
+                          const r = await window.electronAPI.k8sCmBackupExport(b.dir, b.file, b.name)
                           if (r.error) setMsg(r.error)
                           else if (r.saved) setMsg(`내보냈습니다: ${r.path}`)
                         }}
-                        className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-200 hover:bg-white/10"
+                        title={
+                          foreign
+                            ? '지금 접속한 환경과 다른 클러스터의 백업입니다 — apply 대상을 확인하세요'
+                            : '평문 YAML 로 저장 (kubectl apply -f 로 되돌릴 때 사용)'
+                        }
+                        className={
+                          'flex shrink-0 items-center gap-1 whitespace-nowrap rounded border px-2 py-0.5 text-[11px] hover:bg-white/10 ' +
+                          (foreign ? 'border-amber-500/50 text-amber-200' : 'border-white/10 text-gray-200')
+                        }
                       >
                         <Download size={11} /> YAML 내보내기
                       </button>
+                    </div>
+                    {/*
+                      어느 환경에서 만든 백업인가. 같은 이름의 ConfigMap 이 환경마다 있어서, 이게
+                      없으면 이력에서 개발/운영이 구분되지 않고 내보내 apply 할 때 잘못된 것을 고른다.
+                      v2.6.0 이전 백업에는 기록이 없다 — 그 사실을 감추지 않고 그대로 밝힌다.
+                    */}
+                    <div className="mt-0.5 flex items-center gap-1.5 pl-0.5 text-[10.5px]">
+                      {b.origin && (b.origin.host || b.origin.context || b.origin.alias) ? (
+                        <>
+                          <Server size={10} className="shrink-0 text-gray-500" />
+                          <span className="min-w-0 max-w-[45%] truncate text-gray-300" title={b.origin.host}>
+                            {envName(b.origin)}
+                          </span>
+                          {b.origin.context && (
+                            <span
+                              className="min-w-0 truncate rounded bg-white/5 px-1.5 font-mono text-[10px] text-gray-400"
+                              title={`kubectl context: ${b.origin.context}`}
+                            >
+                              ctx {b.origin.context}
+                            </span>
+                          )}
+                          {foreign && (
+                            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-amber-300">
+                              <AlertTriangle size={10} /> 지금 세션과 다른 환경
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-gray-600" title="v2.6.0 이전에 만든 백업입니다 — 그때는 환경을 기록하지 않았습니다">
+                          환경 미기록
+                        </span>
+                      )}
+                    </div>
                     </div>
                   )
                 })

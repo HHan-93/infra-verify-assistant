@@ -42,6 +42,7 @@ import {
   type ConfigMapDetail,
   type ConfigMapPatchResult,
   type ConfigMapBackup,
+  type CmBackupOrigin,
   type CommandCheck,
   type CaptureRule,
   type OnFailureAction,
@@ -3767,10 +3768,85 @@ ipcMain.handle(
 //     kubectl 이 있던 호스트에 두면 이력이 흩어지고, /var/tmp 는 청소되는 곳이다.
 
 const cmBackupDir = () => path.join(app.getPath('userData'), 'configmap-backups')
-/** ns__name 을 파일 시스템에 안전한 폴더명으로 (k8s 이름은 소문자·숫자·`-`·`.` 만 쓰지만 방어적으로) */
-const cmBackupKey = (ns: string, name: string) => `${ns}__${name}`.replace(/[^a-zA-Z0-9._-]/g, '_')
+/** 폴더명에 쓸 수 있는 글자만 남긴다 (k8s 이름은 소문자·숫자·`-`·`.` 뿐이지만 host·context 는 아니다) */
+const cmSeg = (v: string) => ((v ?? '').trim().replace(/[^a-zA-Z0-9._-]/g, '_') || '-')
+
+/**
+ * 백업 폴더명 = `host~context~namespace~name`.
+ *
+ * **환경(host·context)을 키에 넣는 이유**: 예전에는 `ns__name` 만 썼다. 그러면 개발/운영의
+ * 같은 이름 ConfigMap 백업이 한 폴더에 섞여서
+ *   · 보관 개수 정리가 **다른 환경의 백업을 지우고**
+ *   · 이력에서 어느 클러스터의 것인지 구분할 수 없고
+ *   · 내보내 apply 할 때 **다른 환경의 YAML 을 복원**할 수 있었다.
+ *
+ * 구분자가 `~` 인 이유: cmSeg 가 허용하는 글자에 `~` 가 없으므로 **항상 4조각으로 쪼개진다.**
+ * `__` 를 쓰면 cmSeg 가 만든 `__`(연속된 특수문자)와 구분되지 않는다.
+ */
+const cmBackupKey = (origin: CmBackupOrigin, ns: string, name: string) =>
+  [cmSeg(origin.host ?? ''), cmSeg(origin.context ?? ''), cmSeg(ns), cmSeg(name)].join('~')
+
+/**
+ * 폴더명에서 (namespace, name) 을 되읽는다.
+ * `~` 가 없는 폴더는 v2.6.0 이전에 만든 `ns__name` 이다 — 버리지 않고 환경 미기록으로 읽는다.
+ */
+function cmParseDir(dir: string): { namespace: string; name: string } | null {
+  if (dir.includes('~')) {
+    const p = dir.split('~')
+    if (p.length !== 4 || !p[2] || !p[3]) return null
+    return { namespace: p[2], name: p[3] }
+  }
+  const sep = dir.indexOf('__')
+  if (sep <= 0) return null // 우리가 만든 폴더가 아니다
+  return { namespace: dir.slice(0, sep), name: dir.slice(sep + 2) }
+}
+
+/**
+ * 백업마다 환경을 적어 두는 사이드카(`<stamp>.json`). 평문이다.
+ *
+ * host·별칭·컨텍스트·계정은 비밀이 아니고(비밀은 `.dat` 안의 값이다), 평문이면
+ * **safeStorage 로 `.dat` 를 못 읽는 상황(다른 OS 사용자)에서도 "어느 환경이었는지" 는 남는다.**
+ * 목록을 그릴 때마다 20개를 복호화하지 않아도 되는 것도 이유다.
+ */
+const cmMetaName = (datFile: string) => datFile.replace(/\.dat$/, '.json')
+
+async function cmReadOrigin(dir: string, datFile: string): Promise<CmBackupOrigin | undefined> {
+  try {
+    const raw = await readFile(path.join(dir, cmMetaName(datFile)), 'utf-8')
+    const o = JSON.parse(raw) as CmBackupOrigin
+    if (!o || typeof o !== 'object') return undefined
+    // 폴더명에서 유추하지 않는다 — cmSeg 를 거친 값은 원본이 아니다(`a@b` → `a_b`)
+    return { host: o.host, context: o.context, alias: o.alias, user: o.user }
+  } catch {
+    return undefined // v2.6.0 이전 백업 또는 사이드카 유실
+  }
+}
+
 /** cm 하나당 보관 개수 — 무한정 쌓이지 않게. 오래된 것부터 지운다 */
 const CM_BACKUP_KEEP = 20
+
+/**
+ * 지금 이 세션이 가리키는 환경.
+ *
+ * context 조회는 **실패해도 막지 않는다** — kubeconfig 가 없거나 권한이 없는 서버도 있고,
+ * 그렇다고 백업·적용을 못 하게 만들면 안 된다. 못 읽으면 host 만으로 폴더를 가른다.
+ * (별칭은 렌더러가 가진 값이라 인자로 받는다 — 메인에는 탭 이름이 없다)
+ */
+async function cmOriginOf(sessionId: string, alias?: string): Promise<CmBackupOrigin> {
+  const s = sessions.get(sessionId)
+  const origin: CmBackupOrigin = {
+    host: s?.lastConfig?.host,
+    user: s?.lastConfig?.username,
+    alias: alias?.trim() || undefined,
+  }
+  if (s?.client) {
+    const r = await execCapture(s.client, 'kubectl config current-context 2>/dev/null').catch(() => null)
+    const ctx = (r?.out ?? '').trim()
+    // 한 줄짜리 컨텍스트 이름만 받는다. 오류 문구가 섞여 오면 환경 이름으로 쓰면 안 된다.
+    if (r?.code === 0 && ctx && !ctx.includes('\n') && ctx.length <= 253) origin.context = ctx
+  }
+  return origin
+}
 
 /** kubectl 을 그 세션에서 실행 — 실패 메시지는 kubectl 원문을 그대로 올린다(권한·컨텍스트 문제를 감추지 않는다) */
 async function kubectlJson(
@@ -3873,9 +3949,11 @@ ipcMain.handle(
       changes: Record<string, string>
       /** 불러온 시점의 resourceVersion — 이 값이 달라졌으면 적용하지 않는다 */
       baseResourceVersion: string
+      /** 세션 별칭(표시용). 백업 이력에서 "어느 세션에서 고쳤는지" 를 답하기 위해 함께 남긴다 */
+      alias?: string
     },
   ): Promise<ConfigMapPatchResult> => {
-    const { sessionId, namespace, name, changes, baseResourceVersion } = payload
+    const { sessionId, namespace, name, changes, baseResourceVersion, alias } = payload
     const keys = Object.keys(changes)
     if (keys.length === 0) return { ok: false, error: '변경할 항목이 없습니다.' }
     const client = sessions.get(sessionId)?.client
@@ -3897,13 +3975,20 @@ ipcMain.handle(
 
       // 2) 백업을 **먼저** 남긴다. 실패하면 적용하지 않는다 — 되돌릴 수단 없이 클러스터를 바꾸지 않는다.
       //    (파일 저장도 같은 규칙이다: 백업 실패 시 저장 중단)
-      const dir = path.join(cmBackupDir(), cmBackupKey(namespace, name))
+      //    환경(host·context)까지 폴더에 넣어 다른 클러스터의 백업과 섞이지 않게 한다.
+      const origin = await cmOriginOf(sessionId, alias)
+      const dir = path.join(cmBackupDir(), cmBackupKey(origin, namespace, name))
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const backupPath = path.join(dir, `${stamp}.dat`)
       try {
         await mkdir(dir, { recursive: true })
         // 값에 토큰·비밀번호가 그대로 들어 있다 → 평문으로 두지 않는다
         await writeFileAtomic(backupPath, encryptStr(yaml))
+        // 환경 사이드카는 실패해도 적용을 막지 않는다 — 되돌릴 YAML 은 이미 남았고,
+        // 여기서 중단하면 '표시용 정보' 때문에 변경을 못 하게 된다. 그 백업만 미기록으로 보인다.
+        await writeFileAtomic(path.join(dir, cmMetaName(`${stamp}.dat`)), JSON.stringify(origin)).catch(
+          () => undefined,
+        )
       } catch (e) {
         return { ok: false, error: '백업에 실패해 적용하지 않았습니다: ' + cleanErrorMessage(e) }
       }
@@ -3920,8 +4005,10 @@ ipcMain.handle(
       // 4) 보관 개수 초과분 정리 (오래된 것부터)
       try {
         const files = (await readdir(dir)).filter((f) => f.endsWith('.dat')).sort()
-        for (const f of files.slice(0, Math.max(0, files.length - CM_BACKUP_KEEP)))
+        for (const f of files.slice(0, Math.max(0, files.length - CM_BACKUP_KEEP))) {
           await unlink(path.join(dir, f)).catch(() => undefined)
+          await unlink(path.join(dir, cmMetaName(f))).catch(() => undefined) // 사이드카를 남기면 고아가 쌓인다
+        }
       } catch {
         /* 정리 실패는 적용 결과에 영향을 주지 않는다 */
       }
@@ -3942,50 +4029,24 @@ ipcMain.handle(
   },
 )
 
-/** 백업 이력 — 되돌릴 것을 고르기 위한 목록 */
-ipcMain.handle('k8s:cmBackupList', async (_evt, { namespace, name }: { namespace: string; name: string }) => {
-  const dir = path.join(cmBackupDir(), cmBackupKey(namespace, name))
-  try {
-    const files = (await readdir(dir)).filter((f) => f.endsWith('.dat'))
-    const out: ConfigMapBackup[] = []
-    for (const f of files) {
-      const st = await stat(path.join(dir, f)).catch(() => null)
-      // 파일을 쓴 시각이 곧 백업 시각이다 — 파일명을 되파싱하지 않는다
-      out.push({
-        at: st?.mtimeMs ?? 0,
-        file: f,
-        namespace,
-        name,
-        sizeBytes: st?.size ?? 0,
-      })
-    }
-    return { ok: true, items: out.sort((a, b) => b.at - a.at) }
-  } catch {
-    return { ok: true, items: [] } // 폴더가 아직 없는 것은 오류가 아니다
-  }
-})
-
 /**
- * **모든** ConfigMap 의 백업을 한 목록으로. "최근에 내가 어디를 바꿨지" 를 답하기 위한 것이라
- * cm 별로 묶지 않고 시각 역순으로 준다.
- *
- * 폴더명은 `ns__name` 이다. k8s 이름에는 `_` 를 쓸 수 없으므로(DNS-1123: 소문자·숫자·`-`·`.`)
- * `__` 는 되돌리기 안전한 구분자다 — 이름 안에 `__` 가 들어갈 수 없기 때문이다.
+ * 백업 폴더 전체를 훑어 목록을 만든다. 한 ConfigMap 만 볼 때도 **폴더 하나만 보지 않는다** —
+ * 같은 ns/이름의 백업이 환경마다 다른 폴더에 있으므로, 그것을 모아 환경 라벨과 함께 보여줘야
+ * "어디를 고쳤는지" 가 드러난다.
  */
-ipcMain.handle('k8s:cmBackupListAll', async () => {
+async function cmScanBackups(only?: { namespace: string; name: string }): Promise<ConfigMapBackup[]> {
   const base = cmBackupDir()
   const out: ConfigMapBackup[] = []
   let dirs: string[]
   try {
     dirs = await readdir(base)
   } catch {
-    return { ok: true, items: [], configMaps: 0 } // 폴더가 아직 없는 것은 오류가 아니다
+    return out // 폴더가 아직 없는 것은 오류가 아니다
   }
   for (const d of dirs) {
-    const sep = d.indexOf('__')
-    if (sep <= 0) continue // 우리가 만든 폴더가 아니다
-    const namespace = d.slice(0, sep)
-    const name = d.slice(sep + 2)
+    const parsed = cmParseDir(d)
+    if (!parsed) continue
+    if (only && (parsed.namespace !== only.namespace || parsed.name !== only.name)) continue
     let files: string[]
     try {
       files = (await readdir(path.join(base, d))).filter((f) => f.endsWith('.dat'))
@@ -3994,12 +4055,39 @@ ipcMain.handle('k8s:cmBackupListAll', async () => {
     }
     for (const f of files) {
       const st = await stat(path.join(base, d, f)).catch(() => null)
-      out.push({ at: st?.mtimeMs ?? 0, file: f, namespace, name, sizeBytes: st?.size ?? 0 })
+      // 파일을 쓴 시각이 곧 백업 시각이다 — 파일명을 되파싱하지 않는다
+      out.push({
+        at: st?.mtimeMs ?? 0,
+        file: f,
+        namespace: parsed.namespace,
+        name: parsed.name,
+        sizeBytes: st?.size ?? 0,
+        dir: d,
+        origin: await cmReadOrigin(path.join(base, d), f),
+      })
     }
   }
-  out.sort((a, b) => b.at - a.at)
+  return out.sort((a, b) => b.at - a.at)
+}
+
+/** 백업 이력 — 되돌릴 것을 고르기 위한 목록 (이 ConfigMap, 모든 환경) */
+ipcMain.handle('k8s:cmBackupList', async (_evt, { namespace, name }: { namespace: string; name: string }) => {
+  return { ok: true, items: await cmScanBackups({ namespace, name }) }
+})
+
+/**
+ * **모든** ConfigMap 의 백업을 한 목록으로. "최근에 내가 어디를 바꿨지" 를 답하기 위한 것이라
+ * cm 별로 묶지 않고 시각 역순으로 준다.
+ */
+ipcMain.handle('k8s:cmBackupListAll', async () => {
+  const out = await cmScanBackups()
   // 화면에 200 건 넘게 뿌릴 이유가 없다. 잘렸다는 사실은 개수로 드러난다(configMaps · items.length)
   return { ok: true, items: out.slice(0, 200), configMaps: new Set(out.map((b) => `${b.namespace}/${b.name}`)).size }
+})
+
+/** 지금 세션이 가리키는 환경 — 이력의 백업이 '다른 환경의 것'인지 화면에서 가리기 위해 쓴다 */
+ipcMain.handle('k8s:cmEnv', async (_evt, { sessionId, alias }: { sessionId: string; alias?: string }) => {
+  return { ok: true, origin: await cmOriginOf(sessionId, alias) }
 })
 
 /**
@@ -4008,10 +4096,11 @@ ipcMain.handle('k8s:cmBackupListAll', async () => {
  */
 ipcMain.handle(
   'k8s:cmBackupExport',
-  async (_evt, { namespace, name, file }: { namespace: string; name: string; file: string }) => {
-    // 경로 조작 방어 — 파일명만 받는다
-    if (file.includes('/') || file.includes('\\') || file.includes('..')) return { saved: false, error: '잘못된 파일명입니다.' }
-    const src = path.join(cmBackupDir(), cmBackupKey(namespace, name), file)
+  async (_evt, { dir, file, name }: { dir: string; file: string; name: string }) => {
+    // 경로 조작 방어 — 폴더명·파일명만 받는다(둘 다 목록이 돌려준 값 그대로여야 한다)
+    const bad = (v: string) => !v || v.includes('/') || v.includes('\\') || v.includes('..')
+    if (bad(file) || bad(dir)) return { saved: false, error: '잘못된 경로입니다.' }
+    const src = path.join(cmBackupDir(), dir, file)
     let yaml: string
     try {
       yaml = decryptStr(await readFile(src, 'utf-8')) ?? ''
