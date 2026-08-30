@@ -486,8 +486,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     const next: Record<string, string> = {}
     const changed: string[] = []
     for (const t of cfg?.targets ?? []) {
-      // 판정에 영향을 주는 것만 본다 — 이름·묶음·메모를 고쳤다고 결과를 버릴 이유는 없다
-      const sig = JSON.stringify({ p: t.path, m: t.method, b: t.body, h: t.headers, e: t.expectStatus, c: t.checks, a: t.auth })
+      const sig = targetSig(t)
       next[t.id] = sig
       if (targetSigsRef.current[t.id] !== undefined && targetSigsRef.current[t.id] !== sig) changed.push(t.id)
     }
@@ -503,6 +502,9 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   const testTarget = async (t: PortalTarget) => {
     const c = cfgRef.current
     if (!c) return
+    // 시험이 도는 동안 사용자가 그 대상을 고칠 수 있다. 그때 돌아온 결과는 **다른 설정의 결과**이므로
+    // 화면에 올리지 않는다 — 올리면 고친 뒤인데 고치기 전 판정이 초록으로 떠 있게 된다.
+    const sigAtStart = targetSig(t)
     setTesting(t.id)
     try {
       // 시험은 항상 새 토큰으로 — 설정을 고치고 눌렀는데 낡은 토큰으로 나가면
@@ -546,6 +548,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       const suggestValues = wantSuggest && suggest.length === 0 ? suggestValueChecks(r.body) : []
       const body = (r.body ?? '').trim()
       if (body) detail.push('', '응답 앞부분:', body.slice(0, 400) + (body.length > 400 ? '…' : ''))
+      const now = cfgRef.current?.targets.find((x) => x.id === t.id)
+      if (!now || targetSig(now) !== sigAtStart) return // 시험 중에 설정이 바뀌었다
       setTestResult((m) => ({
         ...m,
         [t.id]: {
@@ -980,6 +984,14 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
 // ── 설정 ────────────────────────────────────────────────────────
 // 드롭다운 문구는 describeCheck 가 만드는 문장과 같은 말을 쓴다 —
 // 고를 때와 배지에 찍힐 때 표현이 다르면 같은 조건인지 알아보기 어렵다.
+/**
+ * 대상의 '판정에 영향을 주는' 부분만 뽑은 서명.
+ * 이름·묶음·메모를 고쳤다고 시험 결과를 버릴 이유는 없다 — 그것들은 판정과 무관하다.
+ */
+function targetSig(t: PortalTarget): string {
+  return JSON.stringify({ p: t.path, m: t.method, b: t.body, h: t.headers, e: t.expectStatus, c: t.checks, a: t.auth })
+}
+
 const CHECK_OPS: { v: PortalCheck['op']; label: string; needsValue: boolean }[] = [
   { v: 'nonEmptyArray', label: '항목 1개 이상 (목록)', needsValue: false },
   { v: 'exists', label: '값 있음', needsValue: false },
@@ -1173,7 +1185,7 @@ function ConfigView({
             <div className={labelCls}>기본 주소 — 도메인이 바뀌면 여기만 고치면 됩니다</div>
             <input
               className={
-                inputCls + (cfg.baseUrl.trim() ? '' : ' border-amber-500/60 bg-amber-500/5')
+                inputCls + ' w-full' + (cfg.baseUrl.trim() ? '' : ' border-amber-500/60 bg-amber-500/5')
               }
               value={cfg.baseUrl}
               // 실제 쓸 법한 주소를 예시로 두면 '이미 입력된 값' 으로 착각한다(사용자가 실제로 그랬다).
