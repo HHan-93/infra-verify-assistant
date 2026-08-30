@@ -853,7 +853,7 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
             찾지 못했을 때를 위한 것이니 편한 쪽을 쓰세요.
           </p>
           <textarea
-            className={`${inputCls} h-20 font-mono`}
+            className={`${inputCls} h-20 w-full font-mono`}
             value={text}
             placeholder="curl 'https://...' -H 'accept: application/json' ..."
             onChange={(e) => setText(e.target.value)}
@@ -886,7 +886,15 @@ const CHECK_OPS: { v: PortalCheck['op']; label: string; needsValue: boolean }[] 
   { v: 'regex', label: '정규식 일치', needsValue: true },
 ]
 
-const inputCls = 'w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-blue-500/50'
+/**
+ * 입력칸 공용 클래스. **폭은 여기서 정하지 않는다.**
+ *
+ * 예전에는 앞에 `w-full` 이 있었는데, 그러면 `${inputCls} w-48` 처럼 좁게 쓰려는 곳에서
+ * 생성된 CSS 의 `.w-full` 이 뒤에 정의돼 이겨버린다(클래스를 쓴 순서는 우선순위와 무관하다).
+ * 헤더 편집 줄에서 이름 칸이 100% 를 먹고 값 칸이 몇 픽셀로 찌그러진 것이 그 결과였다.
+ * 시나리오 편집기에서 같은 원인으로 고급 설정이 가로로 넘친 전례가 있다.
+ */
+const inputCls = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-blue-500/50'
 const labelCls = 'text-[10.5px] text-gray-500'
 
 function ConfigView({
@@ -1102,7 +1110,7 @@ function ConfigView({
               개발자도구에서 복사한 토큰. 만료되면 감시가 멈추므로, 로그인 API 경로를 아직 모를 때 잠깐
               확인하는 용도로만 쓰세요 — 긴 검증에는 위 <b className="text-gray-400">아이디/비밀번호 로그인</b> 을 쓰세요.
             </div>
-            <input className={inputCls} value={cfg.auth.token ?? ''} onChange={(e) => setAuth({ token: e.target.value })} />
+            <input className={`${inputCls} w-full`} value={cfg.auth.token ?? ''} onChange={(e) => setAuth({ token: e.target.value })} />
           </>
         )}
         {cfg.auth.mode === 'login' && (
@@ -1131,23 +1139,23 @@ function ConfigView({
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <div className={labelCls}>로그인 API 경로</div>
-                    <input className={inputCls} value={cfg.auth.loginPath ?? ''} onChange={(e) => setAuth({ loginPath: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.loginPath ?? ''} onChange={(e) => setAuth({ loginPath: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls} title="응답 JSON 안에서 토큰이 있는 자리. 예: data.accessToken">
                       토큰 위치 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                     </div>
-                    <input className={inputCls} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls}>계정</div>
-                    <input className={inputCls} value={cfg.auth.username ?? ''} onChange={(e) => setAuth({ username: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.username ?? ''} onChange={(e) => setAuth({ username: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls}>
                       비밀번호 <span className="text-gray-600">· OS 키체인에 암호화 저장</span>
                     </div>
-                    <input type="password" className={inputCls} value={cfg.auth.password ?? ''} onChange={(e) => setAuth({ password: e.target.value })} />
+                    <input type="password" className={`${inputCls} w-full`} value={cfg.auth.password ?? ''} onChange={(e) => setAuth({ password: e.target.value })} />
                   </div>
                 </div>
 
@@ -1191,19 +1199,19 @@ function ConfigView({
                     <div className={labelCls} title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다">
                       로그인 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                     </div>
-                    <input className={inputCls} value={cfg.auth.loginBody ?? ''} onChange={(e) => setAuth({ loginBody: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.loginBody ?? ''} onChange={(e) => setAuth({ loginBody: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls}>토큰 헤더 이름</div>
-                    <input className={inputCls} value={cfg.auth.header ?? ''} onChange={(e) => setAuth({ header: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.header ?? ''} onChange={(e) => setAuth({ header: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls}>헤더 형식</div>
-                    <input className={inputCls} value={cfg.auth.headerFormat ?? ''} placeholder="Bearer {token}" onChange={(e) => setAuth({ headerFormat: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.headerFormat ?? ''} placeholder="Bearer {token}" onChange={(e) => setAuth({ headerFormat: e.target.value })} />
                   </div>
                   <div className="col-span-2">
                     <div className={labelCls}>쿠키 이름 <span className="text-gray-600">· 토큰을 쿠키로도 보내야 할 때만</span></div>
-                    <input className={inputCls} value={cfg.auth.cookieName ?? ''} placeholder="accessToken" onChange={(e) => setAuth({ cookieName: e.target.value })} />
+                    <input className={`${inputCls} w-full`} value={cfg.auth.cookieName ?? ''} placeholder="accessToken" onChange={(e) => setAuth({ cookieName: e.target.value })} />
                   </div>
                   <div>
                     <div className={labelCls} title="0 이면 만료된 뒤(401)에만 재발급합니다. 토큰 수명이 10분이면 8 정도">
@@ -1212,7 +1220,7 @@ function ConfigView({
                     <input
                       type="number"
                       min={0}
-                      className={inputCls}
+                      className={`${inputCls} w-full`}
                       value={cfg.auth.reissueMinutes ?? 0}
                       onChange={(e) => setAuth({ reissueMinutes: Math.max(0, Number(e.target.value) || 0) })}
                     />
@@ -1222,7 +1230,7 @@ function ConfigView({
                       만료를 뜻하는 응답 문구 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                     </div>
                     <input
-                      className={inputCls}
+                      className={`${inputCls} w-full`}
                       value={cfg.auth.expiredBodyMatch ?? ''}
                       placeholder="TOKEN_NOT_VERIFY"
                       onChange={(e) => setAuth({ expiredBodyMatch: e.target.value })}
@@ -1248,7 +1256,7 @@ function ConfigView({
             <input
               type="number"
               min={1}
-              className={inputCls}
+              className={`${inputCls} w-full`}
               value={cfg.intervalSec}
               onChange={(e) => set({ intervalSec: Math.max(1, Number(e.target.value) || 1) })}
             />
@@ -1259,7 +1267,7 @@ function ConfigView({
               type="number"
               min={1000}
               step={500}
-              className={inputCls}
+              className={`${inputCls} w-full`}
               value={cfg.timeoutMs}
               onChange={(e) => set({ timeoutMs: Math.max(1000, Number(e.target.value) || 1000) })}
             />
@@ -1269,7 +1277,7 @@ function ConfigView({
             <input
               type="number"
               min={1}
-              className={inputCls}
+              className={`${inputCls} w-full`}
               value={cfg.successStreak}
               onChange={(e) => set({ successStreak: Math.max(1, Number(e.target.value) || 1) })}
             />
@@ -1316,7 +1324,7 @@ function ConfigView({
               (헤더·본문까지 그대로 가져옵니다. 토큰·쿠키는 매번 새로 붙이므로 저장하지 않습니다)
             </div>
             <textarea
-              className={`${inputCls} mt-1 h-16 font-mono`}
+              className={`${inputCls} mt-1 h-16 w-full font-mono`}
               value={curlNew}
               autoFocus
               placeholder="curl 'https://…' -H 'accept: application/json' …"
@@ -1483,7 +1491,7 @@ function ConfigView({
                     <div className="text-[10px] uppercase tracking-wide text-gray-500">1 · 무엇을 부르나</div>
                     <div>
                       <div className={labelCls}>이름 — 화면에 이 이름으로 보입니다</div>
-                      <input className={inputCls} value={t.name} onChange={(e) => setTarget(t.id, { name: e.target.value })} />
+                      <input className={`${inputCls} w-full`} value={t.name} onChange={(e) => setTarget(t.id, { name: e.target.value })} />
                     </div>
                     <div className="grid grid-cols-[auto_1fr_auto] gap-2">
                       <div>
@@ -1504,7 +1512,7 @@ function ConfigView({
                           (개발자도구 Network → Fetch/XHR) · <span className="text-blue-300/90">cURL 을 붙여넣어도 알아서 읽습니다</span>
                         </div>
                         <input
-                          className={inputCls}
+                          className={`${inputCls} w-full`}
                           value={t.path}
                           placeholder="예: /v1/contrabass/admin/compute/servers?size=2000&page=0"
                           onChange={(e) => {
@@ -1621,14 +1629,14 @@ function ConfigView({
                         <div className="grid grid-cols-2 gap-2">
                           <div>
                             <div className={labelCls}>페이지 묶음 (같은 이름끼리 모아 표시)</div>
-                            <input className={inputCls} value={t.group ?? ''} placeholder="인스턴스 상세" onChange={(e) => setTarget(t.id, { group: e.target.value })} />
+                            <input className={`${inputCls} w-full`} value={t.group ?? ''} placeholder="인스턴스 상세" onChange={(e) => setTarget(t.id, { group: e.target.value })} />
                           </div>
                           <div>
                             <div className={labelCls}>연속 성공 (비우면 전체 설정값)</div>
                             <input
                               type="number"
                               min={1}
-                              className={inputCls}
+                              className={`${inputCls} w-full`}
                               value={t.successStreak ?? ''}
                               placeholder={String(cfg.successStreak)}
                               onChange={(e) => setTarget(t.id, { successStreak: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
@@ -1639,7 +1647,7 @@ function ConfigView({
                       <div>
                         <div className={labelCls}>정상 HTTP 상태 (쉼표)</div>
                         <input
-                          className={inputCls}
+                          className={`${inputCls} w-full`}
                           value={(t.expectStatus ?? [200]).join(', ')}
                           onChange={(e) =>
                             setTarget(t.id, {
@@ -1653,14 +1661,14 @@ function ConfigView({
                       </div>
                       <div>
                         <div className={labelCls}>메모 (기대 지연 등)</div>
-                        <input className={inputCls} value={t.note ?? ''} onChange={(e) => setTarget(t.id, { note: e.target.value })} />
+                        <input className={`${inputCls} w-full`} value={t.note ?? ''} onChange={(e) => setTarget(t.id, { note: e.target.value })} />
                       </div>
                     </div>
 
                     {t.method === 'POST' && (
                       <div>
                         <div className={labelCls}>요청 본문 (JSON)</div>
-                        <textarea className={`${inputCls} h-14 font-mono`} value={t.body ?? ''} onChange={(e) => setTarget(t.id, { body: e.target.value })} />
+                        <textarea className={`${inputCls} h-14 w-full font-mono`} value={t.body ?? ''} onChange={(e) => setTarget(t.id, { body: e.target.value })} />
                       </div>
                     )}
                     {/* 추가 헤더 — cURL 로 가져온 것도 여기 쌓인다. 뭘 보내는지 보여야 원인을 짚을 수 있다 */}
@@ -1688,9 +1696,9 @@ function ConfigView({
                               }}
                             />
                             <input
-                              className={`${inputCls} flex-1`}
+                              className={`${inputCls} min-w-0 flex-1`}
                               value={v}
-                              placeholder="값"
+                              placeholder="값 (예: application/json)"
                               onChange={(e) => setTarget(t.id, { headers: { ...(t.headers ?? {}), [k]: e.target.value } })}
                             />
                             <button
