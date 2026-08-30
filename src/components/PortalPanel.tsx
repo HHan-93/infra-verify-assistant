@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardPaste,
   ShieldCheck,
   HelpCircle,
   ChevronRight,
@@ -458,7 +459,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   // ── 단건 시험 (설정 화면에서 "이 경로가 맞나?" 를 바로 확인) ───
   const [testing, setTesting] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<
-    Record<string, { ok: boolean; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
+    Record<string, { ok: boolean; at: number; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
   >({})
   const testTarget = async (t: PortalTarget) => {
     const c = cfgRef.current
@@ -495,7 +496,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
         !j.ok && (t.checks ?? []).some((c) => c.op === 'nonEmptyArray') ? suggestArrayPaths(r.body) : []
       const body = (r.body ?? '').trim()
       if (body) detail.push('', '응답 앞부분:', body.slice(0, 400) + (body.length > 400 ? '…' : ''))
-      setTestResult((m) => ({ ...m, [t.id]: { ok: j.ok, lines, detail, suggest: suggest.length ? suggest : undefined } }))
+      setTestResult((m) => ({ ...m, [t.id]: { ok: j.ok, at: Date.now(), lines, detail, suggest: suggest.length ? suggest : undefined } }))
     } finally {
       setTesting(null)
     }
@@ -895,7 +896,7 @@ function ConfigView({
   onChange: (c: PortalConfig) => void
   onTest: (t: PortalTarget) => void
   testing: string | null
-  testResult: Record<string, { ok: boolean; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
+  testResult: Record<string, { ok: boolean; at: number; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
   /** 추천 경로를 눌러 반영한 뒤, 그 안내를 지운다 */
   onClearSuggest: (id: string) => void
   onTestLogin: () => void
@@ -914,6 +915,11 @@ function ConfigView({
   const [authOpen, setAuthOpen] = useState(true)
   /** 거의 건드리지 않는 칸(전송 방식·본문 템플릿·만료 대응)은 접어 둔다 — 기본값으로 대개 동작한다 */
   const [advOpen, setAdvOpen] = useState(false)
+  /** 대상별 '고급' 을 펼친 것 — 묶음·연속 성공·상태 코드·토큰·본문·헤더·메모 */
+  const [advTarget, setAdvTarget] = useState<string | null>(null)
+  /** 목록 위의 cURL 붙여넣기 상자 (새 대상을 만드는 가장 확실한 길) */
+  const [curlNew, setCurlNew] = useState<string | null>(null)
+  const [curlErr, setCurlErr] = useState('')
   useEffect(() => {
     if (loginTest?.ok) setAuthOpen(false)
   }, [loginTest?.ok])
@@ -937,6 +943,49 @@ function ConfigView({
     setExpanded(t.id)
   }
   const removeTarget = (id: string) => onChange({ ...cfg, targets: cfg.targets.filter((t) => t.id !== id) })
+
+  /**
+   * 브라우저에서 복사한 cURL 로 **새 대상을 바로 만든다.**
+   *
+   * 예전에는 대상을 먼저 추가하고 펼쳐야 붙여넣는 칸이 나왔다 — 순서가 거꾸로다. 사람이 하는
+   * 일은 "개발자도구에서 이 요청을 복사했다" 로 시작한다.
+   * 이름은 경로의 마지막 조각으로 채워 둔다(빈 이름보다 낫고, 어차피 바로 고칠 수 있다).
+   */
+  const addFromCurl = (text: string) => {
+    const parsed = parseCurl(text)
+    if (!parsed) {
+      setCurlErr("cURL 로 읽지 못했습니다 — 개발자도구 Network 에서 요청을 우클릭 → 'Copy as cURL' 한 내용을 그대로 붙여넣으세요.")
+      return
+    }
+    const headers = headersFromCurl(parsed.headers)
+    const path = pathFromUrl(cfg, parsed.url)
+    const last = path.split('?')[0].split('/').filter(Boolean).slice(-1)[0]
+    const t: PortalTarget = {
+      id: newTargetId(),
+      name: last || '새 대상',
+      group: '',
+      enabled: true,
+      method: (parsed.method === 'POST' ? 'POST' : parsed.method === 'HEAD' ? 'HEAD' : 'GET') as PortalTarget['method'],
+      path,
+      headers: Object.keys(headers).length ? headers : undefined,
+      body: parsed.body,
+      auth: true,
+      expectStatus: [200],
+      checks: [],
+    }
+    onChange({ ...cfg, targets: [...cfg.targets, t] })
+    setExpanded(t.id)
+    setCurlNew(null)
+    setCurlErr('')
+  }
+
+  /** 접힌 줄에 다는 조건 요약 — 무엇을 정상으로 보는지가 목록에서 보여야 한다 */
+  const checkSummary = (t: PortalTarget) => {
+    const cs = t.checks ?? []
+    if (!cs.length) return null
+    const first = describeCheck(cs[0])
+    return cs.length > 1 ? `${first} 외 ${cs.length - 1}` : first
+  }
 
   return (
     <div className="space-y-3 px-3 pb-3">
@@ -1228,28 +1277,117 @@ function ConfigView({
       {/* 대상 */}
       <div className="rounded border border-white/10 bg-black/20 p-2.5">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="text-[11px] font-medium text-gray-300">감시 대상</span>
-          <span className="text-[10.5px] text-gray-500">
-            브라우저 개발자도구 → Network 에서 그 페이지가 부르는 요청의 경로를 그대로 넣으세요
+          <span className="shrink-0 text-[11px] font-medium text-gray-300">감시 대상</span>
+          <span className="shrink-0 text-[10.5px] text-gray-500">
+            {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim()).length}개 활성
+            {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length).length > 0 && (
+              <span className="text-amber-300/90">
+                {' · '}
+                {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length).length}개 조건 없음
+              </span>
+            )}
           </span>
-          <button onClick={addTarget} className="ml-auto flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/5">
+          <button
+            onClick={() => {
+              setCurlNew(curlNew === null ? '' : null)
+              setCurlErr('')
+            }}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/5"
+          >
+            <ClipboardPaste size={11} /> cURL 로 추가
+          </button>
+          <button onClick={addTarget} className="flex shrink-0 items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/5">
             <Plus size={11} /> 대상 추가
           </button>
         </div>
+        {/* 새 대상을 만드는 가장 확실한 길 — 브라우저가 실제로 보낸 요청을 통째로 가져온다 */}
+        {curlNew !== null && (
+          <div className="mb-2 rounded border border-blue-500/30 bg-blue-500/5 p-2">
+            <div className={labelCls}>
+              개발자도구 Network 에서 요청 우클릭 → <b className="text-gray-300">Copy as cURL</b> 한 내용을 붙여넣으세요
+              (헤더·본문까지 그대로 가져옵니다. 토큰·쿠키는 매번 새로 붙이므로 저장하지 않습니다)
+            </div>
+            <textarea
+              className={`${inputCls} mt-1 h-16 font-mono`}
+              value={curlNew}
+              autoFocus
+              placeholder="curl 'https://…' -H 'accept: application/json' …"
+              onChange={(e) => {
+                setCurlNew(e.target.value)
+                setCurlErr('')
+              }}
+            />
+            {curlErr && <p className="mt-1 text-[10.5px] text-amber-300">{curlErr}</p>}
+            <div className="mt-1 flex items-center gap-2">
+              <button
+                onClick={() => addFromCurl(curlNew)}
+                className="rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-200 hover:bg-white/5"
+              >
+                대상으로 만들기
+              </button>
+              <button
+                onClick={() => {
+                  setCurlNew(null)
+                  setCurlErr('')
+                }}
+                className="rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 hover:bg-white/5"
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        )}
         <div className="space-y-1.5">
           {cfg.targets.map((t) => {
             const isOpen = expanded === t.id
             const res = testResult[t.id]
             return (
-              <div key={t.id} className="rounded border border-white/10 bg-black/20">
+              <div
+                key={t.id}
+                className={
+                  'rounded border bg-black/20 ' +
+                  // 조건이 없으면 상태 코드만 보고 정상으로 친다 — SPA 껍데기는 백엔드가 죽어도 200 이라
+                  // 그 사실이 목록에서 보여야 한다(끄라는 게 아니라 의도한 것인지 알아보게)
+                  (t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length
+                    ? 'border-amber-500/40'
+                    : 'border-white/10')
+                }
+              >
                 <div className="flex items-center gap-2 px-2 py-1.5">
                   <input type="checkbox" checked={t.enabled} onChange={(e) => setTarget(t.id, { enabled: e.target.checked })} title="감시 켜기/끄기" />
                   <button onClick={() => setExpanded(isOpen ? null : t.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
                     {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                    <span className="text-[11.5px] text-gray-200">{t.name || '(이름 없음)'}</span>
-                    <span className="truncate text-[10.5px] text-gray-500">
+                    <span className="shrink-0 text-[11.5px] text-gray-200">{t.name || '(이름 없음)'}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-500">
                       {t.method} {t.path || '경로 미입력'}
                     </span>
+                    {/* 무엇을 정상으로 보는지 · 마지막 시험이 어땠는지 — 펼치지 않고 알 수 있어야 한다 */}
+                    {checkSummary(t) ? (
+                      <span
+                        className="shrink-0 truncate rounded bg-white/5 px-1.5 text-[10px] text-gray-400"
+                        title={(t.checks ?? []).map(describeCheck).join(' · 그리고 ')}
+                      >
+                        {checkSummary(t)}
+                      </span>
+                    ) : (
+                      (t.path ?? '').trim() && (
+                        <span
+                          className="shrink-0 whitespace-nowrap rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-300"
+                          title="본문 조건이 없어 상태 코드만 봅니다. 정적 페이지는 백엔드가 죽어도 200 이 옵니다"
+                        >
+                          조건 없음 · 상태 코드만
+                        </span>
+                      )
+                    )}
+                    {res && (
+                      <span
+                        className={
+                          'shrink-0 whitespace-nowrap text-[10px] ' + (res.ok ? 'text-emerald-300/90' : 'text-red-300/90')
+                        }
+                      >
+                        {fmtClock(res.at)} {res.ok ? '정상' : '비정상'}
+                      </span>
+                    )}
                   </button>
                   <button
                     onClick={() => onTest(t)}
@@ -1263,7 +1401,8 @@ function ConfigView({
                   </button>
                 </div>
 
-                {res && (
+                {/* 접혀 있을 때는 줄 끝 배지로 충분하다. 다만 **실패는 접지 않는다** — 사유가 곧 다음에 할 일이다 */}
+                {res && (isOpen || !res.ok) && (
                   <div className={`mx-2 mb-2 rounded border px-2 py-1.5 text-[10.5px] ${res.ok ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-red-500/30 bg-red-500/10 text-red-200'}`}>
                     <div className="mb-0.5 flex items-center gap-1 font-medium">
                       {res.ok ? <Check size={11} /> : <AlertTriangle size={11} />}
@@ -1325,27 +1464,11 @@ function ConfigView({
 
                 {isOpen && (
                   <div className="space-y-2 border-t border-white/5 px-2 py-2">
-                    <CurlImport cfg={cfg} onApply={(p) => setTarget(t.id, p)} />
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <div className={labelCls}>이름</div>
-                        <input className={inputCls} value={t.name} onChange={(e) => setTarget(t.id, { name: e.target.value })} />
-                      </div>
-                      <div>
-                        <div className={labelCls}>페이지 묶음 (같은 이름끼리 모아 표시)</div>
-                        <input className={inputCls} value={t.group ?? ''} placeholder="인스턴스 상세" onChange={(e) => setTarget(t.id, { group: e.target.value })} />
-                      </div>
-                      <div>
-                        <div className={labelCls}>연속 성공 (비우면 전체 설정값)</div>
-                        <input
-                          type="number"
-                          min={1}
-                          className={inputCls}
-                          value={t.successStreak ?? ''}
-                          placeholder={String(cfg.successStreak)}
-                          onChange={(e) => setTarget(t.id, { successStreak: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
-                        />
-                      </div>
+                    {/* ── 1 · 무엇을 부르나 ── */}
+                    <div className="text-[10px] uppercase tracking-wide text-gray-500">1 · 무엇을 부르나</div>
+                    <div>
+                      <div className={labelCls}>이름 — 화면에 이 이름으로 보입니다</div>
+                      <input className={inputCls} value={t.name} onChange={(e) => setTarget(t.id, { name: e.target.value })} />
                     </div>
                     <div className="grid grid-cols-[auto_1fr_auto] gap-2">
                       <div>
@@ -1398,79 +1521,10 @@ function ConfigView({
                         토큰 첨부
                       </label>
                     </div>
-                    {t.method === 'POST' && (
-                      <div>
-                        <div className={labelCls}>요청 본문 (JSON)</div>
-                        <textarea className={`${inputCls} h-14 font-mono`} value={t.body ?? ''} onChange={(e) => setTarget(t.id, { body: e.target.value })} />
-                      </div>
-                    )}
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <div className={labelCls}>정상 HTTP 상태 (쉼표)</div>
-                        <input
-                          className={inputCls}
-                          value={(t.expectStatus ?? [200]).join(', ')}
-                          onChange={(e) =>
-                            setTarget(t.id, {
-                              expectStatus: e.target.value
-                                .split(',')
-                                .map((x) => parseInt(x.trim(), 10))
-                                .filter((n) => !Number.isNaN(n)),
-                            })
-                          }
-                        />
-                      </div>
-                      <div>
-                        <div className={labelCls}>메모 (기대 지연 등)</div>
-                        <input className={inputCls} value={t.note ?? ''} onChange={(e) => setTarget(t.id, { note: e.target.value })} />
-                      </div>
-                    </div>
+                    <CurlImport cfg={cfg} onApply={(p) => setTarget(t.id, p)} />
 
-                    {/* 추가 헤더 — cURL 로 가져온 것도 여기 쌓인다. 뭘 보내는지 보여야 원인을 짚을 수 있다 */}
-                    <div>
-                      <div className="mb-1 flex items-center gap-2">
-                        <span className={labelCls}>추가 헤더</span>
-                        <button
-                          onClick={() => setTarget(t.id, { headers: { ...(t.headers ?? {}), '': '' } })}
-                          className="ml-auto flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/5"
-                        >
-                          <Plus size={10} /> 헤더
-                        </button>
-                      </div>
-                      <div className="space-y-1">
-                        {Object.entries(t.headers ?? {}).map(([k, v], i) => (
-                          <div key={i} className="flex items-center gap-1.5">
-                            <input
-                              className={`${inputCls} w-48`}
-                              value={k}
-                              placeholder="헤더 이름"
-                              onChange={(e) => {
-                                const next: Record<string, string> = {}
-                                for (const [kk, vv] of Object.entries(t.headers ?? {})) next[kk === k ? e.target.value : kk] = vv
-                                setTarget(t.id, { headers: next })
-                              }}
-                            />
-                            <input
-                              className={`${inputCls} flex-1`}
-                              value={v}
-                              placeholder="값"
-                              onChange={(e) => setTarget(t.id, { headers: { ...(t.headers ?? {}), [k]: e.target.value } })}
-                            />
-                            <button
-                              onClick={() => {
-                                const next = { ...(t.headers ?? {}) }
-                                delete next[k]
-                                setTarget(t.id, { headers: Object.keys(next).length ? next : undefined })
-                              }}
-                              className="rounded p-1 text-gray-500 hover:bg-white/5 hover:text-red-300"
-                            >
-                              <X size={11} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
+                    {/* ── 2 · 무엇을 정상으로 볼까 (판정의 핵심이라 위로 올린다) ── */}
+                    <div className="text-[10px] uppercase tracking-wide text-gray-500 pt-1">2 · 무엇을 정상으로 볼까</div>
                     {/* 정상 조건 */}
                     <div>
                       <div className="mb-1 flex items-center gap-2">
@@ -1532,6 +1586,112 @@ function ConfigView({
                         </p>
                       )}
                     </div>
+                    {/* ── 3 · 고급 — 대개 기본값 그대로 둔다 ── */}
+                    <button
+                      onClick={() => setAdvTarget(advTarget === t.id ? null : t.id)}
+                      className="flex w-full items-center gap-1.5 pt-1 text-left text-[10px] uppercase tracking-wide text-gray-500 hover:text-gray-300"
+                    >
+                      {advTarget === t.id ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                      3 · 고급
+                      <span className="normal-case tracking-normal text-gray-600">
+                        — 묶음 · 연속 성공 · 상태 코드 · 본문 · 헤더 · 메모
+                      </span>
+                    </button>
+                    {advTarget === t.id && (
+                      <div className="space-y-2 rounded border border-white/10 bg-black/20 p-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <div className={labelCls}>페이지 묶음 (같은 이름끼리 모아 표시)</div>
+                            <input className={inputCls} value={t.group ?? ''} placeholder="인스턴스 상세" onChange={(e) => setTarget(t.id, { group: e.target.value })} />
+                          </div>
+                          <div>
+                            <div className={labelCls}>연속 성공 (비우면 전체 설정값)</div>
+                            <input
+                              type="number"
+                              min={1}
+                              className={inputCls}
+                              value={t.successStreak ?? ''}
+                              placeholder={String(cfg.successStreak)}
+                              onChange={(e) => setTarget(t.id, { successStreak: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
+                            />
+                          </div>
+                        </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <div className={labelCls}>정상 HTTP 상태 (쉼표)</div>
+                        <input
+                          className={inputCls}
+                          value={(t.expectStatus ?? [200]).join(', ')}
+                          onChange={(e) =>
+                            setTarget(t.id, {
+                              expectStatus: e.target.value
+                                .split(',')
+                                .map((x) => parseInt(x.trim(), 10))
+                                .filter((n) => !Number.isNaN(n)),
+                            })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <div className={labelCls}>메모 (기대 지연 등)</div>
+                        <input className={inputCls} value={t.note ?? ''} onChange={(e) => setTarget(t.id, { note: e.target.value })} />
+                      </div>
+                    </div>
+
+                    {t.method === 'POST' && (
+                      <div>
+                        <div className={labelCls}>요청 본문 (JSON)</div>
+                        <textarea className={`${inputCls} h-14 font-mono`} value={t.body ?? ''} onChange={(e) => setTarget(t.id, { body: e.target.value })} />
+                      </div>
+                    )}
+                    {/* 추가 헤더 — cURL 로 가져온 것도 여기 쌓인다. 뭘 보내는지 보여야 원인을 짚을 수 있다 */}
+                    <div>
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className={labelCls}>추가 헤더</span>
+                        <button
+                          onClick={() => setTarget(t.id, { headers: { ...(t.headers ?? {}), '': '' } })}
+                          className="ml-auto flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/5"
+                        >
+                          <Plus size={10} /> 헤더
+                        </button>
+                      </div>
+                      <div className="space-y-1">
+                        {Object.entries(t.headers ?? {}).map(([k, v], i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <input
+                              className={`${inputCls} w-48`}
+                              value={k}
+                              placeholder="헤더 이름"
+                              onChange={(e) => {
+                                const next: Record<string, string> = {}
+                                for (const [kk, vv] of Object.entries(t.headers ?? {})) next[kk === k ? e.target.value : kk] = vv
+                                setTarget(t.id, { headers: next })
+                              }}
+                            />
+                            <input
+                              className={`${inputCls} flex-1`}
+                              value={v}
+                              placeholder="값"
+                              onChange={(e) => setTarget(t.id, { headers: { ...(t.headers ?? {}), [k]: e.target.value } })}
+                            />
+                            <button
+                              onClick={() => {
+                                const next = { ...(t.headers ?? {}) }
+                                delete next[k]
+                                setTarget(t.id, { headers: Object.keys(next).length ? next : undefined })
+                              }}
+                              className="rounded p-1 text-gray-500 hover:bg-white/5 hover:text-red-300"
+                            >
+                              <X size={11} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                      </div>
+                    )}
+
                   </div>
                 )}
               </div>
