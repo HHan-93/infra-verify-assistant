@@ -492,8 +492,14 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       }
       // 조건 경로가 안 맞아 실패했을 때, 이 응답에서 배열이 실제로 어디 있는지 짚어준다.
       // (포털마다 content · data · data.items 로 제각각이라 눈으로 찾게 두면 시간이 걸린다)
-      const suggest =
-        !j.ok && (t.checks ?? []).some((c) => c.op === 'nonEmptyArray') ? suggestArrayPaths(r.body) : []
+      /**
+       * 배열 후보를 언제 제안할까.
+       *  · 조건이 있는데 실패했다 → 경로를 잘못 잡았을 가능성이 크다(원래 목적)
+       *  · **조건이 아예 없다** → 시험은 200 만 보고 '정상' 이라 답하지만 그건 감시가 아니다.
+       *    이때야말로 "이 응답에는 여기 목록이 있다" 를 보여줘야 조건을 만들 수 있다.
+       */
+      const wantSuggest = (t.checks ?? []).length === 0 || (!j.ok && (t.checks ?? []).some((c) => c.op === 'nonEmptyArray'))
+      const suggest = wantSuggest ? suggestArrayPaths(r.body) : []
       const body = (r.body ?? '').trim()
       if (body) detail.push('', '응답 앞부분:', body.slice(0, 400) + (body.length > 400 ? '…' : ''))
       setTestResult((m) => ({ ...m, [t.id]: { ok: j.ok, at: Date.now(), lines, detail, suggest: suggest.length ? suggest : undefined } }))
@@ -869,10 +875,12 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
 }
 
 // ── 설정 ────────────────────────────────────────────────────────
+// 드롭다운 문구는 describeCheck 가 만드는 문장과 같은 말을 쓴다 —
+// 고를 때와 배지에 찍힐 때 표현이 다르면 같은 조건인지 알아보기 어렵다.
 const CHECK_OPS: { v: PortalCheck['op']; label: string; needsValue: boolean }[] = [
-  { v: 'nonEmptyArray', label: '배열이 1개 이상', needsValue: false },
-  { v: 'exists', label: '값이 있음', needsValue: false },
-  { v: 'gte', label: '숫자가 ≥', needsValue: true },
+  { v: 'nonEmptyArray', label: '항목 1개 이상 (목록)', needsValue: false },
+  { v: 'exists', label: '값 있음', needsValue: false },
+  { v: 'gte', label: '숫자가 ~ 이상', needsValue: true },
   { v: 'contains', label: '문자열 포함', needsValue: true },
   { v: 'notContains', label: '문자열 없음', needsValue: true },
   { v: 'regex', label: '정규식 일치', needsValue: true },
@@ -1283,7 +1291,7 @@ function ConfigView({
             {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length).length > 0 && (
               <span className="text-amber-300/90">
                 {' · '}
-                {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length).length}개 조건 없음
+                {cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim() && !(t.checks ?? []).length).length}개는 본문 조건 없음
               </span>
             )}
           </span>
@@ -1373,9 +1381,9 @@ function ConfigView({
                       (t.path ?? '').trim() && (
                         <span
                           className="shrink-0 whitespace-nowrap rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-300"
-                          title="본문 조건이 없어 상태 코드만 봅니다. 정적 페이지는 백엔드가 죽어도 200 이 옵니다"
+                          title="본문 조건이 없어 200 이면 정상으로 칩니다. 화면·정적 응답은 백엔드가 죽어도 200 이 오므로, 이 대상만으로는 복구를 판단하면 안 됩니다. 시험을 눌러 보면 이 응답 안의 목록을 찾아 조건 후보로 제안합니다"
                         >
-                          조건 없음 · 상태 코드만
+                          200 이면 정상 (본문 안 봄)
                         </span>
                       )
                     )}
@@ -1412,7 +1420,14 @@ function ConfigView({
                     {res.suggest && (
                       <div className="mb-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-amber-100">
                         <div className="mb-1">
-                          이 응답에서 <b>배열</b>이 있는 곳입니다. 눌러서 아래 <b>정상 조건</b>의 경로를 바꾸세요.
+                          {(t.checks ?? []).length === 0 ? (
+                            <>
+                              이 응답에는 <b>목록</b>이 들어 있습니다. 눌러서 <b>정상 조건</b>으로 추가하세요 — 지금은
+                              조건이 없어 <b>200 이면 정상</b>으로 칩니다.
+                            </>
+                          ) : (
+                            <>이 응답에서 <b>목록</b>이 있는 곳입니다. 눌러서 아래 <b>정상 조건</b>의 경로를 바꾸세요.</>
+                          )}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
                           {res.suggest.map((s) => (
@@ -1528,7 +1543,9 @@ function ConfigView({
                     {/* 정상 조건 */}
                     <div>
                       <div className="mb-1 flex items-center gap-2">
-                        <span className={labelCls}>정상 조건 — 전부 통과해야 정상. 비우면 상태 코드만 봅니다</span>
+                        <span className={labelCls}>
+                          정상 조건 — 전부 통과해야 정상. <b className="text-gray-400">비우면 응답 본문을 보지 않고 200 이면 정상</b>으로 칩니다
+                        </span>
                         <button
                           onClick={() => setTarget(t.id, { checks: [...(t.checks ?? []), { path: '', op: 'nonEmptyArray' }] })}
                           className="ml-auto flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/5"
@@ -1538,9 +1555,11 @@ function ConfigView({
                       </div>
                       {(t.checks ?? []).length === 0 && (
                         <p className="text-[10.5px] text-amber-300/80">
-                          조건이 없으면 200 만 보고 정상으로 칩니다. 목록 API 라면{' '}
-                          <span className="text-gray-300">content · 배열이 1개 이상</span> 을 넣으세요 — 200 인데 빈 배열이
-                          오는 구간이 반드시 있습니다.
+                          지금은 <b>200 이면 정상</b>입니다. 목록을 주는 API 라면{' '}
+                          <span className="text-gray-300">content · 항목 1개 이상</span> 을 넣으세요 — DB 는 붙었는데 백엔드가
+                          아직 데이터를 못 읽어 <b>200 인데 빈 목록</b>이 오는 구간이 반드시 있고, 그건 복구가 아닙니다.
+                          <br />
+                          어떤 경로를 넣을지 모르겠으면 <b>⟳ 시험</b>을 누르세요 — 이 응답 안의 목록을 찾아 제안합니다.
                         </p>
                       )}
                       <div className="space-y-1">

@@ -59,22 +59,30 @@ function brief(v: unknown): string {
   return s.length > 60 ? s.slice(0, 60) + '…' : s
 }
 
-/** 조건 하나를 사람 말로 (설정 화면·실패 사유에서 같이 쓴다) */
+/**
+ * 조건 하나를 사람 말로 (설정 화면의 배지·요약, 실패 사유에서 같이 쓴다).
+ *
+ * `대상 · 조건` 형태로 적는다. 예전에는 `data 이(가) 1개 이상인 배열` 처럼 한 문장으로 썼는데
+ *   · 경로가 영문이라 조사를 고를 수 없어 `이(가)` 를 그대로 노출해야 했고
+ *   · `응답 본문 에` 처럼 띄어쓰기가 어긋났으며
+ *   · 목록 배지에서 잘리면 무엇에 대한 조건인지부터 사라졌다.
+ * 가운뎃점으로 끊으면 조사가 필요 없고, 앞부분(대상)이 먼저 읽힌다.
+ */
 export function describeCheck(c: PortalCheck): string {
   const where = c.path ? `${c.path}` : '응답 본문'
   switch (c.op) {
     case 'nonEmptyArray':
-      return `${where} 이(가) 1개 이상인 배열`
+      return `${where} · 항목 1개 이상`
     case 'exists':
-      return `${where} 값이 있음`
+      return `${where} · 값 있음`
     case 'gte':
-      return `${where} ≥ ${c.value ?? 0}`
+      return `${where} · ${c.value ?? 0} 이상`
     case 'contains':
-      return `${where} 에 "${c.value ?? ''}" 포함`
+      return `${where} · "${c.value ?? ''}" 포함`
     case 'notContains':
-      return `${where} 에 "${c.value ?? ''}" 없음`
+      return `${where} · "${c.value ?? ''}" 없음`
     case 'regex':
-      return `${where} 이(가) /${c.value ?? ''}/ 와 일치`
+      return `${where} · 정규식 /${c.value ?? ''}/ 일치`
   }
 }
 
