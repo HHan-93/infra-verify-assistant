@@ -237,7 +237,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     setExpanded(new Set(ids)) // 결과는 기본 펼침
     // 새 실행의 그룹은 새로 접힌 상태에서 시작한다 — 지난 실행에서 펼쳐 둔 키가 우연히 같으면
     // 이번 결과도 펼쳐진 채로 보여 '내가 편 것' 과 구분되지 않는다
-    setExpandedGroups(new Set())
+    setFlippedGroups(new Set())
     setWholeShown(new Set())
   }
 
@@ -305,8 +305,8 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
    * 통째로 읽어야 할 때가 있다.
    */
   const [viewMode, setViewMode] = useState<'group' | 'node'>('group')
-  /** 펼친 그룹(정규화된 출력이 키다). 다수 그룹은 접혀 있는 게 기본이라 여기에 담긴다 */
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  /** 기본 접힘/펼침을 **뒤집은** 그룹 (정규화된 출력이 키다) */
+  const [flippedGroups, setFlippedGroups] = useState<Set<string>>(new Set())
   /** 차이만 보지 않고 전체 출력을 편 그룹 */
   const [wholeShown, setWholeShown] = useState<Set<string>>(new Set())
   const toggleSet = (set: Set<string>, k: string) => {
@@ -315,7 +315,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     else n.add(k)
     return n
   }
-  const toggleGroup = (k: string) => setExpandedGroups((v) => toggleSet(v, k))
+  const toggleGroup = (k: string) => setFlippedGroups((v) => toggleSet(v, k))
   const toggleWhole = (k: string) => setWholeShown((v) => toggleSet(v, k))
 
   /** 세션이 자기 출력에 남기는 이름들 — 이것 때문에 같은 출력이 서로 다르게 갈리는 것을 막는다 */
@@ -701,7 +701,13 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                       const names = g.items.map((x) => nameOf(x.id))
                       const anyFail = g.items.some((x) => isFailed(x.r))
                       const code = g.items[0].r.code
-                      const open = expandedGroups.has(g.key) || (!majority && groups.length > 1) || groups.length === 1
+                      /**
+                       * 기본은 '다수는 접고 소수는 편다'. 사용자가 누르면 그 기본을 뒤집는다.
+                       * (예전에는 기본 펼침을 조건식에 박아 둬서 소수 그룹은 눌러도 접히지 않았다 —
+                       *  화살표가 있는데 아무 일도 안 일어나는 것이 제일 나쁘다)
+                       */
+                      const defaultOpen = groups.length === 1 || !majority
+                      const open = flippedGroups.has(g.key) ? !defaultOpen : defaultOpen
                       const diff = majority || groups.length === 1 ? null : diffLines(groups[0].sample, g.sample)
                       return (
                         <div

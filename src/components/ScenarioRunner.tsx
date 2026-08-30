@@ -1212,6 +1212,11 @@ ${primary?.err ?? ''}`)
     const base = runnerBaseId.current
     const opened = everOpenedRef.current
     return () => {
+      // 일시정지로 멈춰 있는 채 창을 닫으면 실행 루프가 영영 깨어나지 못한 채 남는다.
+      // 셸은 아래에서 반납하므로 이어서 돌 수도 없다 — 중단으로 끝내고 대기 중인 쪽을 깨운다.
+      abortRef.current = true
+      pauseRef.current = false
+      wakeWaiters()
       for (const sid of opened) void window.electronAPI.runnerClose(`${base}-${sid}`)
     }
   }, [])
