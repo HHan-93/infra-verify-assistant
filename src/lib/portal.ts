@@ -403,6 +403,39 @@ export function suggestArrayPaths(body: string | undefined, maxDepth = 3): { pat
   return found.sort((a, b) => b.count - a.count)
 }
 
+/**
+ * 응답에서 **'값' 조건으로 쓸 만한 자리**를 찾는다 — `returnMessage: "COMMON_OK"` 같은 것.
+ *
+ * 왜 필요한가: 목록 API 인 줄 알고 `항목 1개 이상` 을 걸었는데 그 목록이 **원래 0건일 수 있는**
+ * 응답이 있다(시스템 이벤트 알림처럼). 그러면 장애가 아닌데 계속 비정상으로 찍힌다.
+ * 이때 필요한 것은 "백엔드가 실제로 답을 만들었는가" 이고, 그 신호가 응답 봉투의 상태 문구다 —
+ * 게이트웨이 오류 페이지나 SPA 껍데기에는 그 문구가 없다.
+ *
+ * 키 이름으로 고른다(값으로 고르면 우연히 비슷한 문자열을 집는다). 너무 긴 값은 버린다 —
+ * 조건에 박아 두면 서버가 문구를 조금만 바꿔도 깨진다.
+ */
+export function suggestValueChecks(body: string | undefined, maxDepth = 2): { path: string; value: string }[] {
+  const root = parseBody(body)
+  if (!root || typeof root !== 'object') return []
+  const KEY_RE = /(message|status|code|result|state)$/i
+  const found: { path: string; value: string }[] = []
+  const walk = (node: unknown, path: string, depth: number) => {
+    if (found.length >= 4 || depth > maxDepth || !node || typeof node !== 'object' || Array.isArray(node)) return
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      const p = path ? `${path}.${k}` : k
+      if ((typeof v === 'string' || typeof v === 'number') && KEY_RE.test(k)) {
+        const val = String(v).trim()
+        // 숫자만 있는 값(returnCode: "200")은 상태 코드 조건과 겹친다 — 문구 쪽을 우선한다
+        if (val && val.length <= 40) found.push({ path: p, value: val })
+      } else if (v && typeof v === 'object') {
+        walk(v, p, depth + 1)
+      }
+    }
+  }
+  walk(root, '', 0)
+  return found.sort((a, b) => Number(/^\d+$/.test(a.value)) - Number(/^\d+$/.test(b.value))).slice(0, 4)
+}
+
 // ── 브라우저 요청 그대로 가져오기 (cURL) ────────────────────────
 
 /**

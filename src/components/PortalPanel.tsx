@@ -34,6 +34,7 @@ import {
   parseCurl,
   pathFromUrl,
   suggestArrayPaths,
+  suggestValueChecks,
   phaseOf,
   streakNeeded,
   urlOf,
@@ -459,7 +460,19 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   // ── 단건 시험 (설정 화면에서 "이 경로가 맞나?" 를 바로 확인) ───
   const [testing, setTesting] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<
-    Record<string, { ok: boolean; at: number; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
+    Record<
+      string,
+      {
+        ok: boolean
+        at: number
+        lines: string[]
+        detail?: string[]
+        /** 배열이 있는 자리 (항목 1개 이상 조건용) */
+        suggest?: { path: string; count: number }[]
+        /** 상태 문구가 있는 자리 (목록이 원래 비어 있을 수 있는 응답용) */
+        suggestValues?: { path: string; value: string }[]
+      }
+    >
   >({})
   /**
    * 대상 설정이 바뀌면 그 대상의 시험 결과를 버린다.
@@ -525,10 +538,25 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
        *    이때야말로 "이 응답에는 여기 목록이 있다" 를 보여줘야 조건을 만들 수 있다.
        */
       const wantSuggest = (t.checks ?? []).length === 0 || (!j.ok && (t.checks ?? []).some((c) => c.op === 'nonEmptyArray'))
-      const suggest = wantSuggest ? suggestArrayPaths(r.body) : []
+      // 비어 있는 배열은 후보가 아니다. `data (0개)` 를 눌러도 `항목 1개 이상` 은 그대로 실패한다 —
+      // 고치라고 내민 것이 고쳐지지 않는 값이면 사람을 헤매게 만든다.
+      const suggest = wantSuggest ? suggestArrayPaths(r.body).filter((a) => a.count > 0) : []
+      // 쓸 만한 목록이 하나도 없으면 '이 응답은 원래 0건일 수 있다' 는 쪽을 의심해야 한다.
+      // 그때 필요한 것은 다른 경로가 아니라 **다른 조건**이다.
+      const suggestValues = wantSuggest && suggest.length === 0 ? suggestValueChecks(r.body) : []
       const body = (r.body ?? '').trim()
       if (body) detail.push('', '응답 앞부분:', body.slice(0, 400) + (body.length > 400 ? '…' : ''))
-      setTestResult((m) => ({ ...m, [t.id]: { ok: j.ok, at: Date.now(), lines, detail, suggest: suggest.length ? suggest : undefined } }))
+      setTestResult((m) => ({
+        ...m,
+        [t.id]: {
+          ok: j.ok,
+          at: Date.now(),
+          lines,
+          detail,
+          suggest: suggest.length ? suggest : undefined,
+          suggestValues: suggestValues.length ? suggestValues : undefined,
+        },
+      }))
     } finally {
       setTesting(null)
     }
@@ -978,7 +1006,17 @@ function ConfigView({
   onChange: (c: PortalConfig) => void
   onTest: (t: PortalTarget) => void
   testing: string | null
-  testResult: Record<string, { ok: boolean; at: number; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
+  testResult: Record<
+    string,
+    {
+      ok: boolean
+      at: number
+      lines: string[]
+      detail?: string[]
+      suggest?: { path: string; count: number }[]
+      suggestValues?: { path: string; value: string }[]
+    }
+  >
   /** 추천 경로를 눌러 반영한 뒤, 그 안내를 지운다 */
   onClearSuggest: (id: string) => void
   onTestLogin: () => void
@@ -1524,6 +1562,38 @@ function ConfigView({
                         </div>
                         <div className="mt-1 text-[10px] text-amber-200/80">
                           바꾼 뒤 <b>⟳ 시험</b>을 다시 누르면 통과 여부를 확인할 수 있습니다.
+                        </div>
+                      </div>
+                    )}
+                    {/*
+                      목록이 원래 비어 있을 수 있는 응답이다. 경로를 바꿔 봐야 소용없고, 조건 자체를
+                      바꿔야 한다 — 백엔드가 실제로 답을 만들었다는 신호(응답 봉투의 상태 문구)를 본다.
+                    */}
+                    {res.suggestValues && (
+                      <div className="mb-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-amber-100">
+                        <div className="mb-1">
+                          이 응답에는 <b>항목이 있는 목록이 없습니다</b>. 원래 0건일 수 있는 응답이라면
+                          <b> 항목 1개 이상</b> 대신 아래 조건이 맞습니다 — 백엔드가 답을 만들었을 때만 나오는
+                          문구라, 게이트웨이 오류 페이지나 화면 껍데기는 통과하지 못합니다.
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {res.suggestValues.map((v) => (
+                            <button
+                              key={v.path}
+                              onClick={() => {
+                                // 목록 조건은 이 응답에서 성립할 수 없으므로 그 자리를 대신한다
+                                const rest = (t.checks ?? []).filter((c) => c.op !== 'nonEmptyArray')
+                                setTarget(t.id, { checks: [...rest, { path: v.path, op: 'contains', value: v.value }] })
+                                onClearSuggest(t.id)
+                              }}
+                              className="rounded border border-amber-400/50 bg-amber-500/20 px-2 py-0.5 font-mono text-[10.5px] text-amber-50 hover:bg-amber-500/40"
+                            >
+                              {v.path} · "{v.value}" 포함
+                            </button>
+                          ))}
+                        </div>
+                        <div className="mt-1 text-[10px] text-amber-200/80">
+                          누르면 기존 <b>항목 1개 이상</b> 조건을 대신합니다. 바꾼 뒤 <b>⟳ 시험</b>으로 확인하세요.
                         </div>
                       </div>
                     )}
