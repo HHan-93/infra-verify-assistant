@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Play, CornerDownLeft, Copy, Check, X, Search, Star, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
+import {
+  RECENT_MAX_ITEMS,
+  presetId,
+  readFavorites,
+  readRecents,
+  writeFavorites,
+  writeRecents,
+} from '../lib/presetFavorites'
 import { PRESETS, type PresetGroup } from '../presets'
 import type { CustomPresetCommand } from '../../electron/shared-types'
 import CustomItemsMenu from './CustomItemsMenu'
@@ -87,36 +95,6 @@ function Highlight({ text, query }: { text: string; query: string }) {
       {text.slice(idx + query.length)}
     </>
   )
-}
-
-/**
- * 즐겨찾기 · 최근 실행.
- *
- * 프리셋이 184개인데 한 사람이 실제로 쓰는 것은 열댓 개다. 매번 카테고리를 두 번 눌러
- * 찾아 들어가는 대신, 별을 달아 두거나 방금 쓴 것을 첫 화면에서 집게 한다.
- *
- * 식별자는 `솔루션|하위분류|명령어` 다. 라벨은 사람이 고칠 수 있어 기준으로 삼기 어렵고,
- * 명령어가 같아도 솔루션이 다르면 다른 항목이다(같은 `df -h` 라도 맥락이 다르다).
- * 사용자 정의 프리셋의 명령어를 고치면 별이 풀린다 — 그 편이 엉뚱한 항목에 별이 남는 것보다 낫다.
- */
-const FAV_KEY_LS = 'preset_favorites'
-const RECENT_KEY_LS = 'preset_recent'
-const RECENT_MAX_ITEMS = 12
-const presetId = (solution: string, subgroup: string, command: string) => `${solution}|${subgroup}|${command}`
-function readList(key: string): string[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(key) ?? '[]')
-    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return [] // 손상된 값은 빈 목록으로 — 즐겨찾기 때문에 패널이 안 뜨면 안 된다
-  }
-}
-const writeList = (key: string, v: string[]) => {
-  try {
-    localStorage.setItem(key, JSON.stringify(v))
-  } catch {
-    /* 저장 실패는 무시 — 이번 세션에서만 유지된다 */
-  }
 }
 
 /** 카테고리 목록 맨 위에 끼우는 가상 항목 */
@@ -273,19 +251,19 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
     setOpenPh(null)
   }, [solution, subName])
 
-  const [favorites, setFavorites] = useState<string[]>(() => readList(FAV_KEY_LS))
-  const [recents, setRecents] = useState<string[]>(() => readList(RECENT_KEY_LS))
+  const [favorites, setFavorites] = useState<string[]>(() => readFavorites())
+  const [recents, setRecents] = useState<string[]>(() => readRecents())
   const toggleFavorite = (id: string) =>
     setFavorites((f) => {
       const next = f.includes(id) ? f.filter((x) => x !== id) : [id, ...f]
-      writeList(FAV_KEY_LS, next)
+      writeFavorites(next)
       return next
     })
   /** 실행한 것을 최근 목록 맨 앞으로 (같은 것을 또 실행하면 중복이 아니라 순서만 올라간다) */
   const markRecent = (id: string) =>
     setRecents((r) => {
       const next = [id, ...r.filter((x) => x !== id)].slice(0, RECENT_MAX_ITEMS)
-      writeList(RECENT_KEY_LS, next)
+      writeRecents(next)
       return next
     })
 
@@ -735,7 +713,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                         <button
                           onClick={() => {
                             setRecents([])
-                            writeList(RECENT_KEY_LS, [])
+                            writeRecents([])
                           }}
                           className="ml-auto font-normal normal-case tracking-normal text-gray-600 hover:text-gray-400"
                         >
