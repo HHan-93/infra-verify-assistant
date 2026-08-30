@@ -98,21 +98,42 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
 
   const favIds = useMemo(() => new Set(readFavorites()), [pickerOpen])
   const recentIds = useMemo(() => readRecents(), [pickerOpen])
-  const pickerList = useMemo(() => {
-    const q = pickerQuery.trim().toLowerCase()
-    if (q)
-      return allPresets
-        .filter((c) => c.label.toLowerCase().includes(q) || c.command.toLowerCase().includes(q))
-        .slice(0, 60)
-    // 검색 전에는 별을 단 것과 최근 것만 — 184개를 그냥 쏟아 놓으면 고르는 데 더 걸린다
-    const byId = new Map(allPresets.map((c) => [presetId(c.solution, c.subgroup, c.command), c]))
-    const picked: typeof allPresets = []
-    for (const id of [...favIds, ...recentIds]) {
+  /** 카테고리 좁히기 — 184개를 한 줄씩 넘겨 보는 것보다 빠르다 */
+  const [pickerCat, setPickerCat] = useState<string | null>(null)
+  const pickerCats = useMemo(() => [...new Set(allPresets.map((c) => c.solution))], [allPresets])
+
+  const byId = useMemo(
+    () => new Map(allPresets.map((c) => [presetId(c.solution, c.subgroup, c.command), c])),
+    [allPresets],
+  )
+  const pickFrom = (ids: Iterable<string>) => {
+    const out: typeof allPresets = []
+    for (const id of ids) {
       const c = byId.get(id)
-      if (c && !picked.includes(c)) picked.push(c)
+      if (c && !out.includes(c)) out.push(c)
     }
-    return picked
-  }, [allPresets, pickerQuery, favIds, recentIds])
+    return out
+  }
+  /**
+   * 목록 구성.
+   *
+   * 처음에는 즐겨찾기·최근만 보여줬는데, 그러면 **검색이 되는 줄 모르고**, 한 번 실행한 뒤에는
+   * 최근 한 줄만 떠서 "이 명령만 쓸 수 있다" 로 읽혔다. 그래서 전체 목록을 항상 깔아 둔다 —
+   * 즐겨찾기·최근은 그 위에 얹는 '지름길' 이지 목록의 전부가 아니다.
+   */
+  const pickerFavs = useMemo(() => (pickerQuery.trim() ? [] : pickFrom(favIds)), [favIds, pickerQuery, byId])
+  const pickerRecents = useMemo(
+    () => (pickerQuery.trim() ? [] : pickFrom(recentIds).filter((c) => !favIds.has(presetId(c.solution, c.subgroup, c.command)))),
+    [recentIds, favIds, pickerQuery, byId],
+  )
+  const pickerAll = useMemo(() => {
+    const q = pickerQuery.trim().toLowerCase()
+    const base = pickerCat ? allPresets.filter((c) => c.solution === pickerCat) : allPresets
+    if (!q) return base
+    return base.filter(
+      (c) => c.label.toLowerCase().includes(q) || c.command.toLowerCase().includes(q) || c.subgroup.toLowerCase().includes(q),
+    )
+  }, [allPresets, pickerQuery, pickerCat])
 
   const choosePreset = (c: (typeof allPresets)[number]) => {
     setCmd(c.command)
@@ -123,9 +144,37 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     setPickerQuery('')
   }
 
+  /** 목록 한 줄 — 세 섹션(즐겨찾기·최근·전체)이 같은 모양이어야 같은 것으로 읽힌다 */
+  const renderPickerRow = (c: (typeof allPresets)[number], ns: string) => (
+    <button
+      key={`${ns}-${presetId(c.solution, c.subgroup, c.command)}`}
+      onClick={() => choosePreset(c)}
+      className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-white/10"
+    >
+      <span className="shrink-0 text-[11.5px] text-gray-200">{c.label}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-500">{c.command}</span>
+      {hasPlaceholder(c.command) && (
+        <span className="shrink-0 rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-300">값 입력</span>
+      )}
+      {c.check && <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 text-[10px] text-emerald-300">판정 기준</span>}
+      <span className="shrink-0 text-[10px] text-gray-600">{c.subgroup}</span>
+    </button>
+  )
+
   const placeholders = useMemo(() => (hasPlaceholder(cmd) ? extractPlaceholders(cmd) : []), [cmd])
-  /** 값을 안 채운 자리는 원문(`<이름>`) 그대로 나간다 — 프리셋 패널과 같은 규칙 */
   const finalCmd = useMemo(() => (placeholders.length ? fillPlaceholders(cmd, phValues) : cmd), [cmd, phValues, placeholders])
+  /**
+   * 아직 값이 안 채워진 자리.
+   *
+   * **비워 둔 채로 실행하면 안 된다.** `<SERVER_ID>` 를 그대로 보내면 셸이 `<` 를 입력
+   * 리다이렉션으로 읽어 `syntax error near unexpected token` 로 끝난다(실제로 그렇게 나갔다).
+   * 프리셋 패널은 값 입력칸을 먼저 펼쳐서 이 상황이 생기지 않는데, 여기서는 실행 버튼이
+   * 곧바로 나가 있었다. 채우기 전에는 실행을 막고 무엇이 비었는지 말해 준다.
+   */
+  const unfilled = useMemo(
+    () => placeholders.filter((ph) => !(phValues[ph] ?? '').trim()),
+    [placeholders, phValues],
+  )
 
   const toggleTarget = (id: string) =>
     setTargets((s) => {
@@ -144,7 +193,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
 
   /** 실행 요청 — 위험한 명령이면 먼저 물어본다(대상 수만큼 파급이 커진다) */
   const requestRun = () => {
-    if (!finalCmd.trim() || !targets.size) return
+    if (!finalCmd.trim() || !targets.size || unfilled.length) return
     const hits = riskyCommand(finalCmd)
     if (hits.length) {
       setConfirmRun({ cmd: finalCmd, hits })
@@ -156,7 +205,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
   const run = async () => {
     const ids = sessions.filter((s) => targets.has(s.id)).map((s) => s.id)
     const cmdToRun = finalCmd
-    if (!cmdToRun.trim() || !ids.length) return
+    if (!cmdToRun.trim() || !ids.length || unfilled.length) return
     setConfirmRun(null)
     if (pickedId) pushRecent(pickedId) // 프리셋 패널의 '최근 실행' 과 같은 목록에 남는다
     setBusy(true)
@@ -355,41 +404,75 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                   className="flex-1 rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 font-mono text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />
                 {pickerOpen && (
-                  <div className="absolute left-0 top-full z-20 mt-1 max-h-72 w-[520px] overflow-y-auto rounded-md border border-white/15 bg-panel p-2 shadow-2xl">
-                    <input
-                      autoFocus
-                      value={pickerQuery}
-                      onChange={(e) => setPickerQuery(e.target.value)}
-                      placeholder="프리셋 검색 (이름·명령어)"
-                      className="mb-1.5 w-full rounded border border-white/10 bg-panel-light px-2 py-1 text-[12px] text-gray-100 outline-none focus:border-blue-500/60"
-                    />
-                    {pickerList.length === 0 ? (
-                      <p className="px-1 py-3 text-center text-[11.5px] leading-relaxed text-gray-500">
-                        {pickerQuery.trim()
-                          ? '일치하는 프리셋이 없습니다.'
-                          : '프리셋 패널에서 별을 달아 두거나 한 번 실행하면 여기 먼저 나옵니다. 지금은 검색해서 고르세요.'}
-                      </p>
-                    ) : (
+                  <div className="absolute left-0 top-full z-20 mt-1 flex max-h-[420px] w-[560px] flex-col rounded-md border border-white/15 bg-panel p-2 shadow-2xl">
+                    <div className="mb-1.5 flex items-center gap-2">
+                      <Search size={13} className="shrink-0 text-gray-500" />
+                      <input
+                        autoFocus
+                        value={pickerQuery}
+                        onChange={(e) => setPickerQuery(e.target.value)}
+                        placeholder="이름·명령어로 검색"
+                        className="min-w-0 flex-1 rounded border border-white/10 bg-panel-light px-2 py-1 text-[12px] text-gray-100 outline-none focus:border-blue-500/60"
+                      />
+                      <span className="shrink-0 whitespace-nowrap text-[10.5px] text-gray-500">
+                        전체 {allPresets.length}개
+                      </span>
+                    </div>
+                    {/* 카테고리 좁히기 */}
+                    <div className="mb-1.5 flex flex-wrap gap-1">
+                      <button
+                        onClick={() => setPickerCat(null)}
+                        className={
+                          'rounded-full px-2 py-0.5 text-[10.5px] ' +
+                          (pickerCat === null ? 'bg-blue-600/80 text-white' : 'bg-panel-light text-gray-400 hover:text-gray-200')
+                        }
+                      >
+                        전체
+                      </button>
+                      {pickerCats.map((cat) => (
+                        <button
+                          key={cat}
+                          onClick={() => setPickerCat(cat === pickerCat ? null : cat)}
+                          className={
+                            'rounded-full px-2 py-0.5 text-[10.5px] ' +
+                            (pickerCat === cat ? 'bg-blue-600/80 text-white' : 'bg-panel-light text-gray-400 hover:text-gray-200')
+                          }
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+                      {pickerFavs.length > 0 && (
+                        <div className="space-y-0.5">
+                          <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-amber-300/80">
+                            즐겨찾기 {pickerFavs.length}
+                          </p>
+                          {pickerFavs.map((c) => renderPickerRow(c, 'fav'))}
+                        </div>
+                      )}
+                      {pickerRecents.length > 0 && (
+                        <div className="space-y-0.5">
+                          <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                            최근 실행 {pickerRecents.length}
+                          </p>
+                          {pickerRecents.map((c) => renderPickerRow(c, 'rec'))}
+                        </div>
+                      )}
                       <div className="space-y-0.5">
-                        {pickerList.map((c) => (
-                          <button
-                            key={presetId(c.solution, c.subgroup, c.command)}
-                            onClick={() => choosePreset(c)}
-                            className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-white/10"
-                          >
-                            <span className="shrink-0 text-[11.5px] text-gray-200">{c.label}</span>
-                            <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-500">{c.command}</span>
-                            {c.check && (
-                              <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 text-[10px] text-emerald-300">판정 기준</span>
-                            )}
-                            <span className="shrink-0 text-[10px] text-gray-600">{c.solution}</span>
-                          </button>
-                        ))}
+                        <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                          {pickerQuery.trim() ? `검색 결과 ${pickerAll.length}` : `${pickerCat ?? '전체'} ${pickerAll.length}`}
+                        </p>
+                        {pickerAll.length === 0 ? (
+                          <p className="px-1 py-3 text-center text-[11.5px] text-gray-500">일치하는 프리셋이 없습니다.</p>
+                        ) : (
+                          pickerAll.map((c) => renderPickerRow(c, 'all'))
+                        )}
                       </div>
-                    )}
+                    </div>
                     <button
                       onClick={() => setPickerOpen(false)}
-                      className="mt-1.5 w-full rounded border border-white/10 py-1 text-[11px] text-gray-400 hover:bg-white/5"
+                      className="mt-1.5 shrink-0 rounded border border-white/10 py-1 text-[11px] text-gray-400 hover:bg-white/5"
                     >
                       닫기
                     </button>
@@ -397,7 +480,14 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                 )}
                 <button
                   onClick={requestRun}
-                  disabled={busy || !targets.size}
+                  disabled={busy || !targets.size || unfilled.length > 0}
+                  title={
+                    unfilled.length
+                      ? `값을 채워야 실행할 수 있습니다: ${unfilled.join(', ')}`
+                      : !targets.size
+                        ? '대상을 하나 이상 선택하세요'
+                        : '선택한 세션에서 동시에 실행'
+                  }
                   className="flex shrink-0 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
                 >
                   {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} 실행
@@ -430,7 +520,11 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                           />
                         </span>
                       ))}
-                      <span className="text-[10.5px] text-gray-500">비우면 원문 그대로 나갑니다</span>
+                      <span className={'text-[10.5px] ' + (unfilled.length ? 'text-amber-300' : 'text-gray-500')}>
+                        {unfilled.length
+                          ? `${unfilled.join(', ')} 값을 채워야 실행됩니다`
+                          : '값이 모두 채워졌습니다'}
+                      </span>
                     </div>
                   )}
                   {riskyCommand(finalCmd).length > 0 && (
