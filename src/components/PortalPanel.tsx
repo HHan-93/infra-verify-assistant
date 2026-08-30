@@ -696,22 +696,50 @@ function BoardView({
   )
 }
 
-/**
- * 한 줄에 그릴 막대 수 상한.
- *
- * 막대는 폭에 맞춰 늘어나되 하나당 6px 을 넘지 않는다. 그래서 이 값이 곧 '줄이 채워지는 폭'이다 —
- * 100개면 최대 700px 밖에 못 채워, 넓은 보드(1560px)에서는 막대 뒤가 통째로 비어
- * 줄이 중간에 끊긴 것처럼 보였다. 180개면 좁은 창에서도 5px, 넓은 창에서도 6px 로 가득 찬다.
- * 덤으로 보이는 이력도 늘어난다(1초 주기에서 최근 3분).
- */
-const BAR_MAX = 180
-
-/** 막대가 덮고 있는 시간 구간을 사람 말로 */
+/** 띠가 덮고 있는 시간 구간을 사람 말로 */
 function spanLabel(recent: { at: number }[]): string {
   if (recent.length < 2) return `${recent.length}회`
   const sec = Math.round((recent[recent.length - 1].at - recent[0].at) / 1000)
   const span = sec < 60 ? `${sec}초` : `${Math.floor(sec / 60)}분 ${sec % 60}초`
-  return `최근 ${span} (${recent.length}회)`
+  return `최근 ${span} · ${recent.length}회`
+}
+
+/**
+ * 관측을 **같은 상태끼리 하나의 구간으로 합친다.**
+ *
+ * 예전에는 관측 한 건마다 작은 칸을 하나씩 그렸다(최대 180칸). 정상일 때 그 180칸이 말해 주는
+ * 것은 "다 정상" 하나뿐인데 화면 폭을 전부 쓰고, 대상이 다섯이면 그 격자가 다섯 줄이 된다.
+ * 촘촘한 격자가 불편하다는 이야기도 있었다(사람에 따라 실제로 그렇다).
+ *
+ * 합치면 정상 구간은 띠 하나가 되고 **깨진 구간만 자국으로 남는다** — 129칸 중 빨간 칸을
+ * 찾는 것보다 그쪽이 눈에 먼저 들어온다. 페일오버 중 200 이 한 번 튀었다 다시 503 이 되는
+ * 것도 빨강-초록-빨강 세 덩어리로 그대로 보인다(이 그래프의 존재 이유다).
+ *
+ * 폭은 '관측 수' 가 아니라 **그 구간이 덮은 시간**에 비례시킨다 — 알고 싶은 것은
+ * "몇 회 실패했나" 보다 "몇 초 동안 깨져 있었나" 다.
+ */
+interface ObsRun {
+  ok: boolean
+  from: number
+  to: number
+  count: number
+  /** 이 구간이 덮은 시간(ms). 마지막 구간은 관측 하나뿐일 수 있어 최소 폭을 보장한다 */
+  ms: number
+}
+function mergeRuns(recent: { at: number; ok: boolean }[], intervalSec: number): ObsRun[] {
+  const step = Math.max(1, intervalSec) * 1000
+  const runs: ObsRun[] = []
+  for (const r of recent) {
+    const last = runs[runs.length - 1]
+    if (last && last.ok === r.ok) {
+      last.to = r.at
+      last.count++
+      last.ms += step
+    } else {
+      runs.push({ ok: r.ok, from: r.at, to: r.at, count: 1, ms: step })
+    }
+  }
+  return runs
 }
 
 const PHASE_STYLE: Record<string, { cls: string; label: string }> = {
@@ -739,7 +767,9 @@ function TargetRow({
   const phase = phaseOf(state, needed)
   const style = PHASE_STYLE[phase]
   const last = state.last
-  const bars = state.recent.slice(-BAR_MAX)
+  const runs = mergeRuns(state.recent, cfg.intervalSec)
+  const failCount = state.recent.filter((r) => !r.ok).length
+  const lastFailAt = [...state.recent].reverse().find((r) => !r.ok)?.at ?? null
 
   return (
     <div className="px-2.5 py-2">
@@ -767,27 +797,39 @@ function TargetRow({
         )}
       </div>
 
-      {/* 최근 관측 막대 — 페일오버 중의 깜빡임이 눈에 보이게.
-          가로가 가득 차면 오래된 것부터 밀려난다. 그게 '끊긴 것'으로 보이지 않게
-          어느 구간을 보고 있는지 옆에 적는다. */}
+      {/* 최근 관측 — 같은 상태끼리 합친 띠. 페일오버 중의 깜빡임은 그대로 자국으로 남는다 */}
       {state.recent.length > 0 && (
         <div className="mt-1.5 flex items-center gap-2">
-          {/* 막대는 고정 폭이 아니라 **남는 폭에 맞춰** 늘고 줄어든다.
-              창 폭 전환(1120/1560px)이나 우측 패널이 열릴 때 줄이 넘치지 않게 하려는 것 —
-              고정 픽셀로 두면 좁아진 순간 잘려 나간다. */}
-          {/* 옅은 바탕 띠 — 막대가 폭을 다 못 채워도 줄이 우측 시각까지 이어져 보이게 한다 */}
-          <div className="flex min-w-0 flex-1 items-end gap-[1px] overflow-hidden rounded-sm bg-white/[0.04] px-px py-px">
-            {bars.map((r, i) => (
-              <span
+          {/* 띠는 고정 폭이 아니라 **남는 폭에 맞춰** 늘고 줄어든다. 창 폭 전환(1120/1560px)이나
+              우측 패널이 열릴 때 줄이 넘치지 않게 하려는 것 — 고정 픽셀로 두면 좁아진 순간 잘린다.
+              깨진 적이 없으면 띠를 얇게 그린다: 문제 있는 대상이 시각적으로 앞으로 나오게. */}
+          <div
+            className={
+              'flex min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.06] ' +
+              (failCount > 0 ? 'h-2.5' : 'h-1.5')
+            }
+          >
+            {runs.map((r, i) => (
+              <div
                 key={i}
-                title={`${fmtClock(r.at)} ${r.ok ? '정상' : '비정상'}`}
-                className={`h-3 min-w-[2px] max-w-[6px] flex-1 rounded-sm ${r.ok ? 'bg-emerald-500/70' : 'bg-red-500/70'}`}
+                style={{ flexGrow: r.ms, flexBasis: 0 }}
+                title={`${fmtClock(r.from)}${r.count > 1 ? ` ~ ${fmtClock(r.to)}` : ''} ${r.ok ? '정상' : '비정상'} (${r.count}회)`}
+                className={
+                  // 실패 구간은 색만으로 구분하지 않는다 — 위쪽에 밝은 눈금을 함께 둔다
+                  r.ok ? 'bg-emerald-500/70' : 'border-t-2 border-red-300 bg-red-500/80'
+                }
               />
             ))}
           </div>
           <span className="shrink-0 whitespace-nowrap text-[10px] text-gray-500">
-            {spanLabel(bars)}
-            {state.recent.length > BAR_MAX && ' · 이전은 밀려남'}
+            {cfg.intervalSec}초마다 · {spanLabel(state.recent)}
+            {failCount > 0 ? (
+              <span className="text-red-300/90">
+                {' · '}실패 {failCount}회 (마지막 {lastFailAt !== null ? fmtClock(lastFailAt) : '—'})
+              </span>
+            ) : (
+              ' · 실패 없음'
+            )}
           </span>
         </div>
       )}
