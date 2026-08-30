@@ -802,13 +802,11 @@ function TargetRow({
         <div className="mt-1.5 flex items-center gap-2">
           {/* 띠는 고정 폭이 아니라 **남는 폭에 맞춰** 늘고 줄어든다. 창 폭 전환(1120/1560px)이나
               우측 패널이 열릴 때 줄이 넘치지 않게 하려는 것 — 고정 픽셀로 두면 좁아진 순간 잘린다.
-              깨진 적이 없으면 띠를 얇게 그린다: 문제 있는 대상이 시각적으로 앞으로 나오게. */}
-          <div
-            className={
-              'flex min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.06] ' +
-              (failCount > 0 ? 'h-2.5' : 'h-1.5')
-            }
-          >
+
+              높이는 **모든 줄이 같다.** 한때 '깨진 적 없는 줄은 얇게' 로 두었는데, 줄마다 굵기가
+              다른 것이 의도된 신호가 아니라 **그리다 만 것처럼** 보였다. 상태는 색과 눈금으로
+              말하고, 굵기는 말하지 않는다. */}
+          <div className="flex h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.06]">
             {runs.map((r, i) => (
               <div
                 key={i}
