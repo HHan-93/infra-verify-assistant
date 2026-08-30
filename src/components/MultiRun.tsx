@@ -3,6 +3,7 @@ import { PRESETS } from '../presets'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 import { presetId, pushRecent, readFavorites, readRecents } from '../lib/presetFavorites'
 import { riskyCommand } from '../lib/riskyCommand'
+import { IGNORED_LABEL, diffLines, groupOutputs, isShortOutput } from '../lib/outputGroup'
 import type { CommandCheck, CustomPresetCommand } from '../../electron/shared-types'
 import { SquareTerminal, X, Play, Loader2, ChevronDown, ChevronRight, Search, ScanText, Info, AlertTriangle, ListChecks, ShieldCheck } from 'lucide-react'
 import { judgeOutput, verdictBadge, type Verdict } from '../lib/verdict'
@@ -234,6 +235,10 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     )
     setBusy(false)
     setExpanded(new Set(ids)) // 결과는 기본 펼침
+    // 새 실행의 그룹은 새로 접힌 상태에서 시작한다 — 지난 실행에서 펼쳐 둔 키가 우연히 같으면
+    // 이번 결과도 펼쳐진 채로 보여 '내가 편 것' 과 구분되지 않는다
+    setExpandedGroups(new Set())
+    setWholeShown(new Set())
   }
 
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name ?? id
@@ -283,7 +288,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
       (r.error ?? '').toLowerCase().includes(q)
     )
   }
-  const filteredEntries = useMemo(
+  const filteredEntriesRaw = useMemo(
     () =>
       Object.entries(results).filter(
         ([id, r]) => (!onlyFailed || isFailed(r)) && matchesQuery(id, r),
@@ -291,6 +296,51 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [results, onlyFailed, trimmedQuery, sessions],
   )
+
+  /**
+   * 결과 보기 방식.
+   *
+   * 다중 실행을 쓰는 이유는 "어느 노드만 다른가" 인데, 노드별로 나열하면 5개 출력을 눈으로
+   * 대조해야 한다. 기본은 묶어 보기로 두고, 원래 방식(노드별)도 남긴다 — 한 노드의 출력을
+   * 통째로 읽어야 할 때가 있다.
+   */
+  const [viewMode, setViewMode] = useState<'group' | 'node'>('group')
+  /** 펼친 그룹(정규화된 출력이 키다). 다수 그룹은 접혀 있는 게 기본이라 여기에 담긴다 */
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  /** 차이만 보지 않고 전체 출력을 편 그룹 */
+  const [wholeShown, setWholeShown] = useState<Set<string>>(new Set())
+  const toggleSet = (set: Set<string>, k: string) => {
+    const n = new Set(set)
+    if (n.has(k)) n.delete(k)
+    else n.add(k)
+    return n
+  }
+  const toggleGroup = (k: string) => setExpandedGroups((v) => toggleSet(v, k))
+  const toggleWhole = (k: string) => setWholeShown((v) => toggleSet(v, k))
+
+  /** 세션이 자기 출력에 남기는 이름들 — 이것 때문에 같은 출력이 서로 다르게 갈리는 것을 막는다 */
+  const aliasesOf = (id: string) => {
+    const ses = sessions.find((x) => x.id === id)
+    return [ses?.name ?? '', (ses?.name ?? '').split(/[\s(]/)[0]].filter(Boolean)
+  }
+  const bodyOf = (r: Result) =>
+    r.status === 'error' ? `⚠ ${r.error ?? '실행 실패'}` : `${r.out ?? ''}${r.err ? `\n[stderr]\n${r.err}` : ''}`
+
+  const groups = useMemo(
+    () =>
+      groupOutputs(
+        filteredEntriesRaw.map(([id, r]) => ({ item: { id, r }, text: bodyOf(r), hostAliases: aliasesOf(id) })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredEntriesRaw, sessions],
+  )
+  /** 출력이 전부 한 줄이면 묶는 것보다 나란히 놓는 편이 낫다(uptime·hostname 같은 것) */
+  const allShort = useMemo(
+    () => filteredEntriesRaw.length > 0 && filteredEntriesRaw.every(([, r]) => isShortOutput(bodyOf(r))),
+    [filteredEntriesRaw],
+  )
+
+  const filteredEntries = filteredEntriesRaw
 
   const targetNames = sessions.filter((s) => targets.has(s.id)).map((s) => s.name)
 
@@ -579,6 +629,23 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                     <Info size={11} /> 실행됨 {summary.info}
                   </span>
                 )}
+                {Object.keys(results).length > 1 && (
+                  <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/30 p-0.5">
+                    {(['group', 'node'] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setViewMode(m)}
+                        title={m === 'group' ? '같은 출력끼리 묶어서 — 다른 노드가 바로 보입니다' : '노드별로 하나씩'}
+                        className={
+                          'whitespace-nowrap rounded px-2 py-0.5 text-[11px] ' +
+                          (viewMode === m ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200')
+                        }
+                      >
+                        {m === 'group' ? '묶어 보기' : '노드별로'}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <button
                   onClick={() => setOnlyFailed((v) => !v)}
                   className={
@@ -602,6 +669,123 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                 </div>
               ) : filteredEntries.length === 0 ? (
                 <div className="px-2 py-6 text-center text-xs text-gray-500">일치하는 결과가 없습니다.</div>
+              ) : viewMode === 'group' && Object.keys(results).length > 1 ? (
+                /* 묶어 보기 — 같은 출력끼리 한 줄로, 다른 노드만 펼쳐서 */
+                <div className="space-y-2">
+                  {allShort ? (
+                    /* 한 줄짜리 출력은 묶는 것보다 나란히 놓는 편이 낫다 */
+                    <table className="w-full table-fixed text-[11.5px]">
+                      <tbody>
+                        <tr className="text-gray-500">
+                          <td className="w-[140px] py-1">노드</td>
+                          <td className="py-1">출력</td>
+                        </tr>
+                        {filteredEntries.map(([id, r]) => (
+                          <tr key={id} className="border-t border-white/5">
+                            <td className="truncate py-1 text-gray-200">{nameOf(id)}</td>
+                            <td
+                              className={
+                                'truncate py-1 font-mono ' + (isFailed(r) ? 'text-red-300' : 'text-gray-300')
+                              }
+                              title={bodyOf(r)}
+                            >
+                              {bodyOf(r).trim() || '(출력 없음)'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    groups.map((g, gi) => {
+                      const majority = gi === 0 && groups.length > 1
+                      const names = g.items.map((x) => nameOf(x.id))
+                      const anyFail = g.items.some((x) => isFailed(x.r))
+                      const code = g.items[0].r.code
+                      const open = expandedGroups.has(g.key) || (!majority && groups.length > 1) || groups.length === 1
+                      const diff = majority || groups.length === 1 ? null : diffLines(groups[0].sample, g.sample)
+                      return (
+                        <div
+                          key={g.key || gi}
+                          className={
+                            'overflow-hidden rounded-md border ' +
+                            (anyFail ? 'border-red-500/40' : majority ? 'border-white/10' : 'border-amber-500/40')
+                          }
+                        >
+                          <div
+                            onClick={() => toggleGroup(g.key)}
+                            className="flex cursor-pointer items-center gap-2 bg-panel-light px-2.5 py-1.5 text-xs hover:bg-white/5"
+                          >
+                            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                            <span
+                              className={
+                                'shrink-0 rounded px-1.5 py-0.5 text-[10.5px] ' +
+                                (anyFail
+                                  ? 'bg-red-500/20 text-red-300'
+                                  : majority
+                                    ? 'bg-emerald-500/15 text-emerald-300'
+                                    : 'bg-amber-500/20 text-amber-200')
+                              }
+                            >
+                              {groups.length === 1
+                                ? `${g.items.length}대 모두 동일`
+                                : majority
+                                  ? `${g.items.length}대 동일`
+                                  : `${g.items.length}대만 다름`}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-gray-200" title={names.join(' · ')}>
+                              {names.join(' · ')}
+                            </span>
+                            {code !== undefined && (
+                              <span className="shrink-0 font-mono text-[10.5px] text-gray-500">exit {code}</span>
+                            )}
+                          </div>
+                          {open && (
+                            <div className="bg-black/30 px-2.5 py-2">
+                              {diff ? (
+                                <>
+                                  <div className="mb-1 text-[10.5px] text-gray-500">
+                                    다수({groups[0].items.length}대)와 다른 줄만 —{' '}
+                                    <button
+                                      onClick={() => toggleWhole(g.key)}
+                                      className="underline decoration-dotted underline-offset-2 hover:text-gray-300"
+                                    >
+                                      {wholeShown.has(g.key) ? '차이만 보기' : '전체 출력 보기'}
+                                    </button>
+                                  </div>
+                                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed">
+                                    {wholeShown.has(g.key)
+                                      ? g.sample || '(출력 없음)'
+                                      : diff
+                                          .filter((d) => d.kind !== 'same')
+                                          .map((d, i) => (
+                                            <div
+                                              key={i}
+                                              className={d.kind === 'add' ? 'text-red-300' : 'text-emerald-300/80'}
+                                            >
+                                              {d.kind === 'add' ? '+ ' : '− '}
+                                              {d.text}
+                                            </div>
+                                          ))}
+                                  </pre>
+                                </>
+                              ) : (
+                                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-gray-300">
+                                  {g.sample || '(출력 없음)'}
+                                </pre>
+                              )}
+                              {/* 무엇을 무시하고 묶었는지 밝힌다 — 사람이 판단할 수 있어야 한다 */}
+                              {g.ignored.length > 0 && (
+                                <p className="mt-1 text-[10px] text-gray-600">
+                                  묶을 때 무시함: {g.ignored.map((k) => IGNORED_LABEL[k]).join(' · ')}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
               ) : (
                 <ul className="space-y-1">
                   {filteredEntries.map(([id, r]) => {
