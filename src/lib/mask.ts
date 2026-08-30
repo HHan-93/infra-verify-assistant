@@ -151,6 +151,19 @@ export function maskForExport(text: string): string {
   return maskSecrets(text, { ip: f.ip })
 }
 
+/**
+ * **AI(외부 API) 로 나가는 텍스트** 마스킹.
+ *
+ * 스위치는 리포트 저장과 같은 것을 쓴다 — 설정 화면이 "리포트 저장·AI 전송 시 … 가리기" 라는
+ * 한 줄로 약속하고 있기 때문이다. 이름을 따로 둔 이유는 호출부에서 **어느 경로가 외부로
+ * 나가는지** 가 보여야 해서다(리포트는 내 디스크, 이쪽은 남의 서버).
+ *
+ * 화면(대화 기록)에는 원문을 그대로 둔다. 사용자가 자기가 붙여넣은 것을 못 알아보면 안 된다.
+ */
+export function maskForAI(text: string): string {
+  return maskForExport(text)
+}
+
 /** 텍스트에 마스킹 대상이 하나라도 있는지 (배지/안내 표시용, 실제 치환은 하지 않음) */
 export function hasSecrets(text: string): boolean {
   if (!text) return false

@@ -21,6 +21,7 @@ import {
   Terminal,
   CornerDownLeft,
   Play,
+  ShieldCheck,
 } from 'lucide-react'
 import {
   PROVIDER_INFO,
@@ -30,7 +31,7 @@ import {
 } from '../../electron/shared-types'
 import Markdown from './Markdown'
 import { buildReportHtml } from '../lib/reportHtml'
-import { maskForExport } from '../lib/mask'
+import { maskForAI, maskForExport, maskReportEnabled } from '../lib/mask'
 import { PRESETS } from '../presets'
 
 /** App 에서 ref 로 호출: 터미널 출력 텍스트를 분석 요청.
@@ -153,6 +154,8 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
   const [messages, setMessages] = useState<ChatItem[]>(loadStoredMessages)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
+  /** 직전 요청에서 마스킹이 실제로 일어난 메시지 수 (0 이면 가릴 것이 없었다) */
+  const [maskedCount, setMaskedCount] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   // 일반 대화 / 명령어 생성 모드 — 명령어 생성은 analysisStyle 설정과 무관하게 'shellgen' 스타일 강제
   const [chatMode, setChatMode] = useState<'chat' | 'command'>('chat')
@@ -291,13 +294,25 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
       },
     ])
     setStreaming(true)
+    /**
+     * **외부로 나가기 직전에** 비밀번호·토큰·개인키를 가린다.
+     *
+     * 여기까지 오는 내용에는 터미널 출력·설정파일·`kubectl get secret` 결과가 통째로 섞여 있고,
+     * 목적지는 남의 서버다. 설정 화면이 "리포트 저장·AI 전송 시 … 가리기" 라고 약속하는데
+     * 리포트 쪽만 지키고 있었다.
+     *
+     * 화면의 대화 기록은 원문 그대로 둔다 — 보낸 사람이 자기가 붙여넣은 것을 알아볼 수 있어야
+     * 하고, 무엇이 가려져 나갔는지는 아래 입력창 안내로 밝힌다.
+     */
+    const outgoing = history.map((m) => ({ role: m.role, content: maskForAI(m.content) }))
+    setMaskedCount(outgoing.filter((m, i) => m.content !== history[i].content).length)
     window.electronAPI.aiSend({
       requestId,
       provider: p,
       model: c[p].model || undefined, // 비우면 메인에서 프로바이더 기본 모델 사용
       style: styleOverride ?? style,
       apiKey: c[p].key || undefined,
-      messages: history.map((m) => ({ role: m.role, content: m.content })),
+      messages: outgoing,
     })
   }
 
@@ -867,6 +882,21 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
 
       {/* 입력 영역 */}
       <div className="border-t border-white/10 p-3">
+        {/*
+          무엇이 외부로 나가는지 밝힌다. 설정에서 끌 수 있는 것이므로 "꺼져 있다" 도 알려야
+          한다 — 켜져 있다고 착각한 채 비밀번호가 든 로그를 붙여넣는 것이 제일 나쁘다.
+        */}
+        <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] text-gray-500">
+          <ShieldCheck size={11} className={maskReportEnabled() ? 'text-emerald-400/80' : 'text-amber-400/80'} />
+          {maskReportEnabled() ? (
+            <span>
+              비밀번호·토큰·개인키는 <b className="text-gray-400">가려서</b> 보냅니다
+              {maskedCount > 0 && <span className="text-emerald-300/90"> · 직전 요청에서 {maskedCount}건 가림</span>}
+            </span>
+          ) : (
+            <span className="text-amber-300/80">마스킹이 꺼져 있습니다 — 붙여넣은 내용이 그대로 외부 API 로 갑니다</span>
+          )}
+        </div>
         <div className="flex items-end gap-2 rounded-lg bg-panel-light px-3 py-2">
           <textarea
             rows={1}

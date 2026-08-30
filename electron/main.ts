@@ -4306,7 +4306,16 @@ const sanitizeHost = (host: string) => host.replace(/[^a-zA-Z0-9.-]/g, '_')
 const metricsHistoryPath = (host: string) => path.join(metricsHistoryDir(), `${sanitizeHost(host)}.jsonl`)
 const historyAppendCounts = new Map<string, number>()
 
-async function trimMetricsHistory(host: string): Promise<void> {
+/**
+ * 락 키 — 같은 호스트의 append 와 trim 을 한 줄로 세운다.
+ *
+ * 둘이 겹치면 trim 이 읽은 뒤 쓰기 전에 들어온 append 가 통째로 사라진다(read-modify-write).
+ * 다른 저장소들과 같은 규칙을 여기에도 적용한다.
+ */
+const metricsLockKey = (host: string) => `metrics:${sanitizeHost(host)}`
+
+/** 락을 이미 쥔 쪽에서 부르는 본체 — 안에서 다시 락을 잡으면 자기 차례를 기다리다 멈춘다 */
+async function trimMetricsHistoryLocked(host: string): Promise<void> {
   const p = metricsHistoryPath(host)
   try {
     const raw = await readFile(p, 'utf-8')
@@ -4321,7 +4330,8 @@ async function trimMetricsHistory(host: string): Promise<void> {
           return false
         }
       })
-    await writeFile(p, kept.length ? kept.join('\n') + '\n' : '', 'utf-8')
+    // 임시 파일 → rename. 그냥 덮어쓰면 쓰는 도중 앱이 죽었을 때 이력이 반토막 난다
+    await writeFileAtomic(p, kept.length ? kept.join('\n') + '\n' : '')
   } catch {
     /* 파일 없음 등은 무시 */
   }
@@ -4331,10 +4341,14 @@ async function trimMetricsHistory(host: string): Promise<void> {
 async function appendMetricsHistory(sample: MetricSample): Promise<void> {
   try {
     await mkdir(metricsHistoryDir(), { recursive: true })
-    await appendFile(metricsHistoryPath(sample.host), JSON.stringify(sample) + '\n', 'utf-8')
+    const key = metricsLockKey(sample.host)
+    await withStoreLock(key, () =>
+      appendFile(metricsHistoryPath(sample.host), JSON.stringify(sample) + '\n', 'utf-8'),
+    )
     const n = (historyAppendCounts.get(sample.host) ?? 0) + 1
     historyAppendCounts.set(sample.host, n)
-    if (n % 200 === 0) await trimMetricsHistory(sample.host)
+    // 정리는 **락을 놓은 뒤** 다시 잡는다 — 위 락 안에서 부르면 자기 차례를 기다리다 멈춘다
+    if (n % 200 === 0) await withStoreLock(key, () => trimMetricsHistoryLocked(sample.host))
   } catch {
     /* 무시 */
   }

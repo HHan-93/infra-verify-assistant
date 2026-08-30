@@ -14,6 +14,7 @@ import ConfirmDialog from './ConfirmDialog'
 import ProcessListModal from './ProcessListModal'
 import { useMonitor, formatForReport } from '../hooks/useMonitor'
 import { buildReportHtml } from '../lib/reportHtml'
+import { maskForAI } from '../lib/mask'
 import type { AIProvider, AnalysisStyle, MetricSample } from '../../electron/shared-types'
 
 interface Props {
@@ -263,7 +264,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
       model: ai.model,
       style: ai.style,
       apiKey: ai.apiKey,
-      messages: [{ role: 'user', content: formatForReport(history) }],
+      messages: [{ role: 'user', content: maskForAI(formatForReport(history)) }], // 외부로 나가는 경로 — AIPanel 과 같은 규칙
     })
   }
 
