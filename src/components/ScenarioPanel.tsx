@@ -525,9 +525,9 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                   ? '이 시나리오를 복사해 새로 만듭니다'
                   : '내장 시나리오는 수정할 수 없습니다 — 복사본을 만들면 판정 기준·원복 명령을 넣을 수 있습니다'
               }
-              className="shrink-0 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+              className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gray-400 hover:bg-white/10 hover:text-gray-200"
             >
-              <Copy size={14} />
+              <Copy size={14} /> 복제
             </button>
             {scenario.custom && (
               <div className="flex shrink-0 items-center gap-1">

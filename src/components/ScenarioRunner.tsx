@@ -14,6 +14,7 @@ import {
   ScanText,
   Info,
   Square,
+  Pause,
   Pencil,
   Server,
   Variable,
@@ -440,6 +441,49 @@ export default function ScenarioRunner({
   const [stepKeys, setStepKeys] = useState<Record<string, string[]>>(() => loadTargets(scenario.title).steps)
   // 전체 실행 중단 요청
   const abortRef = useRef(false)
+  /**
+   * 일시정지 — **다음 스텝으로 넘어가기 직전**에만 멈춘다.
+   *
+   * 실행 중인 명령을 중간에 얼리지는 않는다(원격에서 이미 돌고 있는 것을 멈출 방법이 없고,
+   * 반쯤 실행된 상태로 세워 두면 판정이 애매해진다). "여기까지 보고 다음으로 갈지 정하겠다" 가
+   * 실제로 필요한 동작이라 스텝 경계에서 멈추는 것으로 충분하다.
+   *
+   * 중단(abort)과 다르다: 중단은 회차를 끝내고, 일시정지는 이어서 계속할 수 있다.
+   */
+  const pauseRef = useRef(false)
+  const [paused, setPaused] = useState(false)
+  /** 재개를 기다리는 쪽에 넘겨줄 resolve 들 */
+  const resumeWaitersRef = useRef<(() => void)[]>([])
+  /** '다음 스텝만' — 한 스텝을 돌고 다시 멈춘다 */
+  const stepOnceRef = useRef(false)
+
+  const wakeWaiters = () => {
+    const list = resumeWaitersRef.current
+    resumeWaitersRef.current = []
+    for (const f of list) f()
+  }
+  const pauseRun = () => {
+    pauseRef.current = true
+    setPaused(true)
+  }
+  const resumeRun = () => {
+    pauseRef.current = false
+    setPaused(false)
+    wakeWaiters()
+  }
+  /** 멈춘 상태에서 한 스텝만 진행 */
+  const stepOnce = () => {
+    stepOnceRef.current = true
+    pauseRef.current = false
+    setPaused(false)
+    wakeWaiters()
+  }
+  /** 스텝 경계에서 호출 — 멈춰 있으면 재개(또는 중단)될 때까지 기다린다 */
+  const waitIfPaused = async () => {
+    while (pauseRef.current && !abortRef.current) {
+      await new Promise<void>((res) => resumeWaitersRef.current.push(res))
+    }
+  }
   // 세션별 영속 셸 식별자 / 사용 가능 여부(false 면 호환 모드)
   const runnerBaseId = useRef(`run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
   const shellOkRef = useRef<Record<string, boolean>>({})
@@ -913,6 +957,10 @@ ${primary?.err ?? ''}`)
     if (!targetId) return
     setBusy(true)
     abortRef.current = false
+    // 지난 회차에서 멈춘 채로 끝났을 수 있다 — 새 실행은 항상 '진행 중' 으로 시작한다
+    pauseRef.current = false
+    stepOnceRef.current = false
+    setPaused(false)
     shellOkRef.current = {} // 새 전체 실행은 셸을 새로 연다(이전 상태 초기화)
     cwdRef.current = {}
     capturedRef.current = {}
@@ -932,6 +980,16 @@ ${primary?.err ?? ''}`)
       if (abortRef.current) {
         stoppedAt = i
         break
+      }
+      // 멈춰 있으면 여기서 기다린다 (스텝 경계)
+      if (pauseRef.current) {
+        setNotice(`일시정지 — ${i + 1}번 스텝 앞에서 멈췄습니다. '이어서' 또는 '다음 스텝만' 을 누르세요.`)
+        await waitIfPaused()
+        if (abortRef.current) {
+          stoppedAt = i
+          break
+        }
+        setNotice('')
       }
       const step = scenario.steps[i]
       const c = commandOf(i)
@@ -955,6 +1013,11 @@ ${primary?.err ?? ''}`)
         continue
       }
       let verdict = await runStep(i)
+      // '다음 스텝만' 으로 들어온 경우 한 스텝을 마쳤으니 다시 멈춘다
+      if (stepOnceRef.current) {
+        stepOnceRef.current = false
+        if (!abortRef.current) pauseRun()
+      }
 
       if (verdict === 'fail' || verdict === 'error') {
         const action: OnFailureAction = step.onFailure ?? 'stop'
@@ -1133,6 +1196,11 @@ ${primary?.err ?? ''}`)
   /** 실행 중단 — 현재 명령에 Ctrl+C 를 보내고 이후 스텝을 실행하지 않는다 */
   const abortRun = () => {
     abortRef.current = true
+    // 일시정지로 기다리는 중이었다면 깨워야 루프가 빠져나간다 (안 깨우면 영영 멈춰 있다)
+    pauseRef.current = false
+    stepOnceRef.current = false
+    setPaused(false)
+    wakeWaiters()
     setNotice('중단 요청됨 — 실행 중인 명령을 중단합니다…')
     for (const [sid, ok] of Object.entries(shellOkRef.current)) {
       if (ok) void window.electronAPI.runnerInterrupt(`${runnerBaseId.current}-${sid}`)
@@ -1549,6 +1617,33 @@ ${primary?.err ?? ''}`)
           >
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} 전체 실행
           </button>
+          {running &&
+            (paused ? (
+              <>
+                <button
+                  onClick={resumeRun}
+                  title="남은 스텝을 이어서 실행합니다"
+                  className="flex items-center gap-1 rounded-md border border-blue-500/40 bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-200 hover:bg-blue-500/20"
+                >
+                  <Play size={12} /> 이어서
+                </button>
+                <button
+                  onClick={stepOnce}
+                  title="다음 스텝 하나만 실행하고 다시 멈춥니다"
+                  className="flex items-center gap-1 rounded-md border border-white/15 bg-panel-light px-2 py-1 text-xs font-medium text-gray-200 hover:bg-white/10"
+                >
+                  <SkipForward size={12} /> 다음 스텝만
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={pauseRun}
+                title="지금 실행 중인 스텝을 끝낸 뒤 다음 스텝 앞에서 멈춥니다"
+                className="flex items-center gap-1 rounded-md border border-white/15 bg-panel-light px-2 py-1 text-xs font-medium text-gray-200 hover:bg-white/10"
+              >
+                <Pause size={12} /> 일시정지
+              </button>
+            ))}
           {running && (
             <button
               onClick={abortRun}

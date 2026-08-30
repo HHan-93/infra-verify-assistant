@@ -57,6 +57,7 @@ import {
   maskIpEnabled,
   setMaskIpEnabled,
 } from './lib/mask'
+import { notifyEnabled, setNotifyEnabled } from './lib/notify'
 
 /** 터미널 색상 테마 프리셋 */
 const THEMES: Record<string, { name: string; background: string; foreground: string; cursor: string }> = {
@@ -239,6 +240,9 @@ export default function App() {
     () => localStorage.getItem('auto_reconnect') === '1',
   )
   // 민감정보 마스킹 — 리포트 저장/AI 전송 시(기본 ON) / 로그 화면 표시(기본 OFF) / IP까지(기본 OFF)
+  const [notifyOn, setNotifyOn] = useState(() => notifyEnabled())
+  /** '알림 시험' 결과 문구 — 알림이 실제로 떴는지 화면에서도 확인되게 */
+  const [notifyTest, setNotifyTest] = useState('')
   const [maskReport, setMaskReport] = useState(() => maskReportEnabled())
   const [maskDisplay, setMaskDisplay] = useState(() => maskDisplayEnabled())
   const [maskIp, setMaskIp] = useState(() => maskIpEnabled())
@@ -2606,6 +2610,39 @@ export default function App() {
               />
               작업 중 끊기면 자동 재연결 시도 (최대 4회, 백오프)
             </label>
+
+            <div className="mt-4 rounded-md border border-white/10 bg-panel-light/50 p-2.5">
+              <div className="mb-1.5 text-[11px] font-medium text-gray-300">알림</div>
+              <label className="flex items-center gap-2 text-xs text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={notifyOn}
+                  onChange={(e) => {
+                    setNotifyOn(e.target.checked)
+                    setNotifyEnabled(e.target.checked)
+                  }}
+                />
+                검증 중 장애 감지·복구 완료를 OS 알림으로 알리기
+              </label>
+              <div className="mt-1.5 flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    // 실제로 어떻게 뜨는지 미리 보는 용도 — 설정만 보고는 알 수 없다
+                    void window.electronAPI
+                      .notify('Q-Term 알림 시험', '이런 모양으로 알려드립니다. 눌러 보시면 창이 앞으로 나옵니다.')
+                      .then((r) => setNotifyTest(r.ok ? '알림을 보냈습니다 — 화면 우측 하단을 확인하세요.' : (r.error ?? '실패')))
+                  }}
+                  className="rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                >
+                  알림 시험
+                </button>
+                {notifyTest && <span className="text-[11px] text-gray-400">{notifyTest}</span>}
+              </div>
+              <p className="mt-1.5 text-[10.5px] leading-relaxed text-gray-500">
+                Windows 알림 센터에 뜹니다. 알림이 안 보이면 윈도우 설정 → 시스템 → 알림에서 이 앱이 꺼져 있거나
+                집중 지원(방해 금지)이 켜져 있는지 확인하세요.
+              </p>
+            </div>
 
             <div className="mt-4 rounded-md border border-white/10 bg-panel-light/50 p-2.5">
               <div className="mb-1.5 text-[11px] font-medium text-gray-300">민감정보 마스킹</div>

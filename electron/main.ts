@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  Notification,
   ipcMain,
   dialog,
   shell,
@@ -1187,6 +1188,32 @@ ipcMain.handle(
 )
 
 // 링크를 기본 브라우저로 열기 (앱 창 네비게이션 방지)
+/**
+ * OS 알림 (Windows 알림 센터 토스트 / macOS 알림).
+ *
+ * 왜 메인에서 띄우나: 렌더러의 Notification 은 창이 최소화·백그라운드일 때 브라우저 정책에
+ * 걸릴 수 있고, 앱 이름·클릭 처리도 메인이 정확하다. 검증은 10분 넘게 걸리는 일이라
+ * **창을 보고 있지 않을 때 알려주는 것**이 이 기능의 전부다.
+ *
+ * 알림을 눌렀을 때 창을 앞으로 가져온다 — 알림만 보고 무슨 일인지 알 수 없으니 화면으로 데려간다.
+ */
+ipcMain.handle('app:notify', async (_evt, { title, body }: { title: string; body: string }) => {
+  if (!Notification.isSupported()) return { ok: false, error: '이 OS 에서는 알림을 지원하지 않습니다.' }
+  try {
+    const n = new Notification({ title: title.slice(0, 120), body: body.slice(0, 300) })
+    n.on('click', () => {
+      if (!mainWindow) return
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    })
+    n.show()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
 ipcMain.on('shell:openExternal', (_evt, url: string) => {
   if (/^https?:\/\//i.test(url)) shell.openExternal(url)
 })

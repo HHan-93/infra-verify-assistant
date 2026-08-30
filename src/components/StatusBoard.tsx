@@ -21,6 +21,7 @@ import {
   Eye,
 } from 'lucide-react'
 import PortalPanel, { type PortalMilestone } from './PortalPanel'
+import { notifyOs } from '../lib/notify'
 
 interface BoardSession {
   id: string
@@ -843,6 +844,17 @@ const RECONNECT_PROBE_MS = 6000
  * 단발 명령(session:run)을 주기 폴링해 상태 카드 + 복구 타임라인으로 표시한다.
  * 신규 IPC 없이 기존 sessionRun 만 사용하며, 겹침 방지를 위해 재귀 setTimeout 으로 폴링한다.
  */
+/**
+ * 회차 이름 제안 — `08-30 18:40 con2 down`.
+ * 날짜를 앞에 두는 이유: 이력 목록이 시각 역순이라 같은 날 회차가 붙어 보이고, 그때 구분되는
+ * 것은 노드 이름이다. 연도는 넣지 않는다(이력에 절대 시각이 이미 있다).
+ */
+function suggestRunLabel(at: number, node: string): string {
+  const d = new Date(at)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} ${node} down`
+}
+
 export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBoardProps) {
   const [cfg, setCfg] = useState<BoardConfig>(loadCfg)
   const [view, setView] = useState<'config' | 'board'>('config')
@@ -854,6 +866,21 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
    * 헤더에 그대로 보이므로 모르고 지나칠 일은 없다.
    */
   const [runLabel, setRunLabel] = useState('')
+  /**
+   * 회차 이름을 자동으로 채운 적이 있는지.
+   *
+   * 며칠 뒤 이력에서 시각만 보고는 어떤 회차였는지 구분이 안 되는데, 검증 중에 이름을 적는 사람은
+   * 많지 않다(빈칸으로 남는다). 장애가 감지되면 그 시점의 정보로 한 번만 채워 준다 —
+   * **사람이 이미 적어 둔 것은 건드리지 않는다.** 채운 뒤에도 그대로 고칠 수 있다.
+   */
+  const autoLabeledRef = useRef(false)
+  /**
+   * 이번 회차에 이미 보낸 알림.
+   *
+   * 같은 사건을 두 번 알리지 않는다 — 1초마다 도는 판정에서 조건이 계속 참이므로 그냥 두면
+   * 초당 한 번씩 토스트가 쌓인다. 회차를 새로 시작할 때 비운다.
+   */
+  const notifiedRef = useRef({ down: false, recovered: false })
   // commitHistory 는 언마운트 정리에서도 불리므로 최신 값을 ref 로 노출한다
   const runLabelRef = useRef('')
   runLabelRef.current = runLabel
@@ -1653,6 +1680,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const start = () => {
     if (!cfg.hosts.filter(Boolean).length) return
     t0Ref.current = Date.now()
+    autoLabeledRef.current = false
+    notifiedRef.current = { down: false, recovered: false }
     msRef.current = emptyMilestones()
     cephPeakRef.current = 0
     updatedAtRef.current = {}
@@ -1709,7 +1738,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   }, [])
 
   // 경과시간 표시용 1초 틱
-  const [, forceTick] = useState(0)
+  const [tick, forceTick] = useState(0)
 
   /**
    * 포털 감시 패널이 '복구 확정' 을 올려주면 이번 회차 마일스톤에 합친다.
@@ -1724,7 +1753,15 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
   useEffect(() => {
     if (!running) return
-    const t = setInterval(() => forceTick((n) => n + 1), 1000)
+    const t = setInterval(() => {
+      forceTick((n) => n + 1)
+      // 장애가 감지된 순간 회차 이름을 한 번만 제안한다
+      const d = msRef.current.down
+      if (!autoLabeledRef.current && d) {
+        autoLabeledRef.current = true
+        setRunLabel((cur) => (cur.trim() ? cur : suggestRunLabel(d.at, d.node)))
+      }
+    }, 1000)
     return () => clearInterval(t)
   }, [running])
 
@@ -1779,6 +1816,29 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       }
     return { label: '복구 진행 중', cls: 'bg-amber-500/20 text-amber-300' }
   }, [state])
+
+  /**
+   * 창 밖으로 알린다 — 장애가 감지된 순간과, 그 뒤 종합 판정이 처음 초록이 된 순간.
+   *
+   * 이 둘만 알린다. 마일스톤마다 울리면(파드·Ceph·VIP…) 한 회차에 열 번 넘게 뜨고, 그러면
+   * 정작 중요한 두 순간이 묻힌다. 알림을 끄는 사람이 생기는 것이 가장 나쁜 결과다.
+   * 조건은 1초마다 계속 참이므로 회차당 한 번만 보낸다(notifiedRef).
+   */
+  useEffect(() => {
+    if (!running) return
+    const d = msRef.current.down
+    if (!d) return
+    if (!notifiedRef.current.down) {
+      notifiedRef.current.down = true
+      notifyOs('장애 감지', `${d.node} DOWN — 복구 감시를 시작합니다`)
+    }
+    if (!notifiedRef.current.recovered && verdict.label.startsWith('정상')) {
+      notifiedRef.current.recovered = true
+      notifyOs('복구 완료', `${d.node} · 장애 후 ${fmtElapsed(Date.now() - d.at)} 만에 종합 판정 정상`)
+    }
+    // tick 은 msRef(참조)가 1초마다 바뀌는 것을 따라가기 위한 것이다 — 값 자체는 쓰지 않는다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, verdict.label, running])
 
   const canStart = cfg.hosts.filter(Boolean).length > 0
   // 우측 패널(서비스 데몬/OpenStack)이 켜져 있으면 보드를 가로로 넓힌다
@@ -1866,8 +1926,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             <input
               value={runLabel}
               onChange={(e) => setRunLabel(e.target.value)}
-              placeholder="회차 이름 (이력에 저장됩니다)"
-              title="예: 306ha con1 1차 · IPMI 강제종료 재시험"
+              placeholder="회차 이름 (장애 감지 시 자동)"
+              title="이력에 저장됩니다. 비워 두면 장애가 감지될 때 '08-30 18:40 con2 down' 형태로 채워 드립니다 — 적어 두신 것이 있으면 건드리지 않습니다"
               className="ml-2 w-[190px] shrink-0 rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none"
             />
           )}

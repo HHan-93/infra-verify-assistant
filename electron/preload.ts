@@ -167,6 +167,10 @@ const electronAPI = {
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:savePdf', payload),
 
+  /** OS 알림 — 검증 중 장애 감지·복구 완료를 창 밖에서 알려준다 */
+  notify: (title: string, body: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('app:notify', { title, body }),
+
   // 링크를 기본 브라우저로 열기
   openExternal: (url: string): void => ipcRenderer.send('shell:openExternal', url),
 

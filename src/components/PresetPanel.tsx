@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, CornerDownLeft, Copy, Check, X, Search, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
+import { Play, CornerDownLeft, Copy, Check, X, Search, Star, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
 import { PRESETS, type PresetGroup } from '../presets'
 import type { CustomPresetCommand } from '../../electron/shared-types'
 import CustomItemsMenu from './CustomItemsMenu'
@@ -88,6 +88,39 @@ function Highlight({ text, query }: { text: string; query: string }) {
     </>
   )
 }
+
+/**
+ * 즐겨찾기 · 최근 실행.
+ *
+ * 프리셋이 184개인데 한 사람이 실제로 쓰는 것은 열댓 개다. 매번 카테고리를 두 번 눌러
+ * 찾아 들어가는 대신, 별을 달아 두거나 방금 쓴 것을 첫 화면에서 집게 한다.
+ *
+ * 식별자는 `솔루션|하위분류|명령어` 다. 라벨은 사람이 고칠 수 있어 기준으로 삼기 어렵고,
+ * 명령어가 같아도 솔루션이 다르면 다른 항목이다(같은 `df -h` 라도 맥락이 다르다).
+ * 사용자 정의 프리셋의 명령어를 고치면 별이 풀린다 — 그 편이 엉뚱한 항목에 별이 남는 것보다 낫다.
+ */
+const FAV_KEY_LS = 'preset_favorites'
+const RECENT_KEY_LS = 'preset_recent'
+const RECENT_MAX_ITEMS = 12
+const presetId = (solution: string, subgroup: string, command: string) => `${solution}|${subgroup}|${command}`
+function readList(key: string): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) ?? '[]')
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return [] // 손상된 값은 빈 목록으로 — 즐겨찾기 때문에 패널이 안 뜨면 안 된다
+  }
+}
+const writeList = (key: string, v: string[]) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(v))
+  } catch {
+    /* 저장 실패는 무시 — 이번 세션에서만 유지된다 */
+  }
+}
+
+/** 카테고리 목록 맨 위에 끼우는 가상 항목 */
+const PINNED_CAT = '★ 자주 쓰는 것'
 
 export default function PresetPanel({ connected, onRun, onClose }: PresetPanelProps) {
   const [solution, setSolution] = useState(PRESETS[0].solution)
@@ -240,6 +273,22 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
     setOpenPh(null)
   }, [solution, subName])
 
+  const [favorites, setFavorites] = useState<string[]>(() => readList(FAV_KEY_LS))
+  const [recents, setRecents] = useState<string[]>(() => readList(RECENT_KEY_LS))
+  const toggleFavorite = (id: string) =>
+    setFavorites((f) => {
+      const next = f.includes(id) ? f.filter((x) => x !== id) : [id, ...f]
+      writeList(FAV_KEY_LS, next)
+      return next
+    })
+  /** 실행한 것을 최근 목록 맨 앞으로 (같은 것을 또 실행하면 중복이 아니라 순서만 올라간다) */
+  const markRecent = (id: string) =>
+    setRecents((r) => {
+      const next = [id, ...r.filter((x) => x !== id)].slice(0, RECENT_MAX_ITEMS)
+      writeList(RECENT_KEY_LS, next)
+      return next
+    })
+
   const trimmed = query.trim()
 
   const group = useMemo(
@@ -264,6 +313,25 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
       setTimeout(() => setCopied((c) => (c === cmd ? null : c)), 1500)
     } catch { /* 무시 */ }
   }
+
+  /**
+   * 저장된 id 를 지금 목록의 명령으로 되살린다.
+   * 없어진 항목(프리셋을 지웠거나 명령어를 고친 경우)은 조용히 빠진다 — 죽은 줄을 남겨
+   * 눌렀을 때 아무 일도 일어나지 않는 것보다, 안 보이는 편이 덜 헷갈린다.
+   */
+  const byId = useMemo(() => {
+    const m = new Map<string, (typeof ALL_COMMANDS)[number]>()
+    for (const c of ALL_COMMANDS) m.set(presetId(c.solution, c.subgroup, c.command), c)
+    return m
+  }, [ALL_COMMANDS])
+  const favoriteCommands = useMemo(
+    () => favorites.map((id) => byId.get(id)).filter((c): c is (typeof ALL_COMMANDS)[number] => !!c),
+    [favorites, byId],
+  )
+  const recentCommands = useMemo(
+    () => recents.map((id) => byId.get(id)).filter((c): c is (typeof ALL_COMMANDS)[number] => !!c),
+    [recents, byId],
+  )
 
   const searchResults = useMemo(() => {
     if (!trimmed) return []
@@ -420,6 +488,18 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               )
             })()}
             <button
+              onClick={() => toggleFavorite(presetId(sol, sub, c.command))}
+              title={favorites.includes(presetId(sol, sub, c.command)) ? '즐겨찾기에서 빼기' : '즐겨찾기에 넣기'}
+              className={
+                'rounded p-1 hover:bg-white/10 ' +
+                (favorites.includes(presetId(sol, sub, c.command))
+                  ? 'text-amber-300'
+                  : 'text-gray-600 hover:text-gray-300')
+              }
+            >
+              <Star size={13} fill={favorites.includes(presetId(sol, sub, c.command)) ? 'currentColor' : 'none'} />
+            </button>
+            <button
               onClick={() => copy(c.command)}
               title="명령어 복사"
               className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
@@ -431,7 +511,11 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               )}
             </button>
             <button
-              onClick={() => (ph ? togglePlaceholderInput(key, c.command) : onRun(c.command, true))}
+              onClick={() => {
+                markRecent(presetId(sol, sub, c.command))
+                if (ph) togglePlaceholderInput(key, c.command)
+                else onRun(c.command, true)
+              }}
               disabled={!connected}
               title={
                 !connected
@@ -565,6 +649,22 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               카테고리
             </div>
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              {/* 별을 달아 둔 것과 방금 쓴 것 — 184개를 카테고리로 파고들지 않아도 되게 맨 위에 둔다 */}
+              <button
+                onClick={() => setSolution(PINNED_CAT)}
+                className={
+                  'flex items-center gap-1.5 px-3 py-1.5 text-left text-[12px] ' +
+                  (solution === PINNED_CAT
+                    ? 'bg-blue-500/15 text-blue-200'
+                    : 'text-gray-400 hover:bg-white/5 hover:text-gray-200')
+                }
+              >
+                <Star size={12} className={favorites.length ? 'text-amber-300' : ''} />
+                자주 쓰는 것
+                <span className="ml-auto text-[10px] text-gray-600">
+                  {favoriteCommands.length + recentCommands.length || ''}
+                </span>
+              </button>
               {groups.map((g) => (
                 <button
                   key={g.solution}
@@ -608,7 +708,48 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
             className="w-1 shrink-0 cursor-col-resize bg-white/10 hover:bg-blue-400/50"
           />
 
-          {/* 2·3단계: 하위분류 + 명령어 */}
+          {/* 자주 쓰는 것 — 하위분류 없이 평면 목록 */}
+          {solution === PINNED_CAT ? (
+            <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-2">
+              {favoriteCommands.length === 0 && recentCommands.length === 0 ? (
+                <p className="py-6 text-center text-[12px] leading-relaxed text-gray-500">
+                  아직 비어 있습니다.
+                  <br />
+                  명령어 옆의 <Star size={11} className="mb-px inline text-amber-300" /> 를 눌러 즐겨찾기에 넣거나,
+                  <br />한 번 실행하면 최근 목록에 남습니다.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {favoriteCommands.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-amber-300/80">
+                        즐겨찾기 {favoriteCommands.length}개
+                      </p>
+                      {favoriteCommands.map((c) => renderCommand(c, `fav-${c.solution}-${c.subgroup}-${c.command}`, true))}
+                    </div>
+                  )}
+                  {recentCommands.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="flex items-center gap-2 px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                        최근 실행 {recentCommands.length}개
+                        <button
+                          onClick={() => {
+                            setRecents([])
+                            writeList(RECENT_KEY_LS, [])
+                          }}
+                          className="ml-auto font-normal normal-case tracking-normal text-gray-600 hover:text-gray-400"
+                        >
+                          비우기
+                        </button>
+                      </p>
+                      {recentCommands.map((c) => renderCommand(c, `rec-${c.solution}-${c.subgroup}-${c.command}`, true))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+          /* 2·3단계: 하위분류 + 명령어 */
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="flex flex-wrap items-center gap-1 border-b border-white/10 px-2 py-1.5">
               {group.subgroups.map((s) => (
@@ -655,6 +796,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               {sub.commands.map((c) => renderCommand(c, c.command))}
             </div>
           </div>
+          )}
         </div>
       )}
 
