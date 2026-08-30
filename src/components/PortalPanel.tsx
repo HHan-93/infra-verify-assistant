@@ -750,12 +750,12 @@ function BoardView({
   )
 }
 
-/** 띠가 덮고 있는 시간 구간을 사람 말로 */
+/** 띠가 덮고 있는 시간 구간 — 줄 끝 라벨은 폭이 고정이라 짧게 적고, 긴 설명은 툴팁으로 준다 */
 function spanLabel(recent: { at: number }[]): string {
   if (recent.length < 2) return `${recent.length}회`
   const sec = Math.round((recent[recent.length - 1].at - recent[0].at) / 1000)
   const span = sec < 60 ? `${sec}초` : `${Math.floor(sec / 60)}분 ${sec % 60}초`
-  return `최근 ${span} · ${recent.length}회`
+  return `${span} · ${recent.length}회`
 }
 
 /**
@@ -873,15 +873,24 @@ function TargetRow({
               />
             ))}
           </div>
-          <span className="shrink-0 whitespace-nowrap text-[10px] text-gray-500">
-            {cfg.intervalSec}초마다 · {spanLabel(state.recent)}
-            {failCount > 0 ? (
-              <span className="text-red-300/90">
-                {' · '}실패 {failCount}회 (마지막 {lastFailAt !== null ? fmtClock(lastFailAt) : '—'})
-              </span>
-            ) : (
-              ' · 실패 없음'
-            )}
+          {/*
+            **폭을 고정한다.** 예전에는 글자 수만큼 자리를 차지해, 실패한 줄만 라벨이 길어지고
+            그만큼 띠가 짧아졌다 — 줄마다 띠 끝이 어긋나 그리다 만 것처럼 보였다.
+            자리를 고정하면 여러 줄의 띠가 같은 지점에서 끝나 서로 비교된다(원래 목적이 그것이다).
+            길어지는 부분(마지막 실패 시각)은 툴팁으로 옮긴다.
+          */}
+          <span
+            className="w-[168px] shrink-0 truncate text-right text-[10px] text-gray-500"
+            title={
+              `${cfg.intervalSec}초마다 확인 · 최근 ${spanLabel(state.recent)}` +
+              (failCount > 0
+                ? ` · 실패 ${failCount}회 (마지막 ${lastFailAt !== null ? fmtClock(lastFailAt) : '—'})`
+                : ' · 실패 없음')
+            }
+          >
+            {/* 확인 주기는 보드 헤더(⟳ 1초 갱신)에 이미 있다 — 줄마다 되풀이하면 자리만 먹는다 */}
+            최근 {spanLabel(state.recent)}
+            {failCount > 0 ? <span className="text-red-300/90">{' · '}실패 {failCount}</span> : ' · 실패 없음'}
           </span>
         </div>
       )}
