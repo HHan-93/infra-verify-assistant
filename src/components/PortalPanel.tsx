@@ -3,6 +3,9 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  ChevronUp,
+  ShieldCheck,
+  HelpCircle,
   ChevronRight,
   Loader2,
   Plus,
@@ -95,6 +98,17 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   }
   const [loginTest, setLoginTest] = useState<{ ok: boolean; text: string } | null>(null)
   const [loginTesting, setLoginTesting] = useState(false)
+  /**
+   * 인증 설정을 고치면 시험 결과를 버린다.
+   *
+   * 결과를 남겨 두면 계정이나 경로를 바꾼 뒤에도 '인증 준비됨' 초록 줄이 그대로 떠 있어서,
+   * **지금 설정으로 되는지 확인하지 않은 것을 확인한 것처럼** 보이게 된다. 이 앱에서 초록은
+   * 근거가 있을 때만 띄운다.
+   */
+  const authSig = JSON.stringify(cfg?.auth ?? null)
+  useEffect(() => {
+    setLoginTest(null)
+  }, [authSig])
   /**
    * 토큰 갱신 이력. 접힌 줄에서도 "갱신이 돌고 있다"를 한눈에 보이게 하려는 것 —
    * 이게 안 보이면 몇 분마다 패널을 펼쳐 인증 줄의 시각을 눈으로 비교해야 한다.
@@ -891,6 +905,18 @@ function ConfigView({
   const [expanded, setExpanded] = useState<string | null>(null)
   /** 시험 결과의 '자세히' 를 펼친 대상 */
   const [detailOpen, setDetailOpen] = useState<string | null>(null)
+  /**
+   * 인증 칸을 펼쳐 둘지.
+   *
+   * 로그인 시험이 통과하면 접는다 — 이 단계에서 사람이 할 일이 끝났다는 신호가 필요하고,
+   * 아래 '감시 대상' 까지 가는 스크롤도 그만큼 짧아진다. 다시 펼치는 것은 사람만 한다.
+   */
+  const [authOpen, setAuthOpen] = useState(true)
+  /** 거의 건드리지 않는 칸(전송 방식·본문 템플릿·만료 대응)은 접어 둔다 — 기본값으로 대개 동작한다 */
+  const [advOpen, setAdvOpen] = useState(false)
+  useEffect(() => {
+    if (loginTest?.ok) setAuthOpen(false)
+  }, [loginTest?.ok])
   const set = (p: Partial<PortalConfig>) => onChange({ ...cfg, ...p })
   const setAuth = (p: Partial<PortalConfig['auth']>) => onChange({ ...cfg, auth: { ...cfg.auth, ...p } })
   const setTarget = (id: string, p: Partial<PortalTarget>) =>
@@ -914,6 +940,53 @@ function ConfigView({
 
   return (
     <div className="space-y-3 px-3 pb-3">
+      {/* 어디까지 됐는지 — 스크롤하지 않고 알 수 있어야 한다(칸이 많아 아래가 잘 안 보인다) */}
+      <div className="grid grid-cols-4 gap-1.5">
+        {[
+          {
+            n: '1',
+            t: '포털 주소',
+            v: cfg.baseUrl.trim() ? cfg.baseUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '') : '미입력',
+            ok: !!cfg.baseUrl.trim(),
+          },
+          {
+            n: '2',
+            t: '인증',
+            v:
+              cfg.auth.mode === 'none'
+                ? '없음'
+                : loginTest?.ok
+                  ? '준비됨'
+                  : cfg.auth.mode === 'token'
+                    ? '토큰 직접 입력'
+                    : '시험 필요',
+            ok: cfg.auth.mode === 'none' || !!loginTest?.ok,
+          },
+          {
+            n: '3',
+            t: '감시 대상',
+            v: `${cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim()).length}개 활성`,
+            ok: cfg.targets.some((t) => t.enabled && (t.path ?? '').trim()),
+          },
+          { n: '4', t: '판정 기준', v: `${cfg.intervalSec}초 · 연속 ${cfg.successStreak}회`, ok: true },
+        ].map((st) => (
+          <div
+            key={st.n}
+            className={
+              'min-w-0 rounded border px-2 py-1.5 ' +
+              (st.ok ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5')
+            }
+          >
+            <div className="text-[10px] text-gray-500">
+              {st.n} · {st.t}
+            </div>
+            <div className={'truncate text-[11px] ' + (st.ok ? 'text-emerald-200/90' : 'text-amber-200')} title={st.v}>
+              {st.v}
+            </div>
+          </div>
+        ))}
+      </div>
+
       {/* 접속 */}
       <div className="rounded border border-white/10 bg-black/20 p-2.5">
         <div className="mb-2 text-[11px] font-medium text-gray-300">포털 주소</div>
@@ -957,6 +1030,14 @@ function ConfigView({
             <option value="token">access token 직접 입력</option>
             <option value="none">인증 없음</option>
           </select>
+          {cfg.auth.mode === 'login' && loginTest?.ok && !authOpen && (
+            <button
+              onClick={() => setAuthOpen(true)}
+              className="ml-auto flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[10.5px] text-gray-400 hover:bg-white/5"
+            >
+              펼치기 <ChevronDown size={11} />
+            </button>
+          )}
         </div>
         {cfg.auth.mode === 'token' && (
           <>
@@ -969,105 +1050,134 @@ function ConfigView({
         )}
         {cfg.auth.mode === 'login' && (
           <div className="space-y-1.5">
-            <p className="text-[10.5px] text-gray-500">
-              401 이 오면 자동으로 다시 로그인해 한 번 더 시도합니다. 재로그인까지 실패하면 그대로 비정상으로
-              기록합니다 — 인증 서비스가 안 떠 있는 것도 "아직 정상이 아니다" 의 일부이기 때문입니다.
-            </p>
-            {looksEncrypted(cfg.auth.password ?? '') && (
-              <div className="rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-sky-200">
-                비밀번호 칸의 값이 <b>암호화된 문자열처럼</b> 보입니다 — 개발자도구 Payload 에서 그대로 옮기신
-                것이라면 대개 <b>그대로 다시 보내도 통합니다</b>. 암호화 방식(AES-CBC)은 복호화에 필요한 값을
-                암호문 안에 같이 담아 보내기 때문입니다. 아래 <b>'로그인 시험'</b> 으로 지금 확인하세요 — 되면
-                토큰이 만료돼도 즉시 다시 받아오므로 감시가 끊기지 않습니다.
+            {/* 통과 뒤에는 한 줄 요약만 — 이 단계에서 할 일이 끝났다는 신호 */}
+            {loginTest?.ok && !authOpen ? (
+              <div className="flex items-center gap-2 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-200">
+                <ShieldCheck size={12} className="shrink-0" />
+                <span className="shrink-0 font-medium">인증 준비됨</span>
+                <span className="min-w-0 truncate text-emerald-200/80" title={loginTest.text}>
+                  {cfg.auth.username}
+                  {(cfg.auth.reissueMinutes ?? 0) > 0 ? ` · ${cfg.auth.reissueMinutes}분마다 미리 재발급` : ''}
+                  {' · 만료되면 즉시 다시 받아옵니다'}
+                </span>
+              </div>
+            ) : (
+              <>
+                {/* 이 안내는 아직 통과하지 못한 동안에만 값어치가 있다 */}
+                {looksEncrypted(cfg.auth.password ?? '') && !loginTest?.ok && (
+                  <div className="rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-sky-200">
+                    비밀번호 칸의 값이 <b>암호화된 문자열처럼</b> 보입니다 — 개발자도구 Payload 에서 그대로 옮기신
+                    것이라면 대개 <b>그대로 다시 보내도 통합니다</b>(AES-CBC 는 복호화에 필요한 값을 암호문 안에
+                    같이 담아 보내기 때문입니다). 아래 <b>'로그인 시험'</b> 으로 확인하세요.
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className={labelCls}>로그인 API 경로</div>
+                    <input className={inputCls} value={cfg.auth.loginPath ?? ''} onChange={(e) => setAuth({ loginPath: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls} title="응답 JSON 안에서 토큰이 있는 자리. 예: data.accessToken">
+                      토큰 위치 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                    </div>
+                    <input className={inputCls} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls}>계정</div>
+                    <input className={inputCls} value={cfg.auth.username ?? ''} onChange={(e) => setAuth({ username: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls}>
+                      비밀번호 <span className="text-gray-600">· OS 키체인에 암호화 저장</span>
+                    </div>
+                    <input type="password" className={inputCls} value={cfg.auth.password ?? ''} onChange={(e) => setAuth({ password: e.target.value })} />
+                  </div>
+                </div>
+
+                {/* 이 설정이 실제로 토큰을 받아오는지가 '끊김 없는 감시' 의 전제다 */}
+                <div className="flex items-center gap-2">
+                  <button
+                    disabled={loginTesting}
+                    onClick={onTestLogin}
+                    className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-200 hover:bg-white/5 disabled:opacity-40"
+                  >
+                    <RefreshCw size={11} className={loginTesting ? 'animate-spin' : ''} /> 로그인 시험
+                  </button>
+                  <span className="text-[10px] text-gray-500">되면 이 칸들은 한 줄로 접힙니다</span>
+                  <button
+                    onClick={() => setAdvOpen((v) => !v)}
+                    className="ml-auto flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[10.5px] text-gray-400 hover:bg-white/5"
+                  >
+                    고급 설정 {advOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* 실패는 접지 않는다 — 사유가 곧 다음에 할 일이다 */}
+            {loginTest && !loginTest.ok && (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber-200">
+                <b>로그인 시험 실패</b> — {loginTest.text}
               </div>
             )}
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <div className={labelCls}>로그인 API 경로</div>
-                <input className={inputCls} value={cfg.auth.loginPath ?? ''} onChange={(e) => setAuth({ loginPath: e.target.value })} />
-              </div>
-              <div>
-                <div className={labelCls}>토큰 위치 (응답 JSON 경로)</div>
-                <input className={inputCls} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
-              </div>
-              <div>
-                <div className={labelCls}>계정</div>
-                <input className={inputCls} value={cfg.auth.username ?? ''} onChange={(e) => setAuth({ username: e.target.value })} />
-              </div>
-              <div>
-                <div className={labelCls}>비밀번호 (OS 키체인으로 암호화 저장)</div>
-                <input type="password" className={inputCls} value={cfg.auth.password ?? ''} onChange={(e) => setAuth({ password: e.target.value })} />
-              </div>
-              <div className="col-span-2">
-                <div className={labelCls}>로그인 요청 본문 — {'{{id}}'} / {'{{pw}}'} 가 위 값으로 치환됩니다</div>
-                <input className={inputCls} value={cfg.auth.loginBody ?? ''} onChange={(e) => setAuth({ loginBody: e.target.value })} />
-              </div>
-              <div>
-                <div className={labelCls}>토큰 헤더 이름</div>
-                <input className={inputCls} value={cfg.auth.header ?? ''} onChange={(e) => setAuth({ header: e.target.value })} />
-              </div>
-              <div>
-                <div className={labelCls}>헤더 형식</div>
-                <input className={inputCls} value={cfg.auth.headerFormat ?? ''} placeholder="Bearer {token}" onChange={(e) => setAuth({ headerFormat: e.target.value })} />
-              </div>
-              <div className="col-span-2">
-                <div className={labelCls}>쿠키 이름 (토큰을 쿠키로도 보내야 하면. 안 쓰면 비워두세요)</div>
-                <input className={inputCls} value={cfg.auth.cookieName ?? ''} placeholder="accessToken" onChange={(e) => setAuth({ cookieName: e.target.value })} />
-              </div>
-            </div>
-
-            {/* 이 설정이 실제로 토큰을 받아오는지가 '끊김 없는 감시' 의 전제다 — 대상 시험과 별개로 여기서 바로 확인한다 */}
-            <div className="flex items-center gap-2">
-              <button
-                disabled={loginTesting}
-                onClick={onTestLogin}
-                className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-200 hover:bg-white/5 disabled:opacity-40"
-              >
-                <RefreshCw size={11} className={loginTesting ? 'animate-spin' : ''} /> 로그인 시험
-              </button>
-              <span className="text-[10px] text-gray-500">지금 이 설정으로 토큰을 받아올 수 있는지 확인합니다</span>
-            </div>
-            {loginTest && (
-              <div
-                className={`rounded border px-2 py-1.5 text-[10.5px] leading-relaxed ${
-                  loginTest.ok ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'
-                }`}
-              >
+            {loginTest?.ok && authOpen && (
+              <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-emerald-200">
                 <b>로그인 시험</b> — {loginTest.text}
               </div>
             )}
 
-            {/* ── 토큰 만료 대응 ── */}
-            <div className="mt-1 rounded border border-white/10 bg-black/20 p-2">
-              <div className="mb-1 text-[11px] font-medium text-gray-300">토큰 만료 대응</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <div className={labelCls}>선제 재발급 주기 (분) — 0 이면 만료된 뒤에만 재발급</div>
-                  <input
-                    type="number"
-                    min={0}
-                    className={inputCls}
-                    value={cfg.auth.reissueMinutes ?? 0}
-                    onChange={(e) => setAuth({ reissueMinutes: Math.max(0, Number(e.target.value) || 0) })}
-                  />
+            {/* ── 고급 설정 — 기본값으로 대개 그대로 둔다 ── */}
+            {advOpen && (
+              <div className="mt-1 space-y-2 rounded border border-white/10 bg-black/20 p-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="col-span-2">
+                    <div className={labelCls} title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다">
+                      로그인 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                    </div>
+                    <input className={inputCls} value={cfg.auth.loginBody ?? ''} onChange={(e) => setAuth({ loginBody: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls}>토큰 헤더 이름</div>
+                    <input className={inputCls} value={cfg.auth.header ?? ''} onChange={(e) => setAuth({ header: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls}>헤더 형식</div>
+                    <input className={inputCls} value={cfg.auth.headerFormat ?? ''} placeholder="Bearer {token}" onChange={(e) => setAuth({ headerFormat: e.target.value })} />
+                  </div>
+                  <div className="col-span-2">
+                    <div className={labelCls}>쿠키 이름 <span className="text-gray-600">· 토큰을 쿠키로도 보내야 할 때만</span></div>
+                    <input className={inputCls} value={cfg.auth.cookieName ?? ''} placeholder="accessToken" onChange={(e) => setAuth({ cookieName: e.target.value })} />
+                  </div>
+                  <div>
+                    <div className={labelCls} title="0 이면 만료된 뒤(401)에만 재발급합니다. 토큰 수명이 10분이면 8 정도">
+                      선제 재발급 (분) <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                    </div>
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      value={cfg.auth.reissueMinutes ?? 0}
+                      onChange={(e) => setAuth({ reissueMinutes: Math.max(0, Number(e.target.value) || 0) })}
+                    />
+                  </div>
+                  <div>
+                    <div className={labelCls} title="토큰이 죽었는데도 HTTP 200 에 에러 봉투만 주는 포털에서 만료를 잡아냅니다">
+                      만료를 뜻하는 응답 문구 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                    </div>
+                    <input
+                      className={inputCls}
+                      value={cfg.auth.expiredBodyMatch ?? ''}
+                      placeholder="TOKEN_NOT_VERIFY"
+                      onChange={(e) => setAuth({ expiredBodyMatch: e.target.value })}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <div className={labelCls}>만료를 뜻하는 응답 문구 (HTTP 200 으로 오는 경우 대비)</div>
-                  <input
-                    className={inputCls}
-                    value={cfg.auth.expiredBodyMatch ?? ''}
-                    placeholder="TOKEN_NOT_VERIFY"
-                    onChange={(e) => setAuth({ expiredBodyMatch: e.target.value })}
-                  />
-                </div>
+                <p className="text-[10.5px] leading-relaxed text-gray-500">
+                  401 이 오면 이 설정과 무관하게 항상 자동 재발급하고 한 번 더 시도합니다. 재로그인까지 실패하면
+                  그대로 비정상으로 기록합니다 — 인증 서비스가 안 떠 있는 것도 "아직 정상이 아니다" 의 일부입니다.
+                </p>
               </div>
-              <p className="mt-1 text-[10.5px] text-gray-500">
-                401 이 오면 이 설정과 무관하게 항상 자동 재발급합니다. 위 두 칸은 그것만으로 부족할 때 씁니다 —
-                <b className="text-gray-400"> 주기</b>는 만료 순간 한 주기가 비정상으로 찍혀 연속 카운트가 초기화되는 걸 막고(토큰
-                수명이 10분이면 8 정도), <b className="text-gray-400">응답 문구</b>는 토큰이 죽었는데도 HTTP 200 에 에러
-                봉투만 담아 주는 포털에서 만료를 잡아냅니다.
-              </p>
-            </div>
+            )}
           </div>
         )}
       </div>
