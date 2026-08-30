@@ -461,6 +461,32 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   const [testResult, setTestResult] = useState<
     Record<string, { ok: boolean; at: number; lines: string[]; detail?: string[]; suggest?: { path: string; count: number }[] }>
   >({})
+  /**
+   * 대상 설정이 바뀌면 그 대상의 시험 결과를 버린다.
+   *
+   * 추천 경로 버튼을 눌러 조건을 넣은 직후에도 위에는 **바꾸기 전에 받은** `정상으로 판정됩니다 /
+   * 정상 조건 0개 모두 통과` 가 그대로 떠 있었다. 지금 설정으로 확인한 적이 없는데 확인한 것처럼
+   * 보인다 — 인증 시험과 같은 규칙이다. 초록은 근거가 있을 때만 띄운다.
+   */
+  const targetSigsRef = useRef<Record<string, string>>({})
+  useEffect(() => {
+    const next: Record<string, string> = {}
+    const changed: string[] = []
+    for (const t of cfg?.targets ?? []) {
+      // 판정에 영향을 주는 것만 본다 — 이름·묶음·메모를 고쳤다고 결과를 버릴 이유는 없다
+      const sig = JSON.stringify({ p: t.path, m: t.method, b: t.body, h: t.headers, e: t.expectStatus, c: t.checks, a: t.auth })
+      next[t.id] = sig
+      if (targetSigsRef.current[t.id] !== undefined && targetSigsRef.current[t.id] !== sig) changed.push(t.id)
+    }
+    targetSigsRef.current = next
+    if (changed.length)
+      setTestResult((m) => {
+        const n = { ...m }
+        for (const id of changed) delete n[id]
+        return n
+      })
+  }, [cfg])
+
   const testTarget = async (t: PortalTarget) => {
     const c = cfgRef.current
     if (!c) return
