@@ -14,6 +14,9 @@ import {
   Minimize2,
   Highlighter,
   FolderOpen,
+  Monitor,
+  Bell,
+  Lock,
 } from 'lucide-react'
 import SSHForm, { type SSHFormHandle } from './components/SSHForm'
 import Toolbar from './components/Toolbar'
@@ -104,6 +107,72 @@ function dotColor(status?: string): string {
     default:
       return 'text-gray-500'
   }
+}
+
+/**
+ * 설정 모달의 분류.
+ *
+ * 전에는 스무 개 남짓을 한 줄로 쌓았다. 그러면 (1) 성격이 다른 것이 같은 간격으로 이웃해
+ * 어디까지가 한 묶음인지 안 보이고, (2) 세로가 화면을 넘어 작은 노트북에서 잘렸다.
+ * 다섯으로 나누니 한 칸이 서너 줄이 된다 — 대신 다른 칸의 항목은 안 보이므로, 이름은
+ * "무엇을 찾을 때 여기로 오는가" 로 짓는다(기능 이름이 아니라).
+ */
+const SETTINGS_TABS = [
+  { key: 'display', label: '화면', icon: Monitor },
+  { key: 'session', label: '세션', icon: Plug },
+  { key: 'notify', label: '알림', icon: Bell },
+  { key: 'security', label: '보안', icon: Lock },
+  { key: 'data', label: '데이터', icon: FolderOpen },
+] as const
+type SettingsTabKey = (typeof SETTINGS_TABS)[number]['key']
+
+/**
+ * 설정 한 줄 — 라벨과 설명을 **분리한다.**
+ *
+ * 전에는 `작업 중 끊기면 자동 재연결 시도 (최대 4회, 백오프)` 처럼 설명까지 괄호로 라벨에
+ * 밀어넣어, 켜고 끌 것을 훑을 수가 없었다. 굵은 한 줄로 무엇인지 말하고, 조건은 아래 줄로 내린다.
+ *
+ * 꺼져 있어 못 누르는 항목은 **왜 못 누르는지**(`disabledReason`)를 그 자리에 밝힌다.
+ */
+function CheckRow({
+  checked,
+  onChange,
+  label,
+  desc,
+  disabled,
+  disabledReason,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  desc?: string
+  disabled?: boolean
+  disabledReason?: string
+}) {
+  return (
+    <label className={'flex gap-2.5 ' + (disabled ? 'cursor-default' : 'cursor-pointer')}>
+      <input
+        type="checkbox"
+        className="mt-0.5 shrink-0"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <div className="min-w-0">
+        <div className={'text-xs ' + (disabled ? 'text-gray-500' : 'text-gray-200')}>{label}</div>
+        {(disabled && disabledReason ? disabledReason : desc) && (
+          <div
+            className={
+              'mt-0.5 text-[11px] leading-relaxed ' +
+              (disabled && disabledReason ? 'text-amber-300/70' : 'text-gray-500')
+            }
+          >
+            {disabled && disabledReason ? disabledReason : desc}
+          </div>
+        )}
+      </div>
+    </label>
+  )
 }
 
 /**
@@ -217,6 +286,9 @@ export default function App() {
   const [, setNowTick] = useState(0)
   // 외형 설정 (글꼴 크기 / 테마) — localStorage 보존
   const [showSettings, setShowSettings] = useState(false)
+  // 설정 모달에서 보고 있는 칸. 창을 닫았다 열면 '화면' 으로 돌아온다 — 마지막에 본 칸을
+  // 기억하면 "설정을 열었는데 못 보던 화면이 뜬다" 가 된다.
+  const [settingsTab, setSettingsTab] = useState<SettingsTabKey>('display')
   /**
    * 설정·데이터가 저장되는 폴더. 모달을 열 때 한 번만 물어본다.
    * 경로를 글자로도 보여주는 게 중요하다 — 백업 스크립트에 붙여 쓰거나 탐색기 주소창에
@@ -2515,220 +2587,270 @@ export default function App() {
         </div>
       )}
 
-      {/* 설정 모달 (외형 + 데이터 폴더) */}
+      {/* 설정 모달 — 왼쪽 분류 + 오른쪽 내용.
+          내용 영역만 스크롤하고 높이를 고정한다: 칸을 옮길 때마다 창이 커졌다 작아지면
+          그 자체가 방해다("화면이 저절로 움직이지 않게" 규칙). */}
       {showSettings && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
           <div
-            className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            className="flex w-full max-w-[560px] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-3 text-sm font-semibold text-gray-100">설정</div>
-
-            <label className="mb-1 block text-[11px] text-gray-400">글꼴 크기: {fontSize}px</label>
-            <div className="mb-3 flex items-center gap-2">
-              <input
-                type="range"
-                min={9}
-                max={24}
-                value={fontSize}
-                onChange={(e) => changeFontSize(Number(e.target.value))}
-                className="flex-1"
-              />
+            <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+              <span className="text-sm font-semibold text-gray-100">설정</span>
               <button
-                onClick={() => changeFontSize(fontSize - 1)}
-                className="rounded border border-white/10 px-2 text-gray-200 hover:bg-white/10"
+                onClick={() => setShowSettings(false)}
+                title="닫기"
+                className="ml-auto rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
               >
-                −
-              </button>
-              <button
-                onClick={() => changeFontSize(fontSize + 1)}
-                className="rounded border border-white/10 px-2 text-gray-200 hover:bg-white/10"
-              >
-                +
+                <X size={14} />
               </button>
             </div>
 
-            <label className="mb-1 block text-[11px] text-gray-400">색상 테마</label>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.entries(THEMES).map(([k, t]) => (
-                <button
-                  key={k}
-                  onClick={() => changeTheme(k)}
-                  className={
-                    'flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ' +
-                    (themeKey === k ? 'border-blue-500/60 bg-blue-600/15 text-blue-100' : 'border-white/10 text-gray-300 hover:bg-white/5')
-                  }
-                >
-                  <span
-                    className="h-4 w-4 shrink-0 rounded-sm border border-white/20"
-                    style={{ background: t.background }}
-                  />
-                  <span className="truncate">{t.name}</span>
-                </button>
-              ))}
-            </div>
-
-            <label className="mt-4 flex items-center gap-2 text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={highlight}
-                onChange={(e) => {
-                  setHighlight(e.target.checked)
-                  localStorage.setItem('term_highlight', e.target.checked ? '1' : '0')
-                }}
-              />
-              출력 하이라이트 (ERROR/WARN/OK 색상 강조)
-            </label>
-            <button
-              onClick={() => setShowHlRules(true)}
-              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-panel-light px-2 py-1.5 text-xs text-gray-200 hover:bg-white/10"
-            >
-              <Highlighter size={13} className="text-blue-300" />
-              로그 하이라이트 규칙 관리 (사용자 키워드)
-            </button>
-            <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={restoreOnLaunch}
-                onChange={(e) => {
-                  setRestoreOnLaunch(e.target.checked)
-                  localStorage.setItem('restore_sessions', e.target.checked ? '1' : '0')
-                }}
-              />
-              시작 시 이전 세션 복원 (자동 재연결)
-            </label>
-            <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={autoReconnect}
-                onChange={(e) => {
-                  setAutoReconnect(e.target.checked)
-                  localStorage.setItem('auto_reconnect', e.target.checked ? '1' : '0')
-                }}
-              />
-              작업 중 끊기면 자동 재연결 시도 (최대 4회, 백오프)
-            </label>
-
-            <div className="mt-4 rounded-md border border-white/10 bg-panel-light/50 p-2.5">
-              <div className="mb-1.5 text-[11px] font-medium text-gray-300">알림</div>
-              <label className="flex items-center gap-2 text-xs text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={notifyOn}
-                  onChange={(e) => {
-                    setNotifyOn(e.target.checked)
-                    setNotifyEnabled(e.target.checked)
-                  }}
-                />
-                검증 중 장애 감지·복구 완료를 OS 알림으로 알리기
-              </label>
-              <div className="mt-1.5 flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    // 실제로 어떻게 뜨는지 미리 보는 용도 — 설정만 보고는 알 수 없다
-                    void window.electronAPI
-                      .notify('Q-Term 알림 시험', '이런 모양으로 알려드립니다. 눌러 보시면 창이 앞으로 나옵니다.')
-                      .then((r) => setNotifyTest(r.ok ? '알림을 보냈습니다 — 화면 우측 하단을 확인하세요.' : (r.error ?? '실패')))
-                  }}
-                  className="rounded border border-white/10 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
-                >
-                  알림 시험
-                </button>
-                {notifyTest && <span className="text-[11px] text-gray-400">{notifyTest}</span>}
+            <div className="flex min-h-0">
+              {/* 분류 */}
+              <div className="w-[124px] shrink-0 space-y-0.5 border-r border-white/10 bg-panel-light/40 p-1.5">
+                {SETTINGS_TABS.map((t) => {
+                  const Icon = t.icon
+                  return (
+                    <button
+                      key={t.key}
+                      onClick={() => setSettingsTab(t.key)}
+                      className={
+                        'flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs ' +
+                        (settingsTab === t.key
+                          ? 'bg-blue-600/20 text-blue-100'
+                          : 'text-gray-400 hover:bg-white/5 hover:text-gray-200')
+                      }
+                    >
+                      <Icon size={14} className="shrink-0" />
+                      {t.label}
+                    </button>
+                  )
+                })}
               </div>
-              <p className="mt-1.5 text-[10.5px] leading-relaxed text-gray-500">
-                Windows 알림 센터에 뜹니다. 알림이 안 보이면 윈도우 설정 → 시스템 → 알림에서 이 앱이 꺼져 있거나
-                집중 지원(방해 금지)이 켜져 있는지 확인하세요.
-              </p>
-            </div>
 
-            <div className="mt-4 rounded-md border border-white/10 bg-panel-light/50 p-2.5">
-              <div className="mb-1.5 text-[11px] font-medium text-gray-300">민감정보 마스킹</div>
-              <label className="flex items-center gap-2 text-xs text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={maskReport}
-                  onChange={(e) => {
-                    setMaskReport(e.target.checked)
-                    setMaskReportEnabled(e.target.checked)
-                  }}
-                />
-                리포트 저장·AI 전송 시 비밀번호/토큰/키 가리기
-              </label>
-              <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={maskDisplay}
-                  onChange={(e) => {
-                    setMaskDisplay(e.target.checked)
-                    setMaskDisplayEnabled(e.target.checked)
-                  }}
-                />
-                실시간 로그 화면에도 마스킹 적용
-              </label>
-              <label className="mt-2 flex items-center gap-2 text-xs text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={maskIp}
-                  disabled={!maskReport && !maskDisplay}
-                  onChange={(e) => {
-                    setMaskIp(e.target.checked)
-                    setMaskIpEnabled(e.target.checked)
-                  }}
-                />
-                <span className={maskReport || maskDisplay ? '' : 'text-gray-500'}>
-                  IP 주소도 가리기 (앞 3옥텟)
-                </span>
-              </label>
-            </div>
+              {/* 내용 */}
+              <div className="h-[min(420px,55vh)] min-w-0 flex-1 overflow-y-auto p-4">
+                {settingsTab === 'display' && (
+                  <>
+                    <div className="mb-1.5 flex items-baseline justify-between">
+                      <span className="text-[11px] text-gray-400">글꼴 크기</span>
+                      <span className="text-xs font-medium text-gray-200">{fontSize}px</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={9}
+                        max={24}
+                        value={fontSize}
+                        onChange={(e) => changeFontSize(Number(e.target.value))}
+                        className="flex-1"
+                      />
+                      <button
+                        onClick={() => changeFontSize(fontSize - 1)}
+                        className="rounded border border-white/10 px-2 text-gray-200 hover:bg-white/10"
+                      >
+                        −
+                      </button>
+                      <button
+                        onClick={() => changeFontSize(fontSize + 1)}
+                        className="rounded border border-white/10 px-2 text-gray-200 hover:bg-white/10"
+                      >
+                        +
+                      </button>
+                    </div>
 
-            <label className="mt-3 block text-[11px] text-gray-400">
-              유휴 마스코트 등장 시간 (무동작 상태가 이 시간만큼 지속되면 등장)
-            </label>
-            <select
-              value={idleDelayMs}
-              onChange={(e) => changeIdleDelay(Number(e.target.value))}
-              className="mt-1 w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            >
-              <option value={0}>끄기 (표시 안 함)</option>
-              <option value={60_000}>1분</option>
-              <option value={180_000}>3분</option>
-              <option value={300_000}>5분</option>
-              <option value={600_000}>10분</option>
-              <option value={1_200_000}>20분</option>
-            </select>
+                    <div className="mb-1.5 mt-4 text-[11px] text-gray-400">색상 테마</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(THEMES).map(([k, t]) => (
+                        <button
+                          key={k}
+                          onClick={() => changeTheme(k)}
+                          className={
+                            'flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ' +
+                            (themeKey === k
+                              ? 'border-blue-500/60 bg-blue-600/15 text-blue-100'
+                              : 'border-white/10 text-gray-300 hover:bg-white/5')
+                          }
+                        >
+                          <span
+                            className="h-4 w-4 shrink-0 rounded-sm border border-white/20"
+                            style={{ background: t.background }}
+                          />
+                          <span className="truncate">{t.name}</span>
+                        </button>
+                      ))}
+                    </div>
 
-            <div className="mt-3 border-t border-white/10 pt-3">
-              <div className="mb-1.5 text-[11px] font-medium text-gray-300">데이터 폴더</div>
-              <p className="mb-1.5 break-all rounded bg-black/30 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-gray-400">
-                {dataDir || '경로를 확인하는 중…'}
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => window.electronAPI.openUserData()}
-                  className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
-                >
-                  <FolderOpen size={12} /> 폴더 열기
-                </button>
-                <button
-                  onClick={() => dataDir && navigator.clipboard.writeText(dataDir)}
-                  className="rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
-                >
-                  경로 복사
-                </button>
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                      <CheckRow
+                        checked={highlight}
+                        onChange={(v) => {
+                          setHighlight(v)
+                          localStorage.setItem('term_highlight', v ? '1' : '0')
+                        }}
+                        label="출력 하이라이트"
+                        desc="ERROR·WARN·OK 를 색으로 구분합니다"
+                      />
+                      {/* 라벨(label) 밖에 둔다 — 안에 넣으면 버튼을 눌러도 체크가 토글된다 */}
+                      <button
+                        onClick={() => setShowHlRules(true)}
+                        className="ml-[26px] mt-2 flex items-center gap-1.5 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                      >
+                        <Highlighter size={12} className="text-blue-300" />
+                        내 키워드 규칙 관리
+                      </button>
+                    </div>
+
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                      <div className="mb-1.5 text-xs text-gray-200">유휴 마스코트</div>
+                      <select
+                        value={idleDelayMs}
+                        onChange={(e) => changeIdleDelay(Number(e.target.value))}
+                        className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value={0}>끄기 (표시 안 함)</option>
+                        <option value={60_000}>1분</option>
+                        <option value={180_000}>3분</option>
+                        <option value={300_000}>5분</option>
+                        <option value={600_000}>10분</option>
+                        <option value={1_200_000}>20분</option>
+                      </select>
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        아무 동작이 없으면 이 시간 뒤에 등장합니다
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {settingsTab === 'session' && (
+                  <div className="space-y-3.5">
+                    <CheckRow
+                      checked={restoreOnLaunch}
+                      onChange={(v) => {
+                        setRestoreOnLaunch(v)
+                        localStorage.setItem('restore_sessions', v ? '1' : '0')
+                      }}
+                      label="이전 세션 복원"
+                      desc="앱을 켜면 마지막에 열려 있던 탭을 다시 연결합니다"
+                    />
+                    <CheckRow
+                      checked={autoReconnect}
+                      onChange={(v) => {
+                        setAutoReconnect(v)
+                        localStorage.setItem('auto_reconnect', v ? '1' : '0')
+                      }}
+                      label="끊기면 자동 재연결"
+                      desc="작업 중 연결이 끊기면 최대 4회, 간격을 늘려가며 다시 붙습니다"
+                    />
+                  </div>
+                )}
+
+                {settingsTab === 'notify' && (
+                  <div className="space-y-3">
+                    <CheckRow
+                      checked={notifyOn}
+                      onChange={(v) => {
+                        setNotifyOn(v)
+                        setNotifyEnabled(v)
+                      }}
+                      label="검증 알림"
+                      desc="장애 감지·복구 완료를 OS 알림으로 알립니다. 창이 내려가 있어도 뜹니다"
+                    />
+                    <div className="ml-[26px] flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          // 실제로 어떻게 뜨는지 미리 보는 용도 — 설정만 보고는 알 수 없다
+                          void window.electronAPI
+                            .notify('Q-Term 알림 시험', '이런 모양으로 알려드립니다. 눌러 보시면 창이 앞으로 나옵니다.')
+                            .then((r) =>
+                              setNotifyTest(
+                                r.ok ? '알림을 보냈습니다 — 화면 우측 하단을 확인하세요.' : (r.error ?? '실패'),
+                              ),
+                            )
+                        }}
+                        className="rounded border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                      >
+                        알림 시험
+                      </button>
+                      {notifyTest && <span className="text-[11px] text-gray-400">{notifyTest}</span>}
+                    </div>
+                    <p className="rounded-md border border-white/10 bg-panel-light/50 p-2.5 text-[11px] leading-relaxed text-gray-500">
+                      알림이 안 보이면 윈도우 설정 → 시스템 → 알림에서 이 앱이 꺼져 있는지, 집중 지원(방해 금지)이
+                      켜져 있는지 확인하세요.
+                    </p>
+                  </div>
+                )}
+
+                {settingsTab === 'security' && (
+                  <div className="space-y-3.5">
+                    <CheckRow
+                      checked={maskReport}
+                      onChange={(v) => {
+                        setMaskReport(v)
+                        setMaskReportEnabled(v)
+                      }}
+                      label="리포트·AI 전송 시 가리기"
+                      desc="비밀번호·토큰·키 값을 가립니다. 키 이름은 남겨 무엇이 가려졌는지 보입니다"
+                    />
+                    <CheckRow
+                      checked={maskDisplay}
+                      onChange={(v) => {
+                        setMaskDisplay(v)
+                        setMaskDisplayEnabled(v)
+                      }}
+                      label="실시간 로그 화면에도 적용"
+                      desc="어깨너머로 보이는 화면에서도 가립니다"
+                    />
+                    <CheckRow
+                      checked={maskIp}
+                      disabled={!maskReport && !maskDisplay}
+                      disabledReason="위 두 가지 중 하나를 먼저 켜세요"
+                      onChange={(v) => {
+                        setMaskIp(v)
+                        setMaskIpEnabled(v)
+                      }}
+                      label="IP 주소도 가리기"
+                      desc="앞 3옥텟을 가립니다 (10.255.233.21 → ***.***.***.21)"
+                    />
+                  </div>
+                )}
+
+                {settingsTab === 'data' && (
+                  <div>
+                    <div className="mb-1.5 text-xs text-gray-200">저장 폴더</div>
+                    <p className="mb-2 break-all rounded bg-black/30 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-gray-400">
+                      {dataDir || '경로를 확인하는 중…'}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => window.electronAPI.openUserData()}
+                        className="flex items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                      >
+                        <FolderOpen size={12} /> 폴더 열기
+                      </button>
+                      <button
+                        onClick={() => dataDir && navigator.clipboard.writeText(dataDir)}
+                        className="rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                      >
+                        경로 복사
+                      </button>
+                    </div>
+                    <p className="mt-3 text-[11px] leading-relaxed text-gray-500">
+                      프리셋·시나리오·접속 프로필·세션 로그가 여기 저장됩니다. 설치 폴더 밖이라{' '}
+                      <span className="text-gray-400">앱을 다시 설치해도 지워지지 않습니다.</span>
+                    </p>
+                    <p className="mt-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-2.5 text-[11px] leading-relaxed text-gray-400">
+                      파일을 직접 고치려면 <span className="text-amber-300/80">앱을 먼저 닫으세요</span> — 실행 중에
+                      고치면 앱이 그 변경을 모른 채 다음 저장 때 덮어씁니다.
+                    </p>
+                  </div>
+                )}
               </div>
-              <p className="mt-1.5 text-[10.5px] leading-relaxed text-gray-500">
-                프리셋·시나리오·접속 프로필·세션 로그가 여기 저장됩니다. 설치 폴더 밖이라{' '}
-                <span className="text-gray-400">앱을 다시 설치해도 지워지지 않습니다.</span>
-                <br />
-                파일을 직접 고치려면 <span className="text-amber-300/80">앱을 먼저 닫으세요</span> — 실행 중에
-                고치면 앱이 그 변경을 모른 채 다음 저장 때 덮어씁니다.
-              </p>
             </div>
 
-            <div className="mt-4 flex justify-end">
+            <div className="flex justify-end border-t border-white/10 px-4 py-2.5">
               <button
                 onClick={() => setShowSettings(false)}
                 className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
