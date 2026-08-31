@@ -98,7 +98,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
 }
 
 /** 카테고리 목록 맨 위에 끼우는 가상 항목 */
-const PINNED_CAT = '★ 자주 쓰는 것'
+const PINNED_CAT = '★ 즐겨찾기'
 
 export default function PresetPanel({ connected, onRun, onClose }: PresetPanelProps) {
   const [solution, setSolution] = useState(PRESETS[0].solution)
@@ -306,9 +306,20 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
     () => favorites.map((id) => byId.get(id)).filter((c): c is (typeof ALL_COMMANDS)[number] => !!c),
     [favorites, byId],
   )
+  /**
+   * 최근 실행에서 **즐겨찾기와 겹치는 것은 뺀다.**
+   *
+   * 겹치는 것을 그대로 두면 같은 명령이 두 줄로 나온다. 별을 누르는 순간 목록이 하나 늘어난 것처럼
+   * 보이고, 한쪽에서 별을 풀어도 다른 쪽 줄이 남아 "즐겨찾기에서 안 빠진다" 로 읽힌다.
+   * 다중 실행의 프리셋 고르기도 같은 규칙이다.
+   */
   const recentCommands = useMemo(
-    () => recents.map((id) => byId.get(id)).filter((c): c is (typeof ALL_COMMANDS)[number] => !!c),
-    [recents, byId],
+    () =>
+      recents
+        .filter((id) => !favorites.includes(id))
+        .map((id) => byId.get(id))
+        .filter((c): c is (typeof ALL_COMMANDS)[number] => !!c),
+    [recents, favorites, byId],
   )
 
   const searchResults = useMemo(() => {
@@ -638,7 +649,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                 }
               >
                 <Star size={12} className={favorites.length ? 'text-amber-300' : ''} />
-                자주 쓰는 것
+                즐겨찾기
                 <span className="ml-auto text-[10px] text-gray-600">
                   {favoriteCommands.length + recentCommands.length || ''}
                 </span>
@@ -686,7 +697,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
             className="w-1 shrink-0 cursor-col-resize bg-white/10 hover:bg-blue-400/50"
           />
 
-          {/* 자주 쓰는 것 — 하위분류 없이 평면 목록 */}
+          {/* 즐겨찾기 — 하위분류 없이 평면 목록 */}
           {solution === PINNED_CAT ? (
             <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-2">
               {favoriteCommands.length === 0 && recentCommands.length === 0 ? (
@@ -771,7 +782,12 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
             )}
 
             <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
-              {sub.commands.map((c) => renderCommand(c, c.command))}
+              {/* 별(즐겨찾기) 식별자는 `솔루션|하위분류|명령어` 다. 지금 보고 있는 위치를 그대로
+                  넘긴다 — 상태(solution/subName)는 하위분류가 사라져 목록이 첫 하위분류로 되돌아간
+                  뒤에도 옛 이름을 들고 있어, 그대로 쓰면 즐겨찾기 목록과 다른 id 가 만들어진다 */}
+              {sub.commands.map((c) =>
+                renderCommand({ ...c, solution: group.solution, subgroup: sub.name }, c.command),
+              )}
             </div>
           </div>
           )}
