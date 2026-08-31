@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   X,
+  CheckSquare,
   Search,
   Trash2,
   Play,
@@ -190,16 +191,21 @@ export default function LogViewer({ onClose }: LogViewerProps) {
             <span className="min-w-0 flex-1 truncate">
               {listQuery.trim() ? `검색 결과 ${filtered.length}개` : `${entries.length}개`}
             </span>
+            {/* 글자만 두었더니 버튼인 줄 몰랐다 — 테두리와 바탕을 줘서 누를 것임을 보인다 */}
             <button
               onClick={() => {
                 setSelectMode((v) => !v)
                 setSelection(new Set())
               }}
+              title={selectMode ? '선택 모드를 끕니다' : '체크해서 여러 개를 한 번에 지웁니다'}
               className={
-                'shrink-0 rounded px-1.5 py-0.5 ' +
-                (selectMode ? 'bg-blue-600/30 text-blue-200' : 'hover:bg-white/10 hover:text-gray-300')
+                'flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 ' +
+                (selectMode
+                  ? 'border-blue-500/50 bg-blue-600/30 text-blue-200'
+                  : 'border-white/15 bg-panel-light text-gray-300 hover:border-white/25 hover:bg-white/10 hover:text-gray-100')
               }
             >
+              {selectMode ? <X size={11} /> : <CheckSquare size={11} />}
               {selectMode ? '선택 끝' : '여러 개 정리'}
             </button>
           </div>
@@ -217,6 +223,22 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                   // "곧 사라진다" 는 사실이 전달되지 않는다.
                   const left = retention && e.endedAt ? daysLeft(e.startedAt, retention.retentionDays) : null
                   const expiring = left !== null && left <= 3
+                  // 배지는 색이 아니라 **말로** 구분한다. '원본 없음(노랑)' 과 '원본 없음(빨강)' 은
+                  // 같은 글자라 색을 외우지 않으면 뜻이 안 오고, 무엇보다 사용자가 알고 싶은 것은
+                  // 파일의 유무가 아니라 "이 줄로 무엇을 할 수 있는가" 다.
+                  const avail = !d
+                    ? null
+                    : d.plainExists && d.castExists
+                      ? null // 둘 다 됨 — 배지를 달 이유가 없다
+                      : d.plainExists
+                        ? { text: '텍스트만', cls: 'bg-white/10 text-gray-300', tip: '리플레이 기록이 없어 텍스트로만 볼 수 있습니다' }
+                        : d.castExists
+                          ? {
+                              text: '리플레이만',
+                              cls: 'bg-amber-500/15 text-amber-200/90',
+                              tip: `원본 로그 파일이 그 자리에 없어 텍스트로는 못 봅니다 (리플레이는 가능)\n${e.path}`,
+                            }
+                          : { text: '내용 없음', cls: 'bg-red-500/15 text-red-300', tip: `원본 로그도 리플레이 기록도 없습니다\n${e.path}` }
                   return (
                     <div
                       key={e.id}
@@ -257,22 +279,16 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                               {left !== null && left <= 0 ? '삭제 대상' : `D-${left}`}
                             </span>
                           )}
-                          {d && !d.plainExists && (
+                          {avail && (
                             <span
-                              title={
-                                d.castExists
-                                  ? `원본 로그 파일이 그 자리에 없습니다 (리플레이는 가능): ${e.path}`
-                                  : `원본 로그 파일이 그 자리에 없습니다: ${e.path}`
-                              }
-                              className={
-                                'shrink-0 whitespace-nowrap rounded px-1 text-[9.5px] ' +
-                                (d.castExists ? 'bg-amber-500/15 text-amber-200/90' : 'bg-red-500/15 text-red-300')
-                              }
+                              title={avail.tip}
+                              className={'shrink-0 whitespace-nowrap rounded px-1 text-[9.5px] ' + avail.cls}
                             >
-                              원본 없음
+                              {avail.text}
                             </span>
                           )}
-                          {d?.castExists && (
+                          {/* 둘 다 되는 줄에만 붙는다 — 배지가 있는 줄에 또 달면 같은 말을 두 번 한다 */}
+                          {!avail && d?.castExists && (
                             <Clapperboard size={11} className="shrink-0 text-gray-500" aria-label="리플레이 가능" />
                           )}
                         </div>
@@ -282,15 +298,18 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                             $ {d.firstCommand}
                           </span>
                         )}
-                        {/* 한 줄로 붙인다 — 목록 폭이 좁아 조각마다 줄이 접히면 '8.7 / 14:23' 처럼
-                            시각이 반토막 나 읽을 수 없게 된다 */}
-                        <span
-                          className="w-full truncate whitespace-nowrap text-[10px] text-gray-500"
-                          title={fmtDate(e.startedAt)}
-                        >
-                          {fmtRelDate(e.startedAt)} · {fmtDuration(e.startedAt, e.endedAt)} ·{' '}
-                          {fmtSize(d?.plainSize ?? d?.castSize ?? e.sizeBytes)}
-                          {!e.endedAt && <span className="text-emerald-400"> · 기록중</span>}
+                        {/* 성격이 다른 둘을 가운뎃점으로만 이어 놓으니 한 덩어리로 뭉개져 읽혔다.
+                            **언제**는 왼쪽, **얼마나**는 오른쪽 끝으로 갈라 놓는다(줄바꿈 없이). */}
+                        <span className="mt-0.5 flex w-full items-baseline gap-2 whitespace-nowrap text-[10.5px]">
+                          <span className="min-w-0 truncate text-gray-400" title={fmtDate(e.startedAt)}>
+                            {fmtRelDate(e.startedAt)}
+                          </span>
+                          {!e.endedAt && <span className="shrink-0 text-emerald-400">기록중</span>}
+                          <span className="ml-auto shrink-0 tabular-nums text-gray-500">
+                            {fmtDuration(e.startedAt, e.endedAt)}
+                            <span className="px-1 text-gray-700">|</span>
+                            {fmtSize(d?.plainSize ?? d?.castSize ?? e.sizeBytes)}
+                          </span>
                         </span>
                       </button>
                       {!selectMode && (
