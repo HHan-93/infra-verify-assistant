@@ -20,6 +20,7 @@ import type {
   ConfigMapBackup,
   CmBackupOrigin,
   LogIndexEntry,
+  LogEntryDetail,
   LogRetentionSettings,
   MetricSample,
   LogTailTarget,
@@ -80,6 +81,7 @@ const electronAPI = {
 
   // ── 세션 로그 뷰어(목록/검색/리플레이) ───────────────────────
   logsList: (): Promise<LogIndexEntry[]> => ipcRenderer.invoke('logs:list'),
+  logsDetails: (): Promise<LogEntryDetail[]> => ipcRenderer.invoke('logs:details'),
   logsRead: (id: string): Promise<{ ok: boolean; content?: string; truncated?: boolean; error?: string }> =>
     ipcRenderer.invoke('logs:read', id),
   logsReadCast: (

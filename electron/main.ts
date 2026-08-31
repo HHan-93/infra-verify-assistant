@@ -14,7 +14,7 @@ import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile, rename } from 'node:fs/promises'
+import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile, rename, open } from 'node:fs/promises'
 // 스트림 청크 경계에서 멀티바이트(한글) 문자가 잘려 �로 깨지는 것을 막는다
 import { StringDecoder } from 'node:string_decoder'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
@@ -48,6 +48,7 @@ import {
   type CaptureRule,
   type OnFailureAction,
   type LogIndexEntry,
+  type LogEntryDetail,
   type LogRetentionSettings,
   type LogTailTarget,
   type ExpectRule,
@@ -854,6 +855,72 @@ ipcMain.handle('log:stop', async (_evt, { sessionId }: { sessionId: string }) =>
 ipcMain.handle('logs:list', async () => {
   const list = await readLogIndex()
   return [...list].sort((a, b) => b.startedAt - a.startedAt)
+})
+
+/**
+ * 목록에 곁들일 실물 정보.
+ *
+ * 목록이 "host · 시각 · 14초 · 10.7KB" 뿐이라 **그때 무슨 작업을 했는지** 알 수 없어, 결국
+ * 하나씩 열어봐야 했다. 로그 앞부분에서 첫 명령어를 뽑아 그 답을 목록에 올린다.
+ *
+ * 앞 64KB 만 읽는다 — 목록을 열 때마다 전부 읽으면 큰 로그에서 창이 멎는다. 첫 명령어가
+ * 그보다 뒤에 있으면 미리보기를 포기한다(틀린 값을 보여주는 것보다 없는 편이 낫다).
+ */
+const CMD_SCAN_BYTES = 64 * 1024
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\r/g
+
+function firstCommandOf(text: string): string | undefined {
+  for (const raw of text.replace(ANSI_RE, '').split('\n')) {
+    // 프롬프트 뒤에 붙은 입력만 뽑는다: `[root@con01 ~]# ceph -s`, `user@host:~$ ls`
+    // 프롬프트 형태를 요구하는 이유는, 그러지 않으면 출력 아무 줄이나 명령어로 잡히기 때문이다.
+    const m = raw.match(/^\s*(?:\[[^\]]{1,60}\]|[\w.-]+@[\w.-]+:[^\s#$]*)\s*[#$]\s+(\S.*)$/)
+    const cmd = m?.[1]?.trim()
+    if (!cmd) continue
+    // 끝맺음·화면 정리는 "무슨 작업이었나" 의 답이 아니다
+    if (/^(exit|logout|clear|ll|ls)$/.test(cmd)) continue
+    // 긴 명령은 잘라서 준다 — 못 찾은 것으로 취급하면 정작 중요한 한 줄을 놓친다
+    return cmd.length > 90 ? cmd.slice(0, 90) + '…' : cmd
+  }
+  return undefined
+}
+
+ipcMain.handle('logs:details', async (): Promise<LogEntryDetail[]> => {
+  const list = await readLogIndex()
+  const out: LogEntryDetail[] = []
+  for (const e of list) {
+    const d: LogEntryDetail = { id: e.id, plainExists: false, castExists: false }
+    try {
+      const st = await stat(e.path)
+      d.plainExists = true
+      d.plainSize = st.size
+    } catch {
+      /* 옮겼거나 지웠다 — 목록에서 그 사실을 밝힌다 */
+    }
+    try {
+      await stat(e.castPath)
+      d.castExists = true
+    } catch {
+      /* 리플레이 기록 없음 */
+    }
+    if (d.plainExists && (d.plainSize ?? 0) > 0) {
+      try {
+        const fh = await open(e.path, 'r')
+        try {
+          const len = Math.min(CMD_SCAN_BYTES, d.plainSize ?? CMD_SCAN_BYTES)
+          const buf = Buffer.alloc(len)
+          const { bytesRead } = await fh.read(buf, 0, len, 0)
+          d.firstCommand = firstCommandOf(buf.subarray(0, bytesRead).toString('utf-8'))
+        } finally {
+          await fh.close()
+        }
+      } catch {
+        /* 못 읽으면 미리보기 없이 간다 */
+      }
+    }
+    out.push(d)
+  }
+  return out
 })
 
 // 평문 로그 내용 읽기 (뷰어/검색용) — 너무 크면 앞부분만 잘라 반환

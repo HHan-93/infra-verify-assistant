@@ -293,6 +293,24 @@ export interface LogIndexEntry {
   sizeBytes?: number
 }
 
+/**
+ * 목록에 곁들이는 **실물 정보** — 인덱스에 없거나 낡을 수 있는 것만 파일에서 직접 확인한다.
+ *
+ * 인덱스의 `sizeBytes` 는 기록이 끝날 때만 채워져, 예전 항목이나 기록 중인 항목은 비어 있다.
+ * 그 빈 값과 "파일이 사라진 것" 이 화면에서 똑같이 `-` 로 보여 구분되지 않았다.
+ */
+export interface LogEntryDetail {
+  id: string
+  /** 평문 로그 파일이 지금도 그 자리에 있는가 (사용자가 옮기거나 지웠을 수 있다) */
+  plainExists: boolean
+  /** 실제 파일 크기 — 인덱스 값이 아니라 지금 잰 것 */
+  plainSize?: number
+  /** 리플레이 기록(.cast.jsonl)이 있는가 — 없으면 리플레이 탭이 실패한다 */
+  castExists: boolean
+  /** 로그 앞부분에서 뽑은 첫 명령어. 못 찾으면 없음(추측해서 채우지 않는다) */
+  firstCommand?: string
+}
+
 /** 세션 로그(.cast.jsonl) 자동 정리 기준 — 렌더러(로그뷰어)에서 조회/변경 가능 */
 export interface LogRetentionSettings {
   retentionDays: number

@@ -16,7 +16,7 @@ import {
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import type { LogIndexEntry, LogRetentionSettings } from '../../electron/shared-types'
+import type { LogEntryDetail, LogIndexEntry, LogRetentionSettings } from '../../electron/shared-types'
 import ConfirmDialog from './ConfirmDialog'
 import { renderLogLine } from '../lib/logDisplay'
 
@@ -38,10 +38,34 @@ function fmtDuration(startMs: number, endMs?: number): string {
   return h > 0 ? `${h}시간 ${m}분` : m > 0 ? `${m}분 ${s}초` : `${s}초`
 }
 function fmtSize(bytes?: number): string {
-  if (!bytes) return '-'
+  if (bytes === undefined) return '크기 모름'
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+const p2 = (n: number) => String(n).padStart(2, '0')
+/**
+ * 목록용 시각 — 오늘/어제는 그렇게 부른다.
+ * `2026. 8. 7. 14시 23분 14초` 는 한 줄을 다 먹으면서도 "언제쯤인지" 가 바로 안 온다.
+ * 정확한 값이 필요할 때를 위해 툴팁에는 전체 시각(fmtDate)을 그대로 남긴다.
+ */
+function fmtRelDate(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  const y = new Date(now)
+  y.setDate(now.getDate() - 1)
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  if (sameDay(d, now)) return `오늘 ${hm}`
+  if (sameDay(d, y)) return `어제 ${hm}`
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}.${d.getDate()} ${hm}`
+  return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()} ${hm}`
+}
+/** 재생 위치 표시 — 0:07 / 1:04 */
+function fmtClock(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000))
+  return `${Math.floor(sec / 60)}:${p2(sec % 60)}`
 }
 function daysLeft(startedAt: number, retentionDays: number): number {
   const ageMs = Date.now() - startedAt
@@ -52,6 +76,12 @@ const SPEEDS = [1, 2, 4, 8] as const
 
 export default function LogViewer({ onClose }: LogViewerProps) {
   const [entries, setEntries] = useState<LogIndexEntry[]>([])
+  /** 파일에서 직접 확인한 것들(실제 크기·리플레이 가능 여부·첫 명령어) — 인덱스에는 없다 */
+  const [details, setDetails] = useState<Record<string, LogEntryDetail>>({})
+  /** 여러 개를 정리할 때만 켜는 모드. 평소에는 체크박스를 띄우지 않는다(한 개 고르는 게 기본이므로) */
+  const [selectMode, setSelectMode] = useState(false)
+  const [selection, setSelection] = useState<Set<string>>(new Set())
+  const [confirmBulk, setConfirmBulk] = useState(false)
   const [listQuery, setListQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('text')
@@ -64,9 +94,16 @@ export default function LogViewer({ onClose }: LogViewerProps) {
   const [exportNote, setExportNote] = useState<string | null>(null)
   const [savingRetention, setSavingRetention] = useState(false)
 
+  const refresh = async () => {
+    const [list, det] = await Promise.all([window.electronAPI.logsList(), window.electronAPI.logsDetails()])
+    setEntries(list)
+    setDetails(Object.fromEntries(det.map((d) => [d.id, d])))
+  }
+
   useEffect(() => {
-    window.electronAPI.logsList().then(setEntries)
+    void refresh()
     window.electronAPI.logsGetRetentionSettings().then(setRetention)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const saveRetention = async () => {
@@ -88,23 +125,49 @@ export default function LogViewer({ onClose }: LogViewerProps) {
     const q = listQuery.trim().toLowerCase()
     if (!q) return entries
     return entries.filter(
-      (e) => e.host.toLowerCase().includes(q) || (e.label ?? '').toLowerCase().includes(q),
+      (e) =>
+        e.host.toLowerCase().includes(q) ||
+        (e.label ?? '').toLowerCase().includes(q) ||
+        (details[e.id]?.firstCommand ?? '').toLowerCase().includes(q),
     )
-  }, [entries, listQuery])
+  }, [entries, listQuery, details])
 
   const selected = entries.find((e) => e.id === selectedId) ?? null
 
-  const oldestFinished = useMemo(
-    () => [...entries].filter((e) => e.endedAt).sort((a, b) => a.startedAt - b.startedAt)[0] ?? null,
-    [entries],
-  )
-
   const deleteEntry = async (e: LogIndexEntry) => {
     await window.electronAPI.logsDelete(e.id)
-    const list = await window.electronAPI.logsList()
-    setEntries(list)
+    await refresh()
     if (selectedId === e.id) setSelectedId(null)
   }
+  /** 선택한 것들을 지운다 — 하나씩 지우면 확인 창을 N번 넘겨야 한다 */
+  const deleteSelected = async () => {
+    const ids = [...selection]
+    for (const id of ids) await window.electronAPI.logsDelete(id)
+    await refresh()
+    if (selectedId && ids.includes(selectedId)) setSelectedId(null)
+    setSelection(new Set())
+    setSelectMode(false)
+  }
+  const toggleSelect = (id: string) =>
+    setSelection((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  // 요약(선택 전 화면) — 목록을 열자마자 "무엇이 얼마나 있는가" 는 답해 준다
+  const summary = useMemo(() => {
+    const det = entries.map((e) => details[e.id]).filter(Boolean) as LogEntryDetail[]
+    return {
+      total: entries.length,
+      bytes: det.reduce((a, d) => a + (d.plainSize ?? 0), 0),
+      replayable: det.filter((d) => d.castExists).length,
+      missing: det.filter((d) => !d.plainExists).length,
+      oldest: entries.length ? Math.min(...entries.map((e) => e.startedAt)) : 0,
+      newest: entries.length ? Math.max(...entries.map((e) => e.startedAt)) : 0,
+    }
+  }, [entries, details])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
@@ -120,6 +183,25 @@ export default function LogViewer({ onClose }: LogViewerProps) {
               className="min-w-0 flex-1 bg-transparent text-[12px] text-gray-200 outline-none placeholder:text-gray-600"
             />
           </div>
+          {/* 목록 머리 — 몇 개인지, 여러 개를 정리할지 */}
+          <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-1 text-[10.5px] text-gray-500">
+            <span className="min-w-0 flex-1 truncate">
+              {listQuery.trim() ? `검색 결과 ${filtered.length}개` : `${entries.length}개`}
+            </span>
+            <button
+              onClick={() => {
+                setSelectMode((v) => !v)
+                setSelection(new Set())
+              }}
+              className={
+                'shrink-0 rounded px-1.5 py-0.5 ' +
+                (selectMode ? 'bg-blue-600/30 text-blue-200' : 'hover:bg-white/10 hover:text-gray-300')
+              }
+            >
+              {selectMode ? '선택 끝' : '여러 개 정리'}
+            </button>
+          </div>
+
           <div className="flex-1 overflow-y-auto p-1.5">
             {filtered.length === 0 ? (
               <p className="py-6 text-center text-[12px] text-gray-500">
@@ -127,58 +209,124 @@ export default function LogViewer({ onClose }: LogViewerProps) {
               </p>
             ) : (
               <div className="space-y-1">
-                {filtered.map((e) => (
-                  <button
-                    key={e.id}
-                    onClick={() => {
-                      setSelectedId(e.id)
-                      setMode('text')
-                    }}
-                    className={
-                      'group flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-left transition ' +
-                      (e.id === selectedId ? 'bg-blue-600/30' : 'hover:bg-white/5')
-                    }
-                  >
-                    <div className="flex w-full items-center gap-1">
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-gray-100">
-                        {e.label || e.host}
-                      </span>
-                      <Trash2
-                        size={12}
-                        className="shrink-0 text-gray-500 opacity-0 hover:text-red-300 group-hover:opacity-100"
-                        onClick={(ev) => {
-                          ev.stopPropagation()
-                          setConfirmDeleteEntry(e)
+                {filtered.map((e) => {
+                  const d = details[e.id]
+                  // 보관 기간이 며칠 안 남았으면 목록에서 바로 밝힌다 — 좌하단 10px 회색 한 줄로는
+                  // "곧 사라진다" 는 사실이 전달되지 않는다.
+                  const left = retention && e.endedAt ? daysLeft(e.startedAt, retention.retentionDays) : null
+                  const expiring = left !== null && left <= 3
+                  return (
+                    <div
+                      key={e.id}
+                      className={
+                        'group flex w-full items-start gap-1.5 rounded-md px-2 py-1.5 transition ' +
+                        (e.id === selectedId ? 'bg-blue-600/30' : 'hover:bg-white/5')
+                      }
+                    >
+                      {selectMode && (
+                        <input
+                          type="checkbox"
+                          checked={selection.has(e.id)}
+                          onChange={() => toggleSelect(e.id)}
+                          className="mt-1 shrink-0"
+                        />
+                      )}
+                      <button
+                        onClick={() => {
+                          if (selectMode) {
+                            toggleSelect(e.id)
+                            return
+                          }
+                          setSelectedId(e.id)
+                          setMode('text')
                         }}
-                      />
+                        className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
+                      >
+                        <div className="flex w-full items-center gap-1">
+                          <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-gray-100">
+                            {e.label || e.host}
+                          </span>
+                          {expiring && (
+                            <span
+                              title={`보관 기간(${retention?.retentionDays}일)이 지나면 자동 삭제됩니다`}
+                              className="shrink-0 rounded bg-amber-500/20 px-1 text-[9.5px] text-amber-200"
+                            >
+                              {left !== null && left <= 0 ? '삭제 대상' : `D-${left}`}
+                            </span>
+                          )}
+                          {d?.castExists && (
+                            <Clapperboard size={11} className="shrink-0 text-gray-500" aria-label="리플레이 가능" />
+                          )}
+                        </div>
+                        {/* 그때 무슨 작업이었나 — 목록에서 답하지 못하면 결국 하나씩 열어보게 된다 */}
+                        {d?.firstCommand && (
+                          <span className="w-full truncate font-mono text-[10px] text-gray-400" title={d.firstCommand}>
+                            $ {d.firstCommand}
+                          </span>
+                        )}
+                        <span className="flex w-full items-center gap-1 text-[10px] text-gray-500">
+                          <span title={fmtDate(e.startedAt)}>{fmtRelDate(e.startedAt)}</span>
+                          <span>· {fmtDuration(e.startedAt, e.endedAt)}</span>
+                          {d && !d.plainExists ? (
+                            <span className="text-red-300/80" title={`원본 로그 파일이 그 자리에 없습니다: ${e.path}`}>
+                              · 원본 없음
+                            </span>
+                          ) : (
+                            <span>· {fmtSize(d?.plainSize ?? e.sizeBytes)}</span>
+                          )}
+                          {!e.endedAt && <span className="text-emerald-400">· 기록중</span>}
+                        </span>
+                      </button>
+                      {!selectMode && (
+                        <button
+                          onClick={() => setConfirmDeleteEntry(e)}
+                          title="이 로그 삭제"
+                          className="mt-0.5 shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 group-hover:text-gray-400"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
                     </div>
-                    <span className="text-[10px] text-gray-500">{fmtDate(e.startedAt)}</span>
-                    <span className="text-[10px] text-gray-500">
-                      {fmtDuration(e.startedAt, e.endedAt)} · {fmtSize(e.sizeBytes)}
-                      {!e.endedAt && <span className="ml-1 text-emerald-400">기록중</span>}
-                    </span>
-                  </button>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
+
+          {/* 선택 모드 — 고른 것들을 한 번에 */}
+          {selectMode && (
+            <div className="flex items-center gap-1.5 border-t border-white/10 px-2.5 py-1.5 text-[10.5px]">
+              <span className="min-w-0 flex-1 truncate text-gray-400">{selection.size}개 선택</span>
+              <button
+                onClick={() => setSelection(new Set(filtered.map((e) => e.id)))}
+                className="shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-white/10"
+              >
+                {listQuery.trim() ? '검색 결과 전체' : '모두'}
+              </button>
+              <button
+                onClick={() => setSelection(new Set())}
+                disabled={selection.size === 0}
+                className="shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-white/10 disabled:opacity-40"
+              >
+                해제
+              </button>
+              <button
+                onClick={() => setConfirmBulk(true)}
+                disabled={selection.size === 0}
+                className="shrink-0 rounded bg-red-600/70 px-2 py-0.5 text-white hover:bg-red-500 disabled:opacity-40"
+              >
+                삭제
+              </button>
+            </div>
+          )}
 
           {/* 하단: 보관 정책 안내 + 인라인 설정 */}
           <div className="border-t border-white/10 px-2.5 py-1.5 text-[10px] text-gray-500">
             {retention && (
               <div className="flex items-center gap-1">
-                <span className="min-w-0 flex-1">
-                  현재 {entries.length}개 보관 · 최근 {retention.maxEntries}개 · {retention.retentionDays}일까지
-                  {oldestFinished && (
-                    <>
-                      {' '}
-                      · 가장 오래된 로그{' '}
-                      {(() => {
-                        const d = daysLeft(oldestFinished.startedAt, retention.retentionDays)
-                        return d <= 0 ? '삭제 대상' : `약 ${d}일 후 삭제`
-                      })()}
-                    </>
-                  )}
+                {/* 임박한 삭제는 목록의 D- 배지가 말한다 — 여기서는 기준만 한 줄로 */}
+                <span className="min-w-0 flex-1 truncate" title="둘 중 하나라도 넘으면 오래된 것부터 자동 삭제됩니다">
+                  최근 {retention.maxEntries}개 · {retention.retentionDays}일까지 보관
                 </span>
                 <button
                   onClick={() => {
@@ -300,8 +448,64 @@ export default function LogViewer({ onClose }: LogViewerProps) {
           </div>
 
           {!selected ? (
-            <div className="flex flex-1 items-center justify-center text-[12px] text-gray-500">
-              왼쪽에서 로그를 선택하세요.
+            /* 로그를 고르기 전 — 넓은 화면을 "왼쪽에서 선택하세요" 한 줄로 두지 않는다.
+               적어도 무엇이 얼마나 있는지는 여기서 답한다. */
+            <div className="flex flex-1 items-center justify-center p-8">
+              {entries.length === 0 ? (
+                <p className="text-[12px] leading-relaxed text-gray-500">
+                  기록된 세션 로그가 없습니다.
+                  <br />
+                  터미널 상단의 <span className="text-gray-300">녹화</span> 를 눌러 세션을 기록하면 여기 쌓입니다.
+                </p>
+              ) : (
+                <div className="w-full max-w-md">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-md border border-white/10 bg-panel-light/40 p-3">
+                      <div className="text-[10.5px] text-gray-500">보관 중</div>
+                      <div className="mt-0.5 text-lg font-medium text-gray-100">{summary.total}개</div>
+                      <div className="mt-0.5 text-[10.5px] text-gray-500">{fmtSize(summary.bytes)}</div>
+                    </div>
+                    <div className="rounded-md border border-white/10 bg-panel-light/40 p-3">
+                      <div className="text-[10.5px] text-gray-500">리플레이 가능</div>
+                      <div className="mt-0.5 text-lg font-medium text-gray-100">{summary.replayable}개</div>
+                      <div className="mt-0.5 text-[10.5px] text-gray-500">
+                        {summary.missing > 0 ? (
+                          <span className="text-red-300/80">원본이 사라진 것 {summary.missing}개</span>
+                        ) : (
+                          '원본 파일 모두 있음'
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-[10.5px] text-gray-500">
+                    {fmtRelDate(summary.oldest)} ~ {fmtRelDate(summary.newest)}
+                  </p>
+
+                  <div className="mt-4 text-[10.5px] text-gray-500">최근</div>
+                  <div className="mt-1 space-y-1">
+                    {entries.slice(0, 3).map((e) => (
+                      <button
+                        key={e.id}
+                        onClick={() => {
+                          setSelectedId(e.id)
+                          setMode('text')
+                        }}
+                        className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2.5 py-1.5 text-left hover:bg-white/5"
+                      >
+                        <span className="min-w-0 flex-1 truncate text-[12px] text-gray-200">
+                          {e.label || e.host}
+                        </span>
+                        {details[e.id]?.firstCommand && (
+                          <span className="min-w-0 max-w-[45%] truncate font-mono text-[10px] text-gray-500">
+                            $ {details[e.id]?.firstCommand}
+                          </span>
+                        )}
+                        <span className="shrink-0 text-[10px] text-gray-500">{fmtRelDate(e.startedAt)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ) : mode === 'text' ? (
             <LogTextView entry={selected} />
@@ -314,11 +518,33 @@ export default function LogViewer({ onClose }: LogViewerProps) {
       {confirmDeleteEntry && (
         <ConfirmDialog
           title="로그 삭제"
-          message={`"${confirmDeleteEntry.label || confirmDeleteEntry.host}" 로그 기록을 삭제할까요?\n(원본 평문 로그 파일은 남아있습니다)`}
+          // 전에는 "(원본 평문 로그 파일은 남아있습니다)" 만 적어, 정작 **무엇이 지워지는지**를
+          // 읽고도 알 수 없었다. 지우는 것과 남는 것을 나란히 적는다.
+          message={
+            `"${confirmDeleteEntry.label || confirmDeleteEntry.host}" 를 목록에서 지울까요?\n\n` +
+            `지워지는 것 — 목록 항목과 리플레이 기록(재생 불가)\n` +
+            `남는 것 — 원본 로그 파일\n${confirmDeleteEntry.path}`
+          }
           onCancel={() => setConfirmDeleteEntry(null)}
           onConfirm={() => {
             deleteEntry(confirmDeleteEntry)
             setConfirmDeleteEntry(null)
+          }}
+        />
+      )}
+
+      {confirmBulk && (
+        <ConfirmDialog
+          title={`로그 ${selection.size}개 삭제`}
+          message={
+            `선택한 ${selection.size}개를 목록에서 지울까요?\n\n` +
+            `지워지는 것 — 목록 항목과 리플레이 기록(재생 불가)\n` +
+            `남는 것 — 원본 로그 파일 (각자 저장한 위치에 그대로)`
+          }
+          onCancel={() => setConfirmBulk(false)}
+          onConfirm={() => {
+            void deleteSelected()
+            setConfirmBulk(false)
           }}
         />
       )}
@@ -456,13 +682,27 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
   const playingRef = useRef(false)
   const speedRef = useRef<number>(4)
   const anchorRef = useRef({ wallStart: 0, frameT: 0 })
+  /** 기록의 첫 조각 시각 — 화면에 보이는 위치는 전부 이 값을 뺀 상대 시간이다 */
+  const startTRef = useRef(0)
+  const durationRef = useRef(0)
+  /** 화면 갱신을 솎기 위한 마지막 표시 시각 */
+  const lastUiTRef = useRef(0)
+  /** 눈금을 끌기 시작할 때 재생 중이었는가 — 놓으면 그 상태로 되돌린다 */
+  const wasPlayingRef = useRef(false)
+  const scrubRef = useRef(0)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(4)
-  const [progress, setProgress] = useState(0)
-  const [total, setTotal] = useState(0)
+  /**
+   * 재생 위치(ms).
+   *
+   * 전에는 `1234/5678 조각` 으로 보여줬는데, 조각은 사람이 가늠할 수 있는 단위가 아니다
+   * (한 조각이 1ms 일 수도 30초일 수도 있다). 시간으로 바꾸고 눈금으로 이동할 수 있게 했다.
+   */
+  const [posMs, setPosMs] = useState(0)
+  const [durationMs, setDurationMs] = useState(0)
 
   const clearTimer = () => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -475,6 +715,7 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
       if (idxRef.current >= frames.length) {
         playingRef.current = false
         setPlaying(false)
+        setPosMs(durationRef.current)
       }
       return
     }
@@ -485,13 +726,21 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
     timerRef.current = setTimeout(() => {
       termRef.current?.write(frame.d)
       idxRef.current++
-      setProgress(idxRef.current)
+      // 조각마다 상태를 바꾸면 초당 수백 번 다시 그린다 — 100ms 이상 진행했을 때만 올린다
+      if (frame.t - lastUiTRef.current >= 100) {
+        lastUiTRef.current = frame.t
+        setPosMs(frame.t - startTRef.current)
+      }
       scheduleNext()
     }, delay)
   }
 
   const play = () => {
-    if (idxRef.current >= framesRef.current.length) return
+    // 끝까지 본 뒤 다시 누르면 처음부터 — 아무 일도 일어나지 않는 버튼은 고장으로 읽힌다
+    if (idxRef.current >= framesRef.current.length) {
+      seekTo(0, true)
+      return
+    }
     playingRef.current = true
     setPlaying(true)
     anchorRef.current = { wallStart: performance.now(), frameT: framesRef.current[idxRef.current]?.t ?? 0 }
@@ -502,12 +751,29 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
     setPlaying(false)
     clearTimer()
   }
-  const restart = () => {
+  const restart = () => seekTo(0, true)
+
+  /**
+   * 되감기·앞으로 감기.
+   *
+   * 터미널 화면은 그때까지의 출력이 쌓여 만들어진 상태라 "그 지점부터" 바로 쓸 수 없다.
+   * 화면을 지우고 목표 시각까지의 조각을 한 번에 몰아 쓴다(사람 눈에는 즉시 이동).
+   * 그래서 되감기가 앞으로 감기보다 느리지 않다.
+   */
+  const seekTo = (targetMs: number, resume = playingRef.current) => {
+    const frames = framesRef.current
+    if (!frames.length) return
     pause()
+    const clamped = Math.max(0, Math.min(targetMs, durationRef.current))
+    const targetT = startTRef.current + clamped
+    let i = 0
+    while (i < frames.length && frames[i].t <= targetT) i++
     termRef.current?.reset()
-    idxRef.current = 0
-    setProgress(0)
-    play()
+    if (i > 0) termRef.current?.write(frames.slice(0, i).map((f) => f.d).join(''))
+    idxRef.current = i
+    lastUiTRef.current = targetT
+    setPosMs(clamped)
+    if (resume && i < frames.length) play()
   }
   const changeSpeed = (v: number) => {
     speedRef.current = v
@@ -553,11 +819,14 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
     window.electronAPI.logsReadCast(entry.id).then((r) => {
       if (r.ok && r.frames) {
         framesRef.current = r.frames
-        setTotal(r.frames.length)
+        startTRef.current = r.frames[0]?.t ?? 0
+        durationRef.current = Math.max(0, (r.frames[r.frames.length - 1]?.t ?? 0) - startTRef.current)
+        setDurationMs(durationRef.current)
         idxRef.current = 0
-        setProgress(0)
+        lastUiTRef.current = startTRef.current
+        setPosMs(0)
         setLoading(false)
-        play()
+        // 열자마자 재생하지 않는다 — 볼 준비가 되기 전에 4배속으로 흘러가 버렸다
       } else {
         setError(r.error ?? '리플레이 기록을 찾을 수 없습니다. (이 세션 로그는 리플레이를 지원하지 않을 수 있습니다)')
         setLoading(false)
@@ -593,7 +862,7 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
         >
           <RotateCcw size={12} />
         </button>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           {SPEEDS.map((v) => (
             <button
               key={v}
@@ -607,10 +876,39 @@ function LogReplayView({ entry }: { entry: LogIndexEntry }) {
             </button>
           ))}
         </div>
-        <span className="ml-auto shrink-0 text-[11px] text-gray-500">
-          {total > 0 ? `${progress}/${total} 조각` : ''}
+        {/* 눈금 — 끄는 동안에는 화면을 옮기지 않고, 놓을 때 한 번만 옮긴다 */}
+        <input
+          type="range"
+          min={0}
+          max={durationMs || 1}
+          step={100}
+          value={posMs}
+          disabled={loading || !!error || durationMs === 0}
+          onPointerDown={() => {
+            wasPlayingRef.current = playingRef.current
+            if (playingRef.current) pause()
+          }}
+          onChange={(e) => {
+            scrubRef.current = Number(e.target.value)
+            setPosMs(scrubRef.current)
+          }}
+          onKeyDown={() => {
+            wasPlayingRef.current = playingRef.current
+            if (playingRef.current) pause()
+          }}
+          onPointerUp={() => seekTo(scrubRef.current, wasPlayingRef.current)}
+          onKeyUp={() => seekTo(scrubRef.current, wasPlayingRef.current)}
+          className="min-w-0 flex-1 disabled:opacity-40"
+        />
+        <span className="shrink-0 font-mono text-[11px] text-gray-400">
+          {fmtClock(posMs)} / {fmtClock(durationMs)}
         </span>
       </div>
+      {!loading && !error && !playing && posMs === 0 && (
+        <div className="bg-panel-light/40 px-3 py-1 text-[10.5px] text-gray-500">
+          재생을 누르면 그때 화면이 그대로 다시 흐릅니다. 눈금을 끌어 특정 시점으로 갈 수 있습니다.
+        </div>
+      )}
       {error && <div className="bg-red-500/10 px-3 py-1 text-[11px] text-red-300">{error}</div>}
       <div className="min-h-0 flex-1 overflow-hidden bg-black/30 p-1.5" ref={containerRef} />
     </div>
