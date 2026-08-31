@@ -161,8 +161,10 @@ export default function LogViewer({ onClose }: LogViewerProps) {
     const det = entries.map((e) => details[e.id]).filter(Boolean) as LogEntryDetail[]
     return {
       total: entries.length,
-      bytes: det.reduce((a, d) => a + (d.plainSize ?? 0), 0),
+      // 자동 정리가 지우는 것은 리플레이 기록 쪽이므로 둘 다 센다
+      bytes: det.reduce((a, d) => a + (d.plainSize ?? 0) + (d.castSize ?? 0), 0),
       replayable: det.filter((d) => d.castExists).length,
+      readable: det.filter((d) => d.plainExists).length,
       missing: det.filter((d) => !d.plainExists).length,
       oldest: entries.length ? Math.min(...entries.map((e) => e.startedAt)) : 0,
       newest: entries.length ? Math.max(...entries.map((e) => e.startedAt)) : 0,
@@ -238,7 +240,8 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                             return
                           }
                           setSelectedId(e.id)
-                          setMode('text')
+                          // 평문이 없으면 텍스트 탭은 실패한다 — 볼 수 있는 쪽으로 연다
+                          setMode(!d?.plainExists && d?.castExists ? 'replay' : 'text')
                         }}
                         className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
                       >
@@ -267,12 +270,15 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                         <span className="flex w-full items-center gap-1 text-[10px] text-gray-500">
                           <span title={fmtDate(e.startedAt)}>{fmtRelDate(e.startedAt)}</span>
                           <span>· {fmtDuration(e.startedAt, e.endedAt)}</span>
-                          {d && !d.plainExists ? (
-                            <span className="text-red-300/80" title={`원본 로그 파일이 그 자리에 없습니다: ${e.path}`}>
-                              · 원본 없음
+                          <span>· {fmtSize(d?.plainSize ?? d?.castSize ?? e.sizeBytes)}</span>
+                          {/* 평문이 없어도 리플레이는 된다 — 빨강으로 칠하면 '깨진 로그' 로 읽힌다 */}
+                          {d && !d.plainExists && (
+                            <span
+                              className={d.castExists ? 'text-amber-300/80' : 'text-red-300/80'}
+                              title={`원본 로그 파일이 그 자리에 없습니다: ${e.path}`}
+                            >
+                              · {d.castExists ? '원본 없음 (리플레이만)' : '파일 없음'}
                             </span>
-                          ) : (
-                            <span>· {fmtSize(d?.plainSize ?? e.sizeBytes)}</span>
                           )}
                           {!e.endedAt && <span className="text-emerald-400">· 기록중</span>}
                         </span>
@@ -458,19 +464,28 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                   터미널 상단의 <span className="text-gray-300">녹화</span> 를 눌러 세션을 기록하면 여기 쌓입니다.
                 </p>
               ) : (
-                <div className="w-full max-w-md">
-                  <div className="grid grid-cols-2 gap-2">
+                <div className="w-full max-w-2xl">
+                  <div className="grid grid-cols-3 gap-2">
                     <div className="rounded-md border border-white/10 bg-panel-light/40 p-3">
                       <div className="text-[10.5px] text-gray-500">보관 중</div>
-                      <div className="mt-0.5 text-lg font-medium text-gray-100">{summary.total}개</div>
-                      <div className="mt-0.5 text-[10.5px] text-gray-500">{fmtSize(summary.bytes)}</div>
+                      <div className="mt-0.5 text-xl font-medium text-gray-100">{summary.total}개</div>
+                      <div className="mt-0.5 text-[10.5px] text-gray-500">{fmtSize(summary.bytes)} 차지</div>
                     </div>
                     <div className="rounded-md border border-white/10 bg-panel-light/40 p-3">
-                      <div className="text-[10.5px] text-gray-500">리플레이 가능</div>
-                      <div className="mt-0.5 text-lg font-medium text-gray-100">{summary.replayable}개</div>
+                      <div className="flex items-center gap-1 text-[10.5px] text-gray-500">
+                        <Clapperboard size={11} /> 리플레이
+                      </div>
+                      <div className="mt-0.5 text-xl font-medium text-gray-100">{summary.replayable}개</div>
+                      <div className="mt-0.5 text-[10.5px] text-gray-500">그때 화면 그대로 재생</div>
+                    </div>
+                    <div className="rounded-md border border-white/10 bg-panel-light/40 p-3">
+                      <div className="flex items-center gap-1 text-[10.5px] text-gray-500">
+                        <FileText size={11} /> 텍스트 보기
+                      </div>
+                      <div className="mt-0.5 text-xl font-medium text-gray-100">{summary.readable}개</div>
                       <div className="mt-0.5 text-[10.5px] text-gray-500">
                         {summary.missing > 0 ? (
-                          <span className="text-red-300/80">원본이 사라진 것 {summary.missing}개</span>
+                          <span className="text-amber-300/80">원본 옮겨짐 {summary.missing}개</span>
                         ) : (
                           '원본 파일 모두 있음'
                         )}
@@ -478,37 +493,59 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                     </div>
                   </div>
                   <p className="mt-2 text-[10.5px] text-gray-500">
-                    {fmtRelDate(summary.oldest)} ~ {fmtRelDate(summary.newest)}
+                    {fmtRelDate(summary.oldest)} ~ {fmtRelDate(summary.newest)} 기록
                   </p>
 
-                  <div className="mt-4 text-[10.5px] text-gray-500">최근</div>
-                  <div className="mt-1 space-y-1">
-                    {entries.slice(0, 3).map((e) => (
-                      <button
-                        key={e.id}
-                        onClick={() => {
-                          setSelectedId(e.id)
-                          setMode('text')
-                        }}
-                        className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2.5 py-1.5 text-left hover:bg-white/5"
-                      >
-                        <span className="min-w-0 flex-1 truncate text-[12px] text-gray-200">
-                          {e.label || e.host}
-                        </span>
-                        {details[e.id]?.firstCommand && (
-                          <span className="min-w-0 max-w-[45%] truncate font-mono text-[10px] text-gray-500">
-                            $ {details[e.id]?.firstCommand}
-                          </span>
-                        )}
-                        <span className="shrink-0 text-[10px] text-gray-500">{fmtRelDate(e.startedAt)}</span>
-                      </button>
-                    ))}
+                  <div className="mt-5 text-[10.5px] font-medium uppercase tracking-wide text-gray-500">최근</div>
+                  <div className="mt-1.5 space-y-1.5">
+                    {entries.slice(0, 4).map((e) => {
+                      const d = details[e.id]
+                      return (
+                        <button
+                          key={e.id}
+                          onClick={() => {
+                            setSelectedId(e.id)
+                            setMode(!d?.plainExists && d?.castExists ? 'replay' : 'text')
+                          }}
+                          className="flex w-full items-center gap-3 rounded-md border border-white/10 bg-panel-light/20 px-3 py-2 text-left hover:border-white/20 hover:bg-white/5"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="min-w-0 truncate text-[12.5px] text-gray-100">
+                                {e.label || e.host}
+                              </span>
+                              {d?.castExists && <Clapperboard size={11} className="shrink-0 text-gray-500" />}
+                            </div>
+                            <div className="mt-0.5 truncate font-mono text-[10.5px] text-gray-500">
+                              {d?.firstCommand ? `$ ${d.firstCommand}` : '기록된 명령을 찾지 못했습니다'}
+                            </div>
+                          </div>
+                          <div className="shrink-0 text-right">
+                            <div className="text-[10.5px] text-gray-400">{fmtRelDate(e.startedAt)}</div>
+                            <div className="mt-0.5 text-[10.5px] text-gray-500">
+                              {fmtDuration(e.startedAt, e.endedAt)} · {fmtSize(d?.plainSize ?? d?.castSize)}
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
                   </div>
+
+                  <p className="mt-4 text-[10.5px] leading-relaxed text-gray-600">
+                    로그를 고르면 <span className="text-gray-400">텍스트</span> 로 훑거나{' '}
+                    <span className="text-gray-400">리플레이</span> 로 그때 화면을 그대로 다시 볼 수 있습니다.
+                    <span className="text-gray-400"> 저장</span> 은 원본 전체를 파일로 내보냅니다.
+                  </p>
                 </div>
               )}
             </div>
           ) : mode === 'text' ? (
-            <LogTextView entry={selected} />
+            <LogTextView
+              entry={selected}
+              plainMissing={details[selected.id] ? !details[selected.id].plainExists : false}
+              canReplay={!!details[selected.id]?.castExists}
+              onReplay={() => setMode('replay')}
+            />
           ) : (
             <LogReplayView entry={selected} />
           )}
@@ -553,7 +590,17 @@ export default function LogViewer({ onClose }: LogViewerProps) {
 }
 
 // ── 텍스트 보기 + 검색 ────────────────────────────────────────
-function LogTextView({ entry }: { entry: LogIndexEntry }) {
+function LogTextView({
+  entry,
+  plainMissing,
+  canReplay,
+  onReplay,
+}: {
+  entry: LogIndexEntry
+  plainMissing: boolean
+  canReplay: boolean
+  onReplay: () => void
+}) {
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -637,6 +684,22 @@ function LogTextView({ entry }: { entry: LogIndexEntry }) {
       <div ref={containerRef} className="flex-1 overflow-auto bg-black/30 p-2.5 font-mono text-[11px] leading-relaxed">
         {loading ? (
           <p className="text-gray-500">불러오는 중...</p>
+        ) : plainMissing ? (
+          /* ENOENT 원문을 그대로 띄우면 앱이 고장 난 것처럼 보인다 — 무슨 일인지 말한다 */
+          <div className="font-sans text-[12px] leading-relaxed text-gray-400">
+            <p>
+              원본 로그 파일이 그 자리에 없습니다. 저장할 때 고른 위치에서 옮겨졌거나 지워진 것 같습니다.
+            </p>
+            <p className="mt-1 break-all font-mono text-[11px] text-gray-600">{entry.path}</p>
+            {canReplay && (
+              <button
+                onClick={onReplay}
+                className="mt-3 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
+              >
+                리플레이로 보기 — 그때 화면은 남아 있습니다
+              </button>
+            )}
+          </div>
         ) : error ? (
           <p className="text-red-400">{error}</p>
         ) : (

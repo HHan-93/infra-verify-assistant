@@ -870,8 +870,25 @@ const CMD_SCAN_BYTES = 64 * 1024
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\r/g
 
+/**
+ * 백스페이스를 화면처럼 적용한다.
+ *
+ * 기록에는 사람이 친 그대로가 남는다 — 오타를 지우면 `dfsasdfdf -h` 같은 줄이 되고, 셸이
+ * 지우기를 `\b \b` 로 내보내므로 그 셋을 순서대로 적용해야 화면에 보였던 `df -h` 가 나온다.
+ * 실제 녹화 파일로 확인한 것이라 없애면 미리보기가 다시 깨진다.
+ */
+function applyBackspaces(line: string): string {
+  const out: string[] = []
+  for (const ch of line) {
+    if (ch === '\b' || ch === '\x7f') out.pop()
+    else out.push(ch)
+  }
+  return out.join('')
+}
+
 function firstCommandOf(text: string): string | undefined {
-  for (const raw of text.replace(ANSI_RE, '').split('\n')) {
+  for (const line of text.replace(ANSI_RE, '').split('\n')) {
+    const raw = applyBackspaces(line)
     // 프롬프트 뒤에 붙은 입력만 뽑는다: `[root@con01 ~]# ceph -s`, `user@host:~$ ls`
     // 프롬프트 형태를 요구하는 이유는, 그러지 않으면 출력 아무 줄이나 명령어로 잡히기 때문이다.
     const m = raw.match(/^\s*(?:\[[^\]]{1,60}\]|[\w.-]+@[\w.-]+:[^\s#$]*)\s*[#$]\s+(\S.*)$/)
@@ -883,6 +900,42 @@ function firstCommandOf(text: string): string | undefined {
     return cmd.length > 90 ? cmd.slice(0, 90) + '…' : cmd
   }
   return undefined
+}
+
+/** 파일 앞부분만 읽어 첫 명령어를 뽑는다 (읽기 실패는 '미리보기 없음'으로 삼킨다) */
+async function firstCommandFromHead(
+  filePath: string,
+  size: number,
+  toText: (raw: string) => string,
+): Promise<string | undefined> {
+  try {
+    const fh = await open(filePath, 'r')
+    try {
+      const len = Math.min(CMD_SCAN_BYTES, size || CMD_SCAN_BYTES)
+      const buf = Buffer.alloc(len)
+      const { bytesRead } = await fh.read(buf, 0, len, 0)
+      return firstCommandOf(toText(buf.subarray(0, bytesRead).toString('utf-8')))
+    } finally {
+      await fh.close()
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** .cast.jsonl 앞부분 → 터미널에 찍혔던 문자열. 마지막 줄은 잘렸을 수 있으므로 버린다 */
+function castHeadToText(raw: string): string {
+  const lines = raw.split('\n')
+  lines.pop()
+  return lines
+    .map((line) => {
+      try {
+        return (JSON.parse(line) as { d?: string }).d ?? ''
+      } catch {
+        return ''
+      }
+    })
+    .join('')
 }
 
 ipcMain.handle('logs:details', async (): Promise<LogEntryDetail[]> => {
@@ -898,25 +951,21 @@ ipcMain.handle('logs:details', async (): Promise<LogEntryDetail[]> => {
       /* 옮겼거나 지웠다 — 목록에서 그 사실을 밝힌다 */
     }
     try {
-      await stat(e.castPath)
-      d.castExists = true
+      const cst = await stat(e.castPath)
+      // 0바이트는 '있는' 것이 아니다 — 배지를 달아 두면 눌러도 아무 일이 없어 고장으로 읽힌다
+      d.castExists = cst.size > 0
+      d.castSize = cst.size
     } catch {
       /* 리플레이 기록 없음 */
     }
+    // 평문이 우선이지만, 사용자가 그 파일을 옮기거나 지워도 리플레이 기록에는 같은 출력이 남아
+    // 있다. 평문이 없다고 미리보기를 포기하면 정작 "원본 없음" 인 항목만 아무 정보도 없는
+    // 빈 줄이 된다 — 그런 항목일수록 무엇이었는지 알아야 지울지 말지 판단할 수 있다.
     if (d.plainExists && (d.plainSize ?? 0) > 0) {
-      try {
-        const fh = await open(e.path, 'r')
-        try {
-          const len = Math.min(CMD_SCAN_BYTES, d.plainSize ?? CMD_SCAN_BYTES)
-          const buf = Buffer.alloc(len)
-          const { bytesRead } = await fh.read(buf, 0, len, 0)
-          d.firstCommand = firstCommandOf(buf.subarray(0, bytesRead).toString('utf-8'))
-        } finally {
-          await fh.close()
-        }
-      } catch {
-        /* 못 읽으면 미리보기 없이 간다 */
-      }
+      d.firstCommand = await firstCommandFromHead(e.path, d.plainSize ?? 0, (t) => t)
+    }
+    if (!d.firstCommand && d.castExists && (d.castSize ?? 0) > 0) {
+      d.firstCommand = await firstCommandFromHead(e.castPath, d.castSize ?? 0, castHeadToText)
     }
     out.push(d)
   }

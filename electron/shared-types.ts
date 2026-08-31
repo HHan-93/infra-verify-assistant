@@ -307,6 +307,8 @@ export interface LogEntryDetail {
   plainSize?: number
   /** 리플레이 기록(.cast.jsonl)이 있는가 — 없으면 리플레이 탭이 실패한다 */
   castExists: boolean
+  /** 리플레이 기록의 크기 — 자동 정리가 지우는 것은 이쪽이다 */
+  castSize?: number
   /** 로그 앞부분에서 뽑은 첫 명령어. 못 찾으면 없음(추측해서 채우지 않는다) */
   firstCommand?: string
 }
