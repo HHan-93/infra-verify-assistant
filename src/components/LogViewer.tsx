@@ -96,7 +96,12 @@ export default function LogViewer({ onClose }: LogViewerProps) {
   const [savingRetention, setSavingRetention] = useState(false)
 
   const refresh = async () => {
-    const [list, det] = await Promise.all([window.electronAPI.logsList(), window.electronAPI.logsDetails()])
+    // 곁들이는 정보(첫 명령어·실제 크기)가 실패해도 목록은 떠야 한다 — 파일 하나 못 읽었다고
+    // 뷰어가 빈 화면이 되면 정작 그 로그를 지우러 들어온 사람이 아무것도 못 한다.
+    const [list, det] = await Promise.all([
+      window.electronAPI.logsList(),
+      window.electronAPI.logsDetails().catch(() => [] as LogEntryDetail[]),
+    ])
     setEntries(list)
     setDetails(Object.fromEntries(det.map((d) => [d.id, d])))
   }

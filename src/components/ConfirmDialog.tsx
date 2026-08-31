@@ -27,7 +27,8 @@ export default function ConfirmDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 text-sm font-semibold text-gray-100">{title}</div>
-        <p className="whitespace-pre-line text-[13px] leading-relaxed text-gray-200">{message}</p>
+        {/* break-words 가 없으면 공백 없는 긴 경로가 상자를 뚫고 나간다 (삭제 확인이 경로를 보여준다) */}
+        <p className="whitespace-pre-line break-words text-[13px] leading-relaxed text-gray-200">{message}</p>
         <div className="mt-3 flex justify-end gap-2">
           <button
             onClick={onCancel}
