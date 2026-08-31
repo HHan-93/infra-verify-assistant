@@ -257,6 +257,21 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                               {left !== null && left <= 0 ? '삭제 대상' : `D-${left}`}
                             </span>
                           )}
+                          {d && !d.plainExists && (
+                            <span
+                              title={
+                                d.castExists
+                                  ? `원본 로그 파일이 그 자리에 없습니다 (리플레이는 가능): ${e.path}`
+                                  : `원본 로그 파일이 그 자리에 없습니다: ${e.path}`
+                              }
+                              className={
+                                'shrink-0 whitespace-nowrap rounded px-1 text-[9.5px] ' +
+                                (d.castExists ? 'bg-amber-500/15 text-amber-200/90' : 'bg-red-500/15 text-red-300')
+                              }
+                            >
+                              원본 없음
+                            </span>
+                          )}
                           {d?.castExists && (
                             <Clapperboard size={11} className="shrink-0 text-gray-500" aria-label="리플레이 가능" />
                           )}
@@ -267,20 +282,15 @@ export default function LogViewer({ onClose }: LogViewerProps) {
                             $ {d.firstCommand}
                           </span>
                         )}
-                        <span className="flex w-full items-center gap-1 text-[10px] text-gray-500">
-                          <span title={fmtDate(e.startedAt)}>{fmtRelDate(e.startedAt)}</span>
-                          <span>· {fmtDuration(e.startedAt, e.endedAt)}</span>
-                          <span>· {fmtSize(d?.plainSize ?? d?.castSize ?? e.sizeBytes)}</span>
-                          {/* 평문이 없어도 리플레이는 된다 — 빨강으로 칠하면 '깨진 로그' 로 읽힌다 */}
-                          {d && !d.plainExists && (
-                            <span
-                              className={d.castExists ? 'text-amber-300/80' : 'text-red-300/80'}
-                              title={`원본 로그 파일이 그 자리에 없습니다: ${e.path}`}
-                            >
-                              · {d.castExists ? '원본 없음 (리플레이만)' : '파일 없음'}
-                            </span>
-                          )}
-                          {!e.endedAt && <span className="text-emerald-400">· 기록중</span>}
+                        {/* 한 줄로 붙인다 — 목록 폭이 좁아 조각마다 줄이 접히면 '8.7 / 14:23' 처럼
+                            시각이 반토막 나 읽을 수 없게 된다 */}
+                        <span
+                          className="w-full truncate whitespace-nowrap text-[10px] text-gray-500"
+                          title={fmtDate(e.startedAt)}
+                        >
+                          {fmtRelDate(e.startedAt)} · {fmtDuration(e.startedAt, e.endedAt)} ·{' '}
+                          {fmtSize(d?.plainSize ?? d?.castSize ?? e.sizeBytes)}
+                          {!e.endedAt && <span className="text-emerald-400"> · 기록중</span>}
                         </span>
                       </button>
                       {!selectMode && (
