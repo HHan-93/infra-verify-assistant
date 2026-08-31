@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, CornerDownLeft, Copy, Check, X, Search, Star, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Info } from 'lucide-react'
+import { Play, CornerDownLeft, Copy, Check, X, Search, Star, Plus, Pencil, Trash2, ChevronUp, ChevronDown, ChevronRight, Info } from 'lucide-react'
 import {
   RECENT_MAX_ITEMS,
   presetId,
@@ -253,6 +253,19 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
 
   const [favorites, setFavorites] = useState<string[]>(() => readFavorites())
   const [recents, setRecents] = useState<string[]>(() => readRecents())
+  /**
+   * 최근 실행은 **접어 둔다.**
+   *
+   * 즐겨찾기 카테고리에 최근 실행을 나란히 펼쳐 두었더니, 별을 풀어 즐겨찾기에서 뺀 항목이
+   * 바로 아래 최근 실행 줄로 남아 "해제했는데 그대로 있다" 로 읽혔다. 이 카테고리가 답해야 하는
+   * 질문은 "내가 별을 단 것" 하나다. 최근 실행은 지우지 않고 접어서, 필요할 때만 편다.
+   */
+  const [recentsOpen, setRecentsOpen] = useState(() => localStorage.getItem('preset_recents_open') === '1')
+  const toggleRecents = () =>
+    setRecentsOpen((v) => {
+      localStorage.setItem('preset_recents_open', v ? '0' : '1')
+      return !v
+    })
   const toggleFavorite = (id: string) =>
     setFavorites((f) => {
       const next = f.includes(id) ? f.filter((x) => x !== id) : [id, ...f]
@@ -651,7 +664,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                 <Star size={12} className={favorites.length ? 'text-amber-300' : ''} />
                 즐겨찾기
                 <span className="ml-auto text-[10px] text-gray-600">
-                  {favoriteCommands.length + recentCommands.length || ''}
+                  {favoriteCommands.length || ''}
                 </span>
               </button>
               {groups.map((g) => (
@@ -700,37 +713,45 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
           {/* 즐겨찾기 — 하위분류 없이 평면 목록 */}
           {solution === PINNED_CAT ? (
             <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-2">
-              {favoriteCommands.length === 0 && recentCommands.length === 0 ? (
+              {/* 본체 = 별을 단 것 */}
+              {favoriteCommands.length === 0 ? (
                 <p className="py-6 text-center text-[12px] leading-relaxed text-gray-500">
-                  아직 비어 있습니다.
+                  즐겨찾기가 비어 있습니다.
                   <br />
-                  명령어 옆의 <Star size={11} className="mb-px inline text-amber-300" /> 를 눌러 즐겨찾기에 넣거나,
-                  <br />한 번 실행하면 최근 목록에 남습니다.
+                  명령어 옆의 <Star size={11} className="mb-px inline text-amber-300" /> 를 누르면 여기 모입니다.
                 </p>
               ) : (
-                <div className="space-y-3">
-                  {favoriteCommands.length > 0 && (
-                    <div className="space-y-1.5">
-                      <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-amber-300/80">
-                        즐겨찾기 {favoriteCommands.length}개
-                      </p>
-                      {favoriteCommands.map((c) => renderCommand(c, `fav-${c.solution}-${c.subgroup}-${c.command}`, true))}
-                    </div>
-                  )}
-                  {recentCommands.length > 0 && (
-                    <div className="space-y-1.5">
-                      <p className="flex items-center gap-2 px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        최근 실행 {recentCommands.length}개
-                        <button
-                          onClick={() => {
-                            setRecents([])
-                            writeRecents([])
-                          }}
-                          className="ml-auto font-normal normal-case tracking-normal text-gray-600 hover:text-gray-400"
-                        >
-                          비우기
-                        </button>
-                      </p>
+                <div className="space-y-1.5">
+                  {favoriteCommands.map((c) => renderCommand(c, `fav-${c.solution}-${c.subgroup}-${c.command}`, true))}
+                </div>
+              )}
+
+              {/* 최근 실행 — 접힌 서랍. 별과 무관한 목록이라는 것이 보이게 선으로 끊는다 */}
+              {recentCommands.length > 0 && (
+                <div className="mt-3 border-t border-white/10 pt-2">
+                  <div className="flex items-center gap-2 px-1">
+                    <button
+                      onClick={toggleRecents}
+                      className="flex items-center gap-1 text-[10.5px] text-gray-500 hover:text-gray-300"
+                    >
+                      {recentsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      최근 실행 {recentCommands.length}개
+                      {!recentsOpen && <span className="text-gray-600">(즐겨찾기 아님)</span>}
+                    </button>
+                    {recentsOpen && (
+                      <button
+                        onClick={() => {
+                          setRecents([])
+                          writeRecents([])
+                        }}
+                        className="ml-auto text-[10.5px] text-gray-600 hover:text-gray-400"
+                      >
+                        비우기
+                      </button>
+                    )}
+                  </div>
+                  {recentsOpen && (
+                    <div className="mt-1.5 space-y-1.5">
                       {recentCommands.map((c) => renderCommand(c, `rec-${c.solution}-${c.subgroup}-${c.command}`, true))}
                     </div>
                   )}
