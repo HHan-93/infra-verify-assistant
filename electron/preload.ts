@@ -119,6 +119,10 @@ const electronAPI = {
     ipcRenderer.invoke('perf:saveCsv', id),
   perfReadHistory: (id: string): Promise<{ ok: boolean; csv?: string; error?: string }> =>
     ipcRenderer.invoke('perf:readHistory', id),
+  perfOpenDashboard: (url: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('perf:openDashboard', url),
+  perfInstallLocust: (): Promise<{ ok: boolean; error?: string; log?: string }> =>
+    ipcRenderer.invoke('perf:installLocust'),
   perfSetLabel: (id: string, label?: string, memo?: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('perf:setLabel', { id, label, memo }),
   perfReadFailureSamples: (

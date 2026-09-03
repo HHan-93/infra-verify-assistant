@@ -2288,6 +2288,7 @@ export default function App() {
             .filter((t) => statuses[t.id]?.status === 'connected')
             .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
           onClose={() => setShowPerf(false)}
+          onAnalyze={analyzeText}
         />
       )}
 

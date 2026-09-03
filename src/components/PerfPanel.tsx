@@ -20,6 +20,8 @@ import {
   ChevronRight,
   ChevronUp,
   ClipboardPaste,
+  Sparkles,
+  PanelRightOpen,
 } from 'lucide-react'
 import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord, PerfStep } from '../../electron/shared-types'
 import { normalizeFormScenario } from '../../electron/shared-types'
@@ -36,7 +38,8 @@ import {
   type PerfSummary,
 } from '../lib/perfParse'
 import { perfVerdict } from '../lib/perfVerdict'
-import { maskForDisplay } from '../lib/mask'
+import { maskForAI, maskForDisplay } from '../lib/mask'
+import { notifyOs } from '../lib/notify'
 import ConfirmDialog from './ConfirmDialog'
 
 interface PerfTarget {
@@ -48,6 +51,8 @@ interface PerfPanelProps {
   /** 연결된 세션 — 대상 주소를 여기서 가져온다(부하는 이 PC 에서 나간다) */
   sessions: PerfTarget[]
   onClose: () => void
+  /** 결과 요약을 AI 패널로 보내 해석을 맡긴다 (스트리밍 중이면 false) */
+  onAnalyze: (text: string) => boolean
 }
 
 type Tab = 'dash' | 'log' | 'summary'
@@ -159,7 +164,7 @@ function fmtBytes(b?: number): string {
   return `${(b / 1024 / 1024).toFixed(1)}MB`
 }
 
-export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
+export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelProps) {
   const [env, setEnv] = useState<PerfEnvStatus | null>(null)
   const [envChecking, setEnvChecking] = useState(true)
   const [locustPath, setLocustPath] = useState('')
@@ -188,6 +193,12 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [waitMax, setWaitMax] = useState('2')
   const [scenarioFile, setScenarioFile] = useState('')
   /** 부하 모양 — 평평하게 유지할지, 계단식으로 올려 한계점을 찾을지 */
+  /** 이 PC 코어 나눠 쓰기 · 다른 PC 워커 기다리기 */
+  const [processes, setProcesses] = useState('1')
+  const [expectWorkers, setExpectWorkers] = useState('0')
+  /** locust 설치 확인 창 */
+  const [confirmInstall, setConfirmInstall] = useState(false)
+  const [installing, setInstalling] = useState(false)
   const [loadMode, setLoadMode] = useState<'flat' | 'stages'>('flat')
   const [stages, setStages] = useState<{ users: string; spawnRate: string; holdSec: string }[]>([
     { users: '10', spawnRate: '5', holdSec: '60' },
@@ -228,6 +239,14 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [openSample, setOpenSample] = useState<number | null>(null)
   /** 회차 이름·메모 편집 중인 값 (null 이면 안 열림) */
   const [labelEdit, setLabelEdit] = useState<{ label: string; memo: string } | null>(null)
+  /**
+   * 같은 시간대 **대상 서버**의 자원 (상태보드/대시보드의 모니터 데몬이 모아 둔 것).
+   *
+   * 이게 이 앱이라서 되는 부분이다 — 성능 도구만으로는 "응답이 느린데 서버 CPU 는 한가하다"
+   * (= 서버가 아니라 다른 곳이 병목) 를 한 화면에서 볼 수 없다.
+   */
+  const [serverSeries, setServerSeries] = useState<{ sec: number; cpu?: number; mem?: number }[]>([])
+  const [serverNote, setServerNote] = useState('')
   const logRef = useRef<HTMLDivElement>(null)
   const [elapsed, setElapsed] = useState(0)
 
@@ -270,6 +289,10 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     const offDone = window.electronAPI.onPerfDone((e) => {
       setRunning(null)
       setNote(e.canceled ? '중지했습니다.' : '끝났습니다 — 요약과 리포트가 회차로 남았습니다.')
+      // 검증은 몇 분 걸리는 일이라 창을 보고 있지 않을 때가 많다. 판정까지는 아직 모르므로
+      // '끝났다' 만 알린다 — 알림에 결론을 적으려면 통계를 다시 읽어야 하고, 그 사이 알림이
+      // 늦어지면 알림의 의미가 없다.
+      if (!e.canceled) notifyOs('성능 검증 끝', '결과와 리포트가 회차로 남았습니다.')
       setSelectedRunId(e.runId)
       setTab('summary')
       void refreshRuns()
@@ -350,6 +373,8 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     errorRateThresholdPct: numOrUndef(errTh),
     warmupSec: numOrUndef(warmupSec),
     insecureTls: insecure,
+    processes: Math.max(1, Number(processes) || 1),
+    expectWorkers: Math.max(0, Number(expectWorkers) || 0),
     stages:
       loadMode === 'stages'
         ? stages
@@ -547,11 +572,39 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
       setOpenSample(null)
     })
     setLabelEdit(null)
+
+    // 대상 서버의 자원 이력 — 회차가 돌던 시간대만 잘라 온다
+    const rec = runs.find((r) => r.meta.id === selectedRunId)
+    const host = hostOf(rec?.meta.config.sessionLabel ?? '')
+    if (!rec || !host) {
+      setServerSeries([])
+      setServerNote('')
+    } else {
+      const from = rec.meta.startedAt
+      const to = rec.meta.endedAt ?? Date.now()
+      void window.electronAPI.monitorHistory(host, from).then((r) => {
+        if (!alive) return
+        const inWindow = (r.samples ?? []).filter((sp) => sp.ts * 1000 >= from && sp.ts * 1000 <= to + 5000)
+        setServerSeries(
+          inWindow.map((sp) => ({
+            sec: Math.round((sp.ts * 1000 - from) / 1000),
+            cpu: sp.cpu,
+            mem: sp.mem?.pct,
+          })),
+        )
+        setServerNote(
+          inWindow.length
+            ? ''
+            : '이 시간대에 수집된 서버 지표가 없습니다 — 대시보드에서 수집을 켜 두면 다음 회차부터 같이 보입니다.',
+        )
+      })
+    }
     return () => {
       alive = false
     }
     // 돌고 있는 회차는 끝난 뒤에 다시 읽어야 이력이 채워진다 — running 이 풀릴 때 다시 돈다
-  }, [selectedRunId, running])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRunId, running, runs])
 
   const failures = useMemo(
     () => (selected?.failuresCsv ? parseLocustFailures(selected.failuresCsv) : []),
@@ -606,6 +659,82 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     })
     return { at: prevRec.meta.startedAt, label: prevRec.meta.label, items }
   }, [selected, selectedSummary, runs])
+
+  /**
+   * AI 에게 보낼 글.
+   *
+   * 숫자만 던지면 "느립니다" 같은 답이 온다. **조건·분포·실패 내용·직전 회차 대비**를 같이
+   * 줘야 원인 후보가 나온다. 나가는 글에는 마스킹을 건다 — 토큰·비밀번호가 실패 본문에
+   * 섞여 있을 수 있고, 이건 외부로 나가는 경로다(AI 패널과 같은 규칙).
+   */
+  const aiText = (): string => {
+    if (!selected) return ''
+    const cfg = selected.meta.config
+    const n = cfg.scenario.kind === 'form' ? normalizeFormScenario(cfg.scenario) : null
+    const lines: string[] = [
+      '성능 검증 결과를 해석해 주세요. 원인 후보와 다음에 확인할 것을 알려 주세요.',
+      '',
+      `대상: ${cfg.targetUrl}`,
+      cfg.stages?.length
+        ? `부하: 계단식 ${cfg.stages.map((st) => `${st.users}명(${st.holdSec}초)`).join(' → ')}`
+        : `부하: 사용자 ${cfg.users}명 · ${cfg.spawnRate}명/초 · ${Math.round(cfg.durationSec / 60)}분`,
+      n
+        ? `시나리오: ${n.order === 'sequential' ? '순서대로' : '비율대로'} ${n.steps
+            .map((st) => `${st.method} ${st.path}(비율 ${st.weight})`)
+            .join(', ')}`
+        : `시나리오: 파일 ${cfg.scenario.kind === 'file' ? cfg.scenario.path : ''}`,
+      `요청 사이 대기: ${n ? `${n.waitMinSec}~${n.waitMaxSec}초` : '알 수 없음'}`,
+      '',
+    ]
+    if (verdict) lines.push(`판정: ${verdict.label}`, ...verdict.reasons.map((r) => `- ${r}`), '')
+    if (selectedSummary) {
+      lines.push(
+        `요청 ${selectedSummary.requests}건 · 실패 ${selectedSummary.failures}건(${selectedSummary.failRatePct.toFixed(
+          2,
+        )}%) · 초당 ${selectedSummary.rps.toFixed(1)}건`,
+        `응답 p50 ${fmtMs(selectedSummary.p50Ms)} · p95 ${fmtMs(selectedSummary.p95Ms)} · p99 ${fmtMs(
+          selectedSummary.p99Ms,
+        )} · 최대 ${fmtMs(selectedSummary.maxMs)}`,
+        '',
+        '요청별:',
+        ...selectedSummary.perEndpoint.map(
+          (e) =>
+            `- ${e.name}: ${e.requests}건, 실패 ${e.failures}건, 평균 ${fmtMs(e.avgMs)}, p95 ${fmtMs(e.p95Ms)}`,
+        ),
+        '',
+      )
+    }
+    if (failures.length) {
+      lines.push('실패 내용:', ...failures.slice(0, 5).map((f) => `- ${f.name}: ${f.error} (${f.count}건)`), '')
+    }
+    if (samples.length) {
+      lines.push('실패 응답 본문(앞 2건):')
+      for (const sp of samples.slice(0, 2)) {
+        lines.push(`- [${sp.code ?? '연결 실패'}] ${sp.name}: ${(sp.body || sp.error).slice(0, 300)}`)
+      }
+      lines.push('')
+    }
+    if (compare) {
+      lines.push(
+        `직전 회차 대비: ${compare.items.map((it) => `${it.label} ${it.before}→${it.after}(${it.delta})`).join(', ')}`,
+        '',
+      )
+    }
+    if (history.length > 1) {
+      const peak = history.reduce((a, b) => ((b.p95Ms ?? 0) > (a.p95Ms ?? 0) ? b : a))
+      lines.push(
+        `시간에 따라: p95 최악은 시작 후 ${peak.sec}초 지점 ${fmtMs(peak.p95Ms)} (그때 사용자 ${peak.users}명, 초당 ${peak.rps.toFixed(
+          1,
+        )}건)`,
+      )
+    }
+    if (serverSeries.length > 1) {
+      const cpuMax = Math.max(...serverSeries.map((s) => s.cpu ?? 0))
+      const memMax = Math.max(...serverSeries.map((s) => s.mem ?? 0))
+      lines.push(`같은 시간대 대상 서버: CPU 최대 ${Math.round(cpuMax)}% · 메모리 최대 ${Math.round(memMax)}%`)
+    }
+    return maskForAI(lines.join('\n'))
+  }
 
   // 타일에 쓰는 값: 돌고 있으면 어림값, 끝났으면 확정값
   const tiles = running
@@ -698,6 +827,13 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                   <code className="rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-gray-300">
                     pip install locust
                   </code>
+                  <button
+                    onClick={() => setConfirmInstall(true)}
+                    disabled={installing}
+                    className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/20 px-2 py-1 text-[11.5px] text-blue-100 hover:bg-blue-600/30 disabled:opacity-50"
+                  >
+                    <Download size={11} /> {installing ? '설치 중…' : '자동으로 설치'}
+                  </button>
                   <button
                     onClick={() => void checkEnv()}
                     className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
@@ -877,6 +1013,36 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                   </button>
                 </>
               )}
+              {/* 부하 발생기 쪽 한계 — 대상이 아니라 내 PC 가 먼저 막히면 그 숫자는 서버 성능이 아니다 */}
+              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                <Field
+                  label="이 PC 프로세스"
+                  unit="개"
+                  value={processes}
+                  onChange={setProcesses}
+                  disabled={!!running}
+                />
+                <Field
+                  label="다른 PC 워커"
+                  unit="대"
+                  value={expectWorkers}
+                  onChange={setExpectWorkers}
+                  disabled={!!running}
+                />
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                파이썬 한 프로세스는 코어 하나만 씁니다. 부하가 크면 프로세스를 늘리세요.
+                {Number(expectWorkers) > 0 && (
+                  <>
+                    <br />
+                    워커 {Number(expectWorkers)}대가 붙을 때까지 시작을 기다립니다. 다른 PC 에서:
+                    <span className="mt-0.5 block break-all rounded bg-black/40 px-1.5 py-1 font-mono text-[10px] text-gray-400">
+                      locust -f locustfile.py --worker --master-host &lt;이 PC 의 IP&gt;
+                    </span>
+                  </>
+                )}
+              </p>
+
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
                 {loadSentence}
@@ -1338,6 +1504,16 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                         >
                           다시 불러오기
                         </button>
+                        <button
+                          onClick={async () => {
+                            const r = await window.electronAPI.perfOpenDashboard(running.webUrl!)
+                            if (!r.ok) setNote(r.error ?? '창을 열 수 없습니다.')
+                          }}
+                          title="화면이 두 개면 대시보드를 옆으로 빼 두세요"
+                          className="flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                        >
+                          <PanelRightOpen size={11} /> 별도 창
+                        </button>
                       </div>
                       <iframe
                         key={dashKey}
@@ -1626,6 +1802,68 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                             <Legend color="#34d399" label="초당 요청 (오른쪽)" />
                             <Legend color="#f87171" label="초당 실패" />
                           </div>
+
+                          {/* 같은 시간축의 대상 서버 자원 — 성능 도구만으로는 볼 수 없는 부분 */}
+                          {serverSeries.length > 1 ? (
+                            <div className="mt-2">
+                              <div className="mb-1 flex items-center gap-2">
+                                <span className="text-[10.5px] text-gray-500">
+                                  같은 시간대 대상 서버 ({hostOf(selected.meta.config.sessionLabel ?? '')})
+                                </span>
+                                <Legend color="#fbbf24" label="CPU %" />
+                                <Legend color="#a78bfa" label="메모리 %" />
+                              </div>
+                              <div className="rounded-md border border-white/10 bg-black/20 p-1.5">
+                                <ResponsiveContainer width="100%" height={96}>
+                                  <LineChart data={serverSeries} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#ffffff14" />
+                                    <XAxis
+                                      dataKey="sec"
+                                      tick={{ fontSize: 10, fill: '#9ca3af' }}
+                                      tickFormatter={(v: number) => `${v}s`}
+                                    />
+                                    <YAxis
+                                      domain={[0, 100]}
+                                      tick={{ fontSize: 10, fill: '#9ca3af' }}
+                                      unit="%"
+                                    />
+                                    <Tooltip
+                                      contentStyle={{
+                                        background: '#1e1e2e',
+                                        border: '1px solid #ffffff22',
+                                        fontSize: 12,
+                                      }}
+                                      labelStyle={{ color: '#9ca3af' }}
+                                      labelFormatter={(v) => `시작 후 ${v}초`}
+                                    />
+                                    <Line
+                                      type="monotone"
+                                      dataKey="cpu"
+                                      name="CPU"
+                                      stroke="#fbbf24"
+                                      strokeWidth={1.3}
+                                      dot={false}
+                                      connectNulls
+                                    />
+                                    <Line
+                                      type="monotone"
+                                      dataKey="mem"
+                                      name="메모리"
+                                      stroke="#a78bfa"
+                                      strokeWidth={1.3}
+                                      dot={false}
+                                      connectNulls
+                                    />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              </div>
+                              <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                                응답이 느린데 서버가 한가하면 병목은 서버 밖(네트워크·프록시·내 PC)입니다.
+                              </p>
+                            </div>
+                          ) : (
+                            serverNote && <p className="mt-2 text-[10px] text-gray-600">{serverNote}</p>
+                          )}
                         </div>
                       )}
 
@@ -1899,6 +2137,16 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                         >
                           <FolderOpen size={11} /> 폴더 열기
                         </button>
+                        <button
+                          onClick={() => {
+                            const ok = onAnalyze(aiText())
+                            setNote(ok ? 'AI 패널로 보냈습니다.' : 'AI 가 이미 답하는 중입니다 — 잠시 뒤에 다시.')
+                          }}
+                          title="조건·결과·실패 내용을 AI 패널로 보내 해석을 맡깁니다"
+                          className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                        >
+                          <Sparkles size={11} className="text-blue-300" /> AI 해석
+                        </button>
                       </div>
                     </>
                   )}
@@ -1908,6 +2156,35 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
           </div>
         </div>
       </div>
+
+      {/* 설치는 반드시 묻고 나서 — 무엇을 어떤 명령으로 설치하는지 그대로 보여준다 */}
+      {confirmInstall && (
+        <ConfirmDialog
+          title="Locust 를 설치할까요?"
+          confirmLabel="설치"
+          message={
+            '이 PC 에 파이썬 패키지를 설치합니다. 아래 명령을 그대로 실행합니다.\n\n' +
+            'python -m pip install locust\n\n' +
+            '설치되는 곳 — 지금 PATH 에 있는 파이썬의 site-packages\n' +
+            '가상환경을 쓰신다면 이 버튼 대신 그 환경에서 직접 설치하고, ' +
+            '위의 "직접 지정" 에 경로를 적어 주세요.'
+          }
+          onCancel={() => setConfirmInstall(false)}
+          onConfirm={async () => {
+            setConfirmInstall(false)
+            setInstalling(true)
+            setNote('설치를 시작했습니다 — 진행 상황은 실시간 로그 탭에 나옵니다.')
+            setTab('log')
+            try {
+              const r = await window.electronAPI.perfInstallLocust()
+              setNote(r.ok ? '설치했습니다. 환경을 다시 확인합니다.' : (r.error ?? '설치하지 못했습니다.'))
+              await checkEnv()
+            } finally {
+              setInstalling(false)
+            }
+          }}
+        />
+      )}
 
       {/* cURL 붙여넣기 — 브라우저가 실제로 보낸 요청을 그대로 단계로 (포털 감시와 같은 파서) */}
       {curlText !== null && (

@@ -5164,6 +5164,11 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     '127.0.0.1',
     '--web-port',
     String(port),
+    ...(cfg.processes && cfg.processes > 1 ? ['--processes', String(Math.round(cfg.processes))] : []),
+    // 워커를 기다리는 모드 — 워커가 붙기 전에는 부하가 시작되지 않는다
+    ...(cfg.expectWorkers && cfg.expectWorkers > 0
+      ? ['--master', '--expect-workers', String(Math.round(cfg.expectWorkers))]
+      : []),
   ]
 
   const meta: PerfRunMeta = {
@@ -5367,6 +5372,75 @@ ipcMain.handle('perf:openReport', async (_evt, id: string) => {
   win.setMenuBarVisibility(false)
   await win.loadFile(file)
   return { ok: true }
+})
+
+/**
+ * 돌고 있는 대시보드를 별도 창으로.
+ *
+ * 화면이 두 개인 사람은 부하 화면을 옆으로 빼 두고 터미널을 본다. 창에는 아무 API 도 주지
+ * 않는다(우리가 만든 문서가 아니다). 127.0.0.1 주소만 허용해 엉뚱한 곳을 열지 않게 막는다.
+ */
+ipcMain.handle('perf:openDashboard', async (_evt, url: string) => {
+  if (!/^http:\/\/127\.0\.0\.1:\d+\/?$/.test(url)) return { ok: false, error: '허용되지 않은 주소입니다.' }
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 800,
+    title: 'Locust 대시보드',
+    backgroundColor: '#121212',
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  })
+  win.setMenuBarVisibility(false)
+  await win.loadURL(url)
+  return { ok: true }
+})
+
+/**
+ * locust 설치.
+ *
+ * **묻지 않고 설치하지 않는다** — 렌더러가 확인 창을 띄운 뒤에만 이 핸들러를 부른다. 무엇을
+ * 어떤 명령으로 설치하는지 화면에 그대로 보여주는 것이 조건이다(사용자 요청).
+ * 출력은 perf:log 와 같은 방식으로 흘려 보내 진행 상황이 보이게 한다.
+ */
+ipcMain.handle('perf:installLocust', async () => {
+  if (perfRun && !perfRun.finished) return { ok: false, error: '검증이 돌고 있는 동안에는 설치할 수 없습니다.' }
+  // 파이썬을 찾는다 — pip 를 직접 부르지 않고 `python -m pip` 로 부른다(경로 문제를 덜 겪는다)
+  let py = ''
+  for (const cand of ['python', 'python3', 'py']) {
+    const v = await new Promise<boolean>((resolve) => {
+      try {
+        const c = spawn(cand, ['--version'], { windowsHide: true })
+        c.on('error', () => resolve(false))
+        c.on('close', (code) => resolve(code === 0))
+      } catch {
+        resolve(false)
+      }
+    })
+    if (v) {
+      py = cand
+      break
+    }
+  }
+  if (!py) return { ok: false, error: 'Python 을 찾을 수 없습니다. 먼저 Python 3.9 이상을 설치하세요.' }
+
+  return await new Promise<{ ok: boolean; error?: string; log?: string }>((resolve) => {
+    let out = ''
+    const child = spawn(py, ['-m', 'pip', 'install', 'locust'], { windowsHide: true })
+    const push = (b: Buffer) => {
+      const t = b.toString('utf-8')
+      out += t
+      mainWindow?.webContents.send('perf:log', { runId: 'install', stream: 'stdout', text: t })
+    }
+    child.stdout?.on('data', push)
+    child.stderr?.on('data', push)
+    child.on('error', (e) => resolve({ ok: false, error: cleanErrorMessage(e), log: out }))
+    child.on('close', (code) =>
+      resolve(
+        code === 0
+          ? { ok: true, log: out }
+          : { ok: false, error: `pip 가 오류로 끝났습니다 (종료 코드 ${code}).`, log: out },
+      ),
+    )
+  })
 })
 
 ipcMain.handle('perf:openFolder', async (_evt, id: string) => {

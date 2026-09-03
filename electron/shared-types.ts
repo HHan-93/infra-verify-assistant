@@ -910,6 +910,21 @@ export interface PerfRunConfig {
    * 경고를 내므로 애초에 주지 않는다).
    */
   stages?: { users: number; spawnRate: number; holdSec: number }[]
+  /**
+   * 이 PC 에서 몇 개 프로세스로 나눠 돌릴지 (`--processes`).
+   *
+   * 파이썬 한 프로세스는 코어 하나만 쓴다(GIL). 부하가 커지면 **대상이 아니라 내 PC 가**
+   * 먼저 한계에 걸리는데, 그때 나온 응답 시간은 서버 성능이 아니다. 코어를 나눠 쓰면 그
+   * 천장을 올릴 수 있다. 1 이면 넘기지 않는다.
+   */
+  processes?: number
+  /**
+   * 다른 PC 를 워커로 붙일 개수 (`--master --expect-workers N`).
+   *
+   * 앱은 master 만 띄우고 **워커는 사람이 다른 PC 에서 직접 실행한다** — 우리가 남의 PC 에
+   * 파이썬을 깔고 프로세스를 띄울 수는 없다. 그래서 붙일 명령을 화면에 그대로 보여준다.
+   */
+  expectWorkers?: number
 }
 
 /** 회차 하나 — userData/perf-runs/<id>/run.json */
