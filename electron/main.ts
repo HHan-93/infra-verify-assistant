@@ -5191,8 +5191,13 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       '-e',
       '-o',
       reportDir,
-      // 계획이 `${__P(qterm.target)}` 로 받아 쓸 수 있게 대상을 속성으로 넘긴다
+      // 화면에 적은 값을 계획이 __P 로 받아 쓸 수 있게 속성으로 넘긴다.
+      // JMeter 계획은 스레드 수를 제 안에 갖고 있어서 우리가 -u/-r/-t 로 바꿀 수 없다 —
+      // 그래서 '넘겨는 주되, 쓸지 말지는 계획이 정한다' 는 것을 화면에서도 밝힌다.
       ...(cfg.targetUrl.trim() ? [`-Jqterm.target=${cfg.targetUrl.trim()}`] : []),
+      `-Jqterm.users=${Math.max(1, Math.round(cfg.users))}`,
+      `-Jqterm.rampup=${Math.max(1, Math.round(cfg.users / Math.max(1, cfg.spawnRate)))}`,
+      `-Jqterm.duration=${Math.max(1, Math.round(cfg.durationSec))}`,
     ]
     const meta2: PerfRunMeta = {
       id: id2,
@@ -5347,6 +5352,15 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       env: {
         ...process.env,
         PYTHONIOENCODING: 'utf-8',
+        /**
+         * 파이썬 UTF-8 모드.
+         *
+         * 이게 없으면 Windows 에서 Locust 가 **시스템 기본 인코딩(한국어 Windows 는 CP949)**
+         * 으로 CSV 를 쓴다. 실제로 연결 실패 메시지가 그 인코딩으로 들어가 우리가 UTF-8 로
+         * 읽을 때 깨졌다("대상 컴퓨터에서 연결을 거부했으므로…" → 알 수 없는 글자).
+         * 실행 파일 인자로는 못 바꾸고 환경변수로만 켤 수 있다.
+         */
+        PYTHONUTF8: '1',
         PYTHONUNBUFFERED: '1',
         // 생성한 locustfile 이 이 경로에 실패 표본을 적는다 (켠 경우에만)
         QTERM_FAIL_LOG: path.join(dir, 'failure_samples.jsonl'),

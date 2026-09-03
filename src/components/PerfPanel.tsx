@@ -216,6 +216,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   /** 이 PC 코어 나눠 쓰기 · 다른 PC 워커 기다리기 */
   const [processes, setProcesses] = useState('1')
   const [expectWorkers, setExpectWorkers] = useState('0')
+  /** 고급 설정 펼침 — 기본은 접힘, 편 상태는 기억한다 */
+  const [advOpen, setAdvOpen] = useState(() => localStorage.getItem('perf_adv_open') === '1')
   /** 저장해 둔 검증 설정 */
   const [presets, setPresets] = useState<PerfPreset[]>([])
   const [presetName, setPresetName] = useState<string | null>(null)
@@ -310,9 +312,30 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool])
 
-  // JMeter 는 폼으로 .jmx 를 만들어 줄 수 없다 — 파일 고르기로 고정한다
+  /**
+   * 도구를 바꾸면 **그 도구의 기본값으로 되돌린다.**
+   *
+   * 남아 있던 값이 다른 도구의 것이면(예: Locust 로 돌아왔는데 파일 칸에 .jmx 가 남아 있으면)
+   * 무엇이 돌아갈지 알 수 없다. 고른 파일은 도구별로 따로 기억해 두었다가 되돌려 준다.
+   *  - Locust → 폼으로 만들기, 계단식 가능
+   *  - JMeter → 파일 고르기 고정(.jmx 는 GUI 로 만드는 XML), 계단식·워밍업 없음
+   */
+  const filesByTool = useRef<Record<PerfTool, string>>({ locust: '', jmeter: '' })
+  const prevTool = useRef<PerfTool>('locust')
   useEffect(() => {
-    if (tool === 'jmeter') setScenarioKind('file')
+    const from = prevTool.current
+    if (from === tool) return
+    filesByTool.current[from] = scenarioFile
+    prevTool.current = tool
+    setScenarioFile(filesByTool.current[tool] ?? '')
+    setScenarioKind(tool === 'jmeter' ? 'file' : 'form')
+    if (tool === 'jmeter') setLoadMode('flat')
+    setNote(
+      tool === 'jmeter'
+        ? 'JMeter 로 바꿨습니다 — .jmx 계획 파일이 필요하고, 실행 중 대시보드와 계단식·워밍업은 없습니다.'
+        : 'Locust 로 바꿨습니다 — 폼으로 시나리오를 만들 수 있습니다.',
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool])
 
   /**
@@ -495,13 +518,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     p95ThresholdMs: numOrUndef(p95Th),
     p99ThresholdMs: numOrUndef(p99Th),
     errorRateThresholdPct: numOrUndef(errTh),
-    warmupSec: numOrUndef(warmupSec),
-    insecureTls: insecure,
+    warmupSec: tool === 'jmeter' ? undefined : numOrUndef(warmupSec),
+    insecureTls: tool === 'jmeter' ? undefined : insecure,
     tool,
-    processes: Math.max(1, Number(processes) || 1),
-    expectWorkers: Math.max(0, Number(expectWorkers) || 0),
+    // JMeter 에는 없는 개념들 — 값을 보내 두면 회차 요약에 '설정한 것처럼' 남아 오해를 만든다
+    ...(tool === 'jmeter'
+      ? {}
+      : {
+          processes: Math.max(1, Number(processes) || 1),
+          expectWorkers: Math.max(0, Number(expectWorkers) || 0),
+        }),
     stages:
-      loadMode === 'stages'
+      tool !== 'jmeter' && loadMode === 'stages'
         ? stages
             .map((st) => ({
               users: Number(st.users) || 0,
@@ -632,8 +660,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const blockedReason = (() => {
     if (envChecking) return '환경을 확인하는 중입니다'
     if (!env?.ok) return '환경 확인이 필요합니다'
-    if (!targetUrl.trim()) return '대상 주소를 적어 주세요'
-    if (!/^https?:\/\//i.test(targetUrl.trim())) return '대상 주소는 http:// 또는 https:// 로 시작해야 합니다'
+    // JMeter 계획은 대상을 제 안에 갖고 있다 — 우리 주소는 속성으로 넘기는 참고값이라 비워도 된다
+    if (tool !== 'jmeter' && !targetUrl.trim()) return '대상 주소를 적어 주세요'
+    if (targetUrl.trim() && !/^https?:\/\//i.test(targetUrl.trim()))
+      return '대상 주소는 http:// 또는 https:// 로 시작해야 합니다'
     if (scenarioKind === 'file' && !scenarioFile.trim()) return 'locustfile 을 고르세요'
     if (tool === 'jmeter' && scenarioKind !== 'file') return 'JMeter 는 .jmx 파일이 필요합니다'
     if (scenarioKind === 'form' && !steps.some((st) => st.path.trim())) return '요청할 경로를 한 개 이상 적어 주세요'
@@ -1102,6 +1132,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               전에는 회차가 긴 칸의 맨 아래에 붙어 회차 하나에 빈 공간이 한 뼘씩 남았다. */}
           <div className="flex w-[392px] shrink-0 flex-col overflow-hidden border-r border-white/10">
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {/* ── 필수 ─────────────────────────────────────────── */}
+
             {/* 대상 — 어디를 때리는가 */}
             <Card icon={<Target size={12} />} title="대상">
               <select
@@ -1127,76 +1159,71 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 placeholder="https://10.255.233.21:5000"
                 className={inputCls + ' mt-1.5 w-full font-mono disabled:opacity-50'}
               />
-              <label className="mt-1.5 flex items-center gap-2 text-[11px] text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={insecure}
-                  disabled={!!running || scenarioKind === 'file'}
-                  onChange={(e) => setInsecure(e.target.checked)}
-                />
-                자체 서명 인증서 무시
-                <span className="text-[10px] text-gray-600">사내 인프라는 대개 필요</span>
-              </label>
               <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
                 세션에서 가져온 주소입니다. 이 PC 에서 안 닿으면 포트 포워딩으로 로컬 포트를 열고 그 주소를 적으세요.
               </p>
             </Card>
 
             {/* 부하 — 얼마나 세게 */}
-            {/* 부하 — 얼마나 세게 */}
             <Card
               icon={<Gauge size={12} />}
               title="부하"
               badge={
-                <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
-                  {(['flat', 'stages'] as const).map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => setLoadMode(m)}
-                      disabled={!!running}
-                      title={
-                        m === 'flat'
-                          ? '정해진 사용자 수로 쭉 유지합니다'
-                          : '사용자를 단계적으로 올려 어디서 무너지는지 봅니다'
-                      }
-                      className={
-                        'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
-                        (loadMode === m ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
-                      }
-                    >
-                      {m === 'flat' ? '평평하게' : '계단식'}
-                    </button>
-                  ))}
-                </span>
+                tool === 'locust' ? (
+                  <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
+                    {(['flat', 'stages'] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setLoadMode(m)}
+                        disabled={!!running}
+                        title={
+                          m === 'flat'
+                            ? '정해진 사용자 수로 쭉 유지합니다'
+                            : '사용자를 단계적으로 올려 어디서 무너지는지 봅니다'
+                        }
+                        className={
+                          'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
+                          (loadMode === m ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
+                        }
+                      >
+                        {m === 'flat' ? '평평하게' : '계단식'}
+                      </button>
+                    ))}
+                  </span>
+                ) : undefined
               }
             >
-              {loadMode === 'flat' ? (
+              {loadMode === 'flat' || tool === 'jmeter' ? (
                 <>
-                  <div className="flex flex-wrap gap-1">
-                    {LOAD_PRESETS.map((pre) => {
-                      const on =
-                        users === String(pre.users) && spawnRate === String(pre.rate) && durationMin === String(pre.min)
-                      return (
-                        <button
-                          key={pre.label}
-                          onClick={() => {
-                            setUsers(String(pre.users))
-                            setSpawnRate(String(pre.rate))
-                            setDurationMin(String(pre.min))
-                          }}
-                          disabled={!!running}
-                          title={`사용자 ${pre.users}명 · ${pre.rate}명/초 · ${pre.min}분`}
-                          className={
-                            'rounded-full px-2 py-0.5 text-[10.5px] disabled:opacity-50 ' +
-                            (on ? 'bg-blue-600/70 text-white' : 'bg-black/25 text-gray-400 hover:text-gray-200')
-                          }
-                        >
-                          {pre.label}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+                  {tool === 'locust' && (
+                    <div className="mb-1.5 flex flex-wrap gap-1">
+                      {LOAD_PRESETS.map((pre) => {
+                        const on =
+                          users === String(pre.users) &&
+                          spawnRate === String(pre.rate) &&
+                          durationMin === String(pre.min)
+                        return (
+                          <button
+                            key={pre.label}
+                            onClick={() => {
+                              setUsers(String(pre.users))
+                              setSpawnRate(String(pre.rate))
+                              setDurationMin(String(pre.min))
+                            }}
+                            disabled={!!running}
+                            title={`사용자 ${pre.users}명 · ${pre.rate}명/초 · ${pre.min}분`}
+                            className={
+                              'rounded-full px-2 py-0.5 text-[10.5px] disabled:opacity-50 ' +
+                              (on ? 'bg-blue-600/70 text-white' : 'bg-black/25 text-gray-400 hover:text-gray-200')
+                            }
+                          >
+                            {pre.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 gap-1.5">
                     <Field label="사용자" unit="명" value={users} onChange={setUsers} disabled={!!running} />
                     <Field label="증가" unit="명/초" value={spawnRate} onChange={setSpawnRate} disabled={!!running} />
                     <Field label="시간" unit="분" value={durationMin} onChange={setDurationMin} disabled={!!running} />
@@ -1245,76 +1272,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </button>
                 </>
               )}
-              {/* 부하 발생기 쪽 한계 — 대상이 아니라 내 PC 가 먼저 막히면 그 숫자는 서버 성능이 아니다 */}
-              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                <Field
-                  label="이 PC 프로세스"
-                  unit="개"
-                  value={processes}
-                  onChange={setProcesses}
-                  disabled={!!running}
-                />
-                <Field
-                  label="다른 PC 워커"
-                  unit="대"
-                  value={expectWorkers}
-                  onChange={setExpectWorkers}
-                  disabled={!!running}
-                />
-              </div>
-              <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
-                파이썬 한 프로세스는 코어 하나만 씁니다. 부하가 크면 프로세스를 늘리세요.
-                {Number(expectWorkers) > 0 && (
-                  <>
-                    <br />
-                    워커 {Number(expectWorkers)}대가 붙을 때까지 시작을 기다립니다. 다른 PC 에서:
-                    <span className="mt-0.5 block break-all rounded bg-black/40 px-1.5 py-1 font-mono text-[10px] text-gray-400">
-                      locust -f locustfile.py --worker --master-host &lt;이 PC 의 IP&gt;
-                    </span>
-                  </>
-                )}
-              </p>
-
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
                 {loadSentence}
               </p>
-            </Card>
-
-            {/* 판정 기준 — 없으면 초록을 띄우지 않는다 */}
-            <Card
-              icon={<CircleCheck size={12} />}
-              title="판정 기준"
-              badge={
-                p50Th.trim() || p95Th.trim() || p99Th.trim() || errTh.trim() ? undefined : (
-                  <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9.5px] text-gray-400">
-                    비워 두면 측정값만
-                  </span>
-                )
-              }
-            >
-              <div className="grid grid-cols-4 gap-1.5">
-                <Field label="p50 이하" unit="ms" value={p50Th} onChange={setP50Th} disabled={!!running} placeholder="—" />
-                <Field label="p95 이하" unit="ms" value={p95Th} onChange={setP95Th} disabled={!!running} placeholder="500" />
-                <Field label="p99 이하" unit="ms" value={p99Th} onChange={setP99Th} disabled={!!running} placeholder="—" />
-                <Field label="실패율 이하" unit="%" value={errTh} onChange={setErrTh} disabled={!!running} placeholder="1" />
-              </div>
-              <div className="mt-1.5 flex items-end gap-2">
-                <div className="w-24">
-                  <Field
-                    label="워밍업 제외"
-                    unit="초"
-                    value={warmupSec}
-                    onChange={setWarmupSec}
-                    disabled={!!running}
-                    placeholder="0"
-                  />
-                </div>
-                <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
-                  사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면{' '}
-                  <span className="text-gray-500">남은 구간의 p95 최댓값</span>으로 판정합니다.
-                </p>
-              </div>
             </Card>
 
             {/* 시나리오 — 무엇을 요청할지 */}
@@ -1322,7 +1283,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               icon={<FileCode size={12} />}
               title="시나리오"
               badge={
-                scenarioKind === 'form' ? (
+                tool === 'locust' && scenarioKind === 'form' ? (
                   <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
                     {(['weighted', 'sequential'] as const).map((o) => (
                       <button
@@ -1346,30 +1307,27 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 ) : undefined
               }
             >
-              <div className="flex gap-1 rounded-md bg-black/25 p-0.5">
-                {(['form', 'file'] as const).map((k) => (
-                  <button
-                    key={k}
-                    onClick={() => setScenarioKind(k)}
-                    disabled={!!running || (tool === 'jmeter' && k === 'form')}
-                    title={
-                      tool === 'jmeter' && k === 'form'
-                        ? 'JMeter 계획(.jmx)은 GUI 로 만드는 XML 이라 폼으로 만들어 드릴 수 없습니다'
-                        : undefined
-                    }
-                    className={
-                      'flex-1 rounded px-2 py-1 text-[11px] disabled:opacity-50 ' +
-                      (scenarioKind === k ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
-                    }
-                  >
-                    {k === 'form' ? '폼으로 만들기' : '파일 고르기'}
-                  </button>
-                ))}
-              </div>
+              {tool === 'locust' && (
+                <div className="mb-2 flex gap-1 rounded-md bg-black/25 p-0.5">
+                  {(['form', 'file'] as const).map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => setScenarioKind(k)}
+                      disabled={!!running}
+                      className={
+                        'flex-1 rounded px-2 py-1 text-[11px] disabled:opacity-50 ' +
+                        (scenarioKind === k ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
+                      }
+                    >
+                      {k === 'form' ? '폼으로 만들기' : '파일 고르기'}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {scenarioKind === 'form' ? (
+              {tool === 'locust' && scenarioKind === 'form' ? (
                 <>
-                  <div className="mt-2 space-y-1">
+                  <div className="space-y-1">
                     {steps.map((st, i) => (
                       <div key={i} className="rounded border border-white/10 bg-black/15">
                         <div className="flex items-center gap-1 p-1">
@@ -1492,83 +1450,214 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     >
                       <ClipboardPaste size={11} /> cURL 로 추가
                     </button>
-                  </div>
-
-                  <textarea
-                    value={commonHeaderText}
-                    onChange={(e) => setCommonHeaderText(e.target.value)}
-                    disabled={!!running}
-                    rows={2}
-                    placeholder={'공통 헤더 — 한 줄에 하나\nX-Auth-Token: ...'}
-                    className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
-                  />
-
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    <span className="shrink-0 text-[10.5px] text-gray-500">요청 사이 대기</span>
-                    <input
-                      value={waitMin}
-                      onChange={(e) => setWaitMin(e.target.value)}
-                      disabled={!!running}
-                      className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
-                    />
-                    <span className="shrink-0 text-gray-600">~</span>
-                    <input
-                      value={waitMax}
-                      onChange={(e) => setWaitMax(e.target.value)}
-                      disabled={!!running}
-                      className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
-                    />
-                    <span className="shrink-0 text-[10.5px] text-gray-500">초</span>
                     <button
                       onClick={async () => {
                         const r = await window.electronAPI.perfPreviewScenario(buildConfig())
                         setPreview(r.text)
                       }}
-                      className="ml-auto shrink-0 rounded border border-white/15 bg-panel-light px-2 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/10"
+                      className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-1 text-[10.5px] text-gray-300 hover:bg-white/10"
                     >
                       미리보기
                     </button>
                   </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      value={scenarioFile}
+                      onChange={(e) => setScenarioFile(e.target.value)}
+                      disabled={!!running}
+                      placeholder={tool === 'jmeter' ? 'plan.jmx' : 'locustfile.py'}
+                      className={inputCls + ' min-w-0 flex-1 font-mono disabled:opacity-50'}
+                    />
+                    <button
+                      onClick={async () => {
+                        const r = await window.electronAPI.perfPickScenario(tool)
+                        if (r.path) setScenarioFile(r.path)
+                      }}
+                      disabled={!!running}
+                      className="shrink-0 rounded border border-white/15 bg-panel-light p-1.5 text-gray-300 hover:bg-white/10 disabled:opacity-50"
+                      title="파일 고르기"
+                    >
+                      <FileCode size={13} />
+                    </button>
+                  </div>
+                  {tool === 'jmeter' && (
+                    <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                      계획(.jmx)은 GUI 로 만드는 XML 이라 폼으로 만들어 드릴 수 없습니다. 위의 대상·부하 값은{' '}
+                      <span className="text-gray-500">속성으로 넘기기만</span> 합니다 — 계획이{' '}
+                      <span className="font-mono text-gray-500">qterm.target · qterm.users · qterm.rampup ·
+                      qterm.duration</span> 을 받아 쓰도록 만들어 두셨을 때만 반영됩니다.
+                    </p>
+                  )}
+                </>
+              )}
+            </Card>
 
-                  <label className="mt-1.5 flex items-start gap-2 text-[11px] text-gray-300">
+            {/* 판정 기준 — 없으면 초록을 띄우지 않는다 (이 앱의 핵심이라 접지 않는다) */}
+            <Card
+              icon={<CircleCheck size={12} />}
+              title="판정 기준"
+              badge={
+                p50Th.trim() || p95Th.trim() || p99Th.trim() || errTh.trim() ? undefined : (
+                  <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9.5px] text-gray-400">
+                    비워 두면 측정값만
+                  </span>
+                )
+              }
+            >
+              <div className="grid grid-cols-2 gap-1.5">
+                <Field label="p95 이하" unit="ms" value={p95Th} onChange={setP95Th} disabled={!!running} placeholder="500" />
+                <Field label="실패율 이하" unit="%" value={errTh} onChange={setErrTh} disabled={!!running} placeholder="1" />
+              </div>
+            </Card>
+
+            {/* ── 고급 설정 ─────────────────────────────────────
+                안 건드려도 돌아가는 것들만 여기 넣는다. 처음 여는 사람에게 스무 칸을 한꺼번에
+                보여주면 무엇이 필수인지 알 수 없다. 기본은 접고, 편 상태는 기억한다. */}
+            <button
+              onClick={() => {
+                const next = !advOpen
+                setAdvOpen(next)
+                localStorage.setItem('perf_adv_open', next ? '1' : '0')
+              }}
+              className="mb-2 flex w-full items-center gap-1.5 rounded-md border border-white/10 bg-panel-light/25 px-2.5 py-1.5 text-[11px] text-gray-400 hover:bg-white/5"
+            >
+              {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              고급 설정
+              <span className="ml-auto text-[10px] text-gray-600">
+                {advOpen ? '접기' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
+              </span>
+            </button>
+
+            {advOpen && (
+              <>
+                <Card icon={<Target size={12} />} title="연결">
+                  <label className="flex items-start gap-2 text-[11px] text-gray-300">
                     <input
                       type="checkbox"
-                      checked={captureFailures}
-                      disabled={!!running}
-                      onChange={(e) => setCaptureFailures(e.target.checked)}
+                      checked={insecure}
+                      disabled={!!running || tool === 'jmeter' || scenarioKind === 'file'}
+                      onChange={(e) => setInsecure(e.target.checked)}
                       className="mt-0.5"
                     />
                     <span>
-                      실패 응답 본문 남기기
+                      자체 서명 인증서 무시
                       <span className="block text-[10px] text-gray-600">
-                        Locust 는 한 줄 문구만 남깁니다. 본문이 있어야 게이트웨이 오류인지 앱 오류인지 갈립니다 (앞 50건)
+                        {tool === 'jmeter' || scenarioKind === 'file'
+                          ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
+                          : '사내 인프라는 대개 필요합니다'}
                       </span>
                     </span>
                   </label>
-                </>
-              ) : (
-                <div className="mt-2 flex items-center gap-1.5">
-                  <input
-                    value={scenarioFile}
-                    onChange={(e) => setScenarioFile(e.target.value)}
-                    disabled={!!running}
-                    placeholder={tool === 'jmeter' ? 'plan.jmx' : 'locustfile.py'}
-                    className={inputCls + ' min-w-0 flex-1 font-mono disabled:opacity-50'}
-                  />
-                  <button
-                    onClick={async () => {
-                      const r = await window.electronAPI.perfPickScenario(tool)
-                      if (r.path) setScenarioFile(r.path)
-                    }}
-                    disabled={!!running}
-                    className="shrink-0 rounded border border-white/15 bg-panel-light p-1.5 text-gray-300 hover:bg-white/10 disabled:opacity-50"
-                    title="파일 고르기"
-                  >
-                    <FileCode size={13} />
-                  </button>
-                </div>
-              )}
-            </Card>
+                </Card>
+
+                <Card icon={<CircleCheck size={12} />} title="판정 기준 — 더">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field label="p50 이하" unit="ms" value={p50Th} onChange={setP50Th} disabled={!!running} placeholder="—" />
+                    <Field label="p99 이하" unit="ms" value={p99Th} onChange={setP99Th} disabled={!!running} placeholder="—" />
+                  </div>
+                  <div className="mt-1.5 flex items-end gap-2">
+                    <div className="w-24">
+                      <Field
+                        label="워밍업 제외"
+                        unit="초"
+                        value={warmupSec}
+                        onChange={setWarmupSec}
+                        disabled={!!running || tool === 'jmeter'}
+                        placeholder="0"
+                      />
+                    </div>
+                    <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
+                      {tool === 'jmeter'
+                        ? 'JMeter 회차는 초 단위 이력이 없어 워밍업을 뺄 수 없습니다.'
+                        : '사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95 최댓값으로 판정합니다.'}
+                    </p>
+                  </div>
+                </Card>
+
+                {tool === 'locust' && scenarioKind === 'form' && (
+                  <Card icon={<FileCode size={12} />} title="요청 방식">
+                    <div className="flex items-center gap-1.5">
+                      <span className="shrink-0 text-[10.5px] text-gray-500">요청 사이 대기</span>
+                      <input
+                        value={waitMin}
+                        onChange={(e) => setWaitMin(e.target.value)}
+                        disabled={!!running}
+                        className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
+                      />
+                      <span className="shrink-0 text-gray-600">~</span>
+                      <input
+                        value={waitMax}
+                        onChange={(e) => setWaitMax(e.target.value)}
+                        disabled={!!running}
+                        className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
+                      />
+                      <span className="shrink-0 text-[10.5px] text-gray-500">초</span>
+                    </div>
+                    <textarea
+                      value={commonHeaderText}
+                      onChange={(e) => setCommonHeaderText(e.target.value)}
+                      disabled={!!running}
+                      rows={2}
+                      placeholder={'공통 헤더 — 한 줄에 하나\nX-Auth-Token: ...'}
+                      className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
+                    />
+                    <label className="mt-1.5 flex items-start gap-2 text-[11px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={captureFailures}
+                        disabled={!!running}
+                        onChange={(e) => setCaptureFailures(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        실패 응답 본문 남기기
+                        <span className="block text-[10px] text-gray-600">
+                          Locust 는 한 줄 문구만 남깁니다. 본문이 있어야 게이트웨이 오류인지 앱 오류인지 갈립니다 (앞 50건)
+                        </span>
+                      </span>
+                    </label>
+                  </Card>
+                )}
+
+                {tool === 'locust' && (
+                  <Card icon={<Gauge size={12} />} title="부하 발생기">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Field
+                        label="이 PC 프로세스"
+                        unit="개"
+                        value={processes}
+                        onChange={setProcesses}
+                        disabled={!!running}
+                      />
+                      <Field
+                        label="다른 PC 워커"
+                        unit="대"
+                        value={expectWorkers}
+                        onChange={setExpectWorkers}
+                        disabled={!!running}
+                      />
+                    </div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                      파이썬 한 프로세스는 코어 하나만 씁니다. 부하가 크면 프로세스를 늘리세요 — 대상이 아니라 내 PC 가
+                      먼저 막히면 그 응답 시간은 서버 성능이 아닙니다.
+                      {Number(expectWorkers) > 0 && (
+                        <>
+                          <br />
+                          워커 {Number(expectWorkers)}대가 붙을 때까지 시작을 기다립니다. 다른 PC 에서:
+                          <span className="mt-0.5 block break-all rounded bg-black/40 px-1.5 py-1 font-mono text-[10px] text-gray-400">
+                            locust -f locustfile.py --worker --master-host &lt;이 PC 의 IP&gt;
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </Card>
+                )}
+              </>
+            )}
+
 
             {/* 저장해 둔 설정 — 같은 검증을 다음에 또 돌리고, 팀에 넘기기도 한다 */}
             <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2">
@@ -2194,6 +2283,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                           응답 평균 {fmtBytes(selectedSummary.avgContentBytes)} · 대략{' '}
                           {fmtRate(selectedSummary.avgContentBytes * selectedSummary.rps)} 주고받았습니다 (본문만,
                           헤더 제외)
+                        </p>
+                      )}
+
+                      {/* 도구에 따라 시계열이 없을 수 있다 — 빈 자리를 그냥 두지 않고 이유를 말한다 */}
+                      {history.length <= 1 && (selected.meta.config.tool ?? 'locust') === 'jmeter' && (
+                        <p className="mt-2 text-[10px] leading-relaxed text-gray-600">
+                          JMeter 회차는 초 단위 이력을 남기지 않아 시계열 그래프가 없습니다 — 시간에 따른 변화는{' '}
+                          <span className="text-gray-500">리포트 열기</span> 의 대시보드에서 보세요.
                         </p>
                       )}
 

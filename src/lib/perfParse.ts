@@ -75,6 +75,24 @@ export function parseStatsApi(json: unknown): PerfLive {
   }
 }
 
+/**
+ * 깨진 오류 문구 다듬기.
+ *
+ * 2.8.0 까지는 Locust 를 UTF-8 모드로 띄우지 않아, 윈도우가 **시스템 인코딩(CP949)** 으로
+ * 낸 소켓 오류 메시지가 그대로 CSV 에 들어갔다. 그런 회차는 지금 읽어도 되살릴 수 없다
+ * (바이트가 이미 U+FFFD 로 뭉개진 채 우리에게 온다).
+ *
+ * 그래도 **앞부분(오류 종류와 코드)은 멀쩡하다** — `ConnectionRefusedError(10061, '[WinError
+ * 10061] …')`. 읽을 수 있는 데까지만 남기고 뒤는 잘라 그 사실을 밝힌다. 알아볼 수 없는
+ * 글자를 그대로 늘어놓는 것보다, 무엇이 왜 안 보이는지 말하는 편이 낫다.
+ */
+export function tidyFailureText(text: string): string {
+  const s = (text ?? '').replace(/\uFFFD/g, '\uFFFD')
+  if (!s.includes('\uFFFD')) return s
+  const head = s.slice(0, s.indexOf('\uFFFD')).replace(/[\s'"(,]+$/, '')
+  return `${head} … (오류 문구가 깨져 읽을 수 없습니다 — 2.8.0 이전 방식으로 기록된 회차입니다)`
+}
+
 /** 쉼표 구분 한 줄 — 따옴표 안의 쉼표는 자르지 않는다 (`Name` 에 쿼리스트링이 들어온다) */
 export function splitCsvLine(line: string): string[] {
   const out: string[] = []
@@ -113,7 +131,7 @@ const num = (v: string | undefined): number | undefined => {
  * 부분 집계를 전체인 척 보여주면 판정이 거짓이 된다.
  */
 export function parseLocustStats(csv: string): PerfSummary | null {
-  const lines = (csv ?? '').split(/\r?\n/).filter((l) => l.trim())
+  const lines = (csv ?? '').split(/\r*\n/).filter((l) => l.trim())
   if (lines.length < 2) return null
   const header = splitCsvLine(lines[0]).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
@@ -173,7 +191,7 @@ export function parseLocustStats(csv: string): PerfSummary | null {
  */
 export function parseLocustConsole(text: string): PerfLive {
   const live: PerfLive = {}
-  for (const raw of (text ?? '').split(/\r?\n/)) {
+  for (const raw of (text ?? '').split(/\r*\n/)) {
     const line = raw.trim()
     if (!line.startsWith('Aggregated')) continue
     // `17(0.20%)` 처럼 붙어 나오는 실패 표기를 분리한다
@@ -217,7 +235,7 @@ export interface PerfFailure {
  * 열 이름은 `Method,Name,Error,Occurrences`.
  */
 export function parseLocustFailures(csv: string): PerfFailure[] {
-  const lines = (csv ?? '').split(/\r?\n/).filter((l) => l.trim())
+  const lines = (csv ?? '').split(/\r*\n/).filter((l) => l.trim())
   if (lines.length < 2) return []
   const header = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase())
   const iMethod = header.indexOf('method')
@@ -232,7 +250,7 @@ export function parseLocustFailures(csv: string): PerfFailure[] {
       const n = Number(String(c[iCount] ?? '').trim())
       return {
         name: [(c[iMethod] ?? '').trim(), (c[iName] ?? '').trim()].filter(Boolean).join(' '),
-        error: (c[iError] ?? '').trim(),
+        error: tidyFailureText((c[iError] ?? '').trim()),
         count: Number.isFinite(n) ? n : 0,
       }
     })
@@ -263,7 +281,7 @@ export interface PerfHistoryPoint {
  * 모양이 되므로 값 없음으로 둔다(recharts 는 끊어 그린다).
  */
 export function parseLocustHistory(csv: string): PerfHistoryPoint[] {
-  const lines = (csv ?? '').split(/\r?\n/).filter((l) => l.trim())
+  const lines = (csv ?? '').split(/\r*\n/).filter((l) => l.trim())
   if (lines.length < 2) return []
   const header = splitCsvLine(lines[0]).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
@@ -372,7 +390,7 @@ export function parseJmeterStatistics(json: unknown): PerfSummary | null {
  */
 export function parseJmeterConsole(text: string): PerfLive {
   const live: PerfLive = {}
-  for (const raw of (text ?? '').split(/\r?\n/)) {
+  for (const raw of (text ?? '').split(/\r*\n/)) {
     const line = raw.trim()
     if (!/^summary [+=]/.test(line)) continue
     const cumulative = line.startsWith('summary =')
