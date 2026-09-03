@@ -5036,6 +5036,10 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     // 끝나고 바로 죽이면 웹 UI 가 사라져 마지막 화면을 못 본다. 3초 여유.
     '--autoquit',
     '3',
+    // 웹 UI 를 띄우는 실행에서는 Locust 가 주기 통계를 콘솔에 찍지 않는다(그래서 실시간 로그가
+    // 시작 문구 몇 줄로 끝나 보였다). 화면의 숫자는 /stats/requests 로 받지만, 로그도 무슨 일이
+    // 벌어지는지 보여야 한다.
+    '--print-stats',
     '--html',
     reportPath,
     '--csv',

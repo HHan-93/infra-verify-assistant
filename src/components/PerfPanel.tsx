@@ -14,7 +14,7 @@ import {
   Info,
 } from 'lucide-react'
 import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord } from '../../electron/shared-types'
-import { parseLocustConsole, parseLocustStats, type PerfLive, type PerfSummary } from '../lib/perfParse'
+import { parseLocustConsole, parseLocustStats, parseStatsApi, type PerfLive, type PerfSummary } from '../lib/perfParse'
 import { perfVerdict } from '../lib/perfVerdict'
 import { maskForDisplay } from '../lib/mask'
 import ConfirmDialog from './ConfirmDialog'
@@ -71,6 +71,16 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [log, setLog] = useState('')
   const [live, setLive] = useState<PerfLive>({})
   const [tab, setTab] = useState<Tab>('dash')
+  /**
+   * 대시보드를 끼울 준비가 됐는가.
+   *
+   * spawn 직후 바로 iframe 을 걸었더니 흰 화면만 남았다 — Locust 가 포트를 잡기까지 몇백
+   * 밀리초가 걸리고, 그 사이에 연결이 거부된 iframe 은 **스스로 다시 시도하지 않는다.**
+   * 그래서 통계 API 가 응답할 때까지 기다렸다가 끼운다(그 응답이 웹 UI 가 떴다는 증거다).
+   */
+  const [dashReady, setDashReady] = useState(false)
+  /** 사람이 다시 불러올 때 iframe 을 새로 만들기 위한 키 */
+  const [dashKey, setDashKey] = useState(0)
   const [startError, setStartError] = useState('')
   const [runs, setRuns] = useState<PerfRunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
@@ -127,6 +137,34 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
       offDone()
     }
   }, [])
+
+  /**
+   * 돌고 있는 동안의 숫자는 Locust 통계 API 에서 받는다.
+   * 첫 응답이 오면 웹 UI 도 뜬 것이므로 그때 대시보드를 끼운다.
+   */
+  useEffect(() => {
+    if (!running?.webUrl) return
+    const base = running.webUrl.replace(/\/+$/, '')
+    let alive = true
+    const tick = async () => {
+      try {
+        const r = await fetch(`${base}/stats/requests`, { cache: 'no-store' })
+        if (!r.ok) throw new Error(String(r.status))
+        const j = await r.json()
+        if (!alive) return
+        setDashReady(true)
+        setLive(parseStatsApi(j))
+      } catch {
+        /* 아직 안 떴거나 이미 끝났다 — 다음 차례에 다시 */
+      }
+    }
+    void tick()
+    const t = setInterval(tick, 1500)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [running])
 
   // 경과 시간 (돌고 있을 때만)
   useEffect(() => {
@@ -199,6 +237,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     setNote('')
     setLog('')
     setLive({})
+    setDashReady(false)
     const r = await window.electronAPI.perfStart(buildConfig())
     if (!r.ok || !r.meta) {
       setStartError(r.error ?? '시작하지 못했습니다.')
@@ -260,8 +299,9 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
           <span className="text-sm font-semibold text-gray-100">성능 검증</span>
           {running ? (
             <span className="rounded-full bg-blue-600/25 px-2 py-0.5 text-[11px] text-blue-200">
-              돌고 있음 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
+              진행 중 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
               {durationMin}:00
+              {live.users !== undefined && ` · 사용자 ${live.users}`}
             </span>
           ) : (
             note && <span className="text-[11px] text-gray-400">{note}</span>
@@ -347,7 +387,10 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
 
         <div className="flex min-h-0 flex-1">
           {/* 왼쪽 — 설정 + 회차 */}
-          <div className="flex w-[392px] shrink-0 flex-col overflow-y-auto border-r border-white/10 p-3">
+          {/* 왼쪽을 둘로 나눈다 — 설정이 남는 높이를 먹고, 회차는 내용만큼만 차지한다.
+              전에는 회차가 긴 칸의 맨 아래에 붙어 회차 하나에 빈 공간이 한 뼘씩 남았다. */}
+          <div className="flex w-[392px] shrink-0 flex-col overflow-hidden border-r border-white/10">
+            <div className="min-h-0 flex-1 overflow-y-auto p-3">
             <div className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">대상</div>
             <select
               value={sessionId}
@@ -567,10 +610,14 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             )}
             {startError && <p className="mt-1 text-[10.5px] leading-relaxed text-red-300">{startError}</p>}
 
-            {/* 회차 */}
-            <div className="mt-4 border-t border-white/10 pt-2">
+            </div>
+
+            {/* 회차 — 아래에 붙이고 높이는 내용만큼 (많아지면 이 안에서만 스크롤) */}
+            <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-white/10 px-3 pb-3 pt-2">
               <div className="flex items-center gap-2">
-                <span className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">회차</span>
+                <span className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">
+                  회차 {runs.length > 0 && <span className="text-gray-600">{runs.length}</span>}
+                </span>
                 <button
                   onClick={() => void refreshRuns()}
                   className="ml-auto rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
@@ -580,9 +627,11 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                 </button>
               </div>
               {runs.length === 0 ? (
-                <p className="py-3 text-[11px] text-gray-600">아직 돌린 적이 없습니다.</p>
+                <p className="py-2 text-[11px] leading-relaxed text-gray-600">
+                  아직 돌린 적이 없습니다. 한 번 돌리면 조건과 결과가 여기 쌓여 회차끼리 비교할 수 있습니다.
+                </p>
               ) : (
-                <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-1">
+                <div className="mt-1 space-y-1">
                   {runs.map((r) => {
                     const sum = r.statsCsv ? parseLocustStats(r.statsCsv) : null
                     const isRunning = running?.id === r.meta.id
@@ -601,19 +650,31 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                           }}
                           className="min-w-0 flex-1 text-left"
                         >
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-baseline gap-1.5">
                             <span className="min-w-0 truncate text-[11.5px] text-gray-200">
-                              {new Date(r.meta.startedAt).toLocaleString('ko-KR', { hour12: false }).slice(5)}
+                              {new Date(r.meta.startedAt).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
                             </span>
-                            {isRunning && <span className="shrink-0 text-[10px] text-blue-300">돌고 있음</span>}
+                            {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
                             {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
+                            {/* 어떤 조건으로 돌린 회차인지 — 이것이 없으면 회차끼리 비교가 안 된다 */}
+                            <span className="ml-auto shrink-0 text-[10px] text-gray-600">
+                              사용자 {r.meta.config.users} · {Math.round(r.meta.config.durationSec / 60)}분
+                            </span>
                           </div>
-                          <div className="mt-0.5 truncate text-[10px] text-gray-500">
-                            {sum
-                              ? `p95 ${fmtMs(sum.p95Ms)} · 실패 ${sum.failRatePct.toFixed(2)}%`
-                              : r.meta.canceled
-                                ? '결과 없음'
-                                : '통계 없음'}
+                          <div className="mt-0.5 flex items-baseline gap-1.5 text-[10px]">
+                            {sum ? (
+                              <>
+                                <span className="text-gray-400">p95 {fmtMs(sum.p95Ms)}</span>
+                                <span className={sum.failRatePct > 0 ? 'text-amber-300/90' : 'text-gray-500'}>
+                                  실패 {sum.failRatePct.toFixed(2)}%
+                                </span>
+                                <span className="ml-auto shrink-0 text-gray-600">{fmtInt(sum.rps)} req/s</span>
+                              </>
+                            ) : (
+                              <span className="text-gray-600">
+                                {isRunning ? '끝나면 결과가 채워집니다' : r.meta.canceled ? '결과 없음' : '통계 없음'}
+                              </span>
+                            )}
                           </div>
                         </button>
                         {!isRunning && (
@@ -656,7 +717,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             </div>
             {running && (
               <p className="mt-1 text-[10px] text-gray-600">
-                돌고 있는 동안의 값은 콘솔에서 읽은 어림값입니다 — 끝나면 통계 파일로 다시 계산합니다.
+                돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다 — 끝나면 통계 파일로 다시 계산합니다.
               </p>
             )}
 
@@ -686,13 +747,39 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             <div className="mt-2 min-h-0 flex-1 overflow-hidden">
               {tab === 'dash' &&
                 (running?.webUrl ? (
-                  // 돌고 있는 동안의 대시보드는 http 라 dev·배포에서 똑같이 끼워진다.
-                  // (정적 리포트는 file:// 이라 별도 창으로 띄운다 — perf:openReport)
-                  <iframe
-                    src={running.webUrl}
-                    title="Locust 대시보드"
-                    className="h-full w-full rounded-md border border-white/10 bg-white"
-                  />
+                  dashReady ? (
+                    // 돌고 있는 동안의 대시보드는 http 라 dev·배포에서 똑같이 끼워진다.
+                    // (정적 리포트는 file:// 이라 별도 창으로 띄운다 — perf:openReport)
+                    <div className="flex h-full flex-col">
+                      <div className="mb-1 flex items-center gap-2 text-[10px] text-gray-600">
+                        <span className="min-w-0 flex-1 truncate">{running.webUrl}</span>
+                        <button
+                          onClick={() => setDashKey((k) => k + 1)}
+                          className="shrink-0 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                        >
+                          다시 불러오기
+                        </button>
+                      </div>
+                      <iframe
+                        key={dashKey}
+                        src={running.webUrl.replace(/\/+$/, '') + '/'}
+                        title="Locust 대시보드"
+                        className="min-h-0 w-full flex-1 rounded-md border border-white/10 bg-white"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
+                      <RefreshCw size={18} className="animate-spin text-gray-600" />
+                      <p className="text-[12px] leading-relaxed text-gray-500">
+                        대시보드를 준비하는 중입니다…
+                        <br />
+                        <span className="text-[11px] text-gray-600">
+                          Locust 가 웹 화면을 띄우면 여기 들어옵니다. 그 사이 진행 상황은{' '}
+                          <span className="text-gray-400">실시간 로그</span> 에서 볼 수 있습니다.
+                        </span>
+                      </p>
+                    </div>
+                  )
                 ) : (
                   <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
                     <Gauge size={20} className="text-gray-600" />

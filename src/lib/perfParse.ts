@@ -1,11 +1,12 @@
 // Locust 결과 읽기 — **판정에 쓰는 숫자는 여기서만 만든다.**
 //
-// 두 출처가 있다.
-//  - 끝난 뒤의 `run_stats.csv`  → 확정값. 백분위까지 다 있다.
-//  - 돌고 있는 동안의 콘솔 출력 → 어림값. 사람이 "지금 어떤지" 보기 위한 것.
+// 출처가 셋이고 쓰임이 다르다.
+//  - 끝난 뒤의 `run_stats.csv`      → 확정값. 판정은 이것으로만 한다.
+//  - 돌고 있는 동안 `/stats/requests` → 진행 중 표시. 웹 UI 가 쓰는 것과 같은 값이다.
+//  - 콘솔 출력                       → 위 요청이 안 될 때의 보루.
 //
 // 콘솔 표 파싱은 서식이 바뀌면 깨진다(Locust 판마다 열이 늘었다 줄었다 한다). 그래서
-// **모양이 정확히 맞을 때만** 값을 받아들이고, 아니면 조용히 버린다 — 어림값 하나를 놓치는
+// **모양이 정확히 맞을 때만** 값을 받아들이고, 아니면 조용히 버린다 — 값 하나를 놓치는
 // 것이 엉뚱한 수치를 화면에 띄우는 것보다 낫다. 확정값은 늘 CSV 에서 다시 계산한다.
 
 export interface PerfEndpointStat {
@@ -30,13 +31,46 @@ export interface PerfSummary {
   perEndpoint: PerfEndpointStat[]
 }
 
-/** 돌고 있는 동안의 어림값 (콘솔 표에서 뽑는다) */
+/** 돌고 있는 동안의 값 */
 export interface PerfLive {
   requests?: number
   failures?: number
   rps?: number
   avgMs?: number
   p95Ms?: number
+  /** 지금 붙어 있는 가상 사용자 수 */
+  users?: number
+}
+
+/**
+ * Locust 웹 UI 가 쓰는 `/stats/requests` 응답 읽기.
+ *
+ * 콘솔 표를 파싱하는 것보다 이쪽이 정본이다 — 웹 UI 를 띄우는 실행에서는 Locust 가 주기
+ * 통계를 콘솔에 안 찍고(그래서 화면 숫자가 계속 '–' 였다), 서식이 판마다 바뀌지도 않는다.
+ * 콘솔 파서는 이 요청이 실패할 때를 위한 보루로 남긴다.
+ *
+ * 합계는 `stats` 배열의 `Aggregated` 행에 있다. 그 행이 없으면 아무것도 주장하지 않는다.
+ */
+export function parseStatsApi(json: unknown): PerfLive {
+  const j = (json ?? {}) as Record<string, unknown>
+  const rows = Array.isArray(j.stats) ? (j.stats as Record<string, unknown>[]) : []
+  const agg = rows.find((r) => String(r.name) === 'Aggregated')
+  const n = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+
+  // 진행 중 백분위는 최근 구간 기준으로 따로 온다. 없으면(초반) 합계 행의 값을 쓴다.
+  const pct = (j.current_response_time_percentiles ?? {}) as Record<string, unknown>
+  const p95 = n(pct['response_time_percentile_0.95']) ?? n(agg?.['response_time_percentile_0.95'])
+
+  const requests = n(agg?.num_requests)
+  const failures = n(agg?.num_failures)
+  return {
+    requests,
+    failures,
+    rps: n(j.total_rps) ?? n(agg?.total_rps),
+    avgMs: n(agg?.avg_response_time),
+    p95Ms: p95,
+    users: n(j.user_count),
+  }
 }
 
 /** 쉼표 구분 한 줄 — 따옴표 안의 쉼표는 자르지 않는다 (`Name` 에 쿼리스트링이 들어온다) */
