@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   X,
   Play,
@@ -20,8 +21,10 @@ import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord } from '.
 import {
   parseLocustConsole,
   parseLocustFailures,
+  parseLocustHistory,
   parseLocustStats,
   parseStatsApi,
+  type PerfHistoryPoint,
   type PerfLive,
   type PerfSummary,
 } from '../lib/perfParse'
@@ -87,6 +90,19 @@ function Card({
   )
 }
 
+/** 그래프 범례 한 칸 */
+function Legend({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span
+        className="inline-block h-0 w-3 shrink-0"
+        style={{ borderTop: `2px ${dashed ? 'dashed' : 'solid'} ${color}` }}
+      />
+      {label}
+    </span>
+  )
+}
+
 /** 숫자 입력 한 칸 — 단위를 입력칸 안에 붙여 라벨을 짧게 유지한다 */
 function Field({
   label,
@@ -122,6 +138,19 @@ function Field({
 
 const fmtMs = (v?: number) => (v === undefined ? '–' : v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`)
 const fmtInt = (v?: number) => (v === undefined ? '–' : Math.round(v).toLocaleString())
+/** 초당 바이트 → 사람이 읽는 단위 */
+function fmtRate(bytesPerSec?: number): string {
+  if (bytesPerSec === undefined || !Number.isFinite(bytesPerSec)) return '–'
+  const mbps = (bytesPerSec * 8) / 1_000_000
+  if (mbps >= 1) return `${mbps.toFixed(1)} Mbps`
+  return `${((bytesPerSec * 8) / 1000).toFixed(0)} kbps`
+}
+function fmtBytes(b?: number): string {
+  if (b === undefined) return '–'
+  if (b < 1024) return `${Math.round(b)}B`
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`
+  return `${(b / 1024 / 1024).toFixed(1)}MB`
+}
 
 export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [env, setEnv] = useState<PerfEnvStatus | null>(null)
@@ -133,8 +162,11 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [users, setUsers] = useState('50')
   const [spawnRate, setSpawnRate] = useState('5')
   const [durationMin, setDurationMin] = useState('3')
+  const [p50Th, setP50Th] = useState('')
   const [p95Th, setP95Th] = useState('')
+  const [p99Th, setP99Th] = useState('')
   const [errTh, setErrTh] = useState('')
+  const [warmupSec, setWarmupSec] = useState('')
   const [insecure, setInsecure] = useState(true)
 
   const [scenarioKind, setScenarioKind] = useState<'form' | 'file'>('form')
@@ -167,6 +199,8 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [note, setNote] = useState('')
   /** 앱이 만들어 줄 locustfile 미리보기 (null 이면 안 열림) */
   const [preview, setPreview] = useState<string | null>(null)
+  /** 고른 회차의 초 단위 이력 — 목록에 얹으면 무거워서 고를 때만 읽는다 */
+  const [history, setHistory] = useState<PerfHistoryPoint[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const [elapsed, setElapsed] = useState(0)
 
@@ -283,8 +317,11 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     users: Number(users) || 1,
     spawnRate: Number(spawnRate) || 1,
     durationSec: Math.max(1, Math.round((Number(durationMin) || 1) * 60)),
+    p50ThresholdMs: numOrUndef(p50Th),
     p95ThresholdMs: numOrUndef(p95Th),
+    p99ThresholdMs: numOrUndef(p99Th),
     errorRateThresholdPct: numOrUndef(errTh),
+    warmupSec: numOrUndef(warmupSec),
     insecureTls: insecure,
     scenario:
       scenarioKind === 'file'
@@ -367,14 +404,33 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
         ? perfVerdict(
             selectedSummary,
             {
+              p50ThresholdMs: selected.meta.config.p50ThresholdMs,
               p95ThresholdMs: selected.meta.config.p95ThresholdMs,
+              p99ThresholdMs: selected.meta.config.p99ThresholdMs,
               errorRateThresholdPct: selected.meta.config.errorRateThresholdPct,
+              warmupSec: selected.meta.config.warmupSec,
             },
-            { canceled: selected.meta.canceled, exitCode: selected.meta.exitCode },
+            { canceled: selected.meta.canceled, exitCode: selected.meta.exitCode, history },
           )
         : null,
-    [selected, selectedSummary],
+    [selected, selectedSummary, history],
   )
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setHistory([])
+      return
+    }
+    let alive = true
+    void window.electronAPI.perfReadHistory(selectedRunId).then((r) => {
+      if (!alive) return
+      setHistory(r.ok && r.csv ? parseLocustHistory(r.csv) : [])
+    })
+    return () => {
+      alive = false
+    }
+    // 돌고 있는 회차는 끝난 뒤에 다시 읽어야 이력이 채워진다 — running 이 풀릴 때 다시 돈다
+  }, [selectedRunId, running])
 
   const failures = useMemo(
     () => (selected?.failuresCsv ? parseLocustFailures(selected.failuresCsv) : []),
@@ -639,16 +695,34 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
               icon={<CircleCheck size={12} />}
               title="판정 기준"
               badge={
-                p95Th.trim() || errTh.trim() ? undefined : (
+                p50Th.trim() || p95Th.trim() || p99Th.trim() || errTh.trim() ? undefined : (
                   <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9.5px] text-gray-400">
                     비워 두면 측정값만
                   </span>
                 )
               }
             >
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
+                <Field label="p50 이하" unit="ms" value={p50Th} onChange={setP50Th} disabled={!!running} placeholder="—" />
                 <Field label="p95 이하" unit="ms" value={p95Th} onChange={setP95Th} disabled={!!running} placeholder="500" />
+                <Field label="p99 이하" unit="ms" value={p99Th} onChange={setP99Th} disabled={!!running} placeholder="—" />
                 <Field label="실패율 이하" unit="%" value={errTh} onChange={setErrTh} disabled={!!running} placeholder="1" />
+              </div>
+              <div className="mt-1.5 flex items-end gap-2">
+                <div className="w-24">
+                  <Field
+                    label="워밍업 제외"
+                    unit="초"
+                    value={warmupSec}
+                    onChange={setWarmupSec}
+                    disabled={!!running}
+                    placeholder="0"
+                  />
+                </div>
+                <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
+                  사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면{' '}
+                  <span className="text-gray-500">남은 구간의 p95 최댓값</span>으로 판정합니다.
+                </p>
               </div>
             </Card>
 
@@ -1059,6 +1133,112 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                             </div>
                           ))}
                         </div>
+                      )}
+
+                      {/* 시계열 — 평균 한 줄로는 '언제 무너졌나' 를 알 수 없다.
+                          Locust 웹 UI 는 돌고 있는 동안만 보여주므로 끝난 회차는 여기서 본다. */}
+                      {history.length > 1 && (
+                        <div className="mt-3">
+                          <div className="mb-1 flex items-center gap-2">
+                            <span className="text-[11px] font-medium text-gray-300">시간에 따라</span>
+                            <span className="text-[10px] text-gray-600">가로축 = 시작 후 초</span>
+                            {selected.meta.config.warmupSec ? (
+                              <span className="text-[10px] text-amber-300/70">
+                                앞 {selected.meta.config.warmupSec}초는 판정에서 제외
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="rounded-md border border-white/10 bg-black/20 p-1.5">
+                            <ResponsiveContainer width="100%" height={132}>
+                              <LineChart data={history} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff14" />
+                                <XAxis
+                                  dataKey="sec"
+                                  tick={{ fontSize: 10, fill: '#9ca3af' }}
+                                  tickFormatter={(v: number) => `${v}s`}
+                                />
+                                <YAxis
+                                  yAxisId="ms"
+                                  tick={{ fontSize: 10, fill: '#9ca3af' }}
+                                  tickFormatter={(v: number) => String(Math.round(v))}
+                                />
+                                <YAxis
+                                  yAxisId="rps"
+                                  orientation="right"
+                                  tick={{ fontSize: 10, fill: '#6b7280' }}
+                                  tickFormatter={(v: number) => String(Math.round(v))}
+                                />
+                                <Tooltip
+                                  contentStyle={{ background: '#1e1e2e', border: '1px solid #ffffff22', fontSize: 12 }}
+                                  labelStyle={{ color: '#9ca3af' }}
+                                  labelFormatter={(v) => `시작 후 ${v}초`}
+                                  formatter={(value, name) => {
+                                    const n = Number(value)
+                                    const isCount = name === '초당 요청' || name === '초당 실패'
+                                    return [
+                                      Number.isFinite(n) ? (isCount ? n.toFixed(1) : `${Math.round(n)}ms`) : '–',
+                                      String(name),
+                                    ]
+                                  }}
+                                />
+                                <Line
+                                  yAxisId="ms"
+                                  type="monotone"
+                                  dataKey="p95Ms"
+                                  name="p95"
+                                  stroke="#60a5fa"
+                                  strokeWidth={1.6}
+                                  dot={false}
+                                  connectNulls={false}
+                                />
+                                <Line
+                                  yAxisId="ms"
+                                  type="monotone"
+                                  dataKey="p50Ms"
+                                  name="p50"
+                                  stroke="#93c5fd"
+                                  strokeWidth={1}
+                                  strokeDasharray="3 3"
+                                  dot={false}
+                                  connectNulls={false}
+                                />
+                                <Line
+                                  yAxisId="rps"
+                                  type="monotone"
+                                  dataKey="rps"
+                                  name="초당 요청"
+                                  stroke="#34d399"
+                                  strokeWidth={1.2}
+                                  dot={false}
+                                />
+                                <Line
+                                  yAxisId="rps"
+                                  type="monotone"
+                                  dataKey="failsPerSec"
+                                  name="초당 실패"
+                                  stroke="#f87171"
+                                  strokeWidth={1.2}
+                                  dot={false}
+                                />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-3 text-[10px] text-gray-500">
+                            <Legend color="#60a5fa" label="p95 (왼쪽, ms)" />
+                            <Legend color="#93c5fd" label="p50" dashed />
+                            <Legend color="#34d399" label="초당 요청 (오른쪽)" />
+                            <Legend color="#f87171" label="초당 실패" />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 얼마나 주고받았나 — 대역폭이 병목이면 서버 탓이 아니다 */}
+                      {selectedSummary?.avgContentBytes !== undefined && selectedSummary.avgContentBytes > 0 && (
+                        <p className="mt-2 text-[10.5px] text-gray-500">
+                          응답 평균 {fmtBytes(selectedSummary.avgContentBytes)} · 대략{' '}
+                          {fmtRate(selectedSummary.avgContentBytes * selectedSummary.rps)} 주고받았습니다 (본문만,
+                          헤더 제외)
+                        </p>
                       )}
 
                       {/* 직전 회차와 비교 — 성능은 절대값보다 '지난번보다 나빠졌나' 로 읽는다 */}

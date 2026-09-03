@@ -20,6 +20,8 @@ export interface PerfEndpointStat {
 export interface PerfSummary {
   requests: number
   failures: number
+  /** 응답 본문 평균 크기(byte) — 대역폭을 어림하는 데 쓴다 */
+  avgContentBytes?: number
   /** 실패율(%) — 요청이 0이면 0 */
   failRatePct: number
   rps: number
@@ -123,6 +125,7 @@ export function parseLocustStats(csv: string): PerfSummary | null {
   const iAvg = idx('Average Response Time')
   const iMax = idx('Max Response Time')
   const iRps = idx('Requests/s')
+  const iSize = idx('Average Content Size')
   const i50 = idx('50%')
   const i95 = idx('95%')
   const i99 = idx('99%')
@@ -145,6 +148,7 @@ export function parseLocustStats(csv: string): PerfSummary | null {
     failRatePct: requests > 0 ? (failures / requests) * 100 : 0,
     rps: num(agg[iRps]) ?? 0,
     avgMs: num(agg[iAvg]) ?? 0,
+    avgContentBytes: iSize >= 0 ? num(agg[iSize]) : undefined,
     p50Ms: i50 >= 0 ? num(agg[i50]) : undefined,
     p95Ms: i95 >= 0 ? num(agg[i95]) : undefined,
     p99Ms: i99 >= 0 ? num(agg[i99]) : undefined,
@@ -234,4 +238,75 @@ export function parseLocustFailures(csv: string): PerfFailure[] {
     })
     .filter((f) => f.error || f.name)
     .sort((a, b) => b.count - a.count)
+}
+
+
+export interface PerfHistoryPoint {
+  /** 절대 시각(epoch ms) — 저장은 늘 절대값으로, 표시할 때만 상대로 바꾼다 */
+  t: number
+  /** 시작 기준 경과 초 (그래프 가로축) */
+  sec: number
+  users: number
+  rps: number
+  failsPerSec: number
+  p50Ms?: number
+  p95Ms?: number
+}
+
+/**
+ * `run_stats_history.csv` → 초 단위 이력.
+ *
+ * 한 줄이 1초다. 열 이름은 `Timestamp,User Count,Type,Name,Requests/s,Failures/s,50%,…`
+ * 이고 **Timestamp 는 epoch 초**다(우리 규칙대로 ms 로 바꿔 담는다).
+ *
+ * 시작 직후 백분위 칸은 `N/A` 로 온다 — 0 으로 바꾸면 그래프가 바닥에서 시작하는 거짓
+ * 모양이 되므로 값 없음으로 둔다(recharts 는 끊어 그린다).
+ */
+export function parseLocustHistory(csv: string): PerfHistoryPoint[] {
+  const lines = (csv ?? '').split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length < 2) return []
+  const header = splitCsvLine(lines[0]).map((h) => h.trim())
+  const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
+  const iT = idx('Timestamp')
+  const iName = idx('Name')
+  const iUsers = idx('User Count')
+  const iRps = idx('Requests/s')
+  const iFail = idx('Failures/s')
+  const i50 = idx('50%')
+  const i95 = idx('95%')
+  if (iT < 0) return []
+
+  const pts: PerfHistoryPoint[] = []
+  for (const line of lines.slice(1)) {
+    const c = splitCsvLine(line)
+    // 요청별 행이 섞여 오는 판도 있다 — 합계만 쓴다
+    if (iName >= 0 && (c[iName] ?? '').trim() !== 'Aggregated') continue
+    const sec = num(c[iT])
+    if (sec === undefined) continue
+    pts.push({
+      t: sec * 1000,
+      sec: 0,
+      users: num(c[iUsers]) ?? 0,
+      rps: num(c[iRps]) ?? 0,
+      failsPerSec: iFail >= 0 ? (num(c[iFail]) ?? 0) : 0,
+      p50Ms: i50 >= 0 ? num(c[i50]) : undefined,
+      p95Ms: i95 >= 0 ? num(c[i95]) : undefined,
+    })
+  }
+  if (!pts.length) return []
+  const t0 = pts[0].t
+  return pts.map((p) => ({ ...p, sec: Math.round((p.t - t0) / 1000) }))
+}
+
+/**
+ * 워밍업 이후 **구간 p95 중 최댓값**.
+ *
+ * 백분위는 평균처럼 다시 합칠 수 없다. 그래서 "앞 N초를 뺀 전체 p95" 를 계산하는 대신,
+ * 남은 구간들의 p95 중 가장 나쁜 값을 쓴다 — "안정된 뒤 어느 순간에도 이 값 이하였다" 는
+ * 더 보수적인(= 거짓 통과가 없는) 주장이 된다.
+ */
+export function worstP95After(history: PerfHistoryPoint[], warmupSec: number): number | undefined {
+  const after = history.filter((p) => p.sec >= warmupSec && p.p95Ms !== undefined && p.rps > 0)
+  if (!after.length) return undefined
+  return Math.max(...after.map((p) => p.p95Ms as number))
 }

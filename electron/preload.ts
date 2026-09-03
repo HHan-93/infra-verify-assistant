@@ -117,6 +117,8 @@ const electronAPI = {
     ipcRenderer.invoke('perf:saveReport', id),
   perfSaveCsv: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('perf:saveCsv', id),
+  perfReadHistory: (id: string): Promise<{ ok: boolean; csv?: string; error?: string }> =>
+    ipcRenderer.invoke('perf:readHistory', id),
   onPerfLog: (cb: (e: PerfLogEvent) => void): (() => void) => {
     const h = (_e: unknown, d: PerfLogEvent) => cb(d)
     ipcRenderer.on('perf:log', h)

@@ -5151,6 +5151,21 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
   return out.sort((a, b) => b.meta.startedAt - a.meta.startedAt)
 })
 
+/**
+ * 초 단위 이력(`run_stats_history.csv`) 읽기.
+ *
+ * 목록(perf:list)에 얹지 않는 이유: 1초에 한 줄이라 30분 실행이면 1800줄이다. 회차가 쌓인
+ * 목록을 열 때마다 그걸 다 실어 보내면 창이 멎는다. 고른 회차만 따로 읽는다.
+ */
+ipcMain.handle('perf:readHistory', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  try {
+    return { ok: true, csv: await readFile(path.join(perfRunsDir(), id, 'run_stats_history.csv'), 'utf-8') }
+  } catch {
+    return { ok: false, error: '이력 파일이 없습니다.' }
+  }
+})
+
 ipcMain.handle('perf:delete', async (_evt, id: string) => {
   if (perfRun && !perfRun.finished && perfRun.meta.id === id) {
     return { ok: false, error: '돌고 있는 회차는 지울 수 없습니다.' }

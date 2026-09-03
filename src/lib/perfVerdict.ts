@@ -7,7 +7,7 @@
 // 중지한 회차는 아예 판정하지 않는다. 5분 걸 예정이던 부하를 30초에 끊고 얻은 p95 를
 // '통과' 로 적으면, 나중에 그 표를 보는 사람이 5분치 결과로 읽는다.
 
-import type { PerfSummary } from './perfParse'
+import { worstP95After, type PerfHistoryPoint, type PerfSummary } from './perfParse'
 
 export type PerfTone = 'pass' | 'fail' | 'info'
 
@@ -19,14 +19,18 @@ export interface PerfVerdict {
 }
 
 export interface PerfThresholds {
+  p50ThresholdMs?: number
   p95ThresholdMs?: number
+  p99ThresholdMs?: number
   errorRateThresholdPct?: number
+  /** 앞부분 몇 초를 판정에서 뺄지 (램프업 구간) */
+  warmupSec?: number
 }
 
 export function perfVerdict(
   summary: PerfSummary | null,
   th: PerfThresholds,
-  opts: { canceled?: boolean; exitCode?: number } = {},
+  opts: { canceled?: boolean; exitCode?: number; history?: PerfHistoryPoint[] } = {},
 ): PerfVerdict {
   if (opts.canceled) {
     return {
@@ -49,16 +53,33 @@ export function perfVerdict(
   const reasons: string[] = []
   const checks: boolean[] = []
 
-  if (th.p95ThresholdMs !== undefined) {
-    if (summary.p95Ms === undefined) {
-      reasons.push('p95 기준을 적었지만 통계에 백분위가 없습니다.')
-    } else {
-      const ok = summary.p95Ms <= th.p95ThresholdMs
-      checks.push(ok)
-      reasons.push(
-        `p95 ${Math.round(summary.p95Ms)}ms ${ok ? '≤' : '>'} 기준 ${th.p95ThresholdMs}ms — ${ok ? '통과' : '초과'}`,
-      )
+  /**
+   * 워밍업을 뺄 때는 **구간 p95 중 최댓값**으로 p95 를 판정한다.
+   * 백분위는 다시 합칠 수 없으므로 전체 p95 에서 앞부분만 걷어낼 방법이 없다 — 대신 남은
+   * 구간들의 최악값을 쓴다(더 보수적이라 거짓 통과가 없다). 화면에도 그렇게 적는다.
+   */
+  const warmup = th.warmupSec && th.warmupSec > 0 ? th.warmupSec : 0
+  const warmP95 = warmup > 0 && opts.history ? worstP95After(opts.history, warmup) : undefined
+  const p95Used = warmP95 ?? summary.p95Ms
+  const p95Label = warmP95 !== undefined ? `워밍업 ${warmup}초 제외 구간 p95 최대` : 'p95'
+  if (warmup > 0 && warmP95 === undefined) {
+    reasons.push(`워밍업 ${warmup}초를 빼려 했지만 초 단위 이력이 없어 전체 값으로 판정했습니다.`)
+  }
+
+  const pctChecks: [string, number | undefined, number | undefined][] = [
+    ['p50', summary.p50Ms, th.p50ThresholdMs],
+    [p95Label, p95Used, th.p95ThresholdMs],
+    ['p99', summary.p99Ms, th.p99ThresholdMs],
+  ]
+  for (const [label, value, limit] of pctChecks) {
+    if (limit === undefined) continue
+    if (value === undefined) {
+      reasons.push(`${label} 기준을 적었지만 통계에 그 값이 없습니다.`)
+      continue
     }
+    const ok = value <= limit
+    checks.push(ok)
+    reasons.push(`${label} ${Math.round(value)}ms ${ok ? '≤' : '>'} 기준 ${limit}ms — ${ok ? '통과' : '초과'}`)
   }
   if (th.errorRateThresholdPct !== undefined) {
     const ok = summary.failRatePct <= th.errorRateThresholdPct

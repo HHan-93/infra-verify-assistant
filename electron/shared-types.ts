@@ -797,8 +797,19 @@ export interface PerfRunConfig {
    * 판정 기준. **없으면 초록 PASS 를 띄우지 않는다** — 측정값만 보여준다.
    * (verdict.ts 의 3-상태 규칙과 같은 이유: 기준 없는 초록은 근거 없는 안심이다)
    */
+  p50ThresholdMs?: number
   p95ThresholdMs?: number
+  p99ThresholdMs?: number
   errorRateThresholdPct?: number
+  /**
+   * 판정에서 뺄 앞부분(초).
+   *
+   * 사용자가 붙는 동안(램프업)은 응답이 느리게 나오고 그 값이 전체 p95 를 끌어올린다.
+   * "안정된 뒤에 기준을 만족하는가" 를 보려면 그 구간을 빼야 한다. 뺄 때는 초 단위 이력
+   * (run_stats_history.csv)의 **구간 p95 중 최댓값**으로 판정한다 — 백분위는 평균처럼
+   * 다시 합칠 수 없으므로 '구간 최댓값' 이라고 화면에도 그대로 적는다.
+   */
+  warmupSec?: number
   scenario: PerfFormScenario | PerfFileScenario
   /** 자체 서명 인증서를 무시할지 (사내 인프라는 대개 필요) */
   insecureTls?: boolean
