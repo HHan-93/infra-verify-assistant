@@ -72,13 +72,15 @@ export default function Toolbar({
   onAnalyzeSelection,
 }: ToolbarProps) {
   return (
-    <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap border-b border-white/10 bg-panel px-3 py-2">
+    // 버튼이 늘 때마다 폭이 모자라 가로 스크롤이 생긴다. 라벨은 지키고 간격을 줄이는 쪽을 택했다
+    // — 이 저장소는 "글자만 있으면 버튼인 줄 모른다" 를 이미 겪었으므로 아이콘 전용으로 바꾸지 않는다.
+    <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-white/10 bg-panel px-2 py-2">
       {/* 명령 입력 (라벨 유지) */}
       <button
         onClick={onTogglePresets}
         title="자주 쓰는 단일 명령어 모음"
         className={
-          'flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition ' +
+          'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ' +
           (showPresets
             ? 'border-blue-500/50 bg-blue-600/20 text-blue-100'
             : 'border-white/10 bg-panel-light text-gray-200 hover:bg-white/10')
@@ -93,7 +95,7 @@ export default function Toolbar({
         onClick={onToggleScenarios}
         title="순서가 있는 작업 흐름 명령어"
         className={
-          'flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition ' +
+          'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ' +
           (showScenarios
             ? 'border-blue-500/50 bg-blue-600/20 text-blue-100'
             : 'border-white/10 bg-panel-light text-gray-200 hover:bg-white/10')
@@ -118,20 +120,20 @@ export default function Toolbar({
       </IconBtn>
 
       {/* 분석 + 유틸 (우측) */}
-      <div className="ml-auto flex items-center gap-1.5">
+      <div className="ml-auto flex items-center gap-1">
         <button
           onClick={onOpenStatusBoard}
           data-statusboard-btn
           title="가용성 검증 상태보드 (host/VIP·masakari·Ceph·파드 실시간 상태)"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <HeartPulse size={14} className="text-blue-300" />
-          가용성 상태보드
+          상태보드
         </button>
         <button
           onClick={onOpenPerf}
           title="성능 검증 — 이 PC 에 설치된 Locust 로 원격 세션에 부하 (JMeter 아님)"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <Gauge size={14} className="text-blue-300" />
           성능 검증
@@ -139,7 +141,7 @@ export default function Toolbar({
         <button
           onClick={onAnalyzeSelection}
           title="드래그로 선택한 텍스트를 AI 분석"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScanText size={14} className="text-blue-300" />
           AI 분석
@@ -147,7 +149,7 @@ export default function Toolbar({
         <button
           onClick={onOpenMultiRun}
           title="여러 세션에 명령 1회 실행 후 결과 표로 수집"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <SquareTerminal size={14} />
           다중 실행
@@ -159,7 +161,7 @@ export default function Toolbar({
         <button
           onClick={onOpenLiveLog}
           title="실시간 로그 보기 (tail -f / kubectl logs -f)"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <Activity size={14} />
           실시간 로깅
@@ -168,7 +170,7 @@ export default function Toolbar({
           onClick={onToggleLog}
           title={logging ? '세션 로그 녹화 중지' : '세션 로그를 파일로 녹화'}
           className={
-            'flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs transition ' +
+            'flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-1 text-xs transition ' +
             (logging
               ? 'border-red-500/50 bg-red-600/20 text-red-200'
               : 'border-white/10 bg-panel-light text-gray-200 hover:bg-white/10')
@@ -180,7 +182,7 @@ export default function Toolbar({
         <button
           onClick={onOpenLogViewer}
           title="녹화된 세션 로그 검색/리플레이"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScrollText size={14} />
           녹화 뷰어
@@ -195,7 +197,7 @@ export default function Toolbar({
 
 /** 그룹 구분선 */
 function Divider() {
-  return <span className="mx-0.5 h-5 w-px shrink-0 bg-white/15" />
+  return <span className="mx-px h-5 w-px shrink-0 bg-white/15" />
 }
 
 /** 아이콘 전용 툴바 버튼 (툴팁 필수) */
