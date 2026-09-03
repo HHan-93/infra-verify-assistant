@@ -251,13 +251,13 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
       <div
-        className="flex h-full max-h-[920px] w-[1500px] max-w-[97vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
+        className="flex h-full max-h-[920px] w-[1760px] max-w-[97vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 머리 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
           <Gauge size={15} className="text-blue-300" />
-          <span className="text-sm font-semibold text-gray-100">성능 테스트</span>
+          <span className="text-sm font-semibold text-gray-100">성능 검증</span>
           {running ? (
             <span className="rounded-full bg-blue-600/25 px-2 py-0.5 text-[11px] text-blue-200">
               돌고 있음 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
@@ -266,7 +266,12 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
           ) : (
             note && <span className="text-[11px] text-gray-400">{note}</span>
           )}
-          <span className="ml-auto text-[10.5px] text-gray-500">부하는 이 PC 에서 나갑니다</span>
+          <span
+            className="ml-auto text-[10.5px] text-gray-500"
+            title="부하 발생기(Locust)는 이 PC 에서 돌고, 요청만 대상 세션으로 나갑니다. 대상 서버에는 아무것도 설치하지 않습니다."
+          >
+            로컬 PC 에 설치된 Locust 로 원격 세션에 부하를 겁니다
+          </span>
           {running && (
             <button
               onClick={() => void window.electronAPI.perfCancel()}
@@ -342,7 +347,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
 
         <div className="flex min-h-0 flex-1">
           {/* 왼쪽 — 설정 + 회차 */}
-          <div className="flex w-[268px] shrink-0 flex-col overflow-y-auto border-r border-white/10 p-3">
+          <div className="flex w-[392px] shrink-0 flex-col overflow-y-auto border-r border-white/10 p-3">
             <div className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">대상</div>
             <select
               value={sessionId}
@@ -372,7 +377,10 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             </p>
 
             <div className="mt-3 text-[10.5px] font-medium uppercase tracking-wide text-gray-500">부하</div>
-            <div className="mt-1 grid grid-cols-2 gap-1.5">
+            {/* 한 줄 — 부하 조건은 같이 읽어야 하는 값들이라 두 줄로 나뉘면 눈이 두 번 간다.
+                요청 사이 '대기' 는 부하의 세기가 아니라 만들어 줄 시나리오의 성격이므로 아래로 옮겼다
+                (파일을 직접 고르면 쓰이지도 않는 값이다). */}
+            <div className="mt-1 grid grid-cols-3 gap-1.5">
               <label className="text-[10.5px] text-gray-500">
                 사용자
                 <input
@@ -399,24 +407,6 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                   disabled={!!running}
                   className={inputCls + ' mt-0.5 w-full disabled:opacity-50'}
                 />
-              </label>
-              <label className="text-[10.5px] text-gray-500">
-                대기(초)
-                <div className="mt-0.5 flex items-center gap-1">
-                  <input
-                    value={waitMin}
-                    onChange={(e) => setWaitMin(e.target.value)}
-                    disabled={!!running || scenarioKind === 'file'}
-                    className={inputCls + ' w-full disabled:opacity-50'}
-                  />
-                  <span className="text-gray-600">~</span>
-                  <input
-                    value={waitMax}
-                    onChange={(e) => setWaitMax(e.target.value)}
-                    disabled={!!running || scenarioKind === 'file'}
-                    className={inputCls + ' w-full disabled:opacity-50'}
-                  />
-                </div>
               </label>
             </div>
 
@@ -471,12 +461,26 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                     value={method}
                     onChange={(e) => setMethod(e.target.value as 'GET' | 'POST')}
                     disabled={!!running}
-                    className={inputCls + ' disabled:opacity-50'}
+                    className={inputCls + ' shrink-0 disabled:opacity-50'}
                   >
                     <option value="GET">GET</option>
                     <option value="POST">POST</option>
                   </select>
-                  <span className="text-[10px] text-gray-600">경로 (한 줄에 하나)</span>
+                  <span className="min-w-0 flex-1 truncate text-[10px] text-gray-600">경로 (한 줄에 하나)</span>
+                  <span className="shrink-0 text-[10px] text-gray-600">요청 사이 대기(초)</span>
+                  <input
+                    value={waitMin}
+                    onChange={(e) => setWaitMin(e.target.value)}
+                    disabled={!!running}
+                    className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
+                  />
+                  <span className="shrink-0 text-gray-600">~</span>
+                  <input
+                    value={waitMax}
+                    onChange={(e) => setWaitMax(e.target.value)}
+                    disabled={!!running}
+                    className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
+                  />
                 </div>
                 <textarea
                   value={paths}
@@ -578,7 +582,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
               {runs.length === 0 ? (
                 <p className="py-3 text-[11px] text-gray-600">아직 돌린 적이 없습니다.</p>
               ) : (
-                <div className="mt-1 space-y-1">
+                <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-1">
                   {runs.map((r) => {
                     const sum = r.statsCsv ? parseLocustStats(r.statsCsv) : null
                     const isRunning = running?.id === r.meta.id

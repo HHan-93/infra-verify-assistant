@@ -4976,7 +4976,7 @@ async function writeRunMeta(dir: string, meta: PerfRunMeta): Promise<void> {
 
 ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
   if (perfRun && !perfRun.finished) {
-    return { ok: false, error: '이미 성능 테스트가 돌고 있습니다. 먼저 중지하세요.' }
+    return { ok: false, error: '이미 성능 검증이 돌고 있습니다. 먼저 중지하세요.' }
   }
   const { locustPath } = await readPerfSettings()
   // 실행 방법을 여기서 다시 정한다 — 점검 결과를 렌더러가 들고 오는 구조로 만들면
@@ -5104,7 +5104,7 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
 })
 
 ipcMain.handle('perf:cancel', async () => {
-  if (!perfRun || perfRun.finished) return { ok: false, error: '돌고 있는 테스트가 없습니다.' }
+  if (!perfRun || perfRun.finished) return { ok: false, error: '돌고 있는 검증이 없습니다.' }
   // 중지한 회차는 그 사실을 남긴다 — 중간에 끊긴 수치를 '결과' 로 읽으면 안 된다
   perfRun.meta.canceled = true
   await writeRunMeta(perfRun.dir, perfRun.meta).catch(() => {})
@@ -5167,7 +5167,7 @@ ipcMain.handle('perf:openReport', async (_evt, id: string) => {
   const win = new BrowserWindow({
     width: 1200,
     height: 900,
-    title: '성능 테스트 리포트',
+    title: '성능 검증 리포트',
     backgroundColor: '#ffffff',
     // 리포트는 우리가 만든 문서가 아니다 — 어떤 API 도 주지 않는다
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
