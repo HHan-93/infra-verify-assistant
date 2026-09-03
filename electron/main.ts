@@ -55,6 +55,7 @@ import {
   type PerfRunConfig,
   type PerfRunMeta,
   type PerfRunRecord,
+  type PerfPreset,
   normalizeFormScenario,
   type LogRetentionSettings,
   type LogTailTarget,
@@ -5440,6 +5441,118 @@ ipcMain.handle('perf:installLocust', async () => {
           : { ok: false, error: `pip 가 오류로 끝났습니다 (종료 코드 ${code}).`, log: out },
       ),
     )
+  })
+})
+
+/**
+ * 리포트 맨 앞에 **우리 판정**을 얹는다.
+ *
+ * Locust 리포트는 숫자만 있고 "그래서 통과인가" 가 없다. 그대로 제출하면 받는 사람이 다시
+ * 판단해야 한다. 판정은 렌더러(src/lib/perfVerdict)가 하므로, 만든 조각을 받아 여기서 끼운다
+ * — 판정 규칙이 두 군데로 갈라지면 화면과 문서가 다른 말을 하게 된다.
+ *
+ * 표식(주석)을 넣어 두고 다시 부르면 그 조각만 갈아 끼운다(여러 번 눌러도 쌓이지 않는다).
+ */
+const BRAND_START = '<!-- QTERM-VERDICT-START -->'
+const BRAND_END = '<!-- QTERM-VERDICT-END -->'
+ipcMain.handle('perf:brandReport', async (_evt, { id, html }: { id: string; html: string }) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false }
+  const file = path.join(perfRunsDir(), id, 'report.html')
+  let raw: string
+  try {
+    raw = await readFile(file, 'utf-8')
+  } catch {
+    return { ok: false }
+  }
+  const block = `${BRAND_START}${html}${BRAND_END}`
+  let next: string
+  const s = raw.indexOf(BRAND_START)
+  const e = raw.indexOf(BRAND_END)
+  if (s >= 0 && e > s) {
+    next = raw.slice(0, s) + block + raw.slice(e + BRAND_END.length)
+  } else {
+    // <body> 바로 뒤에 넣는다. 못 찾으면 맨 앞에 붙인다(리포트가 깨지지 않는 쪽으로).
+    const m = raw.match(/<body[^>]*>/i)
+    next = m ? raw.replace(m[0], m[0] + block) : block + raw
+  }
+  await writeFileAtomic(file, next)
+  return { ok: true }
+})
+
+// ── 저장해 두는 검증 설정 ──────────────────────────────────
+const perfPresetsPath = () => path.join(app.getPath('userData'), 'perf-presets.json')
+const PERF_PRESET_LOCK = 'perfPresets'
+
+ipcMain.handle('perfPresets:list', () => readJsonArrayStore<PerfPreset>(perfPresetsPath()))
+
+ipcMain.handle('perfPresets:upsert', async (_evt, preset: PerfPreset) =>
+  withStoreLock(PERF_PRESET_LOCK, async () => {
+    const list = await readJsonArrayStore<PerfPreset>(perfPresetsPath())
+    const item: PerfPreset = { ...preset, id: preset.id || randomUUID(), savedAt: Date.now() }
+    const idx = list.findIndex((x) => x.id === item.id)
+    if (idx >= 0) list[idx] = item
+    else list.unshift(item)
+    await writeFileAtomic(perfPresetsPath(), JSON.stringify(list, null, 2))
+    return list
+  }),
+)
+
+ipcMain.handle('perfPresets:delete', async (_evt, id: string) =>
+  withStoreLock(PERF_PRESET_LOCK, async () => {
+    const list = (await readJsonArrayStore<PerfPreset>(perfPresetsPath())).filter((x) => x.id !== id)
+    await writeFileAtomic(perfPresetsPath(), JSON.stringify(list, null, 2))
+    return list
+  }),
+)
+
+/** 내보내기 — 팀에 넘길 수 있게 파일 하나로 */
+ipcMain.handle('perfPresets:export', async () => {
+  const list = await readJsonArrayStore<PerfPreset>(perfPresetsPath())
+  if (!list.length) return { saved: false, error: '저장된 설정이 없습니다.' }
+  const r = await dialog.showSaveDialog(mainWindow!, {
+    title: '검증 설정 내보내기',
+    defaultPath: 'qterm-perf-presets.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    await writeFileAtomic(r.filePath, JSON.stringify(list, null, 2))
+    return { saved: true, path: r.filePath, count: list.length }
+  } catch (e) {
+    return { saved: false, error: cleanErrorMessage(e) }
+  }
+})
+
+/** 가져오기 — 이름이 같으면 덮지 않고 나란히 둔다(남의 설정을 조용히 지우지 않는다) */
+ipcMain.handle('perfPresets:import', async () => {
+  const r = await dialog.showOpenDialog(mainWindow!, {
+    title: '검증 설정 가져오기',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  })
+  if (r.canceled || !r.filePaths[0]) return { ok: false }
+  return withStoreLock(PERF_PRESET_LOCK, async () => {
+    try {
+      const raw = JSON.parse(await readFile(r.filePaths[0], 'utf-8'))
+      if (!Array.isArray(raw)) return { ok: false, error: '설정 파일 형식이 아닙니다.' }
+      const incoming = raw.filter(
+        (x): x is PerfPreset => !!x && typeof x.name === 'string' && !!x.config,
+      )
+      if (!incoming.length) return { ok: false, error: '가져올 설정이 없습니다.' }
+      const list = await readJsonArrayStore<PerfPreset>(perfPresetsPath())
+      const names = new Set(list.map((x) => x.name))
+      const added = incoming.map((x) => ({
+        ...x,
+        id: randomUUID(),
+        savedAt: Date.now(),
+        name: names.has(x.name) ? `${x.name} (가져옴)` : x.name,
+      }))
+      const next = [...added, ...list]
+      await writeFileAtomic(perfPresetsPath(), JSON.stringify(next, null, 2))
+      return { ok: true, count: added.length, list: next }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
   })
 })
 

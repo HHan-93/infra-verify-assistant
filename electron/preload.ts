@@ -26,6 +26,7 @@ import type {
   PerfLogEvent,
   PerfRunConfig,
   PerfRunMeta,
+  PerfPreset,
   PerfRunRecord,
   LogRetentionSettings,
   MetricSample,
@@ -119,6 +120,16 @@ const electronAPI = {
     ipcRenderer.invoke('perf:saveCsv', id),
   perfReadHistory: (id: string): Promise<{ ok: boolean; csv?: string; error?: string }> =>
     ipcRenderer.invoke('perf:readHistory', id),
+  perfBrandReport: (id: string, html: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('perf:brandReport', { id, html }),
+  perfPresetsList: (): Promise<PerfPreset[]> => ipcRenderer.invoke('perfPresets:list'),
+  perfPresetsUpsert: (preset: PerfPreset): Promise<PerfPreset[]> =>
+    ipcRenderer.invoke('perfPresets:upsert', preset),
+  perfPresetsDelete: (id: string): Promise<PerfPreset[]> => ipcRenderer.invoke('perfPresets:delete', id),
+  perfPresetsExport: (): Promise<{ saved: boolean; path?: string; count?: number; error?: string }> =>
+    ipcRenderer.invoke('perfPresets:export'),
+  perfPresetsImport: (): Promise<{ ok: boolean; count?: number; list?: PerfPreset[]; error?: string }> =>
+    ipcRenderer.invoke('perfPresets:import'),
   perfOpenDashboard: (url: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('perf:openDashboard', url),
   perfInstallLocust: (): Promise<{ ok: boolean; error?: string; log?: string }> =>

@@ -927,6 +927,21 @@ export interface PerfRunConfig {
   expectWorkers?: number
 }
 
+/**
+ * 저장해 두는 검증 설정 (시나리오 + 부하 + 기준).
+ *
+ * 같은 검증을 다음 주에 또 돌리고, 다른 사람에게도 넘겨야 한다. 프리셋·시나리오와 같은
+ * 방식(userData JSON + 내보내기/가져오기)으로 둔다 — 빌드 없이 늘릴 수 있게.
+ */
+export interface PerfPreset {
+  id: string
+  name: string
+  /** 만든/고친 시각 */
+  savedAt: number
+  /** 대상 주소는 환경마다 달라 저장하지 않는다(세션에서 다시 채운다) */
+  config: Omit<PerfRunConfig, 'sessionId' | 'sessionLabel' | 'targetUrl'>
+}
+
 /** 회차 하나 — userData/perf-runs/<id>/run.json */
 export interface PerfRunMeta {
   id: string

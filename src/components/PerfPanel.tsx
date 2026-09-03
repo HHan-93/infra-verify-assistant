@@ -22,8 +22,17 @@ import {
   ClipboardPaste,
   Sparkles,
   PanelRightOpen,
+  Save,
+  Upload,
 } from 'lucide-react'
-import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord, PerfStep } from '../../electron/shared-types'
+import type {
+  PerfEnvStatus,
+  PerfPreset,
+  PerfRunConfig,
+  PerfRunMeta,
+  PerfRunRecord,
+  PerfStep,
+} from '../../electron/shared-types'
 import { normalizeFormScenario } from '../../electron/shared-types'
 // 브라우저에서 복사한 요청을 그대로 가져오는 파서 — 포털 감시가 쓰는 것과 같은 것을 쓴다
 import { parseCurl } from '../lib/portal'
@@ -196,6 +205,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   /** 이 PC 코어 나눠 쓰기 · 다른 PC 워커 기다리기 */
   const [processes, setProcesses] = useState('1')
   const [expectWorkers, setExpectWorkers] = useState('0')
+  /** 저장해 둔 검증 설정 */
+  const [presets, setPresets] = useState<PerfPreset[]>([])
+  const [presetName, setPresetName] = useState<string | null>(null)
   /** locust 설치 확인 창 */
   const [confirmInstall, setConfirmInstall] = useState(false)
   const [installing, setInstalling] = useState(false)
@@ -274,7 +286,92 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   useEffect(() => {
     void checkEnv()
     void refreshRuns()
+    void window.electronAPI.perfPresetsList().then(setPresets)
   }, [])
+
+  /**
+   * 저장해 둔 설정을 화면에 되돌린다.
+   *
+   * 대상 주소는 넣지 않는다 — 환경마다 다르고, 남의 설정을 가져왔을 때 엉뚱한 곳을 때리는
+   * 사고가 나기 때문이다(주소는 세션에서 다시 채운다).
+   */
+  const applyPreset = (pre: PerfPreset) => {
+    const c = pre.config
+    setUsers(String(c.users ?? 50))
+    setSpawnRate(String(c.spawnRate ?? 5))
+    setDurationMin(String(Math.round((c.durationSec ?? 180) / 60)))
+    setP50Th(c.p50ThresholdMs !== undefined ? String(c.p50ThresholdMs) : '')
+    setP95Th(c.p95ThresholdMs !== undefined ? String(c.p95ThresholdMs) : '')
+    setP99Th(c.p99ThresholdMs !== undefined ? String(c.p99ThresholdMs) : '')
+    setErrTh(c.errorRateThresholdPct !== undefined ? String(c.errorRateThresholdPct) : '')
+    setWarmupSec(c.warmupSec !== undefined ? String(c.warmupSec) : '')
+    setInsecure(!!c.insecureTls)
+    setProcesses(String(c.processes ?? 1))
+    setExpectWorkers(String(c.expectWorkers ?? 0))
+    if (c.stages?.length) {
+      setLoadMode('stages')
+      setStages(
+        c.stages.map((st) => ({
+          users: String(st.users),
+          spawnRate: String(st.spawnRate),
+          holdSec: String(st.holdSec),
+        })),
+      )
+    } else {
+      setLoadMode('flat')
+    }
+    if (c.scenario.kind === 'file') {
+      setScenarioKind('file')
+      setScenarioFile(c.scenario.path)
+    } else {
+      setScenarioKind('form')
+      const n = normalizeFormScenario(c.scenario)
+      setSteps(n.steps.length ? n.steps : [{ method: 'GET', path: '/', weight: 1 }])
+      setOrder(n.order)
+      setCommonHeaderText(
+        Object.entries(n.commonHeaders)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n'),
+      )
+      setCaptureFailures(n.captureFailures)
+      setWaitMin(String(n.waitMinSec))
+      setWaitMax(String(n.waitMaxSec))
+    }
+    setPresetName(pre.name)
+    setNote(`'${pre.name}' 설정을 불러왔습니다 — 대상 주소는 그대로 둡니다.`)
+  }
+
+  const savePreset = async () => {
+    const name = (presetName ?? '').trim()
+    if (!name) {
+      setNote('저장할 이름을 적어 주세요.')
+      return
+    }
+    const cfg = buildConfig()
+    const existing = presets.find((p) => p.name === name)
+    const list = await window.electronAPI.perfPresetsUpsert({
+      id: existing?.id ?? '',
+      name,
+      savedAt: Date.now(),
+      config: {
+        users: cfg.users,
+        spawnRate: cfg.spawnRate,
+        durationSec: cfg.durationSec,
+        p50ThresholdMs: cfg.p50ThresholdMs,
+        p95ThresholdMs: cfg.p95ThresholdMs,
+        p99ThresholdMs: cfg.p99ThresholdMs,
+        errorRateThresholdPct: cfg.errorRateThresholdPct,
+        warmupSec: cfg.warmupSec,
+        insecureTls: cfg.insecureTls,
+        processes: cfg.processes,
+        expectWorkers: cfg.expectWorkers,
+        stages: cfg.stages,
+        scenario: cfg.scenario,
+      },
+    })
+    setPresets(list)
+    setNote(existing ? `'${name}' 설정을 덮어썼습니다.` : `'${name}' 으로 저장했습니다.`)
+  }
 
   // 실시간 로그 — 100ms 씩 묶여서 온다. 화면에 다 쌓아 두면 느려지므로 앞부분을 버린다.
   useEffect(() => {
@@ -659,6 +756,72 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     })
     return { at: prevRec.meta.startedAt, label: prevRec.meta.label, items }
   }, [selected, selectedSummary, runs])
+
+  /**
+   * 리포트 맨 앞에 얹을 판정 조각.
+   *
+   * 리포트를 그대로 제출했을 때 "그래서 통과인가" 가 문서 안에 있어야 한다. 스타일은 인라인
+   * 으로만 쓴다 — 남의 문서에 우리 CSS 를 섞으면 리포트 쪽이 깨질 수 있다.
+   */
+  const brandHtml = (): string => {
+    if (!selected || !verdict) return ''
+    const esc = (v: string) =>
+      String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    const cfg = selected.meta.config
+    const color = verdict.tone === 'pass' ? '#137333' : verdict.tone === 'fail' ? '#b3261e' : '#5f6368'
+    const bg = verdict.tone === 'pass' ? '#e6f4ea' : verdict.tone === 'fail' ? '#fce8e6' : '#f1f3f4'
+    const rows: [string, string][] = [
+      ['대상', cfg.targetUrl],
+      [
+        '부하',
+        cfg.stages?.length
+          ? `계단식 ${cfg.stages.map((st) => `${st.users}명(${st.holdSec}초)`).join(' → ')}`
+          : `사용자 ${cfg.users}명 · ${cfg.spawnRate}명/초 · ${Math.round(cfg.durationSec / 60)}분`,
+      ],
+      [
+        '기준',
+        [
+          cfg.p50ThresholdMs !== undefined ? `p50 ${cfg.p50ThresholdMs}ms` : '',
+          cfg.p95ThresholdMs !== undefined ? `p95 ${cfg.p95ThresholdMs}ms` : '',
+          cfg.p99ThresholdMs !== undefined ? `p99 ${cfg.p99ThresholdMs}ms` : '',
+          cfg.errorRateThresholdPct !== undefined ? `실패율 ${cfg.errorRateThresholdPct}%` : '',
+          cfg.warmupSec ? `워밍업 ${cfg.warmupSec}초 제외` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ') || '없음 (측정값만)',
+      ],
+      ['실행', new Date(selected.meta.startedAt).toLocaleString('ko-KR', { hour12: false })],
+    ]
+    return (
+      `<div style="font-family:system-ui,'Malgun Gothic',sans-serif;margin:16px;padding:14px 16px;` +
+      `border:1px solid #dadce0;border-radius:8px;background:#fff">` +
+      `<div style="font-size:13px;color:#5f6368;margin-bottom:6px">Q-Term 성능 검증` +
+      (selected.meta.label ? ` — ${esc(selected.meta.label)}` : '') +
+      `</div>` +
+      `<div style="display:inline-block;padding:4px 10px;border-radius:12px;background:${bg};color:${color};` +
+      `font-size:14px;font-weight:600">${esc(verdict.label)}</div>` +
+      `<ul style="margin:8px 0 10px;padding-left:18px;font-size:13px;color:#3c4043">` +
+      verdict.reasons.map((r) => `<li>${esc(r)}</li>`).join('') +
+      `</ul>` +
+      (selected.meta.memo ? `<p style="font-size:13px;color:#3c4043;margin:0 0 10px">${esc(selected.meta.memo)}</p>` : '') +
+      `<table style="font-size:12.5px;color:#5f6368;border-collapse:collapse">` +
+      rows
+        .map(
+          ([k, v]) =>
+            `<tr><td style="padding:2px 12px 2px 0;white-space:nowrap">${esc(k)}</td>` +
+            `<td style="padding:2px 0;color:#202124">${esc(v)}</td></tr>`,
+        )
+        .join('') +
+      `</table></div>`
+    )
+  }
+
+  /** 리포트를 열거나 저장하기 전에 판정 조각을 심어 둔다(여러 번 불러도 쌓이지 않는다) */
+  const ensureBranded = async () => {
+    if (!selected) return
+    const html = brandHtml()
+    if (html) await window.electronAPI.perfBrandReport(selected.meta.id, html)
+  }
 
   /**
    * AI 에게 보낼 글.
@@ -1332,6 +1495,77 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 </div>
               )}
             </Card>
+
+            {/* 저장해 둔 설정 — 같은 검증을 다음에 또 돌리고, 팀에 넘기기도 한다 */}
+            <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2">
+              <div className="flex items-center gap-1.5">
+                <Save size={12} className="shrink-0 text-gray-500" />
+                <span className="text-[11px] font-medium text-gray-300">저장한 설정</span>
+                <button
+                  onClick={async () => {
+                    const r = await window.electronAPI.perfPresetsExport()
+                    setNote(r.saved ? `${r.count}개를 내보냈습니다 — ${r.path}` : (r.error ?? '내보내지 않았습니다.'))
+                  }}
+                  title="파일로 내보내기"
+                  className="ml-auto rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
+                >
+                  <Download size={11} />
+                </button>
+                <button
+                  onClick={async () => {
+                    const r = await window.electronAPI.perfPresetsImport()
+                    if (r.ok && r.list) {
+                      setPresets(r.list)
+                      setNote(`${r.count}개를 가져왔습니다.`)
+                    } else if (r.error) setNote(r.error)
+                  }}
+                  title="파일에서 가져오기"
+                  className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
+                >
+                  <Upload size={11} />
+                </button>
+              </div>
+              {presets.length > 0 && (
+                <div className="mt-1.5 space-y-0.5">
+                  {presets.map((pre) => (
+                    <div key={pre.id} className="flex items-center gap-1">
+                      <button
+                        onClick={() => applyPreset(pre)}
+                        disabled={!!running}
+                        className="min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-left text-[11px] text-gray-300 hover:bg-white/10 disabled:opacity-50"
+                        title="이 설정을 화면에 불러옵니다 (대상 주소는 그대로)"
+                      >
+                        {pre.name}
+                      </button>
+                      <button
+                        onClick={async () => setPresets(await window.electronAPI.perfPresetsDelete(pre.id))}
+                        disabled={!!running}
+                        title="삭제"
+                        className="shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 disabled:opacity-30"
+                      >
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-1.5 flex items-center gap-1.5">
+                <input
+                  value={presetName ?? ''}
+                  onChange={(e) => setPresetName(e.target.value)}
+                  disabled={!!running}
+                  placeholder="이름을 적어 지금 설정을 저장"
+                  className={inputCls + ' min-w-0 flex-1 disabled:opacity-50'}
+                />
+                <button
+                  onClick={() => void savePreset()}
+                  disabled={!!running || !(presetName ?? '').trim()}
+                  className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
+                >
+                  저장
+                </button>
+              </div>
+            </div>
 
             {!running ? (
               <button
@@ -2104,15 +2338,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/10 pt-2.5">
                         <button
                           onClick={async () => {
+                            await ensureBranded()
                             const r = await window.electronAPI.perfOpenReport(selected.meta.id)
                             if (!r.ok) setNote(r.error ?? '리포트를 열 수 없습니다.')
                           }}
+                          title="맨 앞에 우리 판정이 얹힌 리포트가 열립니다"
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
                         >
-                          <ExternalLink size={11} /> 원본 리포트 열기
+                          <ExternalLink size={11} /> 리포트 열기
                         </button>
                         <button
                           onClick={async () => {
+                            await ensureBranded()
                             const r = await window.electronAPI.perfSaveReport(selected.meta.id)
                             if (r.saved) setNote(`리포트를 저장했습니다 — ${r.path}`)
                             else if (r.error) setNote(r.error)
