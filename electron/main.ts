@@ -55,6 +55,7 @@ import {
   type PerfRunConfig,
   type PerfRunMeta,
   type PerfRunRecord,
+  normalizeFormScenario,
   type LogRetentionSettings,
   type LogTailTarget,
   type ExpectRule,
@@ -4857,60 +4858,167 @@ const pyStr = (v: string) => JSON.stringify(String(v ?? ''))
  *
  * 명령어(와 파이썬)를 몰라도 한 번은 돌려볼 수 있어야 한다는 판단이다. 생성한 파일은 회차
  * 폴더에 그대로 남기므로, 사람이 열어 고친 뒤 '파일 고르기' 로 다시 쓸 수 있다.
+ *
+ * 세 가지를 여기서 만든다.
+ *  - 단계 여러 개 + 비율 (또는 순서대로)
+ *  - 계단식 부하 (LoadTestShape)
+ *  - 실패 응답 본문 표본 남기기
+ *
+ * 파이썬 문자열은 전부 pyStr(JSON.stringify) 로 감싼다 — 사용자가 넣은 따옴표·개행·한글이
+ * 코드를 깨뜨리지 않게. 실제 생성물을 파이썬 compile() 로 검사해 둔 부분이다.
  */
 function buildLocustfile(cfg: PerfRunConfig): string {
   const sc = cfg.scenario
   if (sc.kind !== 'form') return ''
-  // 먼저 다듬고 나서 앞의 `/` 를 붙인다 — 순서를 바꾸면 `'  /health  '` 가 `'/  /health  '` 가 된다
-  const paths = sc.paths
-    .map((x) => (x ?? '').trim())
-    .filter(Boolean)
-    .map((x) => (x.startsWith('/') ? x : '/' + x))
-  const targets = paths.length ? paths : ['/']
-  const headers = Object.entries(sc.headers ?? {}).filter(([k]) => k.trim())
-  const wMin = Math.max(0, sc.waitMinSec)
-  const wMax = Math.max(wMin, sc.waitMaxSec)
+  const norm = normalizeFormScenario(sc)
+  const steps = norm.steps.length
+    ? norm.steps.map((st) => ({ ...st, path: st.path.startsWith('/') ? st.path : '/' + st.path }))
+    : [{ method: 'GET' as const, path: '/', weight: 1, name: undefined, body: undefined, headers: undefined }]
+  const common = Object.entries(norm.commonHeaders).filter(([k]) => k.trim())
+  const hasStages = !!cfg.stages && cfg.stages.length > 0
 
-  const tasks = targets
-    .map((t, i) => {
-      const nameArg = `name=${pyStr(t)}`
-      const hdrArg = headers.length ? ', headers=HEADERS' : ''
-      if (sc.method === 'POST') {
-        const bodyArg = sc.body?.trim() ? `, data=${pyStr(sc.body)}` : ''
-        return [
-          `    @task`,
-          `    def t${i}(self):`,
-          `        self.client.post(${pyStr(t)}, ${nameArg}${bodyArg}${hdrArg})`,
-        ].join('\n')
-      }
-      return [`    @task`, `    def t${i}(self):`, `        self.client.get(${pyStr(t)}, ${nameArg}${hdrArg})`].join(
-        '\n',
-      )
-    })
-    .join('\n\n')
-
-  // 빈 줄을 filter 로 걸러내지 않는다 — 사람이 열어서 고칠 파일이므로 줄 간격이 남아야 한다.
-  // (예전에 `.filter(l => l !== '')` 로 조건부 줄을 지우려다 의도한 빈 줄까지 다 먹었다.)
   const out: string[] = [
     '# Q-Term 이 폼 입력으로 만든 파일입니다.',
     '# 폼에서 다시 만들면 덮어씁니다 — 직접 고친 내용을 지키려면 다른 이름으로 저장한 뒤',
     "# '파일 고르기' 로 선택하세요.",
-    'from locust import HttpUser, task, between',
+    'import json',
+    'import os',
     '',
+    'from locust import HttpUser, SequentialTaskSet, TaskSet, between, events, task',
   ]
-  if (headers.length) {
-    out.push('HEADERS = {' + headers.map(([k, v]) => `${pyStr(k)}: ${pyStr(v)}`).join(', ') + '}', '')
+  if (hasStages) out.push('from locust import LoadTestShape')
+  out.push('')
+
+  if (common.length) {
+    out.push('COMMON_HEADERS = {' + common.map(([k, v]) => `${pyStr(k)}: ${pyStr(v)}`).join(', ') + '}', '')
+  } else {
+    out.push('COMMON_HEADERS = {}', '')
   }
-  out.push('', 'class QTermUser(HttpUser):', `    wait_time = between(${wMin}, ${wMax})`)
-  if (cfg.insecureTls) {
+
+  if (norm.captureFailures) {
     out.push(
+      '# ── 실패 응답 표본 ────────────────────────────────────────────',
+      '# Locust 는 실패를 한 줄 문구로만 남긴다. 인프라에서는 그 본문이 게이트웨이 오류인지',
+      '# 애플리케이션 오류인지가 원인을 가르므로, 앞쪽 몇 건의 본문을 파일로 남긴다.',
+      '# 무한정 쌓으면 회차 폴더가 커지므로 상한을 둔다.',
+      '_FAIL_LOG = os.environ.get("QTERM_FAIL_LOG")',
+      '_FAIL_MAX = 50',
+      '_fail_seen = [0]',
       '',
-      '    def on_start(self):',
-      '        # 사내 인프라의 자체 서명 인증서를 무시한다 (설정에서 켠 경우에만)',
-      '        self.client.verify = False',
+      '',
+      '@events.request.add_listener',
+      'def _qterm_on_request(**kw):',
+      '    # 판마다 인자가 조금씩 달라 이름을 박지 않고 kw 에서 꺼낸다',
+      '    if not _FAIL_LOG or _fail_seen[0] >= _FAIL_MAX:',
+      '        return',
+      '    exception = kw.get("exception")',
+      '    response = kw.get("response")',
+      '    code = getattr(response, "status_code", None) if response is not None else None',
+      '    if exception is None and (code is None or code < 400):',
+      '        return',
+      '    body = ""',
+      '    try:',
+      '        if response is not None:',
+      '            body = (response.text or "")[:500]',
+      '    except Exception:',
+      '        body = "(본문을 읽지 못했습니다)"',
+      '    rec = {',
+      '        "t": int(kw.get("start_time") or 0) * 1000,',
+      '        "name": kw.get("name") or "",',
+      '        "code": code,',
+      '        "error": str(exception) if exception else "",',
+      '        "body": body,',
+      '    }',
+      '    try:',
+      '        with open(_FAIL_LOG, "a", encoding="utf-8") as f:',
+      '            f.write(json.dumps(rec, ensure_ascii=False) + "\\n")',
+      '        _fail_seen[0] += 1',
+      '    except Exception:',
+      '        pass',
+      '',
+      '',
     )
   }
-  out.push('', tasks, '')
+
+  /** 한 단계를 실행하는 파이썬 한 줄 */
+  const callLine = (st: (typeof steps)[number], indent: string) => {
+    const name = (st.name ?? '').trim() || st.path
+    const own = Object.entries(st.headers ?? {}).filter(([k]) => k.trim())
+    const hdr = own.length
+      ? `, headers={**COMMON_HEADERS, ${own.map(([k, v]) => `${pyStr(k)}: ${pyStr(v)}`).join(', ')}}`
+      : ', headers=COMMON_HEADERS'
+    const method = st.method.toLowerCase()
+    const bodyArg =
+      (st.method === 'POST' || st.method === 'PUT') && (st.body ?? '').trim() ? `, data=${pyStr(st.body ?? '')}` : ''
+    // catch_response 는 쓰지 않는다 — 상태 코드 판정은 requests 기본(4xx/5xx=실패)에 맡긴다
+    return `${indent}self.client.${method}(${pyStr(st.path)}, name=${pyStr(name)}${bodyArg}${hdr})`
+  }
+
+  if (norm.order === 'sequential') {
+    // 한 사용자가 1→2→3 순서대로 돈다 (앞 단계가 있어야 뒤가 되는 흐름)
+    out.push('class QTermFlow(SequentialTaskSet):')
+    steps.forEach((st, i) => {
+      out.push('    @task')
+      out.push(`    def s${i}(self):`)
+      out.push(callLine(st, '        '))
+      out.push('')
+    })
+    out.push('')
+    out.push('class QTermUser(HttpUser):')
+    out.push(`    wait_time = between(${norm.waitMinSec}, ${norm.waitMaxSec})`)
+    out.push('    tasks = [QTermFlow]')
+  } else {
+    out.push('class QTermUser(HttpUser):')
+    out.push(`    wait_time = between(${norm.waitMinSec}, ${norm.waitMaxSec})`)
+    steps.forEach((st, i) => {
+      out.push('')
+      // @task(n) 의 n 이 상대 비율이다 — 10:1 이면 앞 단계가 10배 자주 실행된다
+      out.push(`    @task(${Math.max(1, Math.round(st.weight || 1))})`)
+      out.push(`    def t${i}(self):`)
+      out.push(callLine(st, '        '))
+    })
+  }
+
+  if (cfg.insecureTls) {
+    out.push('')
+    out.push('    def on_start(self):')
+    out.push('        # 사내 인프라의 자체 서명 인증서를 무시한다 (설정에서 켠 경우에만)')
+    out.push('        self.client.verify = False')
+  }
+
+  if (hasStages) {
+    const stages = cfg.stages ?? []
+    let acc = 0
+    const rows = stages.map((st) => {
+      acc += Math.max(1, Math.round(st.holdSec))
+      return `    {"duration": ${acc}, "users": ${Math.max(1, Math.round(st.users))}, "spawn_rate": ${Math.max(
+        1,
+        Math.round(st.spawnRate || 1),
+      )}},`
+    })
+    out.push(
+      '',
+      '',
+      '# ── 계단식 부하 ──────────────────────────────────────────────',
+      '# duration 은 "그 단계가 끝나는 누적 시각(초)" 이다. 마지막 단계가 끝나면 None 을',
+      '# 돌려주고, 그때 Locust 가 실행을 마친다.',
+      'class QTermShape(LoadTestShape):',
+      '    stages = [',
+      ...rows,
+      '    ]',
+      '',
+      '    def tick(self):',
+      '        run_time = self.get_run_time()',
+      '        for stage in self.stages:',
+      '            if run_time < stage["duration"]:',
+      '                return (stage["users"], stage["spawn_rate"])',
+      '        return None',
+    )
+  }
+
+  out.push('')
+  // TaskSet 은 SequentialTaskSet 을 쓰지 않는 경우에도 import 되어 있어 lint 가 걸릴 수 있으나
+  // 파이썬은 미사용 import 로 실패하지 않는다. 사람이 고쳐 쓸 때 필요한 이름이라 남겨 둔다.
   return out.join('\n')
 }
 
@@ -5021,18 +5129,25 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
   const port = await findFreePort(8089)
   const csvPrefix = path.join(dir, 'run')
   const reportPath = path.join(dir, 'report.html')
+  const hasStages = !!cfg.stages && cfg.stages.length > 0
   const args = [
     ...baseArgs,
     '-f',
     scenarioPath,
     '--host',
     cfg.targetUrl,
-    '-u',
-    String(Math.max(1, Math.round(cfg.users))),
-    '-r',
-    String(Math.max(1, Math.round(cfg.spawnRate))),
-    '-t',
-    `${Math.max(1, Math.round(cfg.durationSec))}s`,
+    // 계단식(LoadTestShape)일 때 -u/-r/-t 를 주면 Locust 가 무시하면서 경고를 낸다.
+    // 부하의 모양을 정하는 곳이 두 군데가 되면 화면에 적힌 조건과 실제가 어긋나므로 아예 안 준다.
+    ...(hasStages
+      ? []
+      : [
+          '-u',
+          String(Math.max(1, Math.round(cfg.users))),
+          '-r',
+          String(Math.max(1, Math.round(cfg.spawnRate))),
+          '-t',
+          `${Math.max(1, Math.round(cfg.durationSec))}s`,
+        ]),
     '--autostart',
     // 끝나고 바로 죽이면 웹 UI 가 사라져 마지막 화면을 못 본다. 3초 여유.
     '--autoquit',
@@ -5068,7 +5183,13 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       cwd: dir,
       windowsHide: true,
       // 유니코드 출력이 물음표로 깨지지 않게
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUNBUFFERED: '1',
+        // 생성한 locustfile 이 이 경로에 실패 표본을 적는다 (켠 경우에만)
+        QTERM_FAIL_LOG: path.join(dir, 'failure_samples.jsonl'),
+      },
       detached: process.platform !== 'win32',
     })
   } catch (e) {
@@ -5165,6 +5286,50 @@ ipcMain.handle('perf:readHistory', async (_evt, id: string) => {
     return { ok: false, error: '이력 파일이 없습니다.' }
   }
 })
+
+/**
+ * 실패 응답 표본 읽기 (`failure_samples.jsonl`).
+ *
+ * 생성한 locustfile 이 남긴 것이라 '파일 고르기' 로 돌린 회차에는 없다. 없으면 빈 목록.
+ */
+ipcMain.handle('perf:readFailureSamples', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, samples: [] }
+  try {
+    const raw = await readFile(path.join(perfRunsDir(), id, 'failure_samples.jsonl'), 'utf-8')
+    const samples = raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as { t: number; name: string; code: number | null; error: string; body: string }
+        } catch {
+          return null
+        }
+      })
+      .filter((x): x is { t: number; name: string; code: number | null; error: string; body: string } => x !== null)
+    return { ok: true, samples }
+  } catch {
+    return { ok: true, samples: [] }
+  }
+})
+
+/** 회차 이름·메모 고치기 — 결과를 바꾸지 않으므로 언제든 가능하다 */
+ipcMain.handle(
+  'perf:setLabel',
+  async (_evt, { id, label, memo }: { id: string; label?: string; memo?: string }) => {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false }
+    const file = path.join(perfRunsDir(), id, 'run.json')
+    try {
+      const meta = JSON.parse(await readFile(file, 'utf-8')) as PerfRunMeta
+      meta.label = label?.trim() || undefined
+      meta.memo = memo?.trim() || undefined
+      await writeFileAtomic(file, JSON.stringify(meta, null, 2))
+      return { ok: true }
+    } catch {
+      return { ok: false }
+    }
+  },
+)
 
 ipcMain.handle('perf:delete', async (_evt, id: string) => {
   if (perfRun && !perfRun.finished && perfRun.meta.id === id) {

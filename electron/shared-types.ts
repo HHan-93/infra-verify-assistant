@@ -764,19 +764,108 @@ export interface PerfEnvStatus {
   hint?: string
 }
 
+/** 시나리오의 한 단계 — 요청 하나 */
+export interface PerfStep {
+  /** 통계에 찍힐 이름. 비우면 경로를 쓴다(쿼리스트링이 다른 요청을 한 줄로 묶을 때 유용) */
+  name?: string
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  path: string
+  /** 본문 (GET·DELETE 면 무시) */
+  body?: string
+  /** 이 단계만의 헤더 (공통 헤더에 덮어쓴다) */
+  headers?: Record<string, string>
+  /**
+   * 상대 비율. 목록 조회 10 : 생성 1 처럼 실제 트래픽 모양을 흉내낸다.
+   * `order: 'sequential'` 이면 무시된다(순서대로 한 번씩 돌므로).
+   */
+  weight: number
+}
+
 /** 폼으로 만드는 시나리오 — locustfile.py 를 앱이 생성한다 */
 export interface PerfFormScenario {
   kind: 'form'
-  /** 부하를 줄 경로들 (`/v3`, `/v3/auth/tokens`). 빈 배열이면 `/` */
-  paths: string[]
-  method: 'GET' | 'POST'
-  /** POST 본문 (JSON 문자열). GET 이면 무시 */
-  body?: string
-  /** 추가 헤더 */
-  headers?: Record<string, string>
+  /**
+   * 단계들.
+   *
+   * 예전 형식(2.8.0)은 `paths`+`method` 하나뿐이라 "목록 → 상세 → 생성" 같은 흐름을 못 만들고
+   * 비율도 줄 수 없었다. 새 형식은 단계마다 메서드·본문·헤더·비율을 갖는다.
+   * 예전 회차를 그대로 읽어야 하므로 옛 칸도 남겨 두고 `normalizeFormScenario` 로 합쳐 쓴다.
+   */
+  steps?: PerfStep[]
+  /**
+   * `weighted` — 비율대로 무작위 선택(각 사용자가 계속 아무 단계나 고른다).
+   * `sequential` — 한 사용자가 1→2→3 순서대로 돈다. 로그인 후 조회처럼 앞 단계가 있어야
+   *   뒤가 되는 흐름에 쓴다.
+   */
+  order?: 'weighted' | 'sequential'
+  /** 모든 단계에 붙는 공통 헤더 (인증 토큰 같은 것) */
+  commonHeaders?: Record<string, string>
+  /**
+   * 실패한 응답의 본문을 표본으로 남길지.
+   *
+   * Locust 는 실패를 "HTTPError('503 …')" 같은 한 줄로만 남긴다. 그런데 인프라에서는 그
+   * 본문이 게이트웨이 오류 페이지인지 애플리케이션 오류인지가 원인을 가른다.
+   */
+  captureFailures?: boolean
   /** 요청 사이 대기 (초) — 실사용자 흉내. 0,0 이면 쉬지 않고 때린다 */
   waitMinSec: number
   waitMaxSec: number
+
+  // ── 예전 형식 (읽기 전용) ──────────────────────────────────
+  /** @deprecated 2.8.0 형식. `steps` 로 옮겨 읽는다 */
+  paths?: string[]
+  /** @deprecated 2.8.0 형식 */
+  method?: 'GET' | 'POST'
+  /** @deprecated 2.8.0 형식 */
+  body?: string
+  /** @deprecated 2.8.0 형식 */
+  headers?: Record<string, string>
+}
+
+/**
+ * 예전·현재 형식을 하나로 합쳐 읽는다.
+ *
+ * **왜 shared-types 에 함수가 있나**: 메인(locustfile 생성)과 렌더러(화면 표시)가 똑같은
+ * 규칙으로 읽어야 한다. 한쪽에만 두면 다른 쪽이 옛 회차를 다르게 해석해, 화면에 보이는
+ * 시나리오와 실제로 돌아간 시나리오가 어긋난다.
+ */
+export function normalizeFormScenario(sc: PerfFormScenario): {
+  steps: PerfStep[]
+  order: 'weighted' | 'sequential'
+  commonHeaders: Record<string, string>
+  waitMinSec: number
+  waitMaxSec: number
+  captureFailures: boolean
+} {
+  const wMin = Math.max(0, sc.waitMinSec ?? 0)
+  const wMax = Math.max(wMin, sc.waitMaxSec ?? 0)
+  if (sc.steps && sc.steps.length) {
+    return {
+      steps: sc.steps
+        .map((st) => ({ ...st, path: (st.path ?? '').trim(), weight: Math.max(1, Math.round(st.weight || 1)) }))
+        .filter((st) => st.path),
+      order: sc.order ?? 'weighted',
+      commonHeaders: sc.commonHeaders ?? {},
+      waitMinSec: wMin,
+      waitMaxSec: wMax,
+      captureFailures: !!sc.captureFailures,
+    }
+  }
+  // 예전 형식: 경로마다 같은 메서드·본문, 비율 균등
+  const paths = (sc.paths ?? []).map((x) => (x ?? '').trim()).filter(Boolean)
+  return {
+    steps: (paths.length ? paths : ['/']).map((path) => ({
+      method: sc.method ?? 'GET',
+      path,
+      body: sc.body,
+      weight: 1,
+    })),
+    order: 'weighted',
+    commonHeaders: sc.headers ?? {},
+    waitMinSec: wMin,
+    waitMaxSec: wMax,
+    captureFailures: false,
+  }
 }
 
 /** 사용자가 직접 쓴 locustfile.py */
@@ -813,6 +902,14 @@ export interface PerfRunConfig {
   scenario: PerfFormScenario | PerfFileScenario
   /** 자체 서명 인증서를 무시할지 (사내 인프라는 대개 필요) */
   insecureTls?: boolean
+  /**
+   * 계단식 부하 — 한계점을 찾을 때 쓴다.
+   *
+   * 비어 있으면 `users`/`spawnRate`/`durationSec` 로 평평하게 돈다. 값이 있으면 Locust 의
+   * LoadTestShape 을 만들어 넣고, 그때는 `-u/-r/-t` 를 넘기지 않는다(Locust 가 무시하면서
+   * 경고를 내므로 애초에 주지 않는다).
+   */
+  stages?: { users: number; spawnRate: number; holdSec: number }[]
 }
 
 /** 회차 하나 — userData/perf-runs/<id>/run.json */
@@ -832,6 +929,14 @@ export interface PerfRunMeta {
   csvPrefix?: string
   /** 실행에 쓴 locustfile 경로 (폼으로 만든 것도 여기 남는다) */
   scenarioPath?: string
+  /**
+   * 사람이 붙인 이름·메모.
+   *
+   * 회차가 쌓이면 시각만으로는 못 찾는다 — "게이트웨이 튜닝 전/후" 같은 한마디가 있어야
+   * 나중에 비교할 짝을 고를 수 있다. 실행이 끝난 뒤에도 고칠 수 있어야 하므로 별도 IPC 로 쓴다.
+   */
+  label?: string
+  memo?: string
 }
 
 /** 회차 + 통계 원본 — 요약 계산은 렌더러(src/lib/perfParse)가 한다 */

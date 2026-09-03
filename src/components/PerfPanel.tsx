@@ -16,8 +16,15 @@ import {
   Target,
   Download,
   ArrowRight,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  ClipboardPaste,
 } from 'lucide-react'
-import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord } from '../../electron/shared-types'
+import type { PerfEnvStatus, PerfRunConfig, PerfRunMeta, PerfRunRecord, PerfStep } from '../../electron/shared-types'
+import { normalizeFormScenario } from '../../electron/shared-types'
+// 브라우저에서 복사한 요청을 그대로 가져오는 파서 — 포털 감시가 쓰는 것과 같은 것을 쓴다
+import { parseCurl } from '../lib/portal'
 import {
   parseLocustConsole,
   parseLocustFailures,
@@ -170,13 +177,26 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [insecure, setInsecure] = useState(true)
 
   const [scenarioKind, setScenarioKind] = useState<'form' | 'file'>('form')
-  const [paths, setPaths] = useState('/')
-  const [method, setMethod] = useState<'GET' | 'POST'>('GET')
-  const [body, setBody] = useState('')
-  const [headerText, setHeaderText] = useState('')
+  /** 단계들 — 요청 하나가 한 줄. 비율(weight)로 실제 트래픽 모양을 흉내낸다 */
+  const [steps, setSteps] = useState<PerfStep[]>([{ method: 'GET', path: '/', weight: 1 }])
+  const [order, setOrder] = useState<'weighted' | 'sequential'>('weighted')
+  /** 펼쳐서 이름·본문·헤더를 고치는 단계 (한 번에 하나) */
+  const [openStep, setOpenStep] = useState<number | null>(null)
+  const [commonHeaderText, setCommonHeaderText] = useState('')
+  const [captureFailures, setCaptureFailures] = useState(true)
   const [waitMin, setWaitMin] = useState('1')
   const [waitMax, setWaitMax] = useState('2')
   const [scenarioFile, setScenarioFile] = useState('')
+  /** 부하 모양 — 평평하게 유지할지, 계단식으로 올려 한계점을 찾을지 */
+  const [loadMode, setLoadMode] = useState<'flat' | 'stages'>('flat')
+  const [stages, setStages] = useState<{ users: string; spawnRate: string; holdSec: string }[]>([
+    { users: '10', spawnRate: '5', holdSec: '60' },
+    { users: '50', spawnRate: '10', holdSec: '60' },
+    { users: '200', spawnRate: '20', holdSec: '60' },
+  ])
+  /** cURL 붙여넣기 상자 (null 이면 안 열림) */
+  const [curlText, setCurlText] = useState<string | null>(null)
+  const [curlMsg, setCurlMsg] = useState('')
 
   const [running, setRunning] = useState<PerfRunMeta | null>(null)
   const [log, setLog] = useState('')
@@ -201,6 +221,13 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
   const [preview, setPreview] = useState<string | null>(null)
   /** 고른 회차의 초 단위 이력 — 목록에 얹으면 무거워서 고를 때만 읽는다 */
   const [history, setHistory] = useState<PerfHistoryPoint[]>([])
+  /** 실패 응답 표본 (생성한 시나리오에서 '실패 본문 남기기' 를 켠 회차에만 있다) */
+  const [samples, setSamples] = useState<
+    { t: number; name: string; code: number | null; error: string; body: string }[]
+  >([])
+  const [openSample, setOpenSample] = useState<number | null>(null)
+  /** 회차 이름·메모 편집 중인 값 (null 이면 안 열림) */
+  const [labelEdit, setLabelEdit] = useState<{ label: string; memo: string } | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const [elapsed, setElapsed] = useState(0)
 
@@ -293,9 +320,9 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     if (tab === 'log' && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [log, tab])
 
-  const parseHeaders = (): Record<string, string> => {
+  const parseHeaders = (text: string): Record<string, string> => {
     const out: Record<string, string> = {}
-    for (const line of headerText.split('\n')) {
+    for (const line of text.split('\n')) {
       const i = line.indexOf(':')
       if (i <= 0) continue
       const k = line.slice(0, i).trim()
@@ -323,22 +350,96 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     errorRateThresholdPct: numOrUndef(errTh),
     warmupSec: numOrUndef(warmupSec),
     insecureTls: insecure,
+    stages:
+      loadMode === 'stages'
+        ? stages
+            .map((st) => ({
+              users: Number(st.users) || 0,
+              spawnRate: Number(st.spawnRate) || 1,
+              holdSec: Number(st.holdSec) || 0,
+            }))
+            .filter((st) => st.users > 0 && st.holdSec > 0)
+        : undefined,
     scenario:
       scenarioKind === 'file'
         ? { kind: 'file', path: scenarioFile }
         : {
             kind: 'form',
-            paths: paths
-              .split('\n')
-              .map((x) => x.trim())
-              .filter(Boolean),
-            method,
-            body: method === 'POST' ? body : undefined,
-            headers: parseHeaders(),
+            steps: steps
+              .map((st) => ({ ...st, path: st.path.trim() }))
+              .filter((st) => st.path),
+            order,
+            commonHeaders: parseHeaders(commonHeaderText),
+            captureFailures,
             waitMinSec: Number(waitMin) || 0,
             waitMaxSec: Number(waitMax) || 0,
           },
   })
+
+  // ── 단계 편집 ─────────────────────────────────────────────
+  const updateStep = (i: number, patch: Partial<PerfStep>) =>
+    setSteps((prev) => prev.map((st, k) => (k === i ? { ...st, ...patch } : st)))
+  const addStep = () => setSteps((prev) => [...prev, { method: 'GET', path: '/', weight: 1 }])
+  const removeStep = (i: number) => {
+    setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, k) => k !== i)))
+    setOpenStep(null)
+  }
+  const moveStep = (i: number, dir: -1 | 1) =>
+    setSteps((prev) => {
+      const j = i + dir
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
+
+  /**
+   * cURL 을 단계로 만든다.
+   *
+   * 주소의 경로만 떼어 쓰고, **호스트가 대상과 다르면 대상 주소도 그 값으로 바꾼다** —
+   * 브라우저에서 복사한 요청은 대개 진짜 대상을 가리키므로, 경로만 가져가면 엉뚱한 곳을 때린다.
+   */
+  const addFromCurl = (text: string) => {
+    const parsed = parseCurl(text)
+    if (!parsed) {
+      setCurlMsg('cURL 명령을 읽지 못했습니다 — 개발자도구에서 복사한 내용을 그대로 붙여넣으세요.')
+      return
+    }
+    let pathOnly = parsed.url
+    let origin = ''
+    try {
+      const u = new URL(parsed.url)
+      origin = u.origin
+      pathOnly = u.pathname + (u.search || '')
+    } catch {
+      /* 상대 경로면 그대로 쓴다 */
+    }
+    const m = parsed.method.toUpperCase()
+    const method: PerfStep['method'] = m === 'POST' || m === 'PUT' || m === 'DELETE' ? m : 'GET'
+    // 인증·컨텐츠 관련 헤더만 남긴다. 브라우저가 붙이는 것을 다 넘기면 요청이 오히려 깨진다
+    const keep = ['authorization', 'x-auth-token', 'content-type', 'accept', 'cookie', 'x-subject-token']
+    const headers: Record<string, string> = {}
+    const dropped: string[] = []
+    for (const [k, v] of Object.entries(parsed.headers)) {
+      if (keep.includes(k.toLowerCase())) headers[k] = v
+      else dropped.push(k)
+    }
+    setSteps((prev) => [
+      ...prev.filter((st) => st.path.trim()),
+      { method, path: pathOnly, weight: 1, body: parsed.body, headers },
+    ])
+    if (origin && origin !== targetUrl.trim()) {
+      urlTouched.current = true
+      setTargetUrl(origin)
+    }
+    setCurlText(null)
+    setCurlMsg('')
+    setNote(
+      `단계를 추가했습니다${origin ? ` · 대상을 ${origin} 로 맞췄습니다` : ''}${
+        dropped.length ? ` · 헤더 ${dropped.length}개는 뺐습니다(${dropped.slice(0, 3).join(', ')}…)` : ''
+      }`,
+    )
+  }
 
   /**
    * 부하 설정을 사람 말로 되짚는다.
@@ -348,6 +449,17 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
    * 시간에 좌우되므로, 우리가 계산한 숫자를 내놓으면 틀린 기대를 심는다.
    */
   const loadSentence = useMemo(() => {
+    if (loadMode === 'stages') {
+      const rows = stages
+        .map((st) => ({ u: Number(st.users) || 0, h: Number(st.holdSec) || 0 }))
+        .filter((st) => st.u > 0 && st.h > 0)
+      if (!rows.length) return '단계에 사용자 수와 유지 시간을 적어 주세요.'
+      const total = rows.reduce((a, st) => a + st.h, 0)
+      return (
+        `${rows.map((st) => `${st.u}명`).join(' → ')} 으로 올리며 모두 ${Math.round(total / 60)}분 ` +
+        `${total % 60 ? `${total % 60}초 ` : ''}돕니다. 어디서 응답이 무너지는지 요약의 그래프로 보세요.`
+      )
+    }
     const u = Number(users) || 0
     const r = Number(spawnRate) || 0
     const min = Number(durationMin) || 0
@@ -364,7 +476,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
       head +
       ` 요청 사이 ${wMin}~${wMax}초 쉬므로 대략 초당 ${rps.toFixed(0)}건, 모두 ${total.toLocaleString()}건쯤 됩니다.`
     )
-  }, [users, spawnRate, durationMin, waitMin, waitMax, scenarioKind])
+  }, [users, spawnRate, durationMin, waitMin, waitMax, scenarioKind, loadMode, stages])
 
   /** 시작을 막아야 하는 이유 (없으면 빈 문자열) — 왜 못 누르는지 그 자리에 밝힌다 */
   const blockedReason = (() => {
@@ -373,6 +485,9 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
     if (!targetUrl.trim()) return '대상 주소를 적어 주세요'
     if (!/^https?:\/\//i.test(targetUrl.trim())) return '대상 주소는 http:// 또는 https:// 로 시작해야 합니다'
     if (scenarioKind === 'file' && !scenarioFile.trim()) return 'locustfile 을 고르세요'
+    if (scenarioKind === 'form' && !steps.some((st) => st.path.trim())) return '요청할 경로를 한 개 이상 적어 주세요'
+    if (loadMode === 'stages' && !stages.some((st) => Number(st.users) > 0 && Number(st.holdSec) > 0))
+      return '계단식 단계에 사용자 수와 유지 시간을 적어 주세요'
     return ''
   })()
 
@@ -426,6 +541,12 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
       if (!alive) return
       setHistory(r.ok && r.csv ? parseLocustHistory(r.csv) : [])
     })
+    void window.electronAPI.perfReadFailureSamples(selectedRunId).then((r) => {
+      if (!alive) return
+      setSamples(r.samples ?? [])
+      setOpenSample(null)
+    })
+    setLabelEdit(null)
     return () => {
       alive = false
     }
@@ -483,7 +604,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
       // 처리량은 높은 쪽이 좋다 — 다른 둘과 방향이 반대다
       worse: selectedSummary.rps === prev.rps ? null : selectedSummary.rps < prev.rps,
     })
-    return { at: prevRec.meta.startedAt, items }
+    return { at: prevRec.meta.startedAt, label: prevRec.meta.label, items }
   }, [selected, selectedSummary, runs])
 
   // 타일에 쓰는 값: 돌고 있으면 어림값, 끝났으면 확정값
@@ -654,37 +775,109 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             </Card>
 
             {/* 부하 — 얼마나 세게 */}
-            <Card icon={<Gauge size={12} />} title="부하">
-              <div className="flex flex-wrap gap-1">
-                {LOAD_PRESETS.map((pre) => {
-                  const on = users === String(pre.users) && spawnRate === String(pre.rate) && durationMin === String(pre.min)
-                  return (
+            {/* 부하 — 얼마나 세게 */}
+            <Card
+              icon={<Gauge size={12} />}
+              title="부하"
+              badge={
+                <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
+                  {(['flat', 'stages'] as const).map((m) => (
                     <button
-                      key={pre.label}
-                      onClick={() => {
-                        setUsers(String(pre.users))
-                        setSpawnRate(String(pre.rate))
-                        setDurationMin(String(pre.min))
-                      }}
+                      key={m}
+                      onClick={() => setLoadMode(m)}
                       disabled={!!running}
-                      title={`사용자 ${pre.users}명 · ${pre.rate}명/초 · ${pre.min}분`}
+                      title={
+                        m === 'flat'
+                          ? '정해진 사용자 수로 쭉 유지합니다'
+                          : '사용자를 단계적으로 올려 어디서 무너지는지 봅니다'
+                      }
                       className={
-                        'rounded-full px-2 py-0.5 text-[10.5px] disabled:opacity-50 ' +
-                        (on ? 'bg-blue-600/70 text-white' : 'bg-black/25 text-gray-400 hover:text-gray-200')
+                        'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
+                        (loadMode === m ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                       }
                     >
-                      {pre.label}
+                      {m === 'flat' ? '평평하게' : '계단식'}
                     </button>
-                  )
-                })}
-              </div>
-              <div className="mt-1.5 grid grid-cols-3 gap-1.5">
-                <Field label="사용자" unit="명" value={users} onChange={setUsers} disabled={!!running} />
-                <Field label="증가" unit="명/초" value={spawnRate} onChange={setSpawnRate} disabled={!!running} />
-                <Field label="시간" unit="분" value={durationMin} onChange={setDurationMin} disabled={!!running} />
-              </div>
-              {/* 숫자 세 개가 실제로 무슨 뜻인지 한 문장으로 되짚는다 — 이게 없으면
-                  '증가 5' 가 무엇을 5 하는 것인지 매번 짐작하게 된다 */}
+                  ))}
+                </span>
+              }
+            >
+              {loadMode === 'flat' ? (
+                <>
+                  <div className="flex flex-wrap gap-1">
+                    {LOAD_PRESETS.map((pre) => {
+                      const on =
+                        users === String(pre.users) && spawnRate === String(pre.rate) && durationMin === String(pre.min)
+                      return (
+                        <button
+                          key={pre.label}
+                          onClick={() => {
+                            setUsers(String(pre.users))
+                            setSpawnRate(String(pre.rate))
+                            setDurationMin(String(pre.min))
+                          }}
+                          disabled={!!running}
+                          title={`사용자 ${pre.users}명 · ${pre.rate}명/초 · ${pre.min}분`}
+                          className={
+                            'rounded-full px-2 py-0.5 text-[10.5px] disabled:opacity-50 ' +
+                            (on ? 'bg-blue-600/70 text-white' : 'bg-black/25 text-gray-400 hover:text-gray-200')
+                          }
+                        >
+                          {pre.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+                    <Field label="사용자" unit="명" value={users} onChange={setUsers} disabled={!!running} />
+                    <Field label="증가" unit="명/초" value={spawnRate} onChange={setSpawnRate} disabled={!!running} />
+                    <Field label="시간" unit="분" value={durationMin} onChange={setDurationMin} disabled={!!running} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* 계단식 — 각 줄이 한 단계. 어디서 무너지는지 시계열 그래프와 같이 보면 한계점이 보인다 */}
+                  <div className="mb-1 grid grid-cols-[1fr_1fr_1fr_20px] gap-1.5 text-[9.5px] text-gray-500">
+                    <span>사용자(명)</span>
+                    <span>증가(명/초)</span>
+                    <span>유지(초)</span>
+                    <span />
+                  </div>
+                  <div className="space-y-1">
+                    {stages.map((st, i) => (
+                      <div key={i} className="grid grid-cols-[1fr_1fr_1fr_20px] items-center gap-1.5">
+                        {(['users', 'spawnRate', 'holdSec'] as const).map((k) => (
+                          <input
+                            key={k}
+                            value={st[k]}
+                            onChange={(e) =>
+                              setStages((prev) => prev.map((x, j) => (j === i ? { ...x, [k]: e.target.value } : x)))
+                            }
+                            disabled={!!running}
+                            className={inputCls + ' w-full text-center disabled:opacity-50'}
+                          />
+                        ))}
+                        <button
+                          onClick={() => setStages((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== i)))}
+                          disabled={!!running || stages.length <= 1}
+                          title="이 단계 삭제"
+                          className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 disabled:opacity-30"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setStages((prev) => [...prev, { users: '', spawnRate: '10', holdSec: '60' }])}
+                    disabled={!!running}
+                    className="mt-1.5 w-full rounded border border-dashed border-white/15 py-1 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-50"
+                  >
+                    + 단계 추가
+                  </button>
+                </>
+              )}
+              {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
                 {loadSentence}
               </p>
@@ -727,7 +920,34 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
             </Card>
 
             {/* 시나리오 — 무엇을 요청할지 */}
-            <Card icon={<FileCode size={12} />} title="시나리오">
+            <Card
+              icon={<FileCode size={12} />}
+              title="시나리오"
+              badge={
+                scenarioKind === 'form' ? (
+                  <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
+                    {(['weighted', 'sequential'] as const).map((o) => (
+                      <button
+                        key={o}
+                        onClick={() => setOrder(o)}
+                        disabled={!!running}
+                        title={
+                          o === 'weighted'
+                            ? '각 사용자가 비율대로 아무 단계나 고릅니다 (실제 트래픽 흉내)'
+                            : '한 사용자가 위에서 아래로 순서대로 돕니다 (로그인 후 조회처럼)'
+                        }
+                        className={
+                          'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
+                          (order === o ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
+                        }
+                      >
+                        {o === 'weighted' ? '비율대로' : '순서대로'}
+                      </button>
+                    ))}
+                  </span>
+                ) : undefined
+              }
+            >
               <div className="flex gap-1 rounded-md bg-black/25 p-0.5">
                 {(['form', 'file'] as const).map((k) => (
                   <button
@@ -746,50 +966,154 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
 
               {scenarioKind === 'form' ? (
                 <>
-                  <div className="mt-2 flex items-center gap-1.5">
-                    <select
-                      value={method}
-                      onChange={(e) => setMethod(e.target.value as 'GET' | 'POST')}
-                      disabled={!!running}
-                      className={inputCls + ' shrink-0 disabled:opacity-50'}
-                    >
-                      <option value="GET">GET</option>
-                      <option value="POST">POST</option>
-                    </select>
-                    <span className="min-w-0 flex-1 text-[10.5px] text-gray-500">경로 — 한 줄에 하나</span>
+                  <div className="mt-2 space-y-1">
+                    {steps.map((st, i) => (
+                      <div key={i} className="rounded border border-white/10 bg-black/15">
+                        <div className="flex items-center gap-1 p-1">
+                          <select
+                            value={st.method}
+                            onChange={(e) => updateStep(i, { method: e.target.value as PerfStep['method'] })}
+                            disabled={!!running}
+                            className={inputCls + ' shrink-0 !px-1 disabled:opacity-50'}
+                          >
+                            {(['GET', 'POST', 'PUT', 'DELETE'] as const).map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            value={st.path}
+                            onChange={(e) => updateStep(i, { path: e.target.value })}
+                            disabled={!!running}
+                            placeholder="/v3/servers"
+                            className={inputCls + ' min-w-0 flex-1 font-mono disabled:opacity-50'}
+                          />
+                          {order === 'weighted' ? (
+                            <input
+                              value={String(st.weight)}
+                              onChange={(e) => updateStep(i, { weight: Number(e.target.value) || 1 })}
+                              disabled={!!running}
+                              title="상대 비율 — 10 이면 비율 1 인 단계보다 10배 자주 실행됩니다"
+                              className={inputCls + ' w-9 shrink-0 text-center disabled:opacity-50'}
+                            />
+                          ) : (
+                            <span className="w-9 shrink-0 text-center text-[10px] text-gray-600">{i + 1}번</span>
+                          )}
+                          <button
+                            onClick={() => setOpenStep(openStep === i ? null : i)}
+                            title="이름·본문·헤더"
+                            className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                          >
+                            {openStep === i ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          </button>
+                          {order === 'sequential' && (
+                            <span className="flex shrink-0 flex-col">
+                              <button
+                                onClick={() => moveStep(i, -1)}
+                                disabled={!!running || i === 0}
+                                className="text-gray-600 hover:text-gray-300 disabled:opacity-30"
+                                title="위로"
+                              >
+                                <ChevronUp size={10} />
+                              </button>
+                              <button
+                                onClick={() => moveStep(i, 1)}
+                                disabled={!!running || i === steps.length - 1}
+                                className="text-gray-600 hover:text-gray-300 disabled:opacity-30"
+                                title="아래로"
+                              >
+                                <ChevronDown size={10} />
+                              </button>
+                            </span>
+                          )}
+                          <button
+                            onClick={() => removeStep(i)}
+                            disabled={!!running || steps.length <= 1}
+                            title="이 단계 삭제"
+                            className="shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 disabled:opacity-30"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                        {openStep === i && (
+                          <div className="space-y-1 border-t border-white/10 p-1.5">
+                            <input
+                              value={st.name ?? ''}
+                              onChange={(e) => updateStep(i, { name: e.target.value })}
+                              disabled={!!running}
+                              placeholder="통계에 찍힐 이름 (비우면 경로)"
+                              className={inputCls + ' w-full disabled:opacity-50'}
+                            />
+                            {(st.method === 'POST' || st.method === 'PUT') && (
+                              <textarea
+                                value={st.body ?? ''}
+                                onChange={(e) => updateStep(i, { body: e.target.value })}
+                                disabled={!!running}
+                                rows={2}
+                                placeholder={'본문 (JSON)'}
+                                className={inputCls + ' w-full resize-y font-mono disabled:opacity-50'}
+                              />
+                            )}
+                            <textarea
+                              value={Object.entries(st.headers ?? {})
+                                .map(([k, v]) => `${k}: ${v}`)
+                                .join('\n')}
+                              onChange={(e) => updateStep(i, { headers: parseHeaders(e.target.value) })}
+                              disabled={!!running}
+                              rows={2}
+                              placeholder={'이 단계만의 헤더 (공통 헤더에 덮어씀)'}
+                              className={inputCls + ' w-full resize-y font-mono disabled:opacity-50'}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  <textarea
-                    value={paths}
-                    onChange={(e) => setPaths(e.target.value)}
-                    disabled={!!running}
-                    rows={3}
-                    placeholder={'/v3\n/v3/auth/tokens'}
-                    className={inputCls + ' mt-1 w-full resize-y font-mono disabled:opacity-50'}
-                  />
-                  {method === 'POST' && (
-                    <textarea
-                      value={body}
-                      onChange={(e) => setBody(e.target.value)}
+                  <div className="mt-1.5 flex gap-1">
+                    <button
+                      onClick={addStep}
                       disabled={!!running}
-                      rows={3}
-                      placeholder={'본문 (JSON)\n{"key": "value"}'}
-                      className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
-                    />
-                  )}
+                      className="flex-1 rounded border border-dashed border-white/15 py-1 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-50"
+                    >
+                      + 단계 추가
+                    </button>
+                    <button
+                      onClick={() => {
+                        setCurlText('')
+                        setCurlMsg('')
+                      }}
+                      disabled={!!running}
+                      title="개발자도구에서 Copy as cURL 한 요청을 그대로 단계로 만듭니다"
+                      className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[10.5px] text-gray-300 hover:bg-white/10 disabled:opacity-50"
+                    >
+                      <ClipboardPaste size={11} /> cURL 로 추가
+                    </button>
+                  </div>
+
+                  <textarea
+                    value={commonHeaderText}
+                    onChange={(e) => setCommonHeaderText(e.target.value)}
+                    disabled={!!running}
+                    rows={2}
+                    placeholder={'공통 헤더 — 한 줄에 하나\nX-Auth-Token: ...'}
+                    className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
+                  />
+
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <span className="shrink-0 text-[10.5px] text-gray-500">요청 사이 대기</span>
                     <input
                       value={waitMin}
                       onChange={(e) => setWaitMin(e.target.value)}
                       disabled={!!running}
-                      className={inputCls + ' w-12 shrink-0 text-center disabled:opacity-50'}
+                      className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
                     />
                     <span className="shrink-0 text-gray-600">~</span>
                     <input
                       value={waitMax}
                       onChange={(e) => setWaitMax(e.target.value)}
                       disabled={!!running}
-                      className={inputCls + ' w-12 shrink-0 text-center disabled:opacity-50'}
+                      className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
                     />
                     <span className="shrink-0 text-[10.5px] text-gray-500">초</span>
                     <button
@@ -802,14 +1126,22 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                       미리보기
                     </button>
                   </div>
-                  <textarea
-                    value={headerText}
-                    onChange={(e) => setHeaderText(e.target.value)}
-                    disabled={!!running}
-                    rows={2}
-                    placeholder={'헤더 — 한 줄에 하나\nX-Auth-Token: ...'}
-                    className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
-                  />
+
+                  <label className="mt-1.5 flex items-start gap-2 text-[11px] text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={captureFailures}
+                      disabled={!!running}
+                      onChange={(e) => setCaptureFailures(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      실패 응답 본문 남기기
+                      <span className="block text-[10px] text-gray-600">
+                        Locust 는 한 줄 문구만 남깁니다. 본문이 있어야 게이트웨이 오류인지 앱 오류인지 갈립니다 (앞 50건)
+                      </span>
+                    </span>
+                  </label>
                 </>
               ) : (
                 <div className="mt-2 flex items-center gap-1.5">
@@ -899,7 +1231,7 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                         >
                           <div className="flex items-baseline gap-1.5">
                             <span className="min-w-0 truncate text-[11.5px] text-gray-200">
-                              {new Date(r.meta.startedAt).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
+                              {r.meta.label || new Date(r.meta.startedAt).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
                             </span>
                             {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
                             {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
@@ -1069,6 +1401,71 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                     <p className="text-[12px] text-gray-500">왼쪽에서 회차를 고르세요.</p>
                   ) : (
                     <>
+                      {/* 회차 이름·메모 — 시각만으로는 나중에 못 찾는다 */}
+                      <div className="mb-2 flex items-start gap-2">
+                        {labelEdit ? (
+                          <>
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <input
+                                autoFocus
+                                value={labelEdit.label}
+                                onChange={(e) => setLabelEdit({ ...labelEdit, label: e.target.value })}
+                                placeholder="회차 이름 — 예: 게이트웨이 튜닝 후"
+                                className={inputCls + ' w-full'}
+                              />
+                              <textarea
+                                value={labelEdit.memo}
+                                onChange={(e) => setLabelEdit({ ...labelEdit, memo: e.target.value })}
+                                rows={2}
+                                placeholder="메모 — 무엇을 바꾸고 돌렸는지"
+                                className={inputCls + ' w-full resize-y'}
+                              />
+                            </div>
+                            <button
+                              onClick={async () => {
+                                await window.electronAPI.perfSetLabel(
+                                  selected.meta.id,
+                                  labelEdit.label,
+                                  labelEdit.memo,
+                                )
+                                setLabelEdit(null)
+                                await refreshRuns()
+                              }}
+                              className="shrink-0 rounded-md bg-blue-600 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500"
+                            >
+                              저장
+                            </button>
+                            <button
+                              onClick={() => setLabelEdit(null)}
+                              className="shrink-0 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11px] text-gray-300 hover:bg-white/10"
+                            >
+                              취소
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[13px] text-gray-100">
+                                {selected.meta.label || '이름 없는 회차'}
+                              </div>
+                              {selected.meta.memo && (
+                                <p className="mt-0.5 whitespace-pre-wrap text-[11px] leading-relaxed text-gray-500">
+                                  {selected.meta.memo}
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              onClick={() =>
+                                setLabelEdit({ label: selected.meta.label ?? '', memo: selected.meta.memo ?? '' })
+                              }
+                              className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/10"
+                            >
+                              이름·메모
+                            </button>
+                          </>
+                        )}
+                      </div>
+
                       {verdict && (
                         <div
                           className={
@@ -1245,7 +1642,10 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                       {compare && (
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-white/10 bg-panel-light/25 px-2.5 py-2 text-[11px]">
                           <span className="shrink-0 text-gray-500">
-                            직전 회차({new Date(compare.at).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}) 대비
+                            직전 회차(
+                            {compare.label ||
+                              new Date(compare.at).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
+                            ) 대비
                           </span>
                           {compare.items.map((it) => (
                             <span key={it.label} className="flex items-center gap-1">
@@ -1299,6 +1699,46 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                             <p className="mt-1 text-[10px] text-gray-600">
                               그 외 {failures.length - 6}종은 원본 리포트에서 볼 수 있습니다.
                             </p>
+                          )}
+
+                          {/* 응답 본문 표본 — 같은 503 이라도 게이트웨이가 낸 것과 앱이 낸 것이 다르다 */}
+                          {samples.length > 0 && (
+                            <div className="mt-2 rounded-md border border-white/10 bg-black/20 p-2">
+                              <div className="mb-1 text-[10.5px] text-gray-500">
+                                실패 응답 본문 {samples.length}건 — 눌러서 펼치기
+                              </div>
+                              <div className="space-y-0.5">
+                                {samples.slice(0, 8).map((sp, i) => (
+                                  <div key={i}>
+                                    <button
+                                      onClick={() => setOpenSample(openSample === i ? null : i)}
+                                      className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-white/5"
+                                    >
+                                      {openSample === i ? (
+                                        <ChevronDown size={11} className="shrink-0 text-gray-500" />
+                                      ) : (
+                                        <ChevronRight size={11} className="shrink-0 text-gray-500" />
+                                      )}
+                                      <span className="shrink-0 rounded bg-red-500/15 px-1 text-[10px] text-red-300">
+                                        {sp.code ?? '연결 실패'}
+                                      </span>
+                                      <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-400">
+                                        {sp.name}
+                                      </span>
+                                      <span className="shrink-0 text-[10px] text-gray-600">
+                                        {new Date(sp.t).toLocaleTimeString('ko-KR', { hour12: false })}
+                                      </span>
+                                    </button>
+                                    {openSample === i && (
+                                      <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-black/40 p-2 font-mono text-[10.5px] leading-relaxed text-gray-400">
+                                        {maskForDisplay(sp.error ? sp.error + '\n\n' : '')}
+                                        {maskForDisplay(sp.body || '(본문 없음)')}
+                                      </pre>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
                           )}
                         </div>
                       )}
@@ -1369,9 +1809,13 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                               ['대상', selected.meta.config.targetUrl],
                               [
                                 '부하',
-                                `사용자 ${selected.meta.config.users}명 · ${selected.meta.config.spawnRate}명/초 · ${Math.round(
-                                  selected.meta.config.durationSec / 60,
-                                )}분`,
+                                selected.meta.config.stages?.length
+                                  ? `계단식 · ${selected.meta.config.stages
+                                      .map((st) => `${st.users}명(${st.holdSec}초)`)
+                                      .join(' → ')}`
+                                  : `사용자 ${selected.meta.config.users}명 · ${selected.meta.config.spawnRate}명/초 · ${Math.round(
+                                      selected.meta.config.durationSec / 60,
+                                    )}분`,
                               ],
                               [
                                 '세션',
@@ -1380,7 +1824,13 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
                               [
                                 '시나리오',
                                 selected.meta.config.scenario.kind === 'form'
-                                  ? `폼 · ${selected.meta.config.scenario.method} ${selected.meta.config.scenario.paths.join(', ') || '/'}`
+                                  ? (() => {
+                                      // 옛 회차(경로 목록만 있던 형식)도 같은 규칙으로 읽는다
+                                      const n = normalizeFormScenario(selected.meta.config.scenario)
+                                      return `${n.order === 'sequential' ? '순서대로' : '비율대로'} ${
+                                        n.steps.length
+                                      }단계 · ${n.steps.map((st) => `${st.method} ${st.path}`).join(', ')}`
+                                    })()
                                   : `파일 · ${selected.meta.config.scenario.path}`,
                               ],
                               [
@@ -1458,6 +1908,53 @@ export default function PerfPanel({ sessions, onClose }: PerfPanelProps) {
           </div>
         </div>
       </div>
+
+      {/* cURL 붙여넣기 — 브라우저가 실제로 보낸 요청을 그대로 단계로 (포털 감시와 같은 파서) */}
+      {curlText !== null && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6">
+          <div className="w-[680px] max-w-[92vw] rounded-lg border border-white/10 bg-panel p-4 shadow-2xl">
+            <div className="mb-1 flex items-center gap-2">
+              <ClipboardPaste size={13} className="text-blue-300" />
+              <span className="text-[12.5px] font-medium text-gray-100">cURL 로 단계 추가</span>
+              <button
+                onClick={() => setCurlText(null)}
+                className="ml-auto rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <p className="mb-2 text-[11px] leading-relaxed text-gray-500">
+              개발자도구 <span className="text-gray-300">Network</span> 에서 그 요청을{' '}
+              <span className="text-gray-300">우클릭 → Copy → Copy as cURL</span> 한 뒤 붙여넣으세요. 인증·컨텐츠
+              헤더만 남기고 나머지는 뺍니다 — 브라우저가 붙이는 헤더를 다 넘기면 요청이 오히려 깨집니다.
+            </p>
+            <textarea
+              autoFocus
+              value={curlText}
+              onChange={(e) => setCurlText(e.target.value)}
+              rows={6}
+              placeholder="curl 'https://10.255.233.21:5000/v3/servers' -H 'X-Auth-Token: ...'"
+              className={inputCls + ' w-full resize-y font-mono'}
+            />
+            {curlMsg && <p className="mt-1 text-[11px] text-amber-300/80">{curlMsg}</p>}
+            <div className="mt-2 flex justify-end gap-2">
+              <button
+                onClick={() => setCurlText(null)}
+                className="rounded-md border border-white/10 bg-panel-light px-3 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
+              >
+                취소
+              </button>
+              <button
+                onClick={() => addFromCurl(curlText)}
+                disabled={!curlText.trim()}
+                className="rounded-md bg-blue-600 px-3 py-1 text-[11.5px] text-white hover:bg-blue-500 disabled:opacity-40"
+              >
+                단계로 추가
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 만들어 줄 locustfile 미리보기 — 무엇이 돌아갈지 모르는 채 부하를 걸지 않게 */}
       {preview !== null && (
