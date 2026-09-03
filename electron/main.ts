@@ -14,6 +14,7 @@ import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile, rename, open } from 'node:fs/promises'
 // 스트림 청크 경계에서 멀티바이트(한글) 문자가 잘려 �로 깨지는 것을 막는다
 import { StringDecoder } from 'node:string_decoder'
@@ -49,6 +50,10 @@ import {
   type OnFailureAction,
   type LogIndexEntry,
   type LogEntryDetail,
+  type PerfEnvStatus,
+  type PerfRunConfig,
+  type PerfRunMeta,
+  type PerfRunRecord,
   type LogRetentionSettings,
   type LogTailTarget,
   type ExpectRule,
@@ -4709,7 +4714,488 @@ ipcMain.on('monitor:setKillOnExit', (_evt, value: boolean) => {
   killDaemonOnExit = !!value
 })
 
+// ─────────────────────────────────────────────────────────────
+// 성능 테스트 (Locust) — 부하는 이 PC 에서, 대상만 세션에서 가져온다.
+//
+// 실행 한 번에 요건이 다 채워지는 명령 조합을 쓴다:
+//   locust -f <file> --host <url> -u <n> -r <n> -t <s>
+//          --autostart --autoquit 3            ← 사람이 웹 UI 에서 시작을 안 눌러도 되게
+//          --html <report> --csv <prefix>      ← 종료 후 리포트·통계
+//          --web-host 127.0.0.1 --web-port <p> ← 돌고 있는 동안의 대시보드(앱 안 iframe)
+//
+// `--headless` 는 쓰지 않는다 — 그러면 대시보드가 안 뜬다. `--autostart` 가 그 자리를 메운다.
+// 웹 주소를 127.0.0.1 로 묶는 이유는 부하 도구의 조작 화면이 사내망에 열리지 않게 하는 것이다.
+// ─────────────────────────────────────────────────────────────
+const perfRunsDir = () => path.join(app.getPath('userData'), 'perf-runs')
+const perfSettingsPath = () => path.join(app.getPath('userData'), 'perf-settings.json')
+
+interface PerfSettings {
+  /** 사용자가 직접 지정한 locust 실행 파일 경로 (PATH 에 없을 때) */
+  locustPath?: string
+}
+async function readPerfSettings(): Promise<PerfSettings> {
+  try {
+    const raw = JSON.parse(await readFile(perfSettingsPath(), 'utf-8'))
+    return typeof raw?.locustPath === 'string' ? { locustPath: raw.locustPath } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 실행 중인 성능 테스트 (동시에 하나만 — 두 개를 돌리면 서로의 부하가 결과를 오염시킨다) */
+interface PerfRun {
+  meta: PerfRunMeta
+  child: ChildProcess
+  dir: string
+  /** 100ms 배칭 버퍼 — 줄마다 IPC 를 보내면 렌더러가 멎는다 */
+  pending: { stdout: string; stderr: string }
+  flushTimer?: ReturnType<typeof setTimeout>
+  decoders: { stdout: StringDecoder; stderr: StringDecoder }
+  finished: boolean
+}
+let perfRun: PerfRun | null = null
+
+/** `locust --version` 을 실제로 실행해 본다 — 파일이 있는지만 보면 파이썬이 깨진 경우를 놓친다 */
+function tryVersion(cmd: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v: string | null) => {
+      if (done) return
+      done = true
+      resolve(v)
+    }
+    try {
+      const child = spawn(cmd, args, { windowsHide: true })
+      child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+      child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+      child.on('error', () => finish(null))
+      child.on('close', (code) => finish(code === 0 && /locust/i.test(out) ? out.trim().split('\n')[0] : null))
+      setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          /* 무시 */
+        }
+        finish(null)
+      }, 8000)
+    } catch {
+      finish(null)
+    }
+  })
+}
+
+const PERF_INSTALL_HINT =
+  'Python 3.9 이상을 설치한 뒤 명령 프롬프트에서 `pip install locust` 를 실행하세요. ' +
+  '설치했는데도 안 잡히면 아래에서 locust 실행 파일 경로를 직접 지정할 수 있습니다.'
+
+/**
+ * 환경 점검.
+ *
+ * 없는 것을 "실패" 로만 알리지 않는다 — **무엇이 없고 무엇을 하면 되는지**를 같이 돌려준다.
+ * 이 앱을 쓰는 사람은 파이썬 환경 담당이 아니라 인프라 검증 담당이다.
+ */
+ipcMain.handle('perf:env', async (): Promise<PerfEnvStatus> => {
+  const { locustPath } = await readPerfSettings()
+  if (locustPath) {
+    const v = await tryVersion(locustPath, ['--version'])
+    if (v) return { ok: true, how: locustPath, version: v }
+    return {
+      ok: false,
+      problem: `지정한 경로로 locust 를 실행할 수 없습니다: ${locustPath}`,
+      hint: '경로를 다시 지정하거나 비워 두면 PATH 에서 찾습니다.',
+    }
+  }
+  const direct = await tryVersion('locust', ['--version'])
+  if (direct) return { ok: true, how: 'locust (PATH)', version: direct }
+
+  // pip 로 설치했는데 스크립트 폴더가 PATH 에 없는 경우가 흔하다 — 모듈로 한 번 더 시도한다
+  for (const py of ['python', 'python3', 'py']) {
+    const viaModule = await tryVersion(py, ['-m', 'locust', '--version'])
+    if (viaModule) return { ok: true, how: `${py} -m locust`, version: viaModule }
+  }
+  const anyPython = await (async () => {
+    for (const py of ['python', 'python3', 'py']) {
+      const v = await new Promise<string | null>((resolve) => {
+        try {
+          const c = spawn(py, ['--version'], { windowsHide: true })
+          let o = ''
+          c.stdout?.on('data', (b: Buffer) => (o += b.toString()))
+          c.stderr?.on('data', (b: Buffer) => (o += b.toString()))
+          c.on('error', () => resolve(null))
+          c.on('close', (code) => resolve(code === 0 ? o.trim().split('\n')[0] : null))
+        } catch {
+          resolve(null)
+        }
+      })
+      if (v) return v
+    }
+    return null
+  })()
+
+  return {
+    ok: false,
+    problem: anyPython
+      ? `${anyPython} 는 있지만 locust 가 설치돼 있지 않습니다.`
+      : 'Python 과 locust 를 찾을 수 없습니다.',
+    hint: anyPython ? '명령 프롬프트에서 `pip install locust` 를 실행하세요.' : PERF_INSTALL_HINT,
+  }
+})
+
+ipcMain.handle('perf:setLocustPath', async (_evt, p: string | null) => {
+  await writeFileAtomic(perfSettingsPath(), JSON.stringify({ locustPath: p || undefined }, null, 2))
+  return { ok: true }
+})
+ipcMain.handle('perf:getLocustPath', async () => (await readPerfSettings()).locustPath ?? '')
+
+/** 파이썬 문자열 리터럴로 안전하게 (따옴표·역슬래시·개행이 코드를 깨뜨리지 않게) */
+const pyStr = (v: string) => JSON.stringify(String(v ?? ''))
+
+/**
+ * 폼 입력 → locustfile.py.
+ *
+ * 명령어(와 파이썬)를 몰라도 한 번은 돌려볼 수 있어야 한다는 판단이다. 생성한 파일은 회차
+ * 폴더에 그대로 남기므로, 사람이 열어 고친 뒤 '파일 고르기' 로 다시 쓸 수 있다.
+ */
+function buildLocustfile(cfg: PerfRunConfig): string {
+  const sc = cfg.scenario
+  if (sc.kind !== 'form') return ''
+  // 먼저 다듬고 나서 앞의 `/` 를 붙인다 — 순서를 바꾸면 `'  /health  '` 가 `'/  /health  '` 가 된다
+  const paths = sc.paths
+    .map((x) => (x ?? '').trim())
+    .filter(Boolean)
+    .map((x) => (x.startsWith('/') ? x : '/' + x))
+  const targets = paths.length ? paths : ['/']
+  const headers = Object.entries(sc.headers ?? {}).filter(([k]) => k.trim())
+  const wMin = Math.max(0, sc.waitMinSec)
+  const wMax = Math.max(wMin, sc.waitMaxSec)
+
+  const tasks = targets
+    .map((t, i) => {
+      const nameArg = `name=${pyStr(t)}`
+      const hdrArg = headers.length ? ', headers=HEADERS' : ''
+      if (sc.method === 'POST') {
+        const bodyArg = sc.body?.trim() ? `, data=${pyStr(sc.body)}` : ''
+        return [
+          `    @task`,
+          `    def t${i}(self):`,
+          `        self.client.post(${pyStr(t)}, ${nameArg}${bodyArg}${hdrArg})`,
+        ].join('\n')
+      }
+      return [`    @task`, `    def t${i}(self):`, `        self.client.get(${pyStr(t)}, ${nameArg}${hdrArg})`].join(
+        '\n',
+      )
+    })
+    .join('\n\n')
+
+  // 빈 줄을 filter 로 걸러내지 않는다 — 사람이 열어서 고칠 파일이므로 줄 간격이 남아야 한다.
+  // (예전에 `.filter(l => l !== '')` 로 조건부 줄을 지우려다 의도한 빈 줄까지 다 먹었다.)
+  const out: string[] = [
+    '# Q-Term 이 폼 입력으로 만든 파일입니다.',
+    '# 폼에서 다시 만들면 덮어씁니다 — 직접 고친 내용을 지키려면 다른 이름으로 저장한 뒤',
+    "# '파일 고르기' 로 선택하세요.",
+    'from locust import HttpUser, task, between',
+    '',
+  ]
+  if (headers.length) {
+    out.push('HEADERS = {' + headers.map(([k, v]) => `${pyStr(k)}: ${pyStr(v)}`).join(', ') + '}', '')
+  }
+  out.push('', 'class QTermUser(HttpUser):', `    wait_time = between(${wMin}, ${wMax})`)
+  if (cfg.insecureTls) {
+    out.push(
+      '',
+      '    def on_start(self):',
+      '        # 사내 인프라의 자체 서명 인증서를 무시한다 (설정에서 켠 경우에만)',
+      '        self.client.verify = False',
+    )
+  }
+  out.push('', tasks, '')
+  return out.join('\n')
+}
+
+/** 비어 있는 TCP 포트 찾기 — 8089 가 이미 쓰이고 있으면 대시보드가 안 뜬다 */
+function findFreePort(start: number): Promise<number> {
+  return new Promise((resolve) => {
+    const srv = net.createServer()
+    srv.once('error', () => resolve(start < start + 20 ? findFreePort(start + 1) : start))
+    srv.once('listening', () => {
+      const port = (srv.address() as net.AddressInfo).port
+      srv.close(() => resolve(port))
+    })
+    srv.listen(start, '127.0.0.1')
+  })
+}
+
+/**
+ * 프로세스 트리를 죽인다.
+ *
+ * Windows 에서 `child.kill()` 은 자식을 남긴다 — locust 는 파이썬 런처를 거쳐 뜨는 경우가
+ * 있어 껍데기만 죽고 부하가 계속 나간다. 그건 "중지를 눌렀는데 서비스가 계속 맞는" 상황이다.
+ */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid
+  if (!pid) return
+  if (process.platform === 'win32') {
+    try {
+      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
+    } catch {
+      try {
+        child.kill()
+      } catch {
+        /* 무시 */
+      }
+    }
+  } else {
+    try {
+      process.kill(-pid, 'SIGTERM')
+    } catch {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* 무시 */
+      }
+    }
+  }
+}
+
+function perfFlush(run: PerfRun): void {
+  const { stdout, stderr } = run.pending
+  run.pending = { stdout: '', stderr: '' }
+  run.flushTimer = undefined
+  if (stdout) mainWindow?.webContents.send('perf:log', { runId: run.meta.id, stream: 'stdout', text: stdout })
+  if (stderr) mainWindow?.webContents.send('perf:log', { runId: run.meta.id, stream: 'stderr', text: stderr })
+}
+function perfPush(run: PerfRun, stream: 'stdout' | 'stderr', text: string): void {
+  run.pending[stream] += text
+  if (!run.flushTimer) run.flushTimer = setTimeout(() => perfFlush(run), 100)
+}
+
+async function writeRunMeta(dir: string, meta: PerfRunMeta): Promise<void> {
+  await writeFileAtomic(path.join(dir, 'run.json'), JSON.stringify(meta, null, 2))
+}
+
+ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
+  if (perfRun && !perfRun.finished) {
+    return { ok: false, error: '이미 성능 테스트가 돌고 있습니다. 먼저 중지하세요.' }
+  }
+  const { locustPath } = await readPerfSettings()
+  // 실행 방법을 여기서 다시 정한다 — 점검 결과를 렌더러가 들고 오는 구조로 만들면
+  // 그 사이에 환경이 바뀐 경우를 못 잡는다.
+  let cmd = locustPath || 'locust'
+  let baseArgs: string[] = []
+  if (!locustPath) {
+    const direct = await tryVersion('locust', ['--version'])
+    if (!direct) {
+      let found = false
+      for (const py of ['python', 'python3', 'py']) {
+        if (await tryVersion(py, ['-m', 'locust', '--version'])) {
+          cmd = py
+          baseArgs = ['-m', 'locust']
+          found = true
+          break
+        }
+      }
+      if (!found) return { ok: false, error: 'locust 를 찾을 수 없습니다. 환경 점검을 먼저 확인하세요.' }
+    }
+  }
+
+  const id = randomUUID()
+  const dir = path.join(perfRunsDir(), id)
+  await mkdir(dir, { recursive: true })
+
+  // 시나리오 파일 준비
+  let scenarioPath: string
+  if (cfg.scenario.kind === 'file') {
+    scenarioPath = cfg.scenario.path
+    try {
+      await stat(scenarioPath)
+    } catch {
+      return { ok: false, error: `시나리오 파일을 찾을 수 없습니다: ${scenarioPath}` }
+    }
+  } else {
+    scenarioPath = path.join(dir, 'locustfile.py')
+    await writeFileAtomic(scenarioPath, buildLocustfile(cfg))
+  }
+
+  const port = await findFreePort(8089)
+  const csvPrefix = path.join(dir, 'run')
+  const reportPath = path.join(dir, 'report.html')
+  const args = [
+    ...baseArgs,
+    '-f',
+    scenarioPath,
+    '--host',
+    cfg.targetUrl,
+    '-u',
+    String(Math.max(1, Math.round(cfg.users))),
+    '-r',
+    String(Math.max(1, Math.round(cfg.spawnRate))),
+    '-t',
+    `${Math.max(1, Math.round(cfg.durationSec))}s`,
+    '--autostart',
+    // 끝나고 바로 죽이면 웹 UI 가 사라져 마지막 화면을 못 본다. 3초 여유.
+    '--autoquit',
+    '3',
+    '--html',
+    reportPath,
+    '--csv',
+    csvPrefix,
+    '--web-host',
+    '127.0.0.1',
+    '--web-port',
+    String(port),
+  ]
+
+  const meta: PerfRunMeta = {
+    id,
+    startedAt: Date.now(),
+    config: cfg,
+    webUrl: `http://127.0.0.1:${port}`,
+    reportPath,
+    csvPrefix,
+    scenarioPath,
+  }
+  await writeRunMeta(dir, meta)
+
+  let child: ChildProcess
+  try {
+    child = spawn(cmd, args, {
+      cwd: dir,
+      windowsHide: true,
+      // 유니코드 출력이 물음표로 깨지지 않게
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+      detached: process.platform !== 'win32',
+    })
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+
+  const run: PerfRun = {
+    meta,
+    child,
+    dir,
+    pending: { stdout: '', stderr: '' },
+    decoders: { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') },
+    finished: false,
+  }
+  perfRun = run
+
+  child.stdout?.on('data', (b: Buffer) => perfPush(run, 'stdout', run.decoders.stdout.write(b)))
+  child.stderr?.on('data', (b: Buffer) => perfPush(run, 'stderr', run.decoders.stderr.write(b)))
+  child.on('error', (err) => {
+    perfPush(run, 'stderr', `\n[실행 실패] ${cleanErrorMessage(err)}\n`)
+  })
+  child.on('close', async (code) => {
+    if (run.finished) return
+    run.finished = true
+    if (run.flushTimer) clearTimeout(run.flushTimer)
+    perfFlush(run)
+    run.meta.endedAt = Date.now()
+    run.meta.exitCode = code ?? undefined
+    await writeRunMeta(run.dir, run.meta).catch(() => {})
+    mainWindow?.webContents.send('perf:done', {
+      runId: run.meta.id,
+      exitCode: code ?? undefined,
+      canceled: run.meta.canceled,
+    })
+  })
+
+  return { ok: true, meta }
+})
+
+ipcMain.handle('perf:cancel', async () => {
+  if (!perfRun || perfRun.finished) return { ok: false, error: '돌고 있는 테스트가 없습니다.' }
+  // 중지한 회차는 그 사실을 남긴다 — 중간에 끊긴 수치를 '결과' 로 읽으면 안 된다
+  perfRun.meta.canceled = true
+  await writeRunMeta(perfRun.dir, perfRun.meta).catch(() => {})
+  killTree(perfRun.child)
+  return { ok: true }
+})
+
+/** 회차 목록 (최신순) + 통계 CSV 원본. 요약 계산은 렌더러(src/lib/perfParse)가 한다 */
+ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
+  let ids: string[]
+  try {
+    ids = await readdir(perfRunsDir())
+  } catch {
+    return []
+  }
+  const out: PerfRunRecord[] = []
+  for (const id of ids) {
+    try {
+      const dir = path.join(perfRunsDir(), id)
+      const meta = JSON.parse(await readFile(path.join(dir, 'run.json'), 'utf-8')) as PerfRunMeta
+      let statsCsv: string | undefined
+      try {
+        statsCsv = await readFile(path.join(dir, 'run_stats.csv'), 'utf-8')
+      } catch {
+        /* 중지·실패한 회차는 통계가 없다 */
+      }
+      out.push({ meta, statsCsv })
+    } catch {
+      /* 손상된 폴더는 건너뛴다 */
+    }
+  }
+  return out.sort((a, b) => b.meta.startedAt - a.meta.startedAt)
+})
+
+ipcMain.handle('perf:delete', async (_evt, id: string) => {
+  if (perfRun && !perfRun.finished && perfRun.meta.id === id) {
+    return { ok: false, error: '돌고 있는 회차는 지울 수 없습니다.' }
+  }
+  // 경로 조립에 id 를 그대로 쓰지 않는다 — 상위 경로 탈출을 막는다
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  await rm(path.join(perfRunsDir(), id), { recursive: true, force: true })
+  return { ok: true }
+})
+
+/**
+ * 종료 후 리포트를 **별도 창**으로 띄운다.
+ *
+ * iframe 을 쓰지 않는 이유: 렌더러 출처가 dev 는 http://localhost, 배포는 file:// 이라
+ * `file://` 리포트를 끼우면 개발 중에는 Chromium 이 막는다(= 개발 중 확인 불가). 돌고 있는
+ * 동안의 대시보드는 http 라서 iframe 으로 들어가고, 정적 리포트만 이 창을 쓴다.
+ */
+ipcMain.handle('perf:openReport', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  const file = path.join(perfRunsDir(), id, 'report.html')
+  try {
+    await stat(file)
+  } catch {
+    return { ok: false, error: '리포트 파일이 없습니다. (중지된 회차이거나 실행이 실패했습니다)' }
+  }
+  const win = new BrowserWindow({
+    width: 1200,
+    height: 900,
+    title: '성능 테스트 리포트',
+    backgroundColor: '#ffffff',
+    // 리포트는 우리가 만든 문서가 아니다 — 어떤 API 도 주지 않는다
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  })
+  win.setMenuBarVisibility(false)
+  await win.loadFile(file)
+  return { ok: true }
+})
+
+ipcMain.handle('perf:openFolder', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  await shell.openPath(path.join(perfRunsDir(), id))
+  return { ok: true }
+})
+
+/** 시나리오 파일 고르기 */
+ipcMain.handle('perf:pickScenario', async () => {
+  const r = await dialog.showOpenDialog(mainWindow!, {
+    title: 'locustfile 선택',
+    filters: [{ name: 'Python', extensions: ['py'] }],
+    properties: ['openFile'],
+  })
+  if (r.canceled || !r.filePaths[0]) return { path: '' }
+  return { path: r.filePaths[0] }
+})
+
 // ── 앱 라이프사이클 ────────────────────────────────────────────
+
 app.whenReady().then(() => {
   createWindow()
   void trimSessionLogs()
@@ -4756,6 +5242,11 @@ app.on('window-all-closed', async () => {
   }
   sessions.clear()
   monitors.clear()
+  // 부하는 별도 프로세스라 창을 닫아도 계속 돈다 — 창을 닫았는데 서비스가 계속 맞는 것을 막는다
+  if (perfRun && !perfRun.finished) {
+    perfRun.meta.canceled = true
+    killTree(perfRun.child)
+  }
   if (process.platform !== 'darwin') app.quit()
 })
 

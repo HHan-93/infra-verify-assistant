@@ -21,6 +21,12 @@ import type {
   CmBackupOrigin,
   LogIndexEntry,
   LogEntryDetail,
+  PerfDoneEvent,
+  PerfEnvStatus,
+  PerfLogEvent,
+  PerfRunConfig,
+  PerfRunMeta,
+  PerfRunRecord,
   LogRetentionSettings,
   MetricSample,
   LogTailTarget,
@@ -92,6 +98,29 @@ const electronAPI = {
   logsExport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('logs:export', id),
   logsGetRetentionSettings: (): Promise<LogRetentionSettings> => ipcRenderer.invoke('logs:getRetentionSettings'),
+
+  // ── 성능 테스트 (Locust, 로컬 부하) ─────────────────────────
+  perfEnv: (): Promise<PerfEnvStatus> => ipcRenderer.invoke('perf:env'),
+  perfGetLocustPath: (): Promise<string> => ipcRenderer.invoke('perf:getLocustPath'),
+  perfSetLocustPath: (p: string | null): Promise<{ ok: boolean }> => ipcRenderer.invoke('perf:setLocustPath', p),
+  perfStart: (cfg: PerfRunConfig): Promise<{ ok: boolean; meta?: PerfRunMeta; error?: string }> =>
+    ipcRenderer.invoke('perf:start', cfg),
+  perfCancel: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:cancel'),
+  perfList: (): Promise<PerfRunRecord[]> => ipcRenderer.invoke('perf:list'),
+  perfDelete: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:delete', id),
+  perfOpenReport: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openReport', id),
+  perfOpenFolder: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openFolder', id),
+  perfPickScenario: (): Promise<{ path: string }> => ipcRenderer.invoke('perf:pickScenario'),
+  onPerfLog: (cb: (e: PerfLogEvent) => void): (() => void) => {
+    const h = (_e: unknown, d: PerfLogEvent) => cb(d)
+    ipcRenderer.on('perf:log', h)
+    return () => ipcRenderer.removeListener('perf:log', h)
+  },
+  onPerfDone: (cb: (e: PerfDoneEvent) => void): (() => void) => {
+    const h = (_e: unknown, d: PerfDoneEvent) => cb(d)
+    ipcRenderer.on('perf:done', h)
+    return () => ipcRenderer.removeListener('perf:done', h)
+  },
   logsSetRetentionSettings: (settings: LogRetentionSettings): Promise<LogRetentionSettings> =>
     ipcRenderer.invoke('logs:setRetentionSettings', settings),
 

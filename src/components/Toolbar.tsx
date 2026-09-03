@@ -11,6 +11,7 @@ import {
   Circle,
   Settings,
   HeartPulse,
+  Gauge,
   SquareTerminal,
   ScrollText,
   Activity,
@@ -41,6 +42,8 @@ interface ToolbarProps {
   onOpenSettings: () => void
   /** 가용성 검증 상태보드 열기 */
   onOpenStatusBoard: () => void
+  /** 성능 테스트(로컬 부하) 열기 */
+  onOpenPerf: () => void
   /** 터미널에서 선택한 영역을 AI 분석 */
   onAnalyzeSelection: () => void
 }
@@ -65,6 +68,7 @@ export default function Toolbar({
   onToggleLog,
   onOpenSettings,
   onOpenStatusBoard,
+  onOpenPerf,
   onAnalyzeSelection,
 }: ToolbarProps) {
   return (
@@ -125,12 +129,20 @@ export default function Toolbar({
           가용성 상태보드
         </button>
         <button
+          onClick={onOpenPerf}
+          title="성능 테스트 — 이 PC 에서 대상 서비스로 부하 (Locust)"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+        >
+          <Gauge size={14} className="text-blue-300" />
+          성능 테스트
+        </button>
+        <button
           onClick={onAnalyzeSelection}
           title="드래그로 선택한 텍스트를 AI 분석"
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScanText size={14} className="text-blue-300" />
-          선택 세션 AI 분석
+          AI 분석
         </button>
         <button
           onClick={onOpenMultiRun}

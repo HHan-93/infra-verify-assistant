@@ -737,3 +737,111 @@ export interface PortalHttpResult {
   error?: string
   timedOut?: boolean
 }
+
+
+// ─────────────────────────────────────────────────────────────
+// 성능 테스트 (Locust) — 부하는 **이 PC 에서** 발생시키고 대상만 세션에서 가져온다.
+//
+// 왜 로컬 발생인가: 이 앱은 SSH 도구지만, 부하 발생기를 원격에 올리면 그 서버에 파이썬을
+// 설치하고 방화벽을 열어야 한다. "지금 이 서비스가 얼마나 받아내는가" 를 보려는 것이므로
+// 내 PC → 대상 이 가장 빨리 답이 나온다. 대상이 사설망이면 이미 있는 포트 포워딩을 쓴다.
+//
+// 왜 Locust 인가: 돌고 있는 동안의 대시보드를 http(127.0.0.1)로 띄워 준다 — 그래서 앱 안
+// iframe 이 개발·배포에서 똑같이 동작한다. JMeter 리포트는 file:// 이라 dev 에서 막힌다.
+// (JMeter 를 나중에 붙일 수 있게 요약 파서는 CSV 기준으로 둔다.)
+// ─────────────────────────────────────────────────────────────
+
+/** 성능 테스트 실행 환경 점검 결과 — 없는 것을 **무엇을 하면 되는지**와 함께 돌려준다 */
+export interface PerfEnvStatus {
+  ok: boolean
+  /** 찾은 실행 방법 (표시용): `locust` · `python -m locust` · 사용자가 지정한 경로 */
+  how?: string
+  /** locust --version 첫 줄 */
+  version?: string
+  /** 무엇이 없는지 (사람이 읽는 문장) */
+  problem?: string
+  /** 무엇을 하면 되는지 (설치 명령 등) */
+  hint?: string
+}
+
+/** 폼으로 만드는 시나리오 — locustfile.py 를 앱이 생성한다 */
+export interface PerfFormScenario {
+  kind: 'form'
+  /** 부하를 줄 경로들 (`/v3`, `/v3/auth/tokens`). 빈 배열이면 `/` */
+  paths: string[]
+  method: 'GET' | 'POST'
+  /** POST 본문 (JSON 문자열). GET 이면 무시 */
+  body?: string
+  /** 추가 헤더 */
+  headers?: Record<string, string>
+  /** 요청 사이 대기 (초) — 실사용자 흉내. 0,0 이면 쉬지 않고 때린다 */
+  waitMinSec: number
+  waitMaxSec: number
+}
+
+/** 사용자가 직접 쓴 locustfile.py */
+export interface PerfFileScenario {
+  kind: 'file'
+  path: string
+}
+
+export interface PerfRunConfig {
+  /** 대상을 가져온 세션 (표시·기록용. 부하는 로컬에서 나간다) */
+  sessionId?: string
+  sessionLabel?: string
+  targetUrl: string
+  users: number
+  spawnRate: number
+  durationSec: number
+  /**
+   * 판정 기준. **없으면 초록 PASS 를 띄우지 않는다** — 측정값만 보여준다.
+   * (verdict.ts 의 3-상태 규칙과 같은 이유: 기준 없는 초록은 근거 없는 안심이다)
+   */
+  p95ThresholdMs?: number
+  errorRateThresholdPct?: number
+  scenario: PerfFormScenario | PerfFileScenario
+  /** 자체 서명 인증서를 무시할지 (사내 인프라는 대개 필요) */
+  insecureTls?: boolean
+}
+
+/** 회차 하나 — userData/perf-runs/<id>/run.json */
+export interface PerfRunMeta {
+  id: string
+  startedAt: number
+  endedAt?: number
+  config: PerfRunConfig
+  exitCode?: number
+  /** 사용자가 중지시켰는가 — 중간에 끊긴 수치를 '결과' 로 읽지 않도록 남긴다 */
+  canceled?: boolean
+  /** 돌고 있는 동안의 대시보드 주소 (종료 후에는 안 열린다) */
+  webUrl?: string
+  /** 종료 후 자체 HTML 리포트 */
+  reportPath?: string
+  /** locust --csv 접두어 — `<prefix>_stats.csv` 등 */
+  csvPrefix?: string
+  /** 실행에 쓴 locustfile 경로 (폼으로 만든 것도 여기 남는다) */
+  scenarioPath?: string
+}
+
+/** 회차 + 통계 원본 — 요약 계산은 렌더러(src/lib/perfParse)가 한다 */
+export interface PerfRunRecord {
+  meta: PerfRunMeta
+  /** `<prefix>_stats.csv` 내용. 없으면(중지·실패) 없음 */
+  statsCsv?: string
+}
+
+/** perf:log 이벤트 — 100ms 씩 묶어서 온다(줄마다 보내면 렌더러가 멎는다) */
+export interface PerfLogEvent {
+  runId: string
+  /** locust 는 진행 로그를 stderr 로 낸다 — 그것만으로 오류라고 볼 수 없어 출처를 남긴다 */
+  stream: 'stdout' | 'stderr'
+  text: string
+}
+
+/** perf:done 이벤트 */
+export interface PerfDoneEvent {
+  runId: string
+  exitCode?: number
+  canceled?: boolean
+  error?: string
+}

@@ -33,6 +33,7 @@ import FileExplorer from './components/FileExplorer'
 import LiveLogViewer from './components/LiveLogViewer'
 import TunnelManager from './components/TunnelManager'
 import MultiRun from './components/MultiRun'
+import PerfPanel from './components/PerfPanel'
 import StatusBoard from './components/StatusBoard'
 import ScenarioRunner, { type RunnerScenario } from './components/ScenarioRunner'
 import TabBar, { type TabInfo, type LayoutMode, type GridGroupInfo } from './components/TabBar'
@@ -285,6 +286,7 @@ export default function App() {
   const [latency, setLatency] = useState<number | null>(null)
   const [, setNowTick] = useState(0)
   // 외형 설정 (글꼴 크기 / 테마) — localStorage 보존
+  const [showPerf, setShowPerf] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   // 설정 모달에서 보고 있는 칸. 창을 닫았다 열면 '화면' 으로 돌아온다 — 마지막에 본 칸을
   // 기억하면 "설정을 열었는데 못 보던 화면이 뜬다" 가 된다.
@@ -1755,6 +1757,7 @@ export default function App() {
           logging={loggingSessions.has(activeId)}
           onToggleLog={toggleLog}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenPerf={() => setShowPerf(true)}
           onOpenStatusBoard={() => setShowStatusBoard(true)}
           onAnalyzeSelection={analyzeSelection}
         />
@@ -2275,6 +2278,16 @@ export default function App() {
             .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
           onClose={() => setShowMultiRun(false)}
           onAnalyze={analyzeText}
+        />
+      )}
+
+      {/* 성능 테스트 — 부하는 이 PC 에서, 대상만 세션에서 */}
+      {showPerf && (
+        <PerfPanel
+          sessions={tabs
+            .filter((t) => statuses[t.id]?.status === 'connected')
+            .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
+          onClose={() => setShowPerf(false)}
         />
       )}
 
