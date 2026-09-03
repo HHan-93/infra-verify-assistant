@@ -874,7 +874,18 @@ export interface PerfFileScenario {
   path: string
 }
 
+/**
+ * 어느 도구로 돌릴지.
+ *
+ * Locust 가 기본이다(실행 중 대시보드가 http 라 앱 안에 끼워지고, 사전조건이 pip 하나다).
+ * JMeter 는 **이미 .jmx 자산이 있는 팀**을 위한 길이다 — Java 가 필요하고, 시나리오를 폼으로
+ * 만들어 줄 수 없으며(.jmx 는 GUI 로 만드는 XML), 실행 중 화면이 없다.
+ */
+export type PerfTool = 'locust' | 'jmeter'
+
 export interface PerfRunConfig {
+  /** 없으면 locust (2.8.0 회차 호환) */
+  tool?: PerfTool
   /** 대상을 가져온 세션 (표시·기록용. 부하는 로컬에서 나간다) */
   sessionId?: string
   sessionLabel?: string
@@ -976,6 +987,8 @@ export interface PerfRunRecord {
   statsCsv?: string
   /** `<prefix>_failures.csv` 내용. 실패가 없으면 파일 자체가 없다 */
   failuresCsv?: string
+  /** JMeter 회차의 `report/statistics.json` 내용 */
+  jmeterStatsJson?: string
 }
 
 /** perf:log 이벤트 — 100ms 씩 묶어서 온다(줄마다 보내면 렌더러가 멎는다) */
