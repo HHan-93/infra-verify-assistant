@@ -111,6 +111,12 @@ const electronAPI = {
   perfOpenReport: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openReport', id),
   perfOpenFolder: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openFolder', id),
   perfPickScenario: (): Promise<{ path: string }> => ipcRenderer.invoke('perf:pickScenario'),
+  perfPreviewScenario: (cfg: PerfRunConfig): Promise<{ text: string }> =>
+    ipcRenderer.invoke('perf:previewScenario', cfg),
+  perfSaveReport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('perf:saveReport', id),
+  perfSaveCsv: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('perf:saveCsv', id),
   onPerfLog: (cb: (e: PerfLogEvent) => void): (() => void) => {
     const h = (_e: unknown, d: PerfLogEvent) => cb(d)
     ipcRenderer.on('perf:log', h)

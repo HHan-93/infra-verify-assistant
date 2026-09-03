@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   Notification,
+  nativeTheme,
   ipcMain,
   dialog,
   shell,
@@ -5135,7 +5136,14 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
       } catch {
         /* 중지·실패한 회차는 통계가 없다 */
       }
-      out.push({ meta, statsCsv })
+      // 무엇이 실패했는지가 인프라 검증에서는 숫자보다 중요하다 (503 인지 타임아웃인지)
+      let failuresCsv: string | undefined
+      try {
+        failuresCsv = await readFile(path.join(dir, 'run_failures.csv'), 'utf-8')
+      } catch {
+        /* 실패가 없으면 파일도 없다 */
+      }
+      out.push({ meta, statsCsv, failuresCsv })
     } catch {
       /* 손상된 폴더는 건너뛴다 */
     }
@@ -5187,6 +5195,70 @@ ipcMain.handle('perf:openFolder', async (_evt, id: string) => {
   return { ok: true }
 })
 
+/**
+ * 폼으로 만들 locustfile 미리보기.
+ *
+ * 앱이 대신 만들어 주는 파일을 사람이 못 보면, 무엇이 돌아갈지 모르는 채 부하를 거는 셈이다.
+ * 실행 전에 그대로 보여준다(실행 때도 같은 함수를 쓰므로 화면과 실제가 어긋나지 않는다).
+ */
+ipcMain.handle('perf:previewScenario', (_evt, cfg: PerfRunConfig) => ({ text: buildLocustfile(cfg) }))
+
+/** 리포트(HTML) 를 사용자가 고른 곳으로 저장 */
+ipcMain.handle('perf:saveReport', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }
+  const src = path.join(perfRunsDir(), id, 'report.html')
+  try {
+    await stat(src)
+  } catch {
+    return { saved: false, error: '리포트 파일이 없습니다.' }
+  }
+  let stamp = id.slice(0, 8)
+  try {
+    const meta = JSON.parse(await readFile(path.join(perfRunsDir(), id, 'run.json'), 'utf-8')) as PerfRunMeta
+    const d = new Date(meta.startedAt)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`
+  } catch {
+    /* 이름만 덜 친절해진다 */
+  }
+  const r = await dialog.showSaveDialog(mainWindow!, {
+    title: '성능 검증 리포트 저장',
+    defaultPath: `perf-report_${stamp}.html`,
+    filters: [{ name: 'HTML', extensions: ['html'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    // 원본 바이트 그대로 — utf-8 로 다시 쓰면 리포트가 품은 데이터가 깨질 수 있다
+    await copyFile(src, r.filePath)
+    return { saved: true, path: r.filePath }
+  } catch (e) {
+    return { saved: false, error: cleanErrorMessage(e) }
+  }
+})
+
+/** 통계 CSV 저장 (엑셀로 열어 보고서에 붙이는 용도) */
+ipcMain.handle('perf:saveCsv', async (_evt, id: string) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }
+  const src = path.join(perfRunsDir(), id, 'run_stats.csv')
+  try {
+    await stat(src)
+  } catch {
+    return { saved: false, error: '통계 파일이 없습니다.' }
+  }
+  const r = await dialog.showSaveDialog(mainWindow!, {
+    title: '통계 CSV 저장',
+    defaultPath: `perf-stats_${id.slice(0, 8)}.csv`,
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    await copyFile(src, r.filePath)
+    return { saved: true, path: r.filePath }
+  } catch (e) {
+    return { saved: false, error: cleanErrorMessage(e) }
+  }
+})
+
 /** 시나리오 파일 고르기 */
 ipcMain.handle('perf:pickScenario', async () => {
   const r = await dialog.showOpenDialog(mainWindow!, {
@@ -5201,6 +5273,10 @@ ipcMain.handle('perf:pickScenario', async () => {
 // ── 앱 라이프사이클 ────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  // 앱은 다크 하나뿐인데, **끼워 넣는 남의 화면**은 prefers-color-scheme 을 본다.
+  // Locust 대시보드가 흰 배경으로 떠서 창 안에서 혼자 튀었다 — 확인해 보니 그쪽 UI 가
+  // 이 값을 따르므로, 여기서 다크로 못 박아 둔다(네이티브 창틀·대화상자도 같이 어두워진다).
+  nativeTheme.themeSource = 'dark'
   createWindow()
   void trimSessionLogs()
   // 패키징된 빌드에서만 자동 업데이트 확인 (GitHub Releases 의 latest.yml 기준)

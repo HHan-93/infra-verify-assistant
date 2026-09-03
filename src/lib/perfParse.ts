@@ -196,3 +196,42 @@ export function parseLocustConsole(text: string): PerfLive {
   }
   return live
 }
+
+export interface PerfFailure {
+  /** `GET /v3` */
+  name: string
+  /** 응답 코드나 예외 문구 그대로 */
+  error: string
+  count: number
+}
+
+/**
+ * `run_failures.csv` → 실패 목록 (많은 것부터).
+ *
+ * 인프라 검증에서는 실패율 숫자보다 **무엇이 실패했는가**가 먼저다 — 503 인지, 연결
+ * 타임아웃인지, 인증 만료인지에 따라 볼 곳이 달라진다. 그래서 요약에 같이 올린다.
+ * 열 이름은 `Method,Name,Error,Occurrences`.
+ */
+export function parseLocustFailures(csv: string): PerfFailure[] {
+  const lines = (csv ?? '').split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length < 2) return []
+  const header = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase())
+  const iMethod = header.indexOf('method')
+  const iName = header.indexOf('name')
+  const iError = header.indexOf('error')
+  const iCount = header.indexOf('occurrences')
+  if (iName < 0 || iError < 0) return []
+  return lines
+    .slice(1)
+    .map((line) => {
+      const c = splitCsvLine(line)
+      const n = Number(String(c[iCount] ?? '').trim())
+      return {
+        name: [(c[iMethod] ?? '').trim(), (c[iName] ?? '').trim()].filter(Boolean).join(' '),
+        error: (c[iError] ?? '').trim(),
+        count: Number.isFinite(n) ? n : 0,
+      }
+    })
+    .filter((f) => f.error || f.name)
+    .sort((a, b) => b.count - a.count)
+}

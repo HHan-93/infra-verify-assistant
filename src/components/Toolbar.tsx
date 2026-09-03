@@ -72,8 +72,10 @@ export default function Toolbar({
   onAnalyzeSelection,
 }: ToolbarProps) {
   return (
-    // 버튼이 늘 때마다 폭이 모자라 가로 스크롤이 생긴다. 라벨은 지키고 간격을 줄이는 쪽을 택했다
-    // — 이 저장소는 "글자만 있으면 버튼인 줄 모른다" 를 이미 겪었으므로 아이콘 전용으로 바꾸지 않는다.
+    // 버튼이 늘 때마다 폭이 모자라 가로 스크롤이 생긴다. 라벨은 지키고 간격·여백을 줄이는 쪽을
+    // 택했다 — 이 저장소는 "글자만 있으면 버튼인 줄 모른다" 를 이미 겪었으므로 아이콘 전용으로
+    // 바꾸지 않는다. 실제 CSS 로 재보면 지금 내용 폭이 1023px 이라 터미널 영역이 1030px 이상이면
+    // 스크롤이 없다(FHD 에서 사이드바·AI 패널을 다 펼쳐도 1294px).
     <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-white/10 bg-panel px-2 py-2">
       {/* 명령 입력 (라벨 유지) */}
       <button
@@ -128,7 +130,7 @@ export default function Toolbar({
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <HeartPulse size={14} className="text-blue-300" />
-          상태보드
+          가용성 상태보드
         </button>
         <button
           onClick={onOpenPerf}

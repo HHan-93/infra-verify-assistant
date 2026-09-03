@@ -828,6 +828,8 @@ export interface PerfRunRecord {
   meta: PerfRunMeta
   /** `<prefix>_stats.csv` 내용. 없으면(중지·실패) 없음 */
   statsCsv?: string
+  /** `<prefix>_failures.csv` 내용. 실패가 없으면 파일 자체가 없다 */
+  failuresCsv?: string
 }
 
 /** perf:log 이벤트 — 100ms 씩 묶어서 온다(줄마다 보내면 렌더러가 멎는다) */
