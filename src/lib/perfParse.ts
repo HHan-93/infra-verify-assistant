@@ -398,8 +398,10 @@ export function unreachableRatio(failures: PerfFailure[]): number {
  *
  * **백분위 칸 이름이 값을 말해 주지 않는다**: `pct1/pct2/pct3` 는 jmeter.properties 의
  * `aggregate_rpt_pct1/2/3` 설정을 따르고 기본값이 90/95/99 다. 그래서 pct2→p95, pct3→p99 로
- * 읽되 p50 은 없는 것으로 둔다(중앙값 칸이 없다). 설정을 바꾼 환경에서는 값이 밀릴 수 있어
- * 요약에 '기본 설정 기준' 이라고 밝힌다.
+ * 읽는다. 설정을 바꾼 환경에서는 값이 밀릴 수 있다.
+ *
+ * p50 은 `medianResTime` 을 쓴다 — 실제 5.6.3 산출물을 열어 보고 알았다(처음엔 '중앙값 칸이
+ * 없다' 고 적어 두었는데 틀린 말이었다).
  */
 export function parseJmeterStatistics(json: unknown): PerfSummary | null {
   const j = (json ?? {}) as Record<string, unknown>
@@ -429,7 +431,7 @@ export function parseJmeterStatistics(json: unknown): PerfSummary | null {
     failRatePct: n(total.errorPct) ?? (requests > 0 ? (failures / requests) * 100 : 0),
     rps: n(total.throughput) ?? 0,
     avgMs: n(total.meanResTime) ?? 0,
-    p50Ms: undefined,
+    p50Ms: n(total.medianResTime),
     p95Ms: n(total.pct2ResTime),
     p99Ms: n(total.pct3ResTime),
     maxMs: n(total.maxResTime),

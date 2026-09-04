@@ -4912,14 +4912,36 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
       return { ok: true, how: cmd, version: (line || 'Apache JMeter').slice(0, 80) }
     }
   }
+  // 파일은 있는데 실행이 안 됐다면 Java 쪽일 가능성이 크다 — 그 경우를 갈라서 말한다.
+  // (jmeter.bat 은 java 를 못 찾으면 JAVA_HOME 을 들먹이는 메시지를 내고 끝난다)
+  if (jmeterPath) {
+    let exists = false
+    try {
+      await stat(jmeterPath)
+      exists = true
+    } catch {
+      /* 경로 자체가 틀렸다 */
+    }
+    if (exists) {
+      return {
+        ok: false,
+        problem: `파일은 있는데 JMeter 가 실행되지 않습니다: ${jmeterPath}`,
+        hint:
+          'Java 가 없거나 이 앱이 아직 그 설치를 모르는 상태일 수 있습니다. java -version 이 되는지 확인하고, ' +
+          '방금 Java 를 설치했다면 **앱을 껐다 켜세요** — 실행 중인 앱은 설치 전의 환경변수(PATH)를 그대로 들고 있습니다.',
+      }
+    }
+  }
   return {
     ok: false,
     problem: jmeterPath
-      ? `지정한 경로로 JMeter 를 실행할 수 없습니다: ${jmeterPath}`
+      ? `지정한 경로에 파일이 없습니다: ${jmeterPath}`
       : 'JMeter 를 찾을 수 없습니다.',
     hint:
       'JMeter 는 압축을 풀어 쓰는 도구라 PATH 에 없는 경우가 많습니다. ' +
-      'apache-jmeter/bin/jmeter.bat 경로를 아래에 직접 지정하세요. (Java 8 이상이 함께 필요합니다)',
+      'apache-jmeter/bin/jmeter.bat 경로를 아래에 직접 지정하세요. ' +
+      '압축을 풀면 폴더가 한 겹 더 생기는 경우가 있으니(…/apache-jmeter-5.6.3/apache-jmeter-5.6.3/bin) ' +
+      '실제 jmeter.bat 이 있는 곳을 확인하세요. Java 8 이상도 함께 필요합니다.',
   }
 })
 
