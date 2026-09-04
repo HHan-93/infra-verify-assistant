@@ -30,6 +30,7 @@ import type {
   PerfEnvStatus,
   PerfPreset,
   PerfRetention,
+  PerfTool,
   PerfRunConfig,
   PerfRunMeta,
   PerfRunRecord,
@@ -41,6 +42,8 @@ import { parseCurl } from '../lib/portal'
 import {
   FAILURE_KIND_LABEL,
   classifyFailure,
+  parseJmeterConsole,
+  parseJmeterStatistics,
   parseLocustConsole,
   parseLocustFailures,
   parseLocustHistory,
@@ -222,6 +225,14 @@ function fmtBytes(b?: number): string {
 }
 
 export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelProps) {
+  /**
+   * 어느 도구로 돌릴지.
+   *
+   * Locust 가 기본. JMeter 는 이미 .jmx 가 있는 팀을 위한 길이고, 되는 것과 안 되는 것이
+   * 뚜렷이 갈린다 — **안 되는 자리를 회색으로만 두지 않고 왜인지 그 자리에 적는다.**
+   */
+  const [tool, setTool] = useState<PerfTool>('locust')
+  const [jmeterPath, setJmeterPath] = useState('')
   const [env, setEnv] = useState<PerfEnvStatus | null>(null)
   const [envChecking, setEnvChecking] = useState(true)
   const [locustPath, setLocustPath] = useState('')
@@ -334,13 +345,43 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const checkEnv = async () => {
     setEnvChecking(true)
     try {
-      setEnv(await window.electronAPI.perfEnv())
-      setLocustPath(await window.electronAPI.perfGetLocustPath())
+      if (tool === 'jmeter') {
+        setEnv(await window.electronAPI.perfEnvJmeter())
+        setJmeterPath(await window.electronAPI.perfGetJmeterPath())
+      } else {
+        setEnv(await window.electronAPI.perfEnv())
+        setLocustPath(await window.electronAPI.perfGetLocustPath())
+      }
     } finally {
       setEnvChecking(false)
     }
   }
   const refreshRuns = async () => setRuns(await window.electronAPI.perfList())
+
+  /**
+   * 도구를 바꾸면 **그 도구 기준으로 다시 점검하고, 기본값도 그 도구 것으로 되돌린다.**
+   *
+   * 고른 파일은 도구별로 따로 기억한다 — Locust 로 돌아왔는데 파일 칸에 .jmx 가 남아 있으면
+   * 무엇이 돌아갈지 알 수 없다.
+   */
+  const filesByTool = useRef<Record<PerfTool, string>>({ locust: '', jmeter: '' })
+  const prevTool = useRef<PerfTool>('locust')
+  useEffect(() => {
+    void checkEnv()
+    const from = prevTool.current
+    if (from === tool) return
+    filesByTool.current[from] = scenarioFile
+    prevTool.current = tool
+    setScenarioFile(filesByTool.current[tool] ?? '')
+    setScenarioKind(tool === 'jmeter' ? 'file' : 'form')
+    if (tool === 'jmeter') setLoadMode('flat')
+    setNote(
+      tool === 'jmeter'
+        ? 'JMeter 로 바꿨습니다 — .jmx 계획 파일이 필요합니다.'
+        : 'Locust 로 바꿨습니다 — 폼으로 시나리오를 만들 수 있습니다.',
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool])
 
   useEffect(() => {
     void checkEnv()
@@ -435,7 +476,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         const next = prev + e.text
         return next.length > LOG_MAX_CHARS ? next.slice(next.length - LOG_MAX_CHARS) : next
       })
-      const l = parseLocustConsole(e.text)
+      // JMeter 는 통계 API 가 없어 콘솔의 누적 요약 줄이 유일한 진행 정보다
+      const l = tool === 'jmeter' ? parseJmeterConsole(e.text) : parseLocustConsole(e.text)
       if (Object.keys(l).length) setLive((prev) => ({ ...prev, ...l }))
     })
     const offDone = window.electronAPI.onPerfDone((e) => {
@@ -523,12 +565,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     p95ThresholdMs: numOrUndef(p95Th),
     p99ThresholdMs: numOrUndef(p99Th),
     errorRateThresholdPct: numOrUndef(errTh),
-    warmupSec: numOrUndef(warmupSec),
-    insecureTls: insecure,
-    processes: Math.max(1, Number(processes) || 1),
-    expectWorkers: Math.max(0, Number(expectWorkers) || 0),
+    warmupSec: tool === 'jmeter' ? undefined : numOrUndef(warmupSec),
+    insecureTls: tool === 'jmeter' ? undefined : insecure,
+    tool,
+    // JMeter 에는 없는 개념들 — 값을 보내 두면 회차 요약에 '설정한 것처럼' 남아 오해를 만든다
+    ...(tool === 'jmeter'
+      ? {}
+      : {
+          processes: Math.max(1, Number(processes) || 1),
+          expectWorkers: Math.max(0, Number(expectWorkers) || 0),
+        }),
     stages:
-      loadMode === 'stages'
+      tool !== 'jmeter' && loadMode === 'stages'
         ? stages
             .map((st) => ({
               users: Number(st.users) || 0,
@@ -659,11 +707,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const blockedReason = (() => {
     if (envChecking) return '환경을 확인하는 중입니다'
     if (!env?.ok) return '환경 확인이 필요합니다'
-    if (!targetUrl.trim()) return '대상 주소를 적어 주세요'
+    // JMeter 계획은 대상을 제 안에 갖고 있다 — 우리 주소는 속성으로 넘기는 참고값이라 비워도 된다
+    if (tool !== 'jmeter' && !targetUrl.trim()) return '대상 주소를 적어 주세요'
     if (targetUrl.trim() && !/^https?:\/\//i.test(targetUrl.trim()))
       return '대상 주소는 http:// 또는 https:// 로 시작해야 합니다'
     if (scenarioKind === 'file' && !scenarioFile.trim()) return 'locustfile 을 고르세요'
-    if (scenarioKind === 'form' && !steps.some((st) => st.path.trim())) return '요청할 경로를 한 개 이상 적어 주세요'
+    if (tool === 'jmeter' && !scenarioFile.trim()) return 'JMeter 는 .jmx 계획 파일이 필요합니다'
+    if (tool !== 'jmeter' && scenarioKind === 'form' && !steps.some((st) => st.path.trim()))
+      return '요청할 경로를 한 개 이상 적어 주세요'
     if (loadMode === 'stages' && !stages.some((st) => Number(st.users) > 0 && Number(st.holdSec) > 0))
       return '계단식 단계에 사용자 수와 유지 시간을 적어 주세요'
     return ''
@@ -687,10 +738,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   }
 
   const selected = runs.find((r) => r.meta.id === selectedRunId) ?? null
-  const selectedSummary: PerfSummary | null = useMemo(
-    () => (selected?.statsCsv ? parseLocustStats(selected.statsCsv) : null),
-    [selected],
-  )
+  const selectedSummary: PerfSummary | null = useMemo(() => {
+    if (!selected) return null
+    // 도구마다 집계 파일이 다르다. 판정에 쓰는 숫자는 늘 그 파일에서만 만든다.
+    if ((selected.meta.config.tool ?? 'locust') === 'jmeter') {
+      if (!selected.jmeterStatsJson) return null
+      try {
+        return parseJmeterStatistics(JSON.parse(selected.jmeterStatsJson))
+      } catch {
+        return null
+      }
+    }
+    return selected.statsCsv ? parseLocustStats(selected.statsCsv) : null
+  }, [selected])
   const failures = useMemo(
     () => (selected?.failuresCsv ? parseLocustFailures(selected.failuresCsv) : []),
     [selected],
@@ -992,6 +1052,26 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
           <Gauge size={15} className="text-blue-300" />
           <span className="text-sm font-semibold text-gray-100">성능 검증</span>
+          <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
+            {(['locust', 'jmeter'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTool(t)}
+                disabled={!!running}
+                title={
+                  t === 'locust'
+                    ? '폼으로 시나리오를 만들 수 있고, 실행 중 대시보드가 앱 안에 들어옵니다'
+                    : '이미 만들어 둔 .jmx 계획으로 돌립니다 (Java 필요 · 실행 중 화면 없음)'
+                }
+                className={
+                  'rounded px-2 py-0.5 text-[10.5px] disabled:opacity-50 ' +
+                  (tool === t ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
+                }
+              >
+                {t === 'locust' ? 'Locust' : 'JMeter'}
+              </button>
+            ))}
+          </span>
           {running ? (
             <span className="rounded-full bg-blue-600/25 px-2 py-0.5 text-[11px] text-blue-200">
               진행 중 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
@@ -1028,7 +1108,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         {/* 환경 점검 — 안 되면 무엇을 하면 되는지 여기서 말한다 */}
         {envChecking ? (
           <div className="flex items-center gap-2 border-b border-white/10 bg-panel-light/40 px-4 py-1.5 text-[11.5px] text-gray-400">
-            <RefreshCw size={12} className="animate-spin" /> 부하 도구(Locust) 를 찾는 중…
+            <RefreshCw size={12} className="animate-spin" /> 부하 도구({tool === 'jmeter' ? 'JMeter' : 'Locust'}) 를
+            찾는 중…
           </div>
         ) : env?.ok ? (
           <div className="flex items-center gap-2 border-b border-white/10 bg-panel-light/40 px-4 py-1.5 text-[11.5px] text-gray-400">
@@ -1052,16 +1133,27 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   시작 버튼은 눌리지 않습니다.
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <code className="rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-gray-300">
-                    pip install locust
-                  </code>
-                  <button
-                    onClick={() => setConfirmInstall(true)}
-                    disabled={installing}
-                    className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/20 px-2 py-1 text-[11.5px] text-blue-100 hover:bg-blue-600/30 disabled:opacity-50"
-                  >
-                    <Download size={11} /> {installing ? '설치 중…' : '자동으로 설치'}
-                  </button>
+                  {tool === 'locust' ? (
+                    <code className="rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-gray-300">
+                      pip install locust
+                    </code>
+                  ) : (
+                    <span className="text-[11px] text-gray-400">
+                      jmeter.apache.org 에서 받아 압축을 푼 뒤, 그 안의{' '}
+                      <span className="font-mono text-gray-300">bin/jmeter.bat</span> 경로를 아래에 지정하세요.
+                    </span>
+                  )}
+                  {/* 자동 설치는 pip 한 줄로 끝나는 Locust 만. JMeter 는 압축을 풀어 쓰는 도구라
+                      우리가 대신 깔지 않고, 어디서 받아 어디를 지정하면 되는지 안내한다. */}
+                  {tool === 'locust' && (
+                    <button
+                      onClick={() => setConfirmInstall(true)}
+                      disabled={installing}
+                      className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/20 px-2 py-1 text-[11.5px] text-blue-100 hover:bg-blue-600/30 disabled:opacity-50"
+                    >
+                      <Download size={11} /> {installing ? '설치 중…' : '자동으로 설치'}
+                    </button>
+                  )}
                   <button
                     onClick={() => void checkEnv()}
                     className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
@@ -1072,14 +1164,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 <div className="mt-2 flex items-center gap-2">
                   <span className="shrink-0 text-[11px] text-gray-500">직접 지정</span>
                   <input
-                    value={locustPath}
-                    onChange={(e) => setLocustPath(e.target.value)}
-                    placeholder="C:\\Python312\\Scripts\\locust.exe"
+                    value={tool === 'jmeter' ? jmeterPath : locustPath}
+                    onChange={(e) => (tool === 'jmeter' ? setJmeterPath(e.target.value) : setLocustPath(e.target.value))}
+                    placeholder={
+                      tool === 'jmeter'
+                        ? 'C:\\apache-jmeter-5.6.3\\bin\\jmeter.bat'
+                        : 'C:\\Python312\\Scripts\\locust.exe'
+                    }
                     className={inputCls + ' min-w-0 flex-1 font-mono'}
                   />
                   <button
                     onClick={async () => {
-                      await window.electronAPI.perfSetLocustPath(locustPath.trim() || null)
+                      if (tool === 'jmeter') await window.electronAPI.perfSetJmeterPath(jmeterPath.trim() || null)
+                      else await window.electronAPI.perfSetLocustPath(locustPath.trim() || null)
                       await checkEnv()
                     }}
                     className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
@@ -1135,6 +1232,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               icon={<Gauge size={12} />}
               title="부하"
               badge={
+                tool === 'jmeter' ? (
+                  <span className="text-[9.5px] text-gray-600">계획(.jmx)이 정합니다</span>
+                ) : (
                 <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
                   {(['flat', 'stages'] as const).map((m) => (
                       <button
@@ -1155,10 +1255,12 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     </button>
                   ))}
                 </span>
+                )
               }
             >
-              {loadMode === 'flat' ? (
+              {loadMode === 'flat' || tool === 'jmeter' ? (
                 <>
+                  {tool === 'locust' && (
                   <div className="mb-1.5 flex flex-wrap gap-1">
                     {LOAD_PRESETS.map((pre) => {
                         const on =
@@ -1185,6 +1287,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       )
                     })}
                   </div>
+                  )}
                   <div className="grid grid-cols-3 gap-1.5">
                     <Field
                       label="사용자"
@@ -1266,7 +1369,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               )}
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
-                {loadSentence}
+                {tool === 'jmeter'
+                  ? '계획(.jmx)이 스레드 수와 시간을 제 안에 갖고 있습니다. 여기 값은 qterm.users · qterm.rampup · qterm.duration 속성으로 넘기기만 하니, 계획이 그 속성을 받아 쓰도록 만들어 두셨을 때만 반영됩니다.'
+                  : loadSentence}
               </p>
             </Card>
 
@@ -1275,7 +1380,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               icon={<FileCode size={12} />}
               title="시나리오"
               badge={
-                scenarioKind === 'form' ? (
+                tool === 'locust' && scenarioKind === 'form' ? (
                   <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
                     {(['weighted', 'sequential'] as const).map((o) => (
                       <button
@@ -1299,7 +1404,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 ) : undefined
               }
             >
-              <div className="mb-2 flex gap-1 rounded-md bg-black/25 p-0.5">
+              {/* JMeter 는 폼으로 만들 수 없으니 고르는 자리 자체를 두지 않는다 */}
+              {tool === 'locust' && (
+                <div className="mb-2 flex gap-1 rounded-md bg-black/25 p-0.5">
                   {(['form', 'file'] as const).map((k) => (
                     <button
                       key={k}
@@ -1310,12 +1417,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         (scenarioKind === k ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                       }
                     >
-                    {k === 'form' ? '폼으로 만들기' : '파일 고르기'}
-                  </button>
-                ))}
-              </div>
+                      {k === 'form' ? '폼으로 만들기' : '파일 고르기'}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {scenarioKind === 'form' ? (
+              {tool === 'locust' && scenarioKind === 'form' ? (
                 <>
                   {/* 폼/파일이 각각 무엇인지 한 줄로 — Locust 를 안 써 본 사람에게는 둘 다 낯설다 */}
                   <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
@@ -1466,21 +1574,31 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               ) : (
                 <>
                   <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
-                    이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로 씁니다.
-                    (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로 만들기' 를
-                    쓰세요.)
+                    {tool === 'jmeter' ? (
+                      <>
+                        JMeter GUI 로 만든 <span className="font-mono text-gray-500">.jmx</span> 계획을 그대로
+                        돌립니다. 계획은 <span className="text-gray-500">폼으로 만들어 드릴 수 없습니다</span> —
+                        스레드 그룹·샘플러가 든 XML 이라 GUI 로 짜는 것이 맞습니다.
+                      </>
+                    ) : (
+                      <>
+                        이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로
+                        씁니다. (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로
+                        만들기' 를 쓰세요.)
+                      </>
+                    )}
                   </p>
                   <div className="flex items-center gap-1.5">
                     <input
                       value={scenarioFile}
                       onChange={(e) => setScenarioFile(e.target.value)}
                       disabled={!!running}
-                      placeholder="locustfile.py"
+                      placeholder={tool === 'jmeter' ? 'plan.jmx' : 'locustfile.py'}
                       className={inputCls + ' min-w-0 flex-1 font-mono disabled:opacity-50'}
                     />
                     <button
                       onClick={async () => {
-                        const r = await window.electronAPI.perfPickScenario()
+                        const r = await window.electronAPI.perfPickScenario(tool)
                         if (r.path) setScenarioFile(r.path)
                       }}
                       disabled={!!running}
@@ -1547,7 +1665,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               고급 설정
               <span className="ml-auto text-[10px] text-gray-600">
-                {advOpen ? '접기' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
+                {advOpen ? '접기' : tool === 'jmeter' ? '백분위 기준' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
               </span>
             </button>
 
@@ -1558,16 +1676,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     <input
                       type="checkbox"
                       checked={insecure}
-                      disabled={!!running || scenarioKind === 'file'}
+                      disabled={!!running || tool === 'jmeter' || scenarioKind === 'file'}
                       onChange={(e) => setInsecure(e.target.checked)}
                       className="mt-0.5"
                     />
                     <span>
                       자체 서명 인증서 무시
                       <span className="block text-[10px] text-gray-600">
-                        {scenarioKind === 'file'
-                          ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
-                          : '사내 인프라는 대개 필요합니다'}
+                        {tool === 'jmeter'
+                          ? '계획(.jmx)의 HTTP 요청 기본값에서 설정하세요'
+                          : scenarioKind === 'file'
+                            ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
+                            : '사내 인프라는 대개 필요합니다'}
                       </span>
                     </span>
                   </label>
@@ -1585,18 +1705,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         unit="초"
                         value={warmupSec}
                         onChange={setWarmupSec}
-                        disabled={!!running}
+                        disabled={!!running || tool === 'jmeter'}
                         placeholder="0"
                       />
                     </div>
                     <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
-                      사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95
-                      최댓값으로 판정합니다.
+                      {tool === 'jmeter'
+                        ? 'JMeter 회차는 초 단위 이력을 남기지 않아 워밍업을 뺄 수 없습니다 (그 계산에 구간별 p95 가 필요합니다).'
+                        : '사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95 최댓값으로 판정합니다.'}
                     </p>
                   </div>
                 </Card>
 
-                {scenarioKind === 'form' && (
+                {tool === 'locust' && scenarioKind === 'form' && (
                   <Card icon={<FileCode size={12} />} title="요청 방식">
                     <div className="flex items-center gap-1.5">
                       <span className="shrink-0 text-[10.5px] text-gray-500">요청 사이 대기</span>
@@ -1641,6 +1762,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </Card>
                 )}
 
+                {tool === 'locust' && (
                 <Card icon={<Gauge size={12} />} title="부하 발생기">
                     <div className="grid grid-cols-2 gap-1.5">
                       <Field
@@ -1672,6 +1794,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       )}
                   </p>
                 </Card>
+                )}
               </>
             )}
 
@@ -1993,7 +2116,20 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             </div>
 
             <div className="mt-2 min-h-0 flex-1 overflow-hidden">
-              {tab === 'dash' &&
+              {tab === 'dash' && running && !running.webUrl ? (
+                /* JMeter 는 실행 중 대시보드가 없다 — 기다리게 두지 말고 그 사실을 말한다 */
+                <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
+                  <Gauge size={20} className="text-gray-600" />
+                  <p className="text-[12px] leading-relaxed text-gray-500">
+                    JMeter 는 실행 중 대시보드가 없습니다.
+                    <br />
+                    <span className="text-[11px] text-gray-600">
+                      진행은 <span className="text-gray-400">실시간 로그</span> 에서 보이고, 끝나면 대시보드가
+                      만들어집니다 — 요약의 <span className="text-gray-400">리포트 열기</span> 로 보세요.
+                    </span>
+                  </p>
+                </div>
+              ) : tab === 'dash' &&
                 (running?.webUrl ? (
                   dashReady ? (
                     // 돌고 있는 동안의 대시보드는 http 라 dev·배포에서 똑같이 끼워진다.
@@ -2376,6 +2512,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                           응답 평균 {fmtBytes(selectedSummary.avgContentBytes)} · 대략{' '}
                           {fmtRate(selectedSummary.avgContentBytes * selectedSummary.rps)} 주고받았습니다 (본문만,
                           헤더 제외)
+                        </p>
+                      )}
+
+                      {/* 도구에 따라 시계열이 없을 수 있다 — 빈 자리를 그냥 두지 않고 이유를 말한다 */}
+                      {history.length <= 1 && (selected.meta.config.tool ?? 'locust') === 'jmeter' && (
+                        <p className="mt-2 text-[10px] leading-relaxed text-gray-600">
+                          JMeter 회차는 초 단위 이력을 남기지 않아 시계열 그래프가 없습니다 — 시간에 따른 변화는{' '}
+                          <span className="text-gray-500">리포트 열기</span> 의 대시보드에서 보세요.
                         </p>
                       )}
 

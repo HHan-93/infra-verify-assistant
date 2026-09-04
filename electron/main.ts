@@ -57,6 +57,7 @@ import {
   type PerfRunRecord,
   type PerfPreset,
   type PerfRetention,
+  type PerfTool,
   normalizeFormScenario,
   type LogRetentionSettings,
   type LogTailTarget,
@@ -4736,11 +4737,16 @@ const perfSettingsPath = () => path.join(app.getPath('userData'), 'perf-settings
 interface PerfSettings {
   /** 사용자가 직접 지정한 locust 실행 파일 경로 (PATH 에 없을 때) */
   locustPath?: string
+  /** jmeter 실행 파일(jmeter.bat / jmeter) 경로 */
+  jmeterPath?: string
 }
 async function readPerfSettings(): Promise<PerfSettings> {
   try {
     const raw = JSON.parse(await readFile(perfSettingsPath(), 'utf-8'))
-    return { locustPath: typeof raw?.locustPath === 'string' ? raw.locustPath : undefined }
+    return {
+      locustPath: typeof raw?.locustPath === 'string' ? raw.locustPath : undefined,
+      jmeterPath: typeof raw?.jmeterPath === 'string' ? raw.jmeterPath : undefined,
+    }
   } catch {
     return {}
   }
@@ -4855,6 +4861,68 @@ ipcMain.handle('perf:setLocustPath', async (_evt, p: string | null) => {
   return { ok: true }
 })
 ipcMain.handle('perf:getLocustPath', async () => (await readPerfSettings()).locustPath ?? '')
+ipcMain.handle('perf:setJmeterPath', async (_evt, p: string | null) => {
+  await writePerfSettings({ jmeterPath: p || undefined })
+  return { ok: true }
+})
+ipcMain.handle('perf:getJmeterPath', async () => (await readPerfSettings()).jmeterPath ?? '')
+
+/**
+ * JMeter 환경 점검.
+ *
+ * `jmeter --version` 은 Java 가 있어야 성공한다 — 그래서 이 한 번으로 둘 다 확인된다.
+ * PATH 에 없는 경우가 대부분(zip 을 풀어 쓰는 도구)이라 경로 지정을 앞세워 안내한다.
+ */
+ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
+  const { jmeterPath } = await readPerfSettings()
+  const cands = jmeterPath ? [jmeterPath] : ['jmeter', 'jmeter.bat']
+  for (const cmd of cands) {
+    const v = await new Promise<string | null>((resolve) => {
+      let out = ''
+      let done = false
+      const finish = (r: string | null) => {
+        if (!done) {
+          done = true
+          resolve(r)
+        }
+      }
+      try {
+        const child = spawn(cmd, ['--version'], { windowsHide: true, shell: process.platform === 'win32' })
+        child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+        child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+        child.on('error', () => finish(null))
+        child.on('close', () => finish(/jmeter/i.test(out) ? out : null))
+        setTimeout(() => {
+          try {
+            child.kill()
+          } catch {
+            /* 무시 */
+          }
+          finish(null)
+        }, 15000)
+      } catch {
+        finish(null)
+      }
+    })
+    if (v) {
+      const line = v
+        .split('\n')
+        .map((l) => l.trim())
+        .find((l) => /\d+\.\d+/.test(l) && /jmeter|apache/i.test(l))
+      return { ok: true, how: cmd, version: (line || 'Apache JMeter').slice(0, 80) }
+    }
+  }
+  return {
+    ok: false,
+    problem: jmeterPath
+      ? `지정한 경로로 JMeter 를 실행할 수 없습니다: ${jmeterPath}`
+      : 'JMeter 를 찾을 수 없습니다.',
+    hint:
+      'JMeter 는 압축을 풀어 쓰는 도구라 PATH 에 없는 경우가 많습니다. ' +
+      'apache-jmeter/bin/jmeter.bat 경로를 아래에 직접 지정하세요. (Java 8 이상이 함께 필요합니다)',
+  }
+})
+
 /** 파이썬 문자열 리터럴로 안전하게 (따옴표·역슬래시·개행이 코드를 깨뜨리지 않게) */
 const pyStr = (v: string) => JSON.stringify(String(v ?? ''))
 
@@ -5093,6 +5161,94 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     return { ok: false, error: '이미 성능 검증이 돌고 있습니다. 먼저 중지하세요.' }
   }
   const settings = await readPerfSettings()
+  const tool = cfg.tool ?? 'locust'
+
+  // ── JMeter 로 돌리는 길 ────────────────────────────────────
+  // 폼으로 .jmx 를 만들어 줄 수는 없다(GUI 로 만드는 XML 이다) — 그래서 파일이 반드시 있어야 한다.
+  if (tool === 'jmeter') {
+    if (cfg.scenario.kind !== 'file') {
+      return { ok: false, error: 'JMeter 는 .jmx 파일이 필요합니다. 시나리오에서 파일을 고르세요.' }
+    }
+    const plan = cfg.scenario.path
+    try {
+      await stat(plan)
+    } catch {
+      return { ok: false, error: `테스트 계획 파일을 찾을 수 없습니다: ${plan}` }
+    }
+    const id2 = randomUUID()
+    const dir2 = path.join(perfRunsDir(), id2)
+    await mkdir(dir2, { recursive: true })
+    const jtl = path.join(dir2, 'result.jtl')
+    const reportDir = path.join(dir2, 'report')
+    const jmeterCmd = settings.jmeterPath || 'jmeter'
+    const jargs = [
+      '-n',
+      '-t',
+      plan,
+      '-l',
+      jtl,
+      // 실행이 끝나면 대시보드까지 한 번에 만든다(별도 실행이 필요 없다). 폴더는 비어 있어야
+      // 하는데 회차마다 새로 만드므로 항상 비어 있다.
+      '-e',
+      '-o',
+      reportDir,
+      // 화면에 적은 값을 계획이 __P 로 받아 쓸 수 있게 속성으로 넘긴다.
+      // JMeter 계획은 스레드 수를 제 안에 갖고 있어서 우리가 -u/-r/-t 로 바꿀 수 없다 —
+      // 그래서 '넘겨는 주되, 쓸지 말지는 계획이 정한다' 는 것을 화면에서도 밝힌다.
+      ...(cfg.targetUrl.trim() ? [`-Jqterm.target=${cfg.targetUrl.trim()}`] : []),
+      `-Jqterm.users=${Math.max(1, Math.round(cfg.users))}`,
+      `-Jqterm.rampup=${Math.max(1, Math.round(cfg.users / Math.max(1, cfg.spawnRate)))}`,
+      `-Jqterm.duration=${Math.max(1, Math.round(cfg.durationSec))}`,
+    ]
+    const meta2: PerfRunMeta = {
+      id: id2,
+      startedAt: Date.now(),
+      config: { ...cfg, tool: 'jmeter' },
+      reportPath: path.join(reportDir, 'index.html'),
+      scenarioPath: plan,
+    }
+    await writeRunMeta(dir2, meta2)
+    let child2: ChildProcess
+    try {
+      child2 = spawn(jmeterCmd, jargs, {
+        cwd: dir2,
+        windowsHide: true,
+        // jmeter.bat 은 배치라 셸을 거쳐야 실행된다(Windows)
+        shell: process.platform === 'win32',
+        env: { ...process.env },
+      })
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+    const run2: PerfRun = {
+      meta: meta2,
+      child: child2,
+      dir: dir2,
+      pending: { stdout: '', stderr: '' },
+      decoders: { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') },
+      finished: false,
+    }
+    perfRun = run2
+    child2.stdout?.on('data', (b: Buffer) => perfPush(run2, 'stdout', run2.decoders.stdout.write(b)))
+    child2.stderr?.on('data', (b: Buffer) => perfPush(run2, 'stderr', run2.decoders.stderr.write(b)))
+    child2.on('error', (err) => perfPush(run2, 'stderr', `\n[실행 실패] ${cleanErrorMessage(err)}\n`))
+    child2.on('close', async (code) => {
+      if (run2.finished) return
+      run2.finished = true
+      if (run2.flushTimer) clearTimeout(run2.flushTimer)
+      perfFlush(run2)
+      run2.meta.endedAt = Date.now()
+      run2.meta.exitCode = code ?? undefined
+      await writeRunMeta(run2.dir, run2.meta).catch(() => {})
+      mainWindow?.webContents.send('perf:done', {
+        runId: run2.meta.id,
+        exitCode: code ?? undefined,
+        canceled: run2.meta.canceled,
+      })
+    })
+    return { ok: true, meta: meta2 }
+  }
+
   const locustPath = settings.locustPath
   // 실행 방법을 여기서 다시 정한다 — 점검 결과를 렌더러가 들고 오는 구조로 만들면
   // 그 사이에 환경이 바뀐 경우를 못 잡는다.
@@ -5279,6 +5435,15 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
       } catch {
         /* 중지·실패한 회차는 통계가 없다 */
       }
+      // JMeter 회차는 대시보드가 만든 집계를 쓴다 (원본 JTL 은 표본 한 줄씩이라 너무 크다)
+      let jmeterStatsJson: string | undefined
+      if ((meta.config.tool ?? 'locust') === 'jmeter') {
+        try {
+          jmeterStatsJson = await readFile(path.join(dir, 'report', 'statistics.json'), 'utf-8')
+        } catch {
+          /* 리포트를 못 만든 회차 */
+        }
+      }
       // 무엇이 실패했는지가 인프라 검증에서는 숫자보다 중요하다 (503 인지 타임아웃인지)
       let failuresCsv: string | undefined
       try {
@@ -5286,7 +5451,7 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
       } catch {
         /* 실패가 없으면 파일도 없다 */
       }
-      out.push({ meta, statsCsv, failuresCsv })
+      out.push({ meta, statsCsv, failuresCsv, jmeterStatsJson })
     } catch {
       /* 손상된 폴더는 건너뛴다 */
     }
@@ -5743,10 +5908,13 @@ ipcMain.handle('perf:saveCsv', async (_evt, id: string) => {
 })
 
 /** 시나리오 파일 고르기 */
-ipcMain.handle('perf:pickScenario', async () => {
+ipcMain.handle('perf:pickScenario', async (_evt, tool?: PerfTool) => {
   const r = await dialog.showOpenDialog(mainWindow!, {
-    title: 'locustfile 선택',
-    filters: [{ name: 'Python', extensions: ['py'] }],
+    title: tool === 'jmeter' ? '테스트 계획(.jmx) 선택' : 'locustfile 선택',
+    filters:
+      tool === 'jmeter'
+        ? [{ name: 'JMeter 계획', extensions: ['jmx'] }]
+        : [{ name: 'Python', extensions: ['py'] }],
     properties: ['openFile'],
   })
   if (r.canceled || !r.filePaths[0]) return { path: '' }

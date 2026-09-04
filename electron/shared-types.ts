@@ -749,11 +749,11 @@ export interface PortalHttpResult {
 // 왜 Locust 인가: 돌고 있는 동안의 대시보드를 http(127.0.0.1)로 띄워 준다 — 그래서 앱 안
 // iframe 이 개발·배포에서 똑같이 동작한다. JMeter 리포트는 file:// 이라 dev 에서 막힌다.
 //
-// **JMeter 실행기는 2026-09-04 에 넣었다가 뺐다 — 다시 만들지 말 것.** 돌아가긴 했지만
-// 절반이 겉돌았다: 폼으로 .jmx 를 만들어 줄 수 없고(GUI 로 만드는 XML), 실행 중 대시보드도
-// 초 단위 이력도 없어 시계열·워밍업·계단식이 모두 빠졌다. 화면의 부하 값도 계획이 받아
-// 쓰도록 만들어 뒀을 때만 반영돼, "설정했는데 안 먹는" 자리를 계속 설명해야 했다.
-// 필요해지면 별도 화면으로 만들 것 — 같은 화면에서 두 도구를 고르게 하지 말 것.
+// **JMeter 는 뺐다가(2026-09-04) 같은 날 되살렸다.** 뺀 이유는 절반이 겉돌아서였다 —
+// 폼으로 .jmx 를 만들어 줄 수 없고(GUI 로 만드는 XML), 실행 중 대시보드도 초 단위 이력도
+// 없어 시계열·워밍업·계단식이 빠진다. 되살린 이유는 **이미 .jmx 자산이 있는 팀에게는 그
+// 절반이라도 값이 있기 때문**이다(사용자 판단). 대신 겉도는 자리를 숨기지 않고 그때그때
+// 이유를 적는다 — '없는 기능을 회색으로 두고 왜인지 말하지 않는 것' 이 원래 문제였다.
 // ─────────────────────────────────────────────────────────────
 
 /** 성능 테스트 실행 환경 점검 결과 — 없는 것을 **무엇을 하면 되는지**와 함께 돌려준다 */
@@ -879,7 +879,18 @@ export interface PerfFileScenario {
   path: string
 }
 
+/**
+ * 어느 도구로 돌릴지.
+ *
+ * Locust 가 기본이다(실행 중 대시보드가 http 라 앱 안에 끼워지고, 사전조건이 pip 하나다).
+ * JMeter 는 **이미 .jmx 자산이 있는 팀**을 위한 길이다 — Java 가 필요하고, 시나리오를 폼으로
+ * 만들어 줄 수 없으며(.jmx 는 GUI 로 만드는 XML), 실행 중 화면이 없다.
+ */
+export type PerfTool = 'locust' | 'jmeter'
+
 export interface PerfRunConfig {
+  /** 없으면 locust (2.8.0 회차 호환) */
+  tool?: PerfTool
   /** 대상을 가져온 세션 (표시·기록용. 부하는 로컬에서 나간다) */
   sessionId?: string
   sessionLabel?: string
@@ -981,6 +992,8 @@ export interface PerfRunRecord {
   statsCsv?: string
   /** `<prefix>_failures.csv` 내용. 실패가 없으면 파일 자체가 없다 */
   failuresCsv?: string
+  /** JMeter 회차의 `report/statistics.json` 내용 */
+  jmeterStatsJson?: string
 }
 
 /**

@@ -388,3 +388,83 @@ export function unreachableRatio(failures: PerfFailure[]): number {
     .reduce((a, f) => a + (f.count || 0), 0)
   return pre / total
 }
+
+/**
+ * JMeter 대시보드의 `statistics.json` → 요약.
+ *
+ * `jmeter -n -t plan.jmx -l result.jtl -e -o report/` 가 만드는 파일이다. 원본 JTL 은 표본
+ * 한 줄씩이라 수백만 줄이 될 수 있어 우리가 직접 백분위를 계산하지 않는다 — JMeter 가 이미
+ * 집계해 둔 것을 읽는다.
+ *
+ * **백분위 칸 이름이 값을 말해 주지 않는다**: `pct1/pct2/pct3` 는 jmeter.properties 의
+ * `aggregate_rpt_pct1/2/3` 설정을 따르고 기본값이 90/95/99 다. 그래서 pct2→p95, pct3→p99 로
+ * 읽되 p50 은 없는 것으로 둔다(중앙값 칸이 없다). 설정을 바꾼 환경에서는 값이 밀릴 수 있어
+ * 요약에 '기본 설정 기준' 이라고 밝힌다.
+ */
+export function parseJmeterStatistics(json: unknown): PerfSummary | null {
+  const j = (json ?? {}) as Record<string, unknown>
+  const n = (v: unknown): number | undefined => {
+    const x = Number(v)
+    return Number.isFinite(x) ? x : undefined
+  }
+  const total = j.Total as Record<string, unknown> | undefined
+  if (!total) return null
+  const requests = n(total.sampleCount) ?? 0
+  const failures = n(total.errorCount) ?? 0
+  const perEndpoint: PerfEndpointStat[] = Object.entries(j)
+    .filter(([k]) => k !== 'Total')
+    .map(([k, v]) => {
+      const row = (v ?? {}) as Record<string, unknown>
+      return {
+        name: String(row.transaction ?? k),
+        requests: n(row.sampleCount) ?? 0,
+        failures: n(row.errorCount) ?? 0,
+        avgMs: n(row.meanResTime) ?? 0,
+        p95Ms: n(row.pct2ResTime),
+      }
+    })
+  return {
+    requests,
+    failures,
+    failRatePct: n(total.errorPct) ?? (requests > 0 ? (failures / requests) * 100 : 0),
+    rps: n(total.throughput) ?? 0,
+    avgMs: n(total.meanResTime) ?? 0,
+    p50Ms: undefined,
+    p95Ms: n(total.pct2ResTime),
+    p99Ms: n(total.pct3ResTime),
+    maxMs: n(total.maxResTime),
+    avgContentBytes:
+      n(total.receivedKBytesPerSec) !== undefined && (n(total.throughput) ?? 0) > 0
+        ? ((n(total.receivedKBytesPerSec) as number) * 1024) / (n(total.throughput) as number)
+        : undefined,
+    perEndpoint,
+  }
+}
+
+/**
+ * JMeter 콘솔의 주기 요약 한 줄에서 진행 상황을 뽑는다.
+ *
+ * `summary +  12345 in 00:00:30 =  411.5/s Avg:    24 Min:     3 Max:   300 Err:     0 (0.00%)`
+ * 형태다. `summary =` 로 시작하는 누적 줄이 더 쓸모 있어 그쪽을 우선한다.
+ */
+export function parseJmeterConsole(text: string): PerfLive {
+  const live: PerfLive = {}
+  for (const raw of (text ?? '').split(/\r*\n/)) {
+    const line = raw.trim()
+    if (!/^summary [+=]/.test(line)) continue
+    const cumulative = line.startsWith('summary =')
+    const m = line.match(
+      /summary [+=]\s+([\d,]+) in [\d:]+ =\s+([\d.]+)\/s Avg:\s+([\d.]+).*?Err:\s+([\d,]+)/,
+    )
+    if (!m) continue
+    const pick = {
+      requests: Number(m[1].replace(/,/g, '')),
+      rps: Number(m[2]),
+      avgMs: Number(m[3]),
+      failures: Number(m[4].replace(/,/g, '')),
+    }
+    // 누적 줄이 있으면 그것으로 덮는다(구간 줄은 그 30초만의 값이다)
+    if (cumulative || live.requests === undefined) Object.assign(live, pick)
+  }
+  return live
+}
