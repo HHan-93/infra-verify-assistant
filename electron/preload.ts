@@ -27,6 +27,7 @@ import type {
   PerfRunConfig,
   PerfRunMeta,
   PerfPreset,
+  PerfRetention,
   PerfRunRecord,
   LogRetentionSettings,
   MetricSample,
@@ -122,6 +123,8 @@ const electronAPI = {
     ipcRenderer.invoke('perf:readHistory', id),
   perfBrandReport: (id: string, html: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('perf:brandReport', { id, html }),
+  perfGetRetention: (): Promise<PerfRetention> => ipcRenderer.invoke('perf:getRetention'),
+  perfSetRetention: (v: PerfRetention): Promise<PerfRetention> => ipcRenderer.invoke('perf:setRetention', v),
   perfPresetsList: (): Promise<PerfPreset[]> => ipcRenderer.invoke('perfPresets:list'),
   perfPresetsUpsert: (preset: PerfPreset): Promise<PerfPreset[]> =>
     ipcRenderer.invoke('perfPresets:upsert', preset),

@@ -56,6 +56,7 @@ import {
   type PerfRunMeta,
   type PerfRunRecord,
   type PerfPreset,
+  type PerfRetention,
   normalizeFormScenario,
   type LogRetentionSettings,
   type LogTailTarget,
@@ -5238,6 +5239,8 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     run.meta.endedAt = Date.now()
     run.meta.exitCode = code ?? undefined
     await writeRunMeta(run.dir, run.meta).catch(() => {})
+    // 회차가 하나 늘었으니 오래된 것을 정리한다 (돌고 있는 것·이름 붙인 것은 남긴다)
+    await trimPerfRuns().catch(() => {})
     mainWindow?.webContents.send('perf:done', {
       runId: run.meta.id,
       exitCode: code ?? undefined,
@@ -5349,6 +5352,92 @@ ipcMain.handle(
     }
   },
 )
+
+// ── 회차 보관 정리 ────────────────────────────────────────
+const perfRetentionPath = () => path.join(app.getPath('userData'), 'perf-retention.json')
+const DEFAULT_PERF_RETENTION: PerfRetention = { maxRuns: 30, retentionDays: 90 }
+
+async function readPerfRetention(): Promise<PerfRetention> {
+  let raw: string
+  try {
+    raw = await readFile(perfRetentionPath(), 'utf-8')
+  } catch {
+    return { ...DEFAULT_PERF_RETENTION } // 아직 설정한 적 없음 (정상)
+  }
+  const parsed = JSON.parse(raw)
+  const maxRuns = Number(parsed?.maxRuns)
+  const retentionDays = Number(parsed?.retentionDays)
+  // 값이 이상하면 기본값으로 되돌리지 않고 **throw 한다** — 잘못 읽은 기준으로 남의 회차를
+  // 지우는 것이, 파일 몇 개 더 쌓이는 것보다 나쁘다 (세션 로그 보관 설정과 같은 이유).
+  if (!(Number.isFinite(maxRuns) && maxRuns > 0 && Number.isFinite(retentionDays) && retentionDays > 0)) {
+    throw new Error('perf-retention.json: 보관 설정 값이 올바르지 않습니다 (파일 손상 가능성)')
+  }
+  return { maxRuns, retentionDays }
+}
+
+ipcMain.handle('perf:getRetention', async (): Promise<PerfRetention> => {
+  try {
+    return await readPerfRetention()
+  } catch {
+    return { ...DEFAULT_PERF_RETENTION } // 화면 표시용 — 여기서는 아무것도 지우지 않는다
+  }
+})
+
+ipcMain.handle('perf:setRetention', async (_evt, v: PerfRetention) => {
+  const clamped: PerfRetention = {
+    maxRuns: Math.max(1, Math.round(v.maxRuns)),
+    retentionDays: Math.max(1, Math.round(v.retentionDays)),
+  }
+  await writeFileAtomic(perfRetentionPath(), JSON.stringify(clamped, null, 2))
+  await trimPerfRuns().catch(() => {})
+  return clamped
+})
+
+/**
+ * 오래된 회차 정리.
+ *
+ * 회차 하나가 리포트 950KB + CSV 몇 개다. 정작 되돌아보는 것은 최근 몇 회차이므로 개수·기간
+ * 둘 중 하나라도 넘으면 지운다.
+ *
+ * **돌고 있는 회차와 이름을 붙여 둔 회차는 남긴다.** 사람이 이름을 적었다는 것은 나중에 다시
+ * 볼 생각이라는 뜻이고(튜닝 전/후 비교처럼), 그걸 개수에 밀려 지우면 비교할 짝이 사라진다.
+ */
+async function trimPerfRuns(): Promise<void> {
+  const { maxRuns, retentionDays } = await readPerfRetention()
+  let ids: string[]
+  try {
+    ids = await readdir(perfRunsDir())
+  } catch {
+    return
+  }
+  const metas: PerfRunMeta[] = []
+  for (const id of ids) {
+    try {
+      metas.push(JSON.parse(await readFile(path.join(perfRunsDir(), id, 'run.json'), 'utf-8')) as PerfRunMeta)
+    } catch {
+      /* 손상된 폴더는 건드리지 않는다 */
+    }
+  }
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+  const sorted = [...metas].sort((a, b) => b.startedAt - a.startedAt)
+  const keep = new Set<string>()
+  let kept = 0
+  for (const m of sorted) {
+    const running = !!perfRun && !perfRun.finished && perfRun.meta.id === m.id
+    if (running || m.label) {
+      keep.add(m.id)
+      continue
+    }
+    if (kept < maxRuns && m.startedAt >= cutoff) {
+      keep.add(m.id)
+      kept++
+    }
+  }
+  for (const m of sorted) {
+    if (keep.has(m.id)) continue
+    await rm(path.join(perfRunsDir(), m.id), { recursive: true, force: true }).catch(() => {})
+  }
+}
 
 ipcMain.handle('perf:delete', async (_evt, id: string) => {
   if (perfRun && !perfRun.finished && perfRun.meta.id === id) {

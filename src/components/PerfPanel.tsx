@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Trash2,
   RefreshCw,
+  Settings,
   TriangleAlert,
   CircleCheck,
   FileCode,
@@ -28,6 +29,7 @@ import {
 import type {
   PerfEnvStatus,
   PerfPreset,
+  PerfRetention,
   PerfRunConfig,
   PerfRunMeta,
   PerfRunRecord,
@@ -91,6 +93,12 @@ function hostOf(name: string): string {
  * '가볍게·보통·세게' 로 두었더니 **무엇이 가벼운지**를 알 수 없었다. 형용사 대신 실제 값을
  * 그대로 적는다 — 누르기 전에 무엇이 채워질지 보이는 편이 낫다.
  */
+/** 계단 단계 상한 — 이보다 많아지면 설정 칸이 계단 편집기에 잡아먹힌다 */
+const MAX_STAGES = 6
+
+/** 목록에 펼쳐 두는 회차 수 — 나머지는 '더 보기' 로 */
+const RECENT_RUNS = 5
+
 const LOAD_PRESETS = [
   { label: '10명 1분', users: 10, rate: 2, min: 1 },
   { label: '50명 3분', users: 50, rate: 5, min: 3 },
@@ -247,6 +255,15 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [expectWorkers, setExpectWorkers] = useState('0')
   /** 고급 설정 펼침 — 기본은 접힘, 편 상태는 기억한다 */
   const [advOpen, setAdvOpen] = useState(() => localStorage.getItem('perf_adv_open') === '1')
+  /**
+   * 회차는 최근 것만 펼쳐 둔다.
+   *
+   * 다 보여주면 목록이 길어져 설정이 밀려나고, 정작 자주 보는 것은 최근 몇 개다.
+   * 나머지는 '이전 회차' 로 접어 두고, 오래된 것은 보관 기준에 따라 자동으로 지운다.
+   */
+  const [showAllRuns, setShowAllRuns] = useState(false)
+  const [retention, setRetention] = useState<PerfRetention | null>(null)
+  const [editRetention, setEditRetention] = useState<{ maxRuns: string; retentionDays: string } | null>(null)
   /** 저장해 둔 검증 설정 */
   const [presets, setPresets] = useState<PerfPreset[]>([])
   const [presetName, setPresetName] = useState<string | null>(null)
@@ -329,6 +346,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     void checkEnv()
     void refreshRuns()
     void window.electronAPI.perfPresetsList().then(setPresets)
+    void window.electronAPI.perfGetRetention().then(setRetention)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1228,12 +1246,21 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       </div>
                     ))}
                   </div>
+                  {/* 상한을 둔다 — 단계가 늘수록 왼쪽 칸이 통째로 계단 편집기가 되어 정작
+                      대상·시나리오가 밀려난다. 한계점 찾기에는 서너 단계면 충분하다. */}
                   <button
-                    onClick={() => setStages((prev) => [...prev, { users: '', spawnRate: '10', holdSec: '60' }])}
-                    disabled={!!running}
-                    className="mt-1.5 w-full rounded border border-dashed border-white/15 py-1 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-50"
+                    onClick={() =>
+                      setStages((prev) =>
+                        prev.length >= MAX_STAGES
+                          ? prev
+                          : [...prev, { users: '', spawnRate: '10', holdSec: '60' }],
+                      )
+                    }
+                    disabled={!!running || stages.length >= MAX_STAGES}
+                    title={stages.length >= MAX_STAGES ? `단계는 ${MAX_STAGES}개까지입니다` : undefined}
+                    className="mt-1.5 w-full rounded border border-dashed border-white/15 py-1 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-40"
                   >
-                    + 단계 추가
+                    {stages.length >= MAX_STAGES ? `단계는 ${MAX_STAGES}개까지` : '+ 단계 추가'}
                   </button>
                 </>
               )}
@@ -1265,7 +1292,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                           (order === o ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                         }
                       >
-                        {o === 'weighted' ? '섞어서' : '차례대로'}
+                        {o === 'weighted' ? '랜덤' : '순차'}
                       </button>
                     ))}
                   </span>
@@ -1756,20 +1783,83 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   회차 {runs.length > 0 && <span className="text-gray-600">{runs.length}</span>}
                 </span>
                 <button
-                  onClick={() => void refreshRuns()}
+                  onClick={() => {
+                    setEditRetention(
+                      editRetention
+                        ? null
+                        : {
+                            maxRuns: String(retention?.maxRuns ?? 30),
+                            retentionDays: String(retention?.retentionDays ?? 90),
+                          },
+                    )
+                  }}
                   className="ml-auto rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
+                  title="보관 기준"
+                >
+                  <Settings size={11} />
+                </button>
+                <button
+                  onClick={() => void refreshRuns()}
+                  className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
                   title="새로 읽기"
                 >
                   <RefreshCw size={11} />
                 </button>
               </div>
+
+              {/* 보관 기준 — 세션 로그와 같은 방식(개수·기간 둘 중 하나라도 넘으면 정리) */}
+              {editRetention && (
+                <div className="mt-1.5 rounded-md bg-panel-light p-2">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field
+                      label="최근"
+                      unit="회차"
+                      value={editRetention.maxRuns}
+                      onChange={(v) => setEditRetention({ ...editRetention, maxRuns: v })}
+                    />
+                    <Field
+                      label="보관 기간"
+                      unit="일"
+                      value={editRetention.retentionDays}
+                      onChange={(v) => setEditRetention({ ...editRetention, retentionDays: v })}
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                    둘 중 하나라도 넘으면 오래된 것부터 지웁니다. <span className="text-gray-500">이름을 붙인
+                    회차와 돌고 있는 회차는 지우지 않습니다</span> — 나중에 비교하려고 이름을 적어 둔 것이니까요.
+                    회차 하나가 1MB 남짓입니다.
+                  </p>
+                  <div className="mt-1.5 flex justify-end gap-1.5">
+                    <button
+                      onClick={() => setEditRetention(null)}
+                      className="rounded px-2 py-0.5 text-[11px] text-gray-400 hover:bg-white/10"
+                    >
+                      취소
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const saved = await window.electronAPI.perfSetRetention({
+                          maxRuns: Number(editRetention.maxRuns) || 30,
+                          retentionDays: Number(editRetention.retentionDays) || 90,
+                        })
+                        setRetention(saved)
+                        setEditRetention(null)
+                        await refreshRuns()
+                      }}
+                      className="rounded bg-blue-600/80 px-2 py-0.5 text-[11px] text-white hover:bg-blue-500"
+                    >
+                      저장
+                    </button>
+                  </div>
+                </div>
+              )}
               {runs.length === 0 ? (
                 <p className="py-2 text-[11px] leading-relaxed text-gray-600">
                   아직 돌린 적이 없습니다. 한 번 돌리면 조건과 결과가 여기 쌓여 회차끼리 비교할 수 있습니다.
                 </p>
               ) : (
                 <div className="mt-1 space-y-1">
-                  {runs.map((r) => {
+                  {(showAllRuns ? runs : runs.slice(0, RECENT_RUNS)).map((r) => {
                     const sum = r.statsCsv ? parseLocustStats(r.statsCsv) : null
                     const isRunning = running?.id === r.meta.id
                     return (
@@ -1826,7 +1916,20 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       </div>
                     )
                   })}
+                  {runs.length > RECENT_RUNS && (
+                    <button
+                      onClick={() => setShowAllRuns((v) => !v)}
+                      className="w-full rounded border border-dashed border-white/10 py-1 text-[10.5px] text-gray-500 hover:bg-white/5 hover:text-gray-300"
+                    >
+                      {showAllRuns ? '최근 것만 보기' : `이전 회차 ${runs.length - RECENT_RUNS}개 더 보기`}
+                    </button>
+                  )}
                 </div>
+              )}
+              {retention && (
+                <p className="mt-1.5 text-[10px] text-gray-600">
+                  최근 {retention.maxRuns}회차 · {retention.retentionDays}일까지 보관
+                </p>
               )}
             </div>
           </div>

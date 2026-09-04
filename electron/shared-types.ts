@@ -983,6 +983,19 @@ export interface PerfRunRecord {
   failuresCsv?: string
 }
 
+/**
+ * 회차 보관 기준.
+ *
+ * 회차 하나가 리포트 950KB + CSV 몇 개다. 100번 돌리면 100MB 가 쌓이는데, 정작 사람이
+ * 되돌아보는 것은 최근 몇 회차다. 세션 로그와 같은 방식(개수·기간 둘 중 하나라도 넘으면
+ * 정리)으로 두되, 기본값은 더 넉넉하게 잡는다 — 성능 회차는 하루에 몇 번 돌리는 것이지
+ * 세션 로그처럼 계속 쌓이는 것이 아니다.
+ */
+export interface PerfRetention {
+  maxRuns: number
+  retentionDays: number
+}
+
 /** perf:log 이벤트 — 100ms 씩 묶어서 온다(줄마다 보내면 렌더러가 멎는다) */
 export interface PerfLogEvent {
   runId: string
