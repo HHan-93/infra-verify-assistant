@@ -25,6 +25,7 @@ import {
   PanelRightOpen,
   Save,
   Upload,
+  History,
 } from 'lucide-react'
 import type {
   PerfEnvStatus,
@@ -102,9 +103,6 @@ function hostOf(name: string): string {
 /** 계단 단계 상한 — 이보다 많아지면 설정 칸이 계단 편집기에 잡아먹힌다 */
 const MAX_STAGES = 6
 
-/** 목록에 펼쳐 두는 회차 수 — 나머지는 '더 보기' 로 */
-const RECENT_RUNS = 5
-
 const LOAD_PRESETS = [
   { label: '10명 1분', users: 10, rate: 2, min: 1 },
   { label: '50명 3분', users: 50, rate: 5, min: 3 },
@@ -135,12 +133,15 @@ function Card({
   const [hint, setHint] = useState<string | null>(null)
   return (
     <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2.5">
+      {/* 머리까지 통로 안에 둔다 — 뱃지에 물음표를 달아 긴 안내를 접어 두는 자리가 있다 */}
+      <HintSlot.Provider value={setHint}>
       <div className="mb-1.5 flex items-center gap-1.5">
         <span className="text-gray-500">{icon}</span>
         <span className="text-[11px] font-medium text-gray-300">{title}</span>
-        {badge && <span className="ml-auto">{badge}</span>}
+        {badge && <span className="ml-auto flex items-center gap-1">{badge}</span>}
       </div>
-      <HintSlot.Provider value={setHint}>{children}</HintSlot.Provider>
+      {children}
+      </HintSlot.Provider>
       {hint && (
         <p className="mt-1.5 rounded border border-blue-500/25 bg-blue-500/[0.08] px-2 py-1.5 text-[10.5px] leading-relaxed text-gray-200">
           {hint}
@@ -278,6 +279,16 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [tool, setTool] = useState<PerfTool>('locust')
   /** 두 도구를 언제 쓰면 되는지 — 처음 여는 사람은 고를 근거가 없다 */
   const [showToolGuide, setShowToolGuide] = useState(false)
+  /**
+   * 회차 목록을 창으로 띄운다.
+   *
+   * 전에는 왼쪽 칸 아래 절반을 회차가 늘 차지했다 — 설정을 채우는 동안에는 볼 일이 없는데
+   * 대상·부하·시나리오를 그만큼 좁게 만들었다. '설정하고 돌린다' 와 '지난 것을 돌아본다' 는
+   * 다른 일이라 자리를 나눈다. 머리의 버튼에 개수를 적어 두어 있는 줄은 알 수 있게 한다.
+   */
+  const [showRuns, setShowRuns] = useState(false)
+  /** 설정 이름을 적는 칸을 펼쳤는지 — 늘 띄워 두면 빈 칸과 못 누르는 버튼만 남는다 */
+  const [naming, setNaming] = useState(false)
   const [jmeterPath, setJmeterPath] = useState('')
   const [env, setEnv] = useState<PerfEnvStatus | null>(null)
   const [envChecking, setEnvChecking] = useState(true)
@@ -312,13 +323,6 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [expectWorkers, setExpectWorkers] = useState('0')
   /** 고급 설정 펼침 — 기본은 접힘, 편 상태는 기억한다 */
   const [advOpen, setAdvOpen] = useState(() => localStorage.getItem('perf_adv_open') === '1')
-  /**
-   * 회차는 최근 것만 펼쳐 둔다.
-   *
-   * 다 보여주면 목록이 길어져 설정이 밀려나고, 정작 자주 보는 것은 최근 몇 개다.
-   * 나머지는 '이전 회차' 로 접어 두고, 오래된 것은 보관 기준에 따라 자동으로 지운다.
-   */
-  const [showAllRuns, setShowAllRuns] = useState(false)
   const [retention, setRetention] = useState<PerfRetention | null>(null)
   const [editRetention, setEditRetention] = useState<{ maxRuns: string; retentionDays: string } | null>(null)
   /** 저장해 둔 검증 설정 */
@@ -770,8 +774,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     if (tool !== 'jmeter' && !targetUrl.trim()) return '대상 주소를 적어 주세요'
     if (targetUrl.trim() && !/^https?:\/\//i.test(targetUrl.trim()))
       return '대상 주소는 http:// 또는 https:// 로 시작해야 합니다'
-    if (scenarioKind === 'file' && !scenarioFile.trim()) return 'locustfile 을 고르세요'
-    if (tool === 'jmeter' && !scenarioFile.trim()) return 'JMeter 는 .jmx 계획 파일이 필요합니다'
+    // 도구 이름을 맞게 — JMeter 를 골랐는데 'locustfile 을 고르세요' 가 떴다
+    if (scenarioKind === 'file' && !scenarioFile.trim())
+      return tool === 'jmeter' ? 'JMeter 계획 파일(.jmx)을 고르세요' : 'locustfile(.py)을 고르세요'
     if (tool !== 'jmeter' && scenarioKind === 'form' && !steps.some((st) => st.path.trim()))
       return '요청할 경로를 한 개 이상 적어 주세요'
     if (loadMode === 'stages' && !stages.some((st) => Number(st.users) > 0 && Number(st.holdSec) > 0))
@@ -803,6 +808,24 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
    * 놓으면 비교가 사과와 오렌지가 된다. 직전 회차 비교도 같은 도구끼리여야 뜻이 있다.
    */
   const toolRuns = useMemo(() => runs.filter((r) => (r.meta.config.tool ?? 'locust') === tool), [runs, tool])
+
+  /**
+   * 목록 한 줄에 쓸 집계.
+   *
+   * Locust 는 `run_stats.csv`, JMeter 는 대시보드가 만든 `statistics.json` 이다. 한쪽만
+   * 보면 다른 쪽 회차가 전부 '통계 없음' 으로 보인다.
+   */
+  const runSummary = (r: PerfRunRecord): PerfSummary | null => {
+    if ((r.meta.config.tool ?? 'locust') === 'jmeter') {
+      if (!r.jmeterStatsJson) return null
+      try {
+        return parseJmeterStatistics(JSON.parse(r.jmeterStatsJson))
+      } catch {
+        return null
+      }
+    }
+    return r.statsCsv ? parseLocustStats(r.statsCsv) : null
+  }
 
   const selected = runs.find((r) => r.meta.id === selectedRunId) ?? null
   const selectedSummary: PerfSummary | null = useMemo(() => {
@@ -1171,6 +1194,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           >
             ?
           </button>
+          <button
+            onClick={() => setShowRuns(true)}
+            title="지난 회차를 열어 고르거나 지웁니다"
+            className="flex shrink-0 items-center gap-1 rounded border border-white/15 px-1.5 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/10"
+          >
+            <History size={11} /> 회차
+            {toolRuns.length > 0 && <span className="text-gray-500">{toolRuns.length}</span>}
+          </button>
           {running ? (
             <span className="rounded-full bg-blue-600/25 px-2 py-0.5 text-[11px] text-blue-200">
               진행 중 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
@@ -1187,9 +1218,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           )}
           <span
             className="ml-auto text-[10.5px] text-gray-500"
-            title="부하 발생기(Locust)는 이 PC 에서 돌고, 요청만 대상 세션으로 나갑니다. 대상 서버에는 아무것도 설치하지 않습니다."
+            title={`부하 발생기(${tool === 'jmeter' ? 'JMeter' : 'Locust'})는 이 PC 에서 돌고, 요청만 대상 세션으로 나갑니다. 대상 서버에는 아무것도 설치하지 않습니다.`}
           >
-            로컬 PC 에 설치된 Locust 로 원격 세션에 부하를 겁니다
+            로컬 PC 에 설치된 {tool === 'jmeter' ? 'JMeter' : 'Locust'} 로 원격 세션에 부하를 겁니다
           </span>
           {running && (
             <button
@@ -1230,9 +1261,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   <li>· 팀에 이미 만들어 둔 .jmx 계획이 있을 때 — 그대로 돌립니다</li>
                   <li>· 로그인·토큰·CSV 데이터처럼 손이 많이 가는 흐름을 GUI 로 짜 둔 경우</li>
                   <li>· 제출용 보고서가 필요할 때 — 리포트가 더 상세합니다(APDEX·오류 분류)</li>
-                  <li className="text-gray-500">
-                    안 되는 것: 실행 중 화면 · 시간 그래프 · 인원 늘리기 · 워밍업 제외
-                  </li>
+                  <li>· 계획이 없어도 됩니다 — 시나리오에서 JMeter 를 띄워 만들 수 있습니다</li>
+                  <li className="text-gray-500">안 되는 것: 실행 중 화면 · 인원 늘리기(계단식)</li>
                   <li className="text-gray-500">필요한 것: Java + JMeter 압축 풀기 (경로를 직접 지정)</li>
                 </ul>
               </div>
@@ -1337,9 +1367,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         )}
 
         <div className="flex min-h-0 flex-1">
-          {/* 왼쪽 — 설정 + 회차 */}
-          {/* 왼쪽을 둘로 나눈다 — 설정이 남는 높이를 먹고, 회차는 내용만큼만 차지한다.
-              전에는 회차가 긴 칸의 맨 아래에 붙어 회차 하나에 빈 공간이 한 뼘씩 남았다. */}
+          {/* 왼쪽 — 설정만. 회차는 머리의 [회차] 버튼으로 창에서 본다 */}
           <div className="flex w-[392px] shrink-0 flex-col overflow-hidden border-r border-white/10">
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
             {/* ── 필수 ─────────────────────────────────────────── */}
@@ -1389,7 +1417,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               title="부하"
               badge={
                 tool === 'jmeter' ? (
-                  <span className="text-[9.5px] text-gray-600">계획(.jmx)이 정합니다</span>
+                  <>
+                    <span className="text-[9.5px] text-gray-600">계획(.jmx)이 정합니다</span>
+                    <HintMark text={'JMeter 는 계획 파일이 정한 인원·시간으로 돕니다. 여기 숫자는 참고로 함께 넘길 뿐이라, 계획을 그렇게 만들어 두지 않았다면 바뀌지 않습니다. 계획에서 쓰려면 스레드 수 칸에 ${__P(qterm.users)} 처럼 적으세요 (넘기는 값: users · rampup · duration · protocol · host · port · path).'} />
+                  </>
                 ) : (
                 <span className="flex gap-0.5 rounded bg-black/30 p-0.5">
                   {(['flat', 'stages'] as const).map((m) => (
@@ -1523,22 +1554,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </button>
                 </>
               )}
-              {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
-              <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
-                {tool === 'jmeter' ? (
-                  <>
-                    JMeter 는 <span className="text-gray-300">계획 파일이 정한 값</span>으로 돕니다. 여기 숫자는
-                    참고로 함께 넘길 뿐이라, 계획을 그렇게 만들어 두지 않았다면 바뀌지 않습니다.
-                    <br />
-                    <span className="text-gray-500">
-                      계획에서 쓰려면 스레드 수 칸에 {'${__P(qterm.users)}'} 처럼 적으면 됩니다 (넘기는 값: users ·
-                      rampup · duration · protocol · host · port · path).
-                    </span>
-                  </>
-                ) : (
-                  loadSentence
-                )}
-              </p>
+              {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다.
+                  JMeter 에서는 두지 않는다 — 계획이 정한다는 사실은 뱃지와 그 옆 물음표가
+                  이미 말하고, 여기 네 줄이 더 붙으면 정작 칸이 밀려난다. */}
+              {tool !== 'jmeter' && (
+                <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
+                  {loadSentence}
+                </p>
+              )}
             </Card>
 
             {/* 시나리오 — 무엇을 요청할지 */}
@@ -1738,29 +1761,36 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 </>
               ) : (
                 <>
-                  <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
-                    {tool === 'jmeter' ? (
-                      <>
-                        JMeter 프로그램에서 만든 <span className="font-mono text-gray-500">.jmx</span> 파일을
-                        고르세요. 그 파일에 <span className="text-gray-500">무엇을 몇 명이 얼마나 요청할지</span>가
-                        다 들어 있습니다.
-                        <br />
-                        아직 없으시면 JMeter 를 실행해 만들어야 합니다 — 앱이 대신 만들어 드릴 수 없습니다.
-                      </>
-                    ) : (
-                      <>
-                        이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로
-                        씁니다. (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로
-                        만들기' 를 쓰세요.)
-                      </>
-                    )}
-                  </p>
+                  {tool === 'jmeter' ? (
+                    <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
+                      JMeter 프로그램에서 만든 <span className="font-mono text-gray-500">.jmx</span> 파일을 불러와
+                      실행합니다. 없으면 여기서 <span className="text-gray-500">JMeter 를 열어</span> 만들어도
+                      됩니다.
+                    </p>
+                  ) : (
+                    <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
+                      이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로 씁니다.
+                      (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로 만들기' 를
+                      쓰세요.)
+                    </p>
+                  )}
+                  {/* 칸 이름을 붙인다 — 빈 칸만 있으면 '여기 적으면 저장되는 자리' 로 읽힌다 */}
+                  <div className="mb-0.5 flex items-center gap-1 text-[10px] text-gray-500">
+                    {tool === 'jmeter' ? '계획 파일' : '시나리오 파일'}
+                    <HintMark
+                      text={
+                        tool === 'jmeter'
+                          ? '이미 있는 파일을 읽어 실행하는 칸입니다 — 이름을 적어 두면 그 자리에 저장되는 것이 아니라, 없는 파일이면 시작이 막힙니다. 실행 결과(리포트·result.jtl)는 회차 폴더에 따로 저장되고 요약의 [폴더 열기] 로 갈 수 있습니다.'
+                          : '이미 있는 파일을 읽어 실행하는 칸입니다 — 없는 파일이면 시작이 막힙니다. 실행 결과는 회차 폴더에 따로 저장됩니다.'
+                      }
+                    />
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <input
                       value={scenarioFile}
                       onChange={(e) => setScenarioFile(e.target.value)}
                       disabled={!!running}
-                      placeholder={tool === 'jmeter' ? 'plan.jmx' : 'locustfile.py'}
+                      placeholder={tool === 'jmeter' ? 'C:\\...\\plan.jmx' : 'C:\\...\\locustfile.py'}
                       className={inputCls + ' min-w-0 flex-1 font-mono disabled:opacity-50'}
                     />
                     <button
@@ -1775,6 +1805,29 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       <FileCode size={13} />
                     </button>
                   </div>
+                  {/* 계획이 없는 사람을 막다른 길에 두지 않는다 — 경로는 이미 우리가 안다.
+                      실행 확인이 통과했을 때만 띄운다(Java 가 없으면 창도 안 뜨고 매달린다). */}
+                  {tool === 'jmeter' && (
+                    <button
+                      onClick={async () => {
+                        const r = await window.electronAPI.perfOpenJmeterGui()
+                        setNote(
+                          r.ok
+                            ? 'JMeter 를 띄웠습니다 — 뜨기까지 10초쯤 걸립니다. 계획을 만들어 저장한 뒤 위에서 그 파일을 고르세요.'
+                            : (r.error ?? 'JMeter 를 띄우지 못했습니다.'),
+                        )
+                      }}
+                      disabled={!env?.ok || !!running}
+                      title={
+                        env?.ok
+                          ? 'JMeter 창을 띄웁니다 (이 앱을 닫아도 남습니다)'
+                          : '먼저 위에서 JMeter 경로를 확인해 주세요'
+                      }
+                      className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded border border-white/15 bg-panel-light py-1 text-[10.5px] text-gray-300 hover:bg-white/10 disabled:opacity-40"
+                    >
+                      <ExternalLink size={11} /> JMeter 열어서 계획 만들기
+                    </button>
+                  )}
                 </>
               )}
             </Card>
@@ -1832,32 +1885,39 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               고급 설정
               <span className="ml-auto text-[10px] text-gray-600">
-                {advOpen ? '접기' : tool === 'jmeter' ? '백분위 기준' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
+                {advOpen ? '접기' : tool === 'jmeter' ? '백분위 기준 · 워밍업' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
               </span>
             </button>
 
             {advOpen && (
               <>
+                {/* JMeter 에는 켤 것이 없다 — 못 켜게 막아 둔 체크박스를 보여 주면
+                    '기능이 고장났다' 로 읽힌다. 그래서 그 도구에서는 사실만 적는다. */}
                 <Card icon={<Target size={12} />} title="연결">
-                  <label className="flex items-start gap-2 text-[11px] text-gray-300">
-                    <input
-                      type="checkbox"
-                      checked={insecure}
-                      disabled={!!running || tool === 'jmeter' || scenarioKind === 'file'}
-                      onChange={(e) => setInsecure(e.target.checked)}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      자체 서명 인증서 무시
-                      <span className="block text-[10px] text-gray-600">
-                        {tool === 'jmeter'
-                          ? '계획(.jmx)의 HTTP 요청 기본값에서 설정하세요'
-                          : scenarioKind === 'file'
+                  {tool === 'jmeter' ? (
+                    <p className="text-[10.5px] leading-relaxed text-gray-500">
+                      JMeter 는 <span className="text-gray-300">인증서를 검사하지 않습니다</span> — 자체 서명
+                      인증서도 그대로 붙으므로 여기서 켤 것이 없습니다.
+                    </p>
+                  ) : (
+                    <label className="flex items-start gap-2 text-[11px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={insecure}
+                        disabled={!!running || scenarioKind === 'file'}
+                        onChange={(e) => setInsecure(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        자체 서명 인증서 무시
+                        <span className="block text-[10px] text-gray-600">
+                          {scenarioKind === 'file'
                             ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
                             : '사내 인프라는 대개 필요합니다'}
+                        </span>
                       </span>
-                    </span>
-                  </label>
+                    </label>
+                  )}
                 </Card>
 
                 <Card icon={<CircleCheck size={12} />} title="판정 기준 — 더">
@@ -1872,14 +1932,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         unit="초"
                         value={warmupSec}
                         onChange={setWarmupSec}
-                        disabled={!!running || tool === 'jmeter'}
+                        disabled={!!running}
                         placeholder="0"
                       />
                     </div>
                     <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
-                      {tool === 'jmeter'
-                        ? 'JMeter 회차는 초 단위 이력을 남기지 않아 워밍업을 뺄 수 없습니다 (그 계산에 구간별 p95 가 필요합니다).'
-                        : '사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95 최댓값으로 판정합니다.'}
+                      사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95
+                      최댓값으로 판정합니다.
                     </p>
                   </div>
                 </Card>
@@ -2019,27 +2078,56 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   ))}
                 </div>
               )}
-              <div className="mt-1.5 flex items-center gap-1.5">
-                <input
-                  value={presetName ?? ''}
-                  onChange={(e) => setPresetName(e.target.value)}
-                  disabled={!!running}
-                  placeholder="이름을 적어 지금 설정을 저장"
-                  title="이 PC 의 앱 데이터 폴더(perf-presets.json)에 저장됩니다"
-                  className={inputCls + ' min-w-0 flex-1 disabled:opacity-50'}
-                />
+              {/* 이름 칸을 늘 띄워 두지 않는다 — 빈 칸과 못 누르는 [저장] 이 나란히 있으면
+                  '무엇을 저장하는 자리인지' 부터 헷갈린다. 저장하려는 순간에만 묻는다. */}
+              {naming ? (
+                <div className="mt-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      autoFocus
+                      value={presetName ?? ''}
+                      onChange={(e) => setPresetName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (presetName ?? '').trim()) {
+                          void savePreset()
+                          setNaming(false)
+                        }
+                        if (e.key === 'Escape') setNaming(false)
+                      }}
+                      placeholder="예: 게이트웨이 200명 5분"
+                      className={inputCls + ' min-w-0 flex-1'}
+                    />
+                    <button
+                      onClick={() => {
+                        void savePreset()
+                        setNaming(false)
+                      }}
+                      disabled={!(presetName ?? '').trim()}
+                      className="shrink-0 rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                    >
+                      저장
+                    </button>
+                    <button
+                      onClick={() => setNaming(false)}
+                      className="shrink-0 rounded px-1.5 py-1 text-[11px] text-gray-400 hover:bg-white/10"
+                    >
+                      취소
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                    지금 화면의 대상·부하·판정 기준·시나리오를 그대로 묶어 이 PC 의 앱 데이터 폴더에 남깁니다
+                    (perf-presets.json). 앱을 다시 설치해도 지워지지 않고, 위 내보내기로 팀에 넘길 수 있습니다.
+                  </p>
+                </div>
+              ) : (
                 <button
-                  onClick={() => void savePreset()}
-                  disabled={!!running || !(presetName ?? '').trim()}
-                  className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
+                  onClick={() => setNaming(true)}
+                  disabled={!!running}
+                  className="mt-1.5 w-full rounded border border-dashed border-white/15 py-1 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-40"
                 >
-                  저장
+                  + 지금 설정을 이름 붙여 저장
                 </button>
-              </div>
-              <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
-                이 PC 의 앱 데이터 폴더에 남습니다 (설정 → 데이터 폴더 · perf-presets.json). 앱을 다시 설치해도
-                지워지지 않고, 내보내기로 팀에 넘길 수 있습니다.
-              </p>
+              )}
             </div>
 
             {!running ? (
@@ -2063,173 +2151,6 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               <p className="mt-1 text-[10.5px] leading-relaxed text-amber-300/80">{blockedReason}</p>
             )}
             {startError && <p className="mt-1 text-[10.5px] leading-relaxed text-red-300">{startError}</p>}
-
-            </div>
-
-            {/* 회차 — 아래에 붙이고 높이는 내용만큼 (많아지면 이 안에서만 스크롤) */}
-            <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-white/10 px-3 pb-3 pt-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">
-                  회차 {toolRuns.length > 0 && <span className="text-gray-600">{toolRuns.length}</span>}
-                  <span className="ml-1 font-normal normal-case tracking-normal text-gray-600">
-                    {tool === 'jmeter' ? 'JMeter' : 'Locust'}
-                  </span>
-                </span>
-                <button
-                  onClick={() => {
-                    setEditRetention(
-                      editRetention
-                        ? null
-                        : {
-                            maxRuns: String(retention?.maxRuns ?? 30),
-                            retentionDays: String(retention?.retentionDays ?? 90),
-                          },
-                    )
-                  }}
-                  className="ml-auto rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
-                  title="보관 기준"
-                >
-                  <Settings size={11} />
-                </button>
-                <button
-                  onClick={() => void refreshRuns()}
-                  className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
-                  title="새로 읽기"
-                >
-                  <RefreshCw size={11} />
-                </button>
-              </div>
-
-              {/* 보관 기준 — 세션 로그와 같은 방식(개수·기간 둘 중 하나라도 넘으면 정리) */}
-              {editRetention && (
-                <div className="mt-1.5 rounded-md bg-panel-light p-2">
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <Field
-                      label="최근"
-                      unit="회차"
-                      value={editRetention.maxRuns}
-                      onChange={(v) => setEditRetention({ ...editRetention, maxRuns: v })}
-                    />
-                    <Field
-                      label="보관 기간"
-                      unit="일"
-                      value={editRetention.retentionDays}
-                      onChange={(v) => setEditRetention({ ...editRetention, retentionDays: v })}
-                    />
-                  </div>
-                  <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
-                    둘 중 하나라도 넘으면 오래된 것부터 지웁니다. <span className="text-gray-500">이름을 붙인
-                    회차와 돌고 있는 회차는 지우지 않습니다</span> — 나중에 비교하려고 이름을 적어 둔 것이니까요.
-                    회차 하나가 1MB 남짓입니다.
-                  </p>
-                  <div className="mt-1.5 flex justify-end gap-1.5">
-                    <button
-                      onClick={() => setEditRetention(null)}
-                      className="rounded px-2 py-0.5 text-[11px] text-gray-400 hover:bg-white/10"
-                    >
-                      취소
-                    </button>
-                    <button
-                      onClick={async () => {
-                        const saved = await window.electronAPI.perfSetRetention({
-                          maxRuns: Number(editRetention.maxRuns) || 30,
-                          retentionDays: Number(editRetention.retentionDays) || 90,
-                        })
-                        setRetention(saved)
-                        setEditRetention(null)
-                        await refreshRuns()
-                      }}
-                      className="rounded bg-blue-600/80 px-2 py-0.5 text-[11px] text-white hover:bg-blue-500"
-                    >
-                      저장
-                    </button>
-                  </div>
-                </div>
-              )}
-              {toolRuns.length === 0 ? (
-                <p className="py-2 text-[11px] leading-relaxed text-gray-600">
-                  {tool === 'jmeter' ? 'JMeter' : 'Locust'} 로 돌린 회차가 아직 없습니다. 한 번 돌리면 조건과 결과가
-                  여기 쌓여 회차끼리 비교할 수 있습니다.
-                  {runs.length > toolRuns.length && (
-                    <span className="mt-1 block text-gray-600">
-                      다른 도구의 회차 {runs.length - toolRuns.length}개는 그 도구를 고르면 보입니다.
-                    </span>
-                  )}
-                </p>
-              ) : (
-                <div className="mt-1 space-y-1">
-                  {(showAllRuns ? toolRuns : toolRuns.slice(0, RECENT_RUNS)).map((r) => {
-                    const sum = r.statsCsv ? parseLocustStats(r.statsCsv) : null
-                    const isRunning = running?.id === r.meta.id
-                    return (
-                      <div
-                        key={r.meta.id}
-                        className={
-                          'group flex items-start gap-1 rounded-md px-2 py-1.5 ' +
-                          (selectedRunId === r.meta.id ? 'bg-blue-600/25' : 'hover:bg-white/5')
-                        }
-                      >
-                        <button
-                          onClick={() => {
-                            setSelectedRunId(r.meta.id)
-                            if (!running) setTab('summary')
-                          }}
-                          className="min-w-0 flex-1 text-left"
-                        >
-                          <div className="flex items-baseline gap-1.5">
-                            <span className="min-w-0 truncate text-[11.5px] text-gray-200">
-                              {r.meta.label || fmtRunTime(r.meta.startedAt)}
-                            </span>
-                            {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
-                            {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
-                            {/* 어떤 조건으로 돌린 회차인지 — 이것이 없으면 회차끼리 비교가 안 된다 */}
-                            <span className="ml-auto shrink-0 text-[10px] text-gray-600">
-                              사용자 {r.meta.config.users} · {Math.round(r.meta.config.durationSec / 60)}분
-                            </span>
-                          </div>
-                          <div className="mt-0.5 flex items-baseline gap-1.5 text-[10px]">
-                            {sum ? (
-                              <>
-                                <span className="text-gray-400">p95 {fmtMs(sum.p95Ms)}</span>
-                                <span className={sum.failRatePct > 0 ? 'text-amber-300/90' : 'text-gray-500'}>
-                                  실패 {sum.failRatePct.toFixed(2)}%
-                                </span>
-                                <span className="ml-auto shrink-0 text-gray-600">{fmtInt(sum.rps)} req/s</span>
-                              </>
-                            ) : (
-                              <span className="text-gray-600">
-                                {isRunning ? '끝나면 결과가 채워집니다' : r.meta.canceled ? '결과 없음' : '통계 없음'}
-                              </span>
-                            )}
-                          </div>
-                        </button>
-                        {!isRunning && (
-                          <button
-                            onClick={() => setConfirmDelete(r)}
-                            title="이 회차 삭제"
-                            className="mt-0.5 shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300"
-                          >
-                            <Trash2 size={11} />
-                          </button>
-                        )}
-                      </div>
-                    )
-                  })}
-                  {toolRuns.length > RECENT_RUNS && (
-                    <button
-                      onClick={() => setShowAllRuns((v) => !v)}
-                      className="w-full rounded border border-dashed border-white/10 py-1 text-[10.5px] text-gray-500 hover:bg-white/5 hover:text-gray-300"
-                    >
-                      {showAllRuns ? '최근 것만 보기' : `이전 회차 ${toolRuns.length - RECENT_RUNS}개 더 보기`}
-                    </button>
-                  )}
-                </div>
-              )}
-              {retention && (
-                <p className="mt-1.5 text-[10px] text-gray-600">
-                  최근 {retention.maxRuns}회차 · {retention.retentionDays}일까지 보관
-                </p>
-              )}
             </div>
           </div>
 
@@ -2256,7 +2177,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             </div>
             {running && (
               <p className="mt-1 text-[10px] text-gray-600">
-                돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다 — 끝나면 통계 파일로 다시 계산합니다.
+                {tool === 'jmeter'
+                  ? 'JMeter 는 콘솔에 찍는 누적 요약을 읽어 옵니다 — 끝나면 결과 파일로 다시 계산합니다.'
+                  : '돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다 — 끝나면 통계 파일로 다시 계산합니다.'}
               </p>
             )}
             {/* 닿지도 못한 회차의 응답 시간을 '서버가 느리다' 로 읽지 않게, 타일 바로 아래에서 막는다 */}
@@ -2389,7 +2312,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               {tab === 'summary' && (
                 <div className="h-full overflow-auto pr-1">
                   {!selected ? (
-                    <p className="text-[12px] text-gray-500">왼쪽에서 회차를 고르세요.</p>
+                    <p className="text-[12px] leading-relaxed text-gray-500">
+                      한 번 돌리면 결과가 여기 나옵니다. 지난 것을 보시려면 위의{' '}
+                      <span className="text-gray-300">회차</span> 를 누르세요.
+                    </p>
                   ) : (
                     <>
                       {/* 회차 이름·메모 — 시각만으로는 나중에 못 찾는다 */}
@@ -2524,7 +2450,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       )}
 
                       {/* 시계열 — 평균 한 줄로는 '언제 무너졌나' 를 알 수 없다.
-                          Locust 웹 UI 는 돌고 있는 동안만 보여주므로 끝난 회차는 여기서 본다. */}
+                          돌고 있는 동안의 화면은 끝나면 사라지므로(Locust 웹 UI) 끝난 회차는
+                          여기서 본다. JMeter 회차도 같은 그래프를 그린다 — 원본 JTL 을
+                          초 단위로 접어 같은 모양으로 받아 온다(electron/jtl.ts). */}
                       {history.length > 1 && (
                         <div className="mt-3">
                           <div className="mb-1 flex items-center gap-2">
@@ -2691,11 +2619,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         </p>
                       )}
 
-                      {/* 도구에 따라 시계열이 없을 수 있다 — 빈 자리를 그냥 두지 않고 이유를 말한다 */}
-                      {history.length <= 1 && (selected.meta.config.tool ?? 'locust') === 'jmeter' && (
+                      {/* 이력이 없을 수도 있다 — 빈 자리를 그냥 두지 않고 이유를 말한다.
+                          (JMeter 회차도 원본 JTL 을 접어 그래프를 그린다 — 너무 짧게 끝났거나
+                          결과 파일이 남지 않은 회차만 여기로 온다) */}
+                      {history.length <= 1 && (
                         <p className="mt-2 text-[10px] leading-relaxed text-gray-600">
-                          JMeter 회차는 초 단위 이력을 남기지 않아 시계열 그래프가 없습니다 — 시간에 따른 변화는{' '}
-                          <span className="text-gray-500">리포트 열기</span> 의 대시보드에서 보세요.
+                          시간에 따른 그래프를 그릴 만큼 이력이 없습니다 (몇 초 만에 끝난 회차이거나 결과 파일이
+                          남지 않았습니다).
                         </p>
                       )}
 
@@ -3102,6 +3032,199 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               </p>
               <button
                 onClick={() => setPreview(null)}
+                className="shrink-0 rounded-md border border-white/10 bg-panel-light px-3 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/*
+        회차 — 창으로 띄운다.
+
+        전에는 왼쪽 칸 아래 절반을 늘 차지했다. 설정을 채우는 동안에는 볼 일이 없는데
+        대상·부하·시나리오를 그만큼 좁게 만들었고, 자리가 좁아 '최근 5개만 + 더 보기' 로
+        접어야 했다. 창으로 빼면 목록을 다 펼칠 수 있고 설정 칸도 온전히 쓴다.
+        (배경 클릭으로 닫지 않는다 — 이 저장소의 규칙. 닫는 것은 X·닫기뿐)
+      */}
+      {showRuns && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6">
+          <div className="flex h-full max-h-[620px] w-[540px] max-w-[92vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
+            <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
+              <History size={13} className="text-blue-300" />
+              <span className="text-[12.5px] font-medium text-gray-100">
+                회차 · {tool === 'jmeter' ? 'JMeter' : 'Locust'}
+                {toolRuns.length > 0 && <span className="ml-1 text-gray-500">{toolRuns.length}</span>}
+              </span>
+              <button
+                  onClick={() => {
+                    setEditRetention(
+                      editRetention
+                        ? null
+                        : {
+                            maxRuns: String(retention?.maxRuns ?? 30),
+                            retentionDays: String(retention?.retentionDays ?? 90),
+                          },
+                    )
+                  }}
+                className="ml-auto rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                title="보관 기준"
+              >
+                <Settings size={12} />
+              </button>
+              <button
+                onClick={() => void refreshRuns()}
+                className="rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                title="새로 읽기"
+              >
+                <RefreshCw size={12} />
+              </button>
+              <button
+                onClick={() => setShowRuns(false)}
+                title="닫기"
+                className="rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+
+              {/* 보관 기준 — 세션 로그와 같은 방식(개수·기간 둘 중 하나라도 넘으면 정리) */}
+              {editRetention && (
+                <div className="mt-1.5 rounded-md bg-panel-light p-2">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field
+                      label="최근"
+                      unit="회차"
+                      value={editRetention.maxRuns}
+                      onChange={(v) => setEditRetention({ ...editRetention, maxRuns: v })}
+                    />
+                    <Field
+                      label="보관 기간"
+                      unit="일"
+                      value={editRetention.retentionDays}
+                      onChange={(v) => setEditRetention({ ...editRetention, retentionDays: v })}
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                    둘 중 하나라도 넘으면 오래된 것부터 지웁니다. <span className="text-gray-500">이름을 붙인
+                    회차와 돌고 있는 회차는 지우지 않습니다</span> — 나중에 비교하려고 이름을 적어 둔 것이니까요.
+                    회차 하나가 1MB 남짓입니다.
+                  </p>
+                  <div className="mt-1.5 flex justify-end gap-1.5">
+                    <button
+                      onClick={() => setEditRetention(null)}
+                      className="rounded px-2 py-0.5 text-[11px] text-gray-400 hover:bg-white/10"
+                    >
+                      취소
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const saved = await window.electronAPI.perfSetRetention({
+                          maxRuns: Number(editRetention.maxRuns) || 30,
+                          retentionDays: Number(editRetention.retentionDays) || 90,
+                        })
+                        setRetention(saved)
+                        setEditRetention(null)
+                        await refreshRuns()
+                      }}
+                      className="rounded bg-blue-600/80 px-2 py-0.5 text-[11px] text-white hover:bg-blue-500"
+                    >
+                      저장
+                    </button>
+                  </div>
+                </div>
+              )}
+              {toolRuns.length === 0 ? (
+                <p className="py-2 text-[11px] leading-relaxed text-gray-600">
+                  {tool === 'jmeter' ? 'JMeter' : 'Locust'} 로 돌린 회차가 아직 없습니다. 한 번 돌리면 조건과 결과가
+                  여기 쌓여 회차끼리 비교할 수 있습니다.
+                  {runs.length > toolRuns.length && (
+                    <span className="mt-1 block text-gray-600">
+                      다른 도구의 회차 {runs.length - toolRuns.length}개는 그 도구를 고르면 보입니다.
+                    </span>
+                  )}
+                </p>
+              ) : (
+                <div className="mt-1 space-y-1">
+                  {toolRuns.map((r) => {
+                    // JMeter 회차는 통계 CSV 가 없다 — 대시보드가 만든 집계를 읽는다
+                    // (전에는 Locust CSV 만 봐서 JMeter 회차가 죄다 '통계 없음' 으로 보였다)
+                    const sum = runSummary(r)
+                    const isRunning = running?.id === r.meta.id
+                    return (
+                      <div
+                        key={r.meta.id}
+                        className={
+                          'group flex items-start gap-1 rounded-md px-2 py-1.5 ' +
+                          (selectedRunId === r.meta.id ? 'bg-blue-600/25' : 'hover:bg-white/5')
+                        }
+                      >
+                        <button
+                          onClick={() => {
+                            setSelectedRunId(r.meta.id)
+                            if (!running) setTab('summary')
+                            // 고른 다음에도 창이 떠 있으면 정작 그 결과를 가린다
+                            setShowRuns(false)
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="flex items-baseline gap-1.5">
+                            <span className="min-w-0 truncate text-[11.5px] text-gray-200">
+                              {r.meta.label || fmtRunTime(r.meta.startedAt)}
+                            </span>
+                            {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
+                            {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
+                            {/* 어떤 조건으로 돌린 회차인지 — 이것이 없으면 회차끼리 비교가 안 된다 */}
+                            <span className="ml-auto shrink-0 text-[10px] text-gray-600">
+                              {(r.meta.config.tool ?? 'locust') === 'jmeter'
+                                ? (r.meta.scenarioPath ?? '').split(/[\\/]/).pop() || '계획 파일'
+                                : `사용자 ${r.meta.config.users} · ${Math.round(r.meta.config.durationSec / 60)}분`}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 flex items-baseline gap-1.5 text-[10px]">
+                            {sum ? (
+                              <>
+                                <span className="text-gray-400">p95 {fmtMs(sum.p95Ms)}</span>
+                                <span className={sum.failRatePct > 0 ? 'text-amber-300/90' : 'text-gray-500'}>
+                                  실패 {sum.failRatePct.toFixed(2)}%
+                                </span>
+                                <span className="ml-auto shrink-0 text-gray-600">{fmtInt(sum.rps)} req/s</span>
+                              </>
+                            ) : (
+                              <span className="text-gray-600">
+                                {isRunning ? '끝나면 결과가 채워집니다' : r.meta.canceled ? '결과 없음' : '통계 없음'}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                        {!isRunning && (
+                          <button
+                            onClick={() => setConfirmDelete(r)}
+                            title="이 회차 삭제"
+                            className="mt-0.5 shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2">
+              <p className="min-w-0 flex-1 text-[10.5px] leading-relaxed text-gray-500">
+                {retention
+                  ? `최근 ${retention.maxRuns}회차 · ${retention.retentionDays}일까지 보관합니다 (이름 붙인 회차는 지우지 않습니다).`
+                  : '\u00a0'}
+              </p>
+              <button
+                onClick={() => setShowRuns(false)}
                 className="shrink-0 rounded-md border border-white/10 bg-panel-light px-3 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
               >
                 닫기

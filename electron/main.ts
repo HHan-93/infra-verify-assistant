@@ -14,7 +14,8 @@ import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
-import { createWriteStream, type WriteStream } from 'node:fs'
+import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { writeFile, readFile, unlink, mkdir, stat, appendFile, readdir, rm, copyFile, rename, open } from 'node:fs/promises'
 // 스트림 청크 경계에서 멀티바이트(한글) 문자가 잘려 �로 깨지는 것을 막는다
@@ -24,6 +25,7 @@ import * as pty from 'node-pty'
 import { streamChat, listModels } from './ai-providers'
 import { AGENT_SCRIPT } from './agent-script'
 import { portalRequest } from './portal-http'
+import { jtlLinesToHistoryCsv } from './jtl'
 import {
   PROVIDER_INFO,
   ANALYSIS_STYLES,
@@ -4868,6 +4870,26 @@ ipcMain.handle('perf:setJmeterPath', async (_evt, p: string | null) => {
 ipcMain.handle('perf:getJmeterPath', async () => (await readPerfSettings()).jmeterPath ?? '')
 
 /**
+ * 셸을 거쳐 실행할 때 쓸 따옴표 (Windows).
+ *
+ * ── 왜 필요한가
+ * `.bat` 은 CreateProcess 로 직접 못 띄운다(Node 20 부터는 아예 거부한다). 그래서
+ * `jmeter.bat` 은 `shell: true` 로 cmd.exe 를 거쳐야 하는데, Node 는 이때 명령과 인자를
+ * **공백으로 이어 붙이기만 하고 따옴표를 붙여 주지 않는다.** 그래서 공백이 든 경로는
+ * 그 자리에서 잘린다 — 이 저장소의 회차 폴더가 `C:\Users\<이름 성>\AppData\...` 처럼
+ * 사용자 이름에 공백이 있으면 `-l C:\Users\Hanho` 로 넘어가고, JMeter 는 엉뚱한 곳에
+ * 쓰려다 접근 거부로 죽는다. (실제로 그렇게 되는 것을 확인하고 넣었다.)
+ *
+ * `"` 는 값에서 지운다 — Windows 경로에는 들어갈 수 없는 문자이고, 남겨 두면 우리가
+ * 감싼 따옴표를 빠져나가 뒤에 아무 명령이나 붙일 수 있다.
+ */
+function shellQuote(v: string): string {
+  if (process.platform !== 'win32') return v
+  const clean = v.replace(/"/g, '')
+  return /[\s&|<>^()]/.test(clean) ? `"${clean}"` : clean
+}
+
+/**
  * JMeter 환경 점검.
  *
  * `jmeter --version` 은 Java 가 있어야 성공한다 — 그래서 이 한 번으로 둘 다 확인된다.
@@ -4887,7 +4909,11 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
         }
       }
       try {
-        const child = spawn(cmd, ['--version'], { windowsHide: true, shell: process.platform === 'win32' })
+        // 경로에 공백이 있으면(예: C:\Program Files\...) 따옴표 없이는 여기서 잘린다
+        const child = spawn(shellQuote(cmd), ['--version'], {
+          windowsHide: true,
+          shell: process.platform === 'win32',
+        })
         child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.on('error', () => finish(null))
@@ -5249,7 +5275,8 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     await writeRunMeta(dir2, meta2)
     let child2: ChildProcess
     try {
-      child2 = spawn(jmeterCmd, jargs, {
+      // 셸을 거치므로 우리가 따옴표를 붙인다 — 회차 폴더 경로에 공백이 흔하다
+      child2 = spawn(shellQuote(jmeterCmd), jargs.map(shellQuote), {
         cwd: dir2,
         windowsHide: true,
         // jmeter.bat 은 배치라 셸을 거쳐야 실행된다(Windows)
@@ -5508,17 +5535,42 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
 })
 
 /**
- * 초 단위 이력(`run_stats_history.csv`) 읽기.
+ * 초 단위 이력 읽기.
  *
  * 목록(perf:list)에 얹지 않는 이유: 1초에 한 줄이라 30분 실행이면 1800줄이다. 회차가 쌓인
  * 목록을 열 때마다 그걸 다 실어 보내면 창이 멎는다. 고른 회차만 따로 읽는다.
+ *
+ * **두 도구가 같은 모양으로 나간다.** Locust 는 제가 만든 `run_stats_history.csv` 를 그대로
+ * 주고, JMeter 는 원본 `result.jtl`(요청 한 건에 한 줄)을 여기서 초 단위로 접어 같은 칸
+ * 이름으로 내놓는다 — 그래서 렌더러는 도구를 구분하지 않는다. 한때 "JMeter 는 초 단위
+ * 이력이 없다"며 시간 그래프와 워밍업 제외를 막아 두었는데, 없는 것은 이력이 아니라
+ * 접는 코드였다.
  */
 ipcMain.handle('perf:readHistory', async (_evt, id: string) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  const dir = path.join(perfRunsDir(), id)
   try {
-    return { ok: true, csv: await readFile(path.join(perfRunsDir(), id, 'run_stats_history.csv'), 'utf-8') }
+    return { ok: true, csv: await readFile(path.join(dir, 'run_stats_history.csv'), 'utf-8') }
+  } catch {
+    // Locust 이력이 없다 — JMeter 회차일 수 있으니 JTL 을 본다
+  }
+  const jtl = path.join(dir, 'result.jtl')
+  try {
+    await stat(jtl)
   } catch {
     return { ok: false, error: '이력 파일이 없습니다.' }
+  }
+  try {
+    // 흘려 읽는다 — 큰 실행이면 JTL 이 수십 MB 라 통째로 올리면 창이 멎는다
+    const rl = createInterface({ input: createReadStream(jtl, { encoding: 'utf-8' }), crlfDelay: Infinity })
+    try {
+      const csv = await jtlLinesToHistoryCsv(rl)
+      return csv ? { ok: true, csv } : { ok: false, error: '이력을 만들 수 없는 결과 파일입니다.' }
+    } finally {
+      rl.close()
+    }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
   }
 })
 
@@ -5952,6 +6004,35 @@ ipcMain.handle('perf:saveCsv', async (_evt, id: string) => {
     return { saved: true, path: r.filePath }
   } catch (e) {
     return { saved: false, error: cleanErrorMessage(e) }
+  }
+})
+
+/**
+ * JMeter 를 창 모드로 띄운다 — 계획(.jmx)을 만들러 가는 길.
+ *
+ * .jmx 는 스레드 그룹·샘플러가 든 XML 이라 폼으로 만들어 줄 수 없다. 그렇다고 "JMeter 를
+ * 실행해 만드세요" 라고만 적어 두면 방금 압축을 푼 사람은 어디를 눌러야 하는지 모른다 —
+ * 경로는 이미 우리가 알고 있으니 여기서 띄워 준다.
+ *
+ * `detached` + `unref` 로 떼어 놓는다: 이 앱을 닫아도 편집하던 JMeter 가 같이 죽지 않는다.
+ * 실행 확인(perf:envJmeter)이 통과했을 때만 부를 것 — jmeter.bat 은 Java 를 못 찾으면
+ * pause 로 멈추고, stdio 를 버려 둔 프로세스는 그 화면조차 보이지 않는다.
+ */
+ipcMain.handle('perf:openJmeterGui', async () => {
+  const { jmeterPath } = await readPerfSettings()
+  const cmd = jmeterPath || 'jmeter'
+  try {
+    const child = spawn(shellQuote(cmd), [], {
+      detached: true,
+      stdio: 'ignore',
+      // jmeter.bat 은 배치라 셸을 거쳐야 한다(Windows). 콘솔 창은 숨기고 Swing 창만 뜬다.
+      shell: process.platform === 'win32',
+      windowsHide: true,
+    })
+    child.unref()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
   }
 })
 

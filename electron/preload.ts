@@ -119,6 +119,9 @@ const electronAPI = {
   perfGetJmeterPath: (): Promise<string> => ipcRenderer.invoke('perf:getJmeterPath'),
   perfSetJmeterPath: (p: string | null): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('perf:setJmeterPath', p),
+  /** JMeter 를 창 모드로 띄운다 — 계획(.jmx)이 아직 없는 사람이 만들러 갈 길 */
+  perfOpenJmeterGui: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('perf:openJmeterGui'),
   perfPreviewScenario: (cfg: PerfRunConfig): Promise<{ text: string }> =>
     ipcRenderer.invoke('perf:previewScenario', cfg),
   perfSaveReport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
