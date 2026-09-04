@@ -1370,7 +1370,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
                 {tool === 'jmeter'
-                  ? '계획(.jmx)이 스레드 수와 시간을 제 안에 갖고 있습니다. 여기 값은 qterm.users · qterm.rampup · qterm.duration 속성으로 넘기기만 하니, 계획이 그 속성을 받아 쓰도록 만들어 두셨을 때만 반영됩니다.'
+                  ? '계획(.jmx)이 스레드 수와 시간을 제 안에 갖고 있습니다. 여기 값은 속성으로 넘기기만 합니다 — 계획에서 ${__P(qterm.users)} 처럼 받아 쓰도록 만들어 두셨을 때만 반영됩니다. 넘기는 것: qterm.users · rampup · duration · target · protocol · host · port · path'
                   : loadSentence}
               </p>
             </Card>

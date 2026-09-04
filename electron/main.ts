@@ -5217,7 +5217,24 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       // 화면에 적은 값을 계획이 __P 로 받아 쓸 수 있게 속성으로 넘긴다.
       // JMeter 계획은 스레드 수를 제 안에 갖고 있어서 우리가 -u/-r/-t 로 바꿀 수 없다 —
       // 그래서 '넘겨는 주되, 쓸지 말지는 계획이 정한다' 는 것을 화면에서도 밝힌다.
+      //
+      // 주소는 통째로도 주고 **쪼개서도 준다**: HTTP 요청 샘플러는 URL 한 덩어리가 아니라
+      // 프로토콜·서버명·포트를 각각 받는 칸으로 되어 있어서, 통째로만 주면 계획에서 쓸 수 없다.
       ...(cfg.targetUrl.trim() ? [`-Jqterm.target=${cfg.targetUrl.trim()}`] : []),
+      ...(() => {
+        try {
+          const u = new URL(cfg.targetUrl.trim())
+          const proto = u.protocol.replace(':', '')
+          return [
+            `-Jqterm.protocol=${proto}`,
+            `-Jqterm.host=${u.hostname}`,
+            `-Jqterm.port=${u.port || (proto === 'https' ? '443' : '80')}`,
+            `-Jqterm.path=${u.pathname || '/'}`,
+          ]
+        } catch {
+          return [] // 주소를 비웠거나 형식이 아니면 계획이 제 값을 쓰면 된다
+        }
+      })(),
       `-Jqterm.users=${Math.max(1, Math.round(cfg.users))}`,
       `-Jqterm.rampup=${Math.max(1, Math.round(cfg.users / Math.max(1, cfg.spawnRate)))}`,
       `-Jqterm.duration=${Math.max(1, Math.round(cfg.durationSec))}`,
@@ -5251,6 +5268,14 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       finished: false,
     }
     perfRun = run2
+    /**
+     * **stdin 을 닫는다.**
+     *
+     * jmeter.bat 은 Java 를 못 찾으면 "Press any key to continue . . ." 로 멈춘다(배치의 pause).
+     * 우리가 띄운 프로세스에는 키를 눌러 줄 사람이 없어서, 아무 출력도 없이 영원히 매달린다 —
+     * 화면에는 '진행 중' 만 도는 최악의 모양이 된다. 입력을 닫아 두면 pause 가 바로 지나간다.
+     */
+    child2.stdin?.end()
     child2.stdout?.on('data', (b: Buffer) => perfPush(run2, 'stdout', run2.decoders.stdout.write(b)))
     child2.stderr?.on('data', (b: Buffer) => perfPush(run2, 'stderr', run2.decoders.stderr.write(b)))
     child2.on('error', (err) => perfPush(run2, 'stderr', `\n[실행 실패] ${cleanErrorMessage(err)}\n`))
@@ -5403,6 +5428,7 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     finished: false,
   }
   perfRun = run
+  child.stdin?.end() // 입력을 기다릴 일이 없다 — 열어 두면 멈춰 있는 원인만 늘어난다
 
   child.stdout?.on('data', (b: Buffer) => perfPush(run, 'stdout', run.decoders.stdout.write(b)))
   child.stderr?.on('data', (b: Buffer) => perfPush(run, 'stderr', run.decoders.stderr.write(b)))
