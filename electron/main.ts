@@ -4772,6 +4772,18 @@ interface PerfRun {
 let perfRun: PerfRun | null = null
 
 /** `locust --version` 을 실제로 실행해 본다 — 파일이 있는지만 보면 파이썬이 깨진 경우를 놓친다 */
+/**
+ * 버전 한 줄을 짧게.
+ *
+ * `locust --version` 은 설치 경로를 통째로 붙여 준다 —
+ * `locust 2.46.4 from C:\Users\...\site-packages\locust (Python 3.12.10)`. 배너 한 줄을
+ * 그 경로가 다 먹어서 정작 버전이 안 보였다. 어느 파이썬의 locust 인지는 아래 '직접 지정'
+ * 칸과 `how` 로 알 수 있으니 여기서는 버전과 파이썬만 남긴다.
+ */
+function tidyVersionLine(v: string): string {
+  return v.replace(/\s+from\s+\S.*?(?=\s*\(|$)/i, '').trim()
+}
+
 function tryVersion(cmd: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
     let out = ''
@@ -4786,7 +4798,9 @@ function tryVersion(cmd: string, args: string[]): Promise<string | null> {
       child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
       child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
       child.on('error', () => finish(null))
-      child.on('close', (code) => finish(code === 0 && /locust/i.test(out) ? out.trim().split('\n')[0] : null))
+      child.on('close', (code) =>
+        finish(code === 0 && /locust/i.test(out) ? tidyVersionLine(out.trim().split('\n')[0]) : null),
+      )
       setTimeout(() => {
         try {
           child.kill()
@@ -4893,6 +4907,11 @@ function shellQuote(v: string): string {
  * JMeter 환경 점검.
  *
  * `jmeter --version` 은 Java 가 있어야 성공한다 — 그래서 이 한 번으로 둘 다 확인된다.
+ *
+ * **출력에 'jmeter' 가 있는지로 판단하면 안 된다.** 셸을 거치므로 실행 파일이 없을 때
+ * cmd.exe 가 `'jmeter'은(는) 내부 또는 외부 명령...` 을 내는데, 거기에 우리가 찾던 이름이
+ * 그대로 들어 있다. 그래서 설치가 안 됐는데도 초록불이 떴고, 정작 실행하면 아무 일도 일어
+ * 나지 않았다(2026-09-05 확인). **종료 코드 0** 을 함께 요구한다 — 못 찾으면 1/9009 다.
  * PATH 에 없는 경우가 대부분(zip 을 풀어 쓰는 도구)이라 경로 지정을 앞세워 안내한다.
  */
 ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
@@ -4917,7 +4936,10 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
         child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.on('error', () => finish(null))
-        child.on('close', () => finish(/jmeter/i.test(out) ? out : null))
+        // 종료 코드 0 + 실제 배너(Apache 저작권 줄이나 버전 숫자)까지 봐야 진짜다
+        child.on('close', (code) =>
+          finish(code === 0 && /apache|\d+\.\d+/i.test(out) ? out : null),
+        )
         setTimeout(() => {
           try {
             child.kill()
@@ -4931,11 +4953,9 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
       }
     })
     if (v) {
-      const line = v
-        .split('\n')
-        .map((l) => l.trim())
-        .find((l) => /\d+\.\d+/.test(l) && /jmeter|apache/i.test(l))
-      return { ok: true, how: cmd, version: (line || 'Apache JMeter').slice(0, 80) }
+      // 배너가 아스키 아트라 '5.6.3' 이 그림 끝에 붙어 나온다 — 줄 끝의 버전만 뽑는다
+      const ver = /(\d+\.\d+(?:\.\d+)?)\s*$/m.exec(v)?.[1]
+      return { ok: true, how: cmd, version: ver ? `Apache JMeter ${ver}` : 'Apache JMeter' }
     }
   }
   // 파일은 있는데 실행이 안 됐다면 Java 쪽일 가능성이 크다 — 그 경우를 갈라서 말한다.
@@ -5721,12 +5741,39 @@ ipcMain.handle('perf:delete', async (_evt, id: string) => {
  * `file://` 리포트를 끼우면 개발 중에는 Chromium 이 막는다(= 개발 중 확인 불가). 돌고 있는
  * 동안의 대시보드는 http 라서 iframe 으로 들어가고, 정적 리포트만 이 창을 쓴다.
  */
+/**
+ * 회차의 리포트 파일 위치.
+ *
+ * 도구마다 다르다 — Locust 는 `--html` 로 **한 파일**(report.html)을 만들고, JMeter 는
+ * `-e -o` 로 **폴더**(report/index.html + content/…)를 만든다. 회차 meta 에 실제 경로를
+ * 적어 두었는데 열 때는 report.html 만 보고 있어서, JMeter 회차는 전부 '리포트 파일이
+ * 없습니다' 였다(2026-09-05 확인).
+ */
+async function perfReportFile(id: string): Promise<string | null> {
+  const dir = path.join(perfRunsDir(), id)
+  const cands: string[] = []
+  try {
+    const meta = JSON.parse(await readFile(path.join(dir, 'run.json'), 'utf-8')) as PerfRunMeta
+    if (meta.reportPath) cands.push(meta.reportPath)
+  } catch {
+    /* meta 가 없으면 아래 기본 경로로 */
+  }
+  cands.push(path.join(dir, 'report.html'), path.join(dir, 'report', 'index.html'))
+  for (const c of cands) {
+    try {
+      await stat(c)
+      return c
+    } catch {
+      /* 다음 후보 */
+    }
+  }
+  return null
+}
+
 ipcMain.handle('perf:openReport', async (_evt, id: string) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false, error: '잘못된 회차 id' }
-  const file = path.join(perfRunsDir(), id, 'report.html')
-  try {
-    await stat(file)
-  } catch {
+  const file = await perfReportFile(id)
+  if (!file) {
     return { ok: false, error: '리포트 파일이 없습니다. (중지된 회차이거나 실행이 실패했습니다)' }
   }
   const win = new BrowserWindow({
@@ -5824,7 +5871,10 @@ const BRAND_START = '<!-- QTERM-VERDICT-START -->'
 const BRAND_END = '<!-- QTERM-VERDICT-END -->'
 ipcMain.handle('perf:brandReport', async (_evt, { id, html }: { id: string; html: string }) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { ok: false }
-  const file = path.join(perfRunsDir(), id, 'report.html')
+  // 도구마다 파일이 다르다 — Locust 는 report.html, JMeter 는 report/index.html.
+  // 전에는 report.html 만 보고 있어서 JMeter 리포트에는 우리 판정이 얹히지 않았다.
+  const file = await perfReportFile(id)
+  if (!file) return { ok: false }
   let raw: string
   try {
     raw = await readFile(file, 'utf-8')
@@ -5954,11 +6004,16 @@ ipcMain.handle('perf:previewScenario', (_evt, cfg: PerfRunConfig) => ({ text: bu
 /** 리포트(HTML) 를 사용자가 고른 곳으로 저장 */
 ipcMain.handle('perf:saveReport', async (_evt, id: string) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }
-  const src = path.join(perfRunsDir(), id, 'report.html')
-  try {
-    await stat(src)
-  } catch {
-    return { saved: false, error: '리포트 파일이 없습니다.' }
+  const src = await perfReportFile(id)
+  if (!src) return { saved: false, error: '리포트 파일이 없습니다.' }
+  // JMeter 리포트는 index.html 혼자서는 아무것도 못 그린다(content/·js/·css/ 를 참조).
+  // 한 파일로 저장한 척하지 않고, 폴더째 가져가라고 말한다.
+  if (path.basename(src).toLowerCase() === 'index.html') {
+    return {
+      saved: false,
+      error:
+        'JMeter 리포트는 여러 파일로 되어 있어 한 파일로 저장할 수 없습니다. [폴더 열기] 로 열어 report 폴더를 통째로 복사하세요.',
+    }
   }
   let stamp = id.slice(0, 8)
   try {
@@ -5987,11 +6042,17 @@ ipcMain.handle('perf:saveReport', async (_evt, id: string) => {
 /** 통계 CSV 저장 (엑셀로 열어 보고서에 붙이는 용도) */
 ipcMain.handle('perf:saveCsv', async (_evt, id: string) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }
-  const src = path.join(perfRunsDir(), id, 'run_stats.csv')
+  // JMeter 회차에는 run_stats.csv 가 없다 — 대신 원본 result.jtl 이 CSV 다(요청 한 건에 한 줄)
+  let src = path.join(perfRunsDir(), id, 'run_stats.csv')
   try {
     await stat(src)
   } catch {
-    return { saved: false, error: '통계 파일이 없습니다.' }
+    src = path.join(perfRunsDir(), id, 'result.jtl')
+    try {
+      await stat(src)
+    } catch {
+      return { saved: false, error: '통계 파일이 없습니다.' }
+    }
   }
   const r = await dialog.showSaveDialog(mainWindow!, {
     title: '통계 CSV 저장',
@@ -6030,6 +6091,34 @@ ipcMain.handle('perf:openJmeterGui', async () => {
       windowsHide: true,
     })
     child.unref()
+    /**
+     * **바로 죽는지 잠깐 지켜본다.**
+     *
+     * stdio 를 버려 두었으니 실패해도 아무 소리가 없다 — 예전에는 그래서 "띄웠습니다" 라고
+     * 말해 놓고 창은 뜨지 않았다. 경로가 틀렸거나 Java 가 없으면 셸이 1~2초 안에 끝나므로,
+     * 그때까지만 기다려 실패를 그대로 알린다. (창이 실제로 뜨기까지는 10초쯤 걸리는데,
+     * 그때는 프로세스가 살아 있으므로 여기서 걸리지 않는다.)
+     */
+    const early = await new Promise<string | null>((resolve) => {
+      let settled = false
+      const done = (v: string | null) => {
+        if (!settled) {
+          settled = true
+          resolve(v)
+        }
+      }
+      child.once('error', (e) => done(cleanErrorMessage(e)))
+      child.once('exit', (code) =>
+        done(code && code !== 0 ? `JMeter 가 바로 끝났습니다 (종료 코드 ${code})` : null),
+      )
+      setTimeout(() => done(null), 2000)
+    })
+    if (early) {
+      return {
+        ok: false,
+        error: `${early} — 위에서 jmeter.bat 경로와 Java 설치를 확인해 주세요.`,
+      }
+    }
     return { ok: true }
   } catch (e) {
     return { ok: false, error: cleanErrorMessage(e) }

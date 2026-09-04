@@ -388,8 +388,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const urlTouched = useRef(false)
   useEffect(() => {
     if (urlTouched.current) return
-    const h = session ? hostOf(session.name) : ''
-    setTargetUrl(h ? `https://${h}` : '')
+    const h = session ? hostOf(session.host || session.name) : ''
+    // http 를 기본으로 둔다 — 사내 검증 대상은 대개 평문이고, https 로 채워 두면 인증서·
+    // 포트 문제로 '전부 실패' 부터 보게 된다. 필요하면 한 글자 고치면 된다.
+    setTargetUrl(h ? `http://${h}` : '')
   }, [session])
 
   /**
@@ -1262,6 +1264,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   <li>· 로그인·토큰·CSV 데이터처럼 손이 많이 가는 흐름을 GUI 로 짜 둔 경우</li>
                   <li>· 제출용 보고서가 필요할 때 — 리포트가 더 상세합니다(APDEX·오류 분류)</li>
                   <li>· 계획이 없어도 됩니다 — 시나리오에서 JMeter 를 띄워 만들 수 있습니다</li>
+                  <li>· 자체 서명 인증서를 신경 쓸 필요가 없습니다 — JMeter 는 검사하지 않습니다</li>
                   <li className="text-gray-500">안 되는 것: 실행 중 화면 · 인원 늘리기(계단식)</li>
                   <li className="text-gray-500">필요한 것: Java + JMeter 압축 풀기 (경로를 직접 지정)</li>
                 </ul>
@@ -1394,7 +1397,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               </select>
               <div className="mb-0.5 mt-1.5 flex items-center gap-1 text-[10px] text-gray-500">
                 대상 주소
-                <HintMark text="부하를 받을 곳입니다. https:// 는 443, http:// 는 80 으로 갑니다 — 서비스 포트가 다르면 http://주소:포트 처럼 직접 적으세요." />
+                <HintMark text="부하를 받을 곳을 주소 한 줄로 적습니다 (두 도구 모두 이 방식입니다). 포트를 안 적으면 http 는 80, https 는 443 으로 갑니다 — 서비스 포트가 다르면 http://주소:8080 처럼 적으세요. 경로는 아래 시나리오에서 정합니다." />
               </div>
               <input
                 value={targetUrl}
@@ -1403,7 +1406,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   setTargetUrl(e.target.value)
                 }}
                 disabled={!!running}
-                placeholder="https://10.255.233.21:5000"
+                placeholder="http://10.255.233.21:8080"
                 className={inputCls + ' w-full font-mono disabled:opacity-50'}
               />
               <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
@@ -1606,7 +1609,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         (scenarioKind === k ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                       }
                     >
-                      {k === 'form' ? '폼으로 만들기' : '파일 고르기'}
+                      {k === 'form' ? '여기서 만들기' : '파일 선택'}
                     </button>
                   ))}
                 </div>
@@ -1770,7 +1773,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   ) : (
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
                       이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로 씁니다.
-                      (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로 만들기' 를
+                      (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '여기서 만들기' 를
                       쓰세요.)
                     </p>
                   )}
@@ -1874,32 +1877,40 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             {/* ── 고급 설정 ─────────────────────────────────────
                 안 건드려도 돌아가는 것들만 여기 넣는다. 처음 여는 사람에게 스무 칸을 한꺼번에
                 보여주면 무엇이 필수인지 알 수 없다. 기본은 접고, 편 상태는 기억한다. */}
-            <button
-              onClick={() => {
-                const next = !advOpen
-                setAdvOpen(next)
-                localStorage.setItem('perf_adv_open', next ? '1' : '0')
-              }}
-              className="mb-2 flex w-full items-center gap-1.5 rounded-md border border-white/10 bg-panel-light/25 px-2.5 py-1.5 text-[11px] text-gray-400 hover:bg-white/5"
+            {/* 펼친 내용을 **이 테두리 안에** 담는다 — 전에는 버튼과 카드가 따로 떠 있어
+                어디까지가 고급 설정인지 알 수 없었다(사용자 지적). */}
+            <div
+              className={
+                'mb-2 overflow-hidden rounded-md border ' +
+                (advOpen ? 'border-blue-500/25 bg-blue-500/[0.04]' : 'border-white/10 bg-panel-light/25')
+              }
             >
-              {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-              고급 설정
-              <span className="ml-auto text-[10px] text-gray-600">
-                {advOpen ? '접기' : tool === 'jmeter' ? '백분위 기준 · 워밍업' : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
-              </span>
-            </button>
+              <button
+                onClick={() => {
+                  const next = !advOpen
+                  setAdvOpen(next)
+                  localStorage.setItem('perf_adv_open', next ? '1' : '0')
+                }}
+                className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-gray-400 hover:bg-white/5"
+              >
+                {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                고급 설정
+                <span className="ml-auto text-[10px] text-gray-600">
+                  {advOpen
+                    ? '접기'
+                    : tool === 'jmeter'
+                      ? '백분위 기준 · 워밍업'
+                      : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
+                </span>
+              </button>
 
             {advOpen && (
-              <>
-                {/* JMeter 에는 켤 것이 없다 — 못 켜게 막아 둔 체크박스를 보여 주면
-                    '기능이 고장났다' 로 읽힌다. 그래서 그 도구에서는 사실만 적는다. */}
+              <div className="border-t border-white/10 px-2 pb-0.5 pt-2 [&>div:last-child]:mb-0">
+                {/* JMeter 에는 아예 두지 않는다 — 그 도구는 인증서를 검사하지 않아 켤 것이
+                    없고, '켤 것이 없다' 는 한 줄만 남은 칸은 자리만 차지한다(사용자 지적).
+                    그 사실은 탭 옆 [?] 의 도구 안내에 적어 둔다. */}
+                {tool === 'locust' && (
                 <Card icon={<Target size={12} />} title="연결">
-                  {tool === 'jmeter' ? (
-                    <p className="text-[10.5px] leading-relaxed text-gray-500">
-                      JMeter 는 <span className="text-gray-300">인증서를 검사하지 않습니다</span> — 자체 서명
-                      인증서도 그대로 붙으므로 여기서 켤 것이 없습니다.
-                    </p>
-                  ) : (
                     <label className="flex items-start gap-2 text-[11px] text-gray-300">
                       <input
                         type="checkbox"
@@ -1917,13 +1928,29 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         </span>
                       </span>
                     </label>
-                  )}
                 </Card>
+                )}
 
                 <Card icon={<CircleCheck size={12} />} title="판정 기준 — 더">
                   <div className="grid grid-cols-2 gap-1.5">
-                    <Field label="p50 이하" unit="ms" value={p50Th} onChange={setP50Th} disabled={!!running} placeholder="—" />
-                    <Field label="p99 이하" unit="ms" value={p99Th} onChange={setP99Th} disabled={!!running} placeholder="—" />
+                    <Field
+                      label="p50 이하"
+                      unit="ms"
+                      value={p50Th}
+                      onChange={setP50Th}
+                      disabled={!!running}
+                      placeholder="—"
+                      hint="절반의 요청이 이 시간 안에 끝났다는 뜻(중간값)입니다. '보통은 빠른가' 를 봅니다 — p95 는 통과했는데 p50 이 나쁘면 전체가 느린 것입니다."
+                    />
+                    <Field
+                      label="p99 이하"
+                      unit="ms"
+                      value={p99Th}
+                      onChange={setP99Th}
+                      disabled={!!running}
+                      placeholder="—"
+                      hint="100번 중 99번. 드물게 아주 오래 걸리는 요청(GC·락·재시도)을 잡습니다. 값이 잘 튀니 p95 보다 넉넉하게 잡으세요."
+                    />
                   </div>
                   <div className="mt-1.5 flex items-end gap-2">
                     <div className="w-24">
@@ -1946,7 +1973,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 {tool === 'locust' && scenarioKind === 'form' && (
                   <Card icon={<FileCode size={12} />} title="요청 방식">
                     <div className="flex items-center gap-1.5">
-                      <span className="shrink-0 text-[10.5px] text-gray-500">요청 사이 대기</span>
+                      <span className="flex shrink-0 items-center gap-1 text-[10.5px] text-gray-500">
+                        요청 사이 대기
+                        <HintMark text="한 사용자가 요청을 끝낸 뒤 다음 요청까지 쉬는 시간입니다. 사람은 화면을 보고 생각하니 1~3초쯤이 실제에 가깝습니다. 0~0 으로 두면 쉬지 않고 계속 보내 같은 인원으로 훨씬 센 부하가 됩니다." />
+                      </span>
                       <input
                         value={waitMin}
                         onChange={(e) => setWaitMin(e.target.value)}
@@ -1962,13 +1992,17 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       />
                       <span className="shrink-0 text-[10.5px] text-gray-500">초</span>
                     </div>
+                    <div className="mt-1.5 mb-0.5 flex items-center gap-1 text-[10px] text-gray-500">
+                      공통 헤더
+                      <HintMark text="모든 요청에 똑같이 붙일 헤더입니다. 인증이 필요한 API 라면 여기에 토큰을 넣으세요 (예: X-Auth-Token: gAAAAA…). 한 줄에 하나, '이름: 값' 형식입니다. 로그·리포트·AI 로 나갈 때는 값이 가려집니다." />
+                    </div>
                     <textarea
                       value={commonHeaderText}
                       onChange={(e) => setCommonHeaderText(e.target.value)}
                       disabled={!!running}
                       rows={2}
-                      placeholder={'공통 헤더 — 한 줄에 하나\nX-Auth-Token: ...'}
-                      className={inputCls + ' mt-1.5 w-full resize-y font-mono disabled:opacity-50'}
+                      placeholder={'X-Auth-Token: ...'}
+                      className={inputCls + ' w-full resize-y font-mono disabled:opacity-50'}
                     />
                     <label className="mt-1.5 flex items-start gap-2 text-[11px] text-gray-300">
                       <input
@@ -1997,6 +2031,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         value={processes}
                         onChange={setProcesses}
                         disabled={!!running}
+                        hint="이 PC 에서 몇 개로 나눠 돌릴지. 1 이면 코어 하나만 씁니다. 사용자 수를 수백 명으로 올렸는데 초당 요청이 더 안 늘면 내 PC 가 막힌 것이니 코어 수만큼 올리세요."
                       />
                       <Field
                         label="다른 PC 워커"
@@ -2004,6 +2039,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         value={expectWorkers}
                         onChange={setExpectWorkers}
                         disabled={!!running}
+                        hint="한 대로 부족할 때 다른 PC 를 붙입니다. 0 이면 이 PC 만 씁니다. 1 이상이면 그 수만큼 붙을 때까지 시작을 기다리고, 붙일 명령을 아래에 보여줍니다 — 그 PC 에도 locust 가 설치돼 있어야 합니다."
                       />
                     </div>
                     <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
@@ -2021,9 +2057,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </p>
                 </Card>
                 )}
-              </>
+              </div>
             )}
-
+            </div>
 
             {/* 저장해 둔 설정 — 같은 검증을 다음에 또 돌리고, 팀에 넘기기도 한다 */}
             <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2">
@@ -2276,10 +2312,20 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 ) : (
                   <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
                     <Gauge size={20} className="text-gray-600" />
+                    {/* 고른 회차가 없으면 없는 버튼을 가리키지 않는다 — 전에는 버튼이 안
+                        보이는 상태에서 '아래 원본 리포트 열기로 보세요' 라고만 했다 */}
                     <p className="text-[12px] leading-relaxed text-gray-500">
                       실시간 대시보드는 <span className="text-gray-300">돌고 있는 동안</span>만 뜹니다.
                       <br />
-                      끝난 회차는 아래 <span className="text-gray-300">원본 리포트 열기</span> 로 보세요.
+                      {selected ? (
+                        <span className="text-[11px] text-gray-600">
+                          끝난 회차는 아래 <span className="text-gray-400">원본 리포트 열기</span> 로 보세요.
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-gray-600">
+                          지난 회차를 보시려면 위의 <span className="text-gray-400">회차</span> 에서 하나를 고르세요.
+                        </span>
+                      )}
                     </p>
                     {selected && !selected.meta.canceled && (
                       <button
@@ -2886,26 +2932,38 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         >
                           <ExternalLink size={11} /> 리포트 열기
                         </button>
-                        <button
-                          onClick={async () => {
-                            await ensureBranded()
-                            const r = await window.electronAPI.perfSaveReport(selected.meta.id)
-                            if (r.saved) setNote(`리포트를 저장했습니다 — ${r.path}`)
-                            else if (r.error) setNote(r.error)
-                          }}
-                          className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
-                        >
-                          <Download size={11} /> 리포트 저장 (HTML)
-                        </button>
+                        {/* JMeter 리포트는 index.html 혼자서는 아무것도 못 그린다(content/·js/
+                            를 참조) — 한 파일로 저장하는 버튼을 두지 않고 [폴더 열기] 로 보낸다 */}
+                        {(selected.meta.config.tool ?? 'locust') !== 'jmeter' && (
+                          <button
+                            onClick={async () => {
+                              await ensureBranded()
+                              const r = await window.electronAPI.perfSaveReport(selected.meta.id)
+                              if (r.saved) setNote(`리포트를 저장했습니다 — ${r.path}`)
+                              else if (r.error) setNote(r.error)
+                            }}
+                            className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
+                          >
+                            <Download size={11} /> 리포트 저장 (HTML)
+                          </button>
+                        )}
                         <button
                           onClick={async () => {
                             const r = await window.electronAPI.perfSaveCsv(selected.meta.id)
-                            if (r.saved) setNote(`통계를 저장했습니다 — ${r.path}`)
+                            if (r.saved) setNote(`결과를 저장했습니다 — ${r.path}`)
                             else if (r.error) setNote(r.error)
                           }}
+                          title={
+                            (selected.meta.config.tool ?? 'locust') === 'jmeter'
+                              ? '요청 한 건에 한 줄인 원본 결과(result.jtl) — 엑셀에서 CSV 로 열립니다'
+                              : '엑셀로 열어 보고서에 붙이는 용도'
+                          }
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
                         >
-                          <Download size={11} /> 통계 저장 (CSV)
+                          <Download size={11} />{' '}
+                          {(selected.meta.config.tool ?? 'locust') === 'jmeter'
+                            ? '결과 저장 (JTL·CSV)'
+                            : '통계 저장 (CSV)'}
                         </button>
                         <button
                           onClick={() => void window.electronAPI.perfOpenFolder(selected.meta.id)}
@@ -3028,7 +3086,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             </pre>
             <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2">
               <p className="min-w-0 flex-1 text-[10.5px] leading-relaxed text-gray-500">
-                회차 폴더에도 같은 파일이 남습니다. 고쳐 쓰려면 그 파일을 복사해 두고 '파일 고르기' 로 선택하세요.
+                회차 폴더에도 같은 파일이 남습니다. 고쳐 쓰려면 그 파일을 복사해 두고 '파일 선택' 으로 고르세요.
               </p>
               <button
                 onClick={() => setPreview(null)}

@@ -2286,12 +2286,23 @@ export default function App() {
         <PerfPanel
           sessions={tabs
             .filter((t) => statuses[t.id]?.status === 'connected')
-            // 별칭과 접속 주소를 둘 다 넘긴다 — 성능 검증 창에서 '별칭(IP)' 로 보여준다
-            .map((t) => ({
-              id: t.id,
-              name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title),
-              host: statuses[t.id]?.host,
-            }))}
+            /*
+             * 별칭과 접속 주소를 **따로** 넘긴다 — 성능 검증 창이 '별칭 (IP)' 로 붙여 쓴다.
+             *
+             * 전에는 name 자리에 host 를 넣어 버려서 두 값이 같아지고, 결국 IP 만 보였다.
+             * 별칭은 탭 이름(사용자가 고친 경우)이나 접속 프로필의 label 이다 — 안 고친 탭의
+             * 기본 이름('세션 1')은 별칭이 아니므로 그때는 주소만 보여준다.
+             */
+            .map((t) => {
+              const host = statuses[t.id]?.host
+              const key = statuses[t.id]?.key
+              const label = t.custom
+                ? t.title
+                : key
+                  ? profiles.find((pr) => profileKey(pr) === key)?.label?.trim()
+                  : undefined
+              return { id: t.id, name: label || host || t.title, host }
+            })}
           onClose={() => setShowPerf(false)}
           onAnalyze={analyzeText}
         />
