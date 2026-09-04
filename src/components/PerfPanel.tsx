@@ -81,10 +81,16 @@ function hostOf(name: string): string {
  * 처음 여는 사람이 "사용자 몇 명이 적당한가" 를 알 수가 없다. 세 칸으로 시작점을 준다 —
  * 값은 그대로 편집되니 프리셋은 잠금이 아니라 출발점이다.
  */
+/**
+ * 부하 프리셋.
+ *
+ * '가볍게·보통·세게' 로 두었더니 **무엇이 가벼운지**를 알 수 없었다. 형용사 대신 실제 값을
+ * 그대로 적는다 — 누르기 전에 무엇이 채워질지 보이는 편이 낫다.
+ */
 const LOAD_PRESETS = [
-  { label: '가볍게', users: 10, rate: 2, min: 1 },
-  { label: '보통', users: 50, rate: 5, min: 3 },
-  { label: '세게', users: 200, rate: 20, min: 5 },
+  { label: '10명 1분', users: 10, rate: 2, min: 1 },
+  { label: '50명 3분', users: 50, rate: 5, min: 3 },
+  { label: '200명 5분', users: 200, rate: 20, min: 5 },
 ] as const
 
 /** 설정 묶음 하나 — 제목과 내용을 테두리로 묶는다(전에는 라벨만 있어 어디까지가 한 묶음인지 안 보였다) */
@@ -124,7 +130,12 @@ function Legend({ color, label, dashed }: { color: string; label: string; dashed
   )
 }
 
-/** 숫자 입력 한 칸 — 단위를 입력칸 안에 붙여 라벨을 짧게 유지한다 */
+/**
+ * 숫자 입력 한 칸 — 단위를 입력칸 안에 붙여 라벨을 짧게 유지한다.
+ *
+ * `hint` 를 주면 라벨 옆에 물음표가 붙는다. 라벨만으로는 '증가 5 명/초' 가 무엇을 5 하는
+ * 것인지 알 수 없다는 지적이 있었다 — 짧은 라벨을 지키면서 뜻은 그 자리에서 볼 수 있게 한다.
+ */
 function Field({
   label,
   unit,
@@ -132,6 +143,7 @@ function Field({
   onChange,
   disabled,
   placeholder,
+  hint,
 }: {
   label: string
   unit: string
@@ -139,10 +151,21 @@ function Field({
   onChange: (v: string) => void
   disabled?: boolean
   placeholder?: string
+  hint?: string
 }) {
   return (
     <label className="block">
-      <span className="text-[10px] text-gray-500">{label}</span>
+      <span className="flex items-center gap-1 text-[10px] text-gray-500">
+        {label}
+        {hint && (
+          <span
+            title={hint}
+            className="flex h-3 w-3 shrink-0 cursor-help items-center justify-center rounded-full border border-white/20 text-[8px] leading-none text-gray-500"
+          >
+            ?
+          </span>
+        )}
+      </span>
       <span className="mt-0.5 flex items-center rounded border border-white/10 bg-panel-light focus-within:border-blue-500/60">
         <input
           value={value}
@@ -159,6 +182,19 @@ function Field({
 
 const fmtMs = (v?: number) => (v === undefined ? '–' : v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`)
 const fmtInt = (v?: number) => (v === undefined ? '–' : Math.round(v).toLocaleString())
+/**
+ * 회차 시각 — `2026년 09월 04일 08시 12분`.
+ *
+ * toLocaleString 을 잘라 쓰다가 `9. 4. 8시 2` 같은 반토막이 나왔다. 로캘 문자열의 길이는
+ * 값에 따라 달라지므로 자를 것이 아니라 직접 만든다.
+ */
+function fmtRunTime(ms: number): string {
+  const d = new Date(ms)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}년 ${p2(d.getMonth() + 1)}월 ${p2(d.getDate())}일 ${p2(d.getHours())}시 ${p2(
+    d.getMinutes(),
+  )}분`
+}
 /** 초당 바이트 → 사람이 읽는 단위 */
 function fmtRate(bytesPerSec?: number): string {
   if (bytesPerSec === undefined || !Number.isFinite(bytesPerSec)) return '–'
@@ -788,7 +824,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           .filter(Boolean)
           .join(' · ') || '없음 (측정값만)',
       ],
-      ['실행', new Date(selected.meta.startedAt).toLocaleString('ko-KR', { hour12: false })],
+      ['실행', fmtRunTime(selected.meta.startedAt)],
     ]
     return (
       `<div style="font-family:system-ui,'Malgun Gothic',sans-serif;margin:16px;padding:14px 16px;` +
@@ -1076,15 +1112,15 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         disabled={!!running}
                         title={
                           m === 'flat'
-                            ? '정해진 사용자 수로 쭉 유지합니다'
-                            : '사용자를 단계적으로 올려 어디서 무너지는지 봅니다'
+                            ? '정해진 인원이 다 붙은 뒤로는 그 인원을 끝까지 유지합니다'
+                            : '인원을 몇 단계에 걸쳐 올려 어디서부터 느려지는지 봅니다 (한계점 찾기)'
                         }
                         className={
                           'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
                           (loadMode === m ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                         }
                     >
-                      {m === 'flat' ? '평평하게' : '계단식'}
+                      {m === 'flat' ? '인원 유지' : '인원 늘리기'}
                     </button>
                   ))}
                 </span>
@@ -1119,9 +1155,30 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     })}
                   </div>
                   <div className="grid grid-cols-3 gap-1.5">
-                    <Field label="사용자" unit="명" value={users} onChange={setUsers} disabled={!!running} />
-                    <Field label="증가" unit="명/초" value={spawnRate} onChange={setSpawnRate} disabled={!!running} />
-                    <Field label="시간" unit="분" value={durationMin} onChange={setDurationMin} disabled={!!running} />
+                    <Field
+                      label="사용자"
+                      unit="명"
+                      value={users}
+                      onChange={setUsers}
+                      disabled={!!running}
+                      hint="끝까지 유지할 가상 사용자 수"
+                    />
+                    <Field
+                      label="붙는 속도"
+                      unit="명/초"
+                      value={spawnRate}
+                      onChange={setSpawnRate}
+                      disabled={!!running}
+                      hint="처음에 사용자를 얼마나 빨리 늘릴지. 50명을 5명/초면 10초 만에 다 붙고, 그 뒤로는 계속 50명입니다 (3분 동안 5명씩 느는 것이 아닙니다)"
+                    />
+                    <Field
+                      label="시간"
+                      unit="분"
+                      value={durationMin}
+                      onChange={setDurationMin}
+                      disabled={!!running}
+                      hint="다 붙은 뒤 이 시간만큼 부하를 유지합니다"
+                    />
                   </div>
                 </>
               ) : (
@@ -1129,8 +1186,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   {/* 계단식 — 각 줄이 한 단계. 어디서 무너지는지 시계열 그래프와 같이 보면 한계점이 보인다 */}
                   <div className="mb-1 grid grid-cols-[1fr_1fr_1fr_20px] gap-1.5 text-[9.5px] text-gray-500">
                     <span>사용자(명)</span>
-                    <span>증가(명/초)</span>
-                    <span>유지(초)</span>
+                    <span title="처음에 사용자를 얼마나 빨리 늘릴지">붙는 속도(명/초)</span>
+                    <span title="그 인원을 몇 초 동안 유지할지">유지(초)</span>
                     <span />
                   </div>
                   <div className="space-y-1">
@@ -1187,15 +1244,15 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         disabled={!!running}
                         title={
                           o === 'weighted'
-                            ? '각 사용자가 비율대로 아무 단계나 고릅니다 (실제 트래픽 흉내)'
-                            : '한 사용자가 위에서 아래로 순서대로 돕니다 (로그인 후 조회처럼)'
+                            ? '사용자마다 매번 아무 단계나 무작위로 고릅니다. 오른쪽 숫자가 그 비율입니다(10 이면 1 인 단계보다 10배 자주). 여러 요청이 섞이는 실제 서비스에 가깝습니다.'
+                            : '한 사용자가 1→2→3 차례로 돌고 다시 처음으로. 로그인 → 목록 → 상세처럼 앞 단계가 있어야 뒤가 되는 흐름에 씁니다.'
                         }
                         className={
                           'rounded px-1.5 py-0.5 text-[9.5px] disabled:opacity-50 ' +
                           (order === o ? 'bg-blue-600/70 text-white' : 'text-gray-400 hover:text-gray-200')
                         }
                       >
-                        {o === 'weighted' ? '비율대로' : '순서대로'}
+                        {o === 'weighted' ? '섞어서' : '차례대로'}
                       </button>
                     ))}
                   </span>
@@ -1220,6 +1277,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
               {scenarioKind === 'form' ? (
                 <>
+                  {/* 폼/파일이 각각 무엇인지 한 줄로 — Locust 를 안 써 본 사람에게는 둘 다 낯설다 */}
+                  <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
+                    적어 주신 경로로 <span className="text-gray-500">앱이 Locust 시나리오 파일(locustfile.py)을
+                    대신 만듭니다.</span> 만들 파일은 <span className="text-gray-500">미리보기</span> 로 실행 전에
+                    확인할 수 있습니다.
+                  </p>
+                  <div className="mb-1 grid grid-cols-[62px_1fr_36px_auto] items-center gap-1 px-1 text-[9.5px] text-gray-500">
+                    <span>방식</span>
+                    <span>경로</span>
+                    <span className="text-center">{order === 'weighted' ? '비율' : '순서'}</span>
+                    <span />
+                  </div>
                   <div className="space-y-1">
                     {steps.map((st, i) => (
                       <div key={i} className="rounded border border-white/10 bg-black/15">
@@ -1356,6 +1425,11 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 </>
               ) : (
                 <>
+                  <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
+                    이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로 씁니다.
+                    (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '폼으로 만들기' 를
+                    쓰세요.)
+                  </p>
                   <div className="flex items-center gap-1.5">
                     <input
                       value={scenarioFile}
@@ -1393,9 +1467,30 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               }
             >
               <div className="grid grid-cols-2 gap-1.5">
-                <Field label="p95 이하" unit="ms" value={p95Th} onChange={setP95Th} disabled={!!running} placeholder="500" />
-                <Field label="실패율 이하" unit="%" value={errTh} onChange={setErrTh} disabled={!!running} placeholder="1" />
+                <Field
+                  label="p95 이하"
+                  unit="ms"
+                  value={p95Th}
+                  onChange={setP95Th}
+                  disabled={!!running}
+                  placeholder="500"
+                  hint="100번 중 95번은 이 시간 안에 응답했다는 뜻입니다. 평균은 느린 몇 건에 가려지지만 p95 는 가려지지 않아 체감에 가깝습니다."
+                />
+                <Field
+                  label="실패율 이하"
+                  unit="%"
+                  value={errTh}
+                  onChange={setErrTh}
+                  disabled={!!running}
+                  placeholder="1"
+                  hint="전체 요청 중 실패한 비율입니다. 4xx·5xx 응답과 연결 실패·타임아웃이 실패로 셉니다."
+                />
               </div>
+              <p className="mt-1.5 text-[10px] leading-relaxed text-gray-600">
+                여기 적은 값을 넘으면 <span className="text-red-300/80">기준 초과</span>, 다 만족하면{' '}
+                <span className="text-emerald-300/80">기준 통과</span> 로 판정합니다. 비워 두면 판정하지 않고 측정값만
+                보여줍니다.
+              </p>
             </Card>
 
             {/* ── 고급 설정 ─────────────────────────────────────
@@ -1600,6 +1695,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   onChange={(e) => setPresetName(e.target.value)}
                   disabled={!!running}
                   placeholder="이름을 적어 지금 설정을 저장"
+                  title="이 PC 의 앱 데이터 폴더(perf-presets.json)에 저장됩니다"
                   className={inputCls + ' min-w-0 flex-1 disabled:opacity-50'}
                 />
                 <button
@@ -1610,6 +1706,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   저장
                 </button>
               </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                이 PC 의 앱 데이터 폴더에 남습니다 (설정 → 데이터 폴더 · perf-presets.json). 앱을 다시 설치해도
+                지워지지 않고, 내보내기로 팀에 넘길 수 있습니다.
+              </p>
             </div>
 
             {!running ? (
@@ -1676,7 +1776,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         >
                           <div className="flex items-baseline gap-1.5">
                             <span className="min-w-0 truncate text-[11.5px] text-gray-200">
-                              {r.meta.label || new Date(r.meta.startedAt).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
+                              {r.meta.label || fmtRunTime(r.meta.startedAt)}
                             </span>
                             {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
                             {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
@@ -1953,7 +2053,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               {verdict.label}
                             </span>
                             <span className="ml-auto text-[10.5px] text-gray-500">
-                              {new Date(selected.meta.startedAt).toLocaleString('ko-KR', { hour12: false })}
+                              {fmtRunTime(selected.meta.startedAt)}
                               {selected.meta.endedAt &&
                                 ` · ${Math.round((selected.meta.endedAt - selected.meta.startedAt) / 1000)}초 걸림`}
                             </span>
@@ -2159,10 +2259,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       {compare && (
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-white/10 bg-panel-light/25 px-2.5 py-2 text-[11px]">
                           <span className="shrink-0 text-gray-500">
-                            직전 회차(
-                            {compare.label ||
-                              new Date(compare.at).toLocaleString('ko-KR', { hour12: false }).slice(5, 16)}
-                            ) 대비
+                            직전 회차({compare.label || fmtRunTime(compare.at)}) 대비
                           </span>
                           {compare.items.map((it) => (
                             <span key={it.label} className="flex items-center gap-1">
@@ -2551,7 +2648,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         <ConfirmDialog
           title="회차 삭제"
           message={
-            `${new Date(confirmDelete.meta.startedAt).toLocaleString('ko-KR', { hour12: false })} 회차를 지울까요?\n\n` +
+            `${fmtRunTime(confirmDelete.meta.startedAt)} 회차를 지울까요?\n\n` +
             '지워지는 것 — 통계·리포트·시나리오 파일이 든 회차 폴더 전체'
           }
           onCancel={() => setConfirmDelete(null)}
