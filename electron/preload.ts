@@ -27,7 +27,6 @@ import type {
   PerfRunConfig,
   PerfRunMeta,
   PerfPreset,
-  PerfTool,
   PerfRunRecord,
   LogRetentionSettings,
   MetricSample,
@@ -112,12 +111,7 @@ const electronAPI = {
   perfDelete: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:delete', id),
   perfOpenReport: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openReport', id),
   perfOpenFolder: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openFolder', id),
-  perfPickScenario: (tool?: PerfTool): Promise<{ path: string }> =>
-    ipcRenderer.invoke('perf:pickScenario', tool),
-  perfEnvJmeter: (): Promise<PerfEnvStatus> => ipcRenderer.invoke('perf:envJmeter'),
-  perfGetJmeterPath: (): Promise<string> => ipcRenderer.invoke('perf:getJmeterPath'),
-  perfSetJmeterPath: (p: string | null): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('perf:setJmeterPath', p),
+  perfPickScenario: (): Promise<{ path: string }> => ipcRenderer.invoke('perf:pickScenario'),
   perfPreviewScenario: (cfg: PerfRunConfig): Promise<{ text: string }> =>
     ipcRenderer.invoke('perf:previewScenario', cfg),
   perfSaveReport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
