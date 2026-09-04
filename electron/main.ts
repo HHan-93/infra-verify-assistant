@@ -5478,16 +5478,30 @@ ipcMain.handle('perf:brandReport', async (_evt, { id, html }: { id: string; html
     return { ok: false }
   }
   const block = `${BRAND_START}${html}${BRAND_END}`
-  let next: string
-  const s = raw.indexOf(BRAND_START)
-  const e = raw.indexOf(BRAND_END)
-  if (s >= 0 && e > s) {
-    next = raw.slice(0, s) + block + raw.slice(e + BRAND_END.length)
-  } else {
-    // <body> 바로 뒤에 넣는다. 못 찾으면 맨 앞에 붙인다(리포트가 깨지지 않는 쪽으로).
-    const m = raw.match(/<body[^>]*>/i)
-    next = m ? raw.replace(m[0], m[0] + block) : block + raw
-  }
+
+  // 이미 넣어 둔 조각은 **어디에 있든** 먼저 걷어낸다. 예전 판이 엉뚱한 자리(스크립트 안)에
+  // 넣어 버린 파일도 이 단계에서 원래대로 돌아온다.
+  const s0 = raw.indexOf(BRAND_START)
+  const e0 = raw.indexOf(BRAND_END)
+  if (s0 >= 0 && e0 > s0) raw = raw.slice(0, s0) + raw.slice(e0 + BRAND_END.length)
+
+  /**
+   * **진짜 `<body>` 는 `</head>` 뒤에 있다.**
+   *
+   * 파일 앞에서부터 `<body` 를 찾으면 head 에 인라인된 거대한 스크립트 안의 문자열에 걸린다.
+   * 실제로 그렇게 되어 판정 조각이 자바스크립트 한복판에 들어갔고, 리포트가 통째로 흰 화면이
+   * 됐다(콘솔에 `Uncaught SyntaxError: Unexpected identifier 'Malgun'` — 우리 조각의 글꼴
+   * 이름이 코드로 읽힌 것이다). 자리를 옮기는 것으로 끝날 문제가 아니라, **어디를 기준으로
+   * 찾느냐**의 문제였다.
+   *
+   * 붙일 때도 String.replace 를 쓰지 않는다 — 바꿀 문자열에 든 `$&`·`` $` `` 가 특수 기호로
+   * 해석돼 남의 문서를 조용히 망가뜨릴 수 있다. 위치를 세어 잘라 붙인다.
+   */
+  const headEnd = raw.search(/<\/head\s*>/i)
+  const from = headEnd >= 0 ? headEnd : 0
+  const m = /<body[^>]*>/i.exec(raw.slice(from))
+  const at = m ? from + m.index + m[0].length : -1
+  const next = at >= 0 ? raw.slice(0, at) + block + raw.slice(at) : block + raw
   await writeFileAtomic(file, next)
   return { ok: true }
 })
