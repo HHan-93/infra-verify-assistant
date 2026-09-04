@@ -298,14 +298,16 @@ export default function SessionSidebar({
             'h-2 w-2 shrink-0 rounded-full ' +
             (connected
               ? 'bg-emerald-400 shadow-[0_0_6px_1px_rgba(52,211,153,0.55)]'
-              : 'bg-gray-600 ring-1 ring-inset ring-white/10')
+              : 'bg-gray-500 ring-1 ring-inset ring-white/20')
           }
         />
         <div className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] font-medium text-gray-200 group-hover:text-white">
+          <span className="block truncate text-[13px] font-medium text-gray-100 group-hover:text-white">
             {p.label?.trim() || p.host}
           </span>
-          <span className="block truncate font-mono text-[10px] text-gray-500">
+          {/* 사이드바 배경(#2a2a3c)에서 gray-500 은 배경과 거의 붙어 보인다 — 한 단계 밝게.
+              크기도 10 → 10.5px. 여기 적힌 주소가 '어느 장비인가' 를 가리는 정보다. */}
+          <span className="block truncate font-mono text-[10.5px] text-gray-400">
             {p.username}@{p.host}:{p.port} · {authLabel(p)}
             {p.jump?.host ? ' · ↪점프' : ''}
           </span>
@@ -317,7 +319,7 @@ export default function SessionSidebar({
               openEdit(p)
             }}
             title="편집"
-            className="rounded-md p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+            className="rounded-md p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200"
           >
             <Pencil size={12} />
           </button>
@@ -327,7 +329,7 @@ export default function SessionSidebar({
               setConfirmDel(p)
             }}
             title="삭제"
-            className="rounded-md p-1 text-gray-500 hover:bg-white/10 hover:text-red-300"
+            className="rounded-md p-1 text-gray-400 hover:bg-white/10 hover:text-red-300"
           >
             <Trash2 size={12} />
           </button>
@@ -374,7 +376,7 @@ export default function SessionSidebar({
         </div>
         {/* 검색 */}
         <div className="relative mt-2">
-          <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+          <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -440,14 +442,14 @@ export default function SessionSidebar({
               <ServerCog size={20} />
             </div>
             <div className="text-xs text-gray-400">저장된 세션이 없습니다</div>
-            <div className="text-[11px] leading-relaxed text-gray-600">
+            <div className="text-[11px] leading-relaxed text-gray-400">
               상단 <span className="text-gray-400">＋</span> 로 등록하거나
               <br />
               SSH 연결 시 자동 저장됩니다
             </div>
           </div>
         ) : visible.length === 0 ? (
-          <div className="px-4 py-8 text-center text-xs text-gray-500">검색 결과가 없습니다.</div>
+          <div className="px-4 py-8 text-center text-xs text-gray-400">검색 결과가 없습니다.</div>
         ) : (
           <ul>
             {/* 폴더들 */}
@@ -483,9 +485,9 @@ export default function SessionSidebar({
                     }
                   >
                     {open ? (
-                      <ChevronDown size={13} className="shrink-0 text-gray-500" />
+                      <ChevronDown size={13} className="shrink-0 text-gray-400" />
                     ) : (
-                      <ChevronRight size={13} className="shrink-0 text-gray-500" />
+                      <ChevronRight size={13} className="shrink-0 text-gray-400" />
                     )}
                     {open ? (
                       <FolderOpen size={14} className="shrink-0 text-amber-300/80" />
@@ -513,7 +515,7 @@ export default function SessionSidebar({
                           startFolderRename(name)
                         }}
                         title="더블클릭하여 폴더명 변경"
-                        className="flex-1 truncate text-[12.5px] font-semibold tracking-tight text-gray-200"
+                        className="flex-1 truncate text-[12.5px] font-semibold tracking-tight text-gray-100"
                       >
                         {name}
                       </span>
@@ -525,7 +527,7 @@ export default function SessionSidebar({
                       </span>
                     )}
                     {items.length - connCount > 0 && (
-                      <span className="text-[10px] tabular-nums text-gray-500">{items.length - connCount}</span>
+                      <span className="text-[10px] tabular-nums text-gray-400">{items.length - connCount}</span>
                     )}
                     <button
                       onClick={(e) => {

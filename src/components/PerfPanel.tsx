@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   X,
@@ -62,7 +62,10 @@ import ConfirmDialog from './ConfirmDialog'
 
 interface PerfTarget {
   id: string
+  /** 화면에 보이는 이름 — 사용자가 붙인 별칭이면 그 별칭 */
   name: string
+  /** 접속 주소. 별칭과 다를 때만 괄호로 같이 보여준다 */
+  host?: string
 }
 
 interface PerfPanelProps {
@@ -108,6 +111,15 @@ const LOAD_PRESETS = [
   { label: '200명 5분', users: 200, rate: 20, min: 5 },
 ] as const
 
+/**
+ * 물음표를 눌렀을 때 설명이 나타날 자리를 알려 주는 통로.
+ *
+ * 처음에는 `title` 속성(브라우저 기본 툴팁)을 썼는데 **안 뜬다는 말을 들었다** — 뜨기까지
+ * 1~2초가 걸리고, 좁은 칸에서는 잘리기도 한다. 그래서 카드 아래에 자리를 만들어 거기에
+ * 글로 펼친다. 위치가 늘 같아 어디를 봐야 할지 헷갈리지 않고, 잘릴 일도 없다.
+ */
+const HintSlot = createContext<(text: string | null) => void>(() => {})
+
 /** 설정 묶음 하나 — 제목과 내용을 테두리로 묶는다(전에는 라벨만 있어 어디까지가 한 묶음인지 안 보였다) */
 function Card({
   icon,
@@ -120,6 +132,7 @@ function Card({
   badge?: ReactNode
   children: ReactNode
 }) {
+  const [hint, setHint] = useState<string | null>(null)
   return (
     <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2.5">
       <div className="mb-1.5 flex items-center gap-1.5">
@@ -127,7 +140,12 @@ function Card({
         <span className="text-[11px] font-medium text-gray-300">{title}</span>
         {badge && <span className="ml-auto">{badge}</span>}
       </div>
-      {children}
+      <HintSlot.Provider value={setHint}>{children}</HintSlot.Provider>
+      {hint && (
+        <p className="mt-1.5 rounded border border-blue-500/25 bg-blue-500/[0.08] px-2 py-1.5 text-[10.5px] leading-relaxed text-gray-200">
+          {hint}
+        </p>
+      )}
     </div>
   )
 }
@@ -151,6 +169,39 @@ function Legend({ color, label, dashed }: { color: string; label: string; dashed
  * `hint` 를 주면 라벨 옆에 물음표가 붙는다. 라벨만으로는 '증가 5 명/초' 가 무엇을 5 하는
  * 것인지 알 수 없다는 지적이 있었다 — 짧은 라벨을 지키면서 뜻은 그 자리에서 볼 수 있게 한다.
  */
+/**
+ * 설명 물음표.
+ *
+ * 마우스를 올리면 카드 아래에 설명이 뜨고, 눌러 두면 마우스를 치워도 남는다(읽는 중에
+ * 사라지지 않게). 다시 누르면 닫힌다.
+ */
+function HintMark({ text }: { text: string }) {
+  const setHint = useContext(HintSlot)
+  const [pinned, setPinned] = useState(false)
+  return (
+    <button
+      type="button"
+      onMouseEnter={() => setHint(text)}
+      onMouseLeave={() => !pinned && setHint(null)}
+      onClick={(e) => {
+        e.preventDefault()
+        const next = !pinned
+        setPinned(next)
+        setHint(next ? text : null)
+      }}
+      title="설명 보기"
+      className={
+        'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border text-[8.5px] leading-none transition ' +
+        (pinned
+          ? 'border-blue-400/60 bg-blue-500/25 text-blue-100'
+          : 'border-white/25 text-gray-400 hover:border-blue-400/60 hover:text-blue-200')
+      }
+    >
+      ?
+    </button>
+  )
+}
+
 function Field({
   label,
   unit,
@@ -172,14 +223,7 @@ function Field({
     <label className="block">
       <span className="flex items-center gap-1 text-[10px] text-gray-500">
         {label}
-        {hint && (
-          <span
-            title={hint}
-            className="flex h-3 w-3 shrink-0 cursor-help items-center justify-center rounded-full border border-white/20 text-[8px] leading-none text-gray-500"
-          >
-            ?
-          </span>
-        )}
+        {hint && <HintMark text={hint} />}
       </span>
       <span className="mt-0.5 flex items-center rounded border border-white/10 bg-panel-light focus-within:border-blue-500/60">
         <input
@@ -232,6 +276,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
    * 뚜렷이 갈린다 — **안 되는 자리를 회색으로만 두지 않고 왜인지 그 자리에 적는다.**
    */
   const [tool, setTool] = useState<PerfTool>('locust')
+  /** 두 도구를 언제 쓰면 되는지 — 처음 여는 사람은 고를 근거가 없다 */
+  const [showToolGuide, setShowToolGuide] = useState(false)
   const [jmeterPath, setJmeterPath] = useState('')
   const [env, setEnv] = useState<PerfEnvStatus | null>(null)
   const [envChecking, setEnvChecking] = useState(true)
@@ -342,18 +388,31 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     setTargetUrl(h ? `https://${h}` : '')
   }, [session])
 
+  /**
+   * 환경 점검.
+   *
+   * **늦게 온 결과가 덮어쓰지 않게 한다.** 점검은 실제로 프로세스를 띄우는 일이라 몇 초가
+   * 걸리는데, 그 사이 도구를 바꾸면 앞선 점검(Locust)이 뒤에 도착해 JMeter 화면에 Locust
+   * 경로가 찍혔다 — 실제로 그렇게 보였다. 차수를 세어 마지막 요청의 결과만 받는다.
+   */
+  const envReq = useRef(0)
   const checkEnv = async () => {
+    const my = ++envReq.current
+    const forTool = tool
     setEnvChecking(true)
     try {
-      if (tool === 'jmeter') {
-        setEnv(await window.electronAPI.perfEnvJmeter())
-        setJmeterPath(await window.electronAPI.perfGetJmeterPath())
-      } else {
-        setEnv(await window.electronAPI.perfEnv())
-        setLocustPath(await window.electronAPI.perfGetLocustPath())
-      }
+      const status =
+        forTool === 'jmeter' ? await window.electronAPI.perfEnvJmeter() : await window.electronAPI.perfEnv()
+      const savedPath =
+        forTool === 'jmeter'
+          ? await window.electronAPI.perfGetJmeterPath()
+          : await window.electronAPI.perfGetLocustPath()
+      if (envReq.current !== my) return // 그 사이에 도구가 바뀌었다 — 이 결과는 버린다
+      setEnv(status)
+      if (forTool === 'jmeter') setJmeterPath(savedPath)
+      else setLocustPath(savedPath)
     } finally {
-      setEnvChecking(false)
+      if (envReq.current === my) setEnvChecking(false)
     }
   }
   const refreshRuns = async () => setRuns(await window.electronAPI.perfList())
@@ -737,6 +796,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     void refreshRuns()
   }
 
+  /**
+   * 회차는 **고른 도구의 것만** 보여준다.
+   *
+   * Locust 와 JMeter 는 재는 방식도 남기는 것도 달라(시계열 유무, 백분위 출처) 한 줄에 섞어
+   * 놓으면 비교가 사과와 오렌지가 된다. 직전 회차 비교도 같은 도구끼리여야 뜻이 있다.
+   */
+  const toolRuns = useMemo(() => runs.filter((r) => (r.meta.config.tool ?? 'locust') === tool), [runs, tool])
+
   const selected = runs.find((r) => r.meta.id === selectedRunId) ?? null
   const selectedSummary: PerfSummary | null = useMemo(() => {
     if (!selected) return null
@@ -842,10 +909,30 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
    */
   const compare = useMemo(() => {
     if (!selected || !selectedSummary || selected.meta.canceled) return null
-    const idx = runs.findIndex((r) => r.meta.id === selected.meta.id)
+    // 같은 도구끼리만 비교한다 — 도구가 다르면 백분위 출처부터 달라 비교가 성립하지 않는다
+    const sameTool = runs.filter(
+      (r) => (r.meta.config.tool ?? 'locust') === (selected.meta.config.tool ?? 'locust'),
+    )
+    const idx = sameTool.findIndex((r) => r.meta.id === selected.meta.id)
     if (idx < 0) return null
-    const prevRec = runs.slice(idx + 1).find((r) => r.statsCsv && !r.meta.canceled)
-    const prev = prevRec?.statsCsv ? parseLocustStats(prevRec.statsCsv) : null
+    const prevRec = sameTool
+      .slice(idx + 1)
+      .find((r) => !r.meta.canceled && (r.statsCsv || r.jmeterStatsJson))
+    const prev = !prevRec
+      ? null
+      : (prevRec.meta.config.tool ?? 'locust') === 'jmeter'
+        ? prevRec.jmeterStatsJson
+          ? (() => {
+              try {
+                return parseJmeterStatistics(JSON.parse(prevRec.jmeterStatsJson))
+              } catch {
+                return null
+              }
+            })()
+          : null
+        : prevRec.statsCsv
+          ? parseLocustStats(prevRec.statsCsv)
+          : null
     if (!prevRec || !prev) return null
 
     const pct = (before: number, after: number) =>
@@ -1072,6 +1159,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               </button>
             ))}
           </span>
+          <button
+            onClick={() => setShowToolGuide((v) => !v)}
+            title="둘 중 무엇을 쓰면 되는지"
+            className={
+              'flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px] leading-none transition ' +
+              (showToolGuide
+                ? 'border-blue-400/60 bg-blue-500/25 text-blue-100'
+                : 'border-white/25 text-gray-400 hover:border-blue-400/60 hover:text-blue-200')
+            }
+          >
+            ?
+          </button>
           {running ? (
             <span className="rounded-full bg-blue-600/25 px-2 py-0.5 text-[11px] text-blue-200">
               진행 중 · {Math.floor(elapsed / 60000)}:{String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')} /{' '}
@@ -1105,6 +1204,46 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           </button>
         </div>
 
+        {/* 어느 도구를 쓸지 — 둘 다 부하를 거는 도구라 이름만으로는 고를 수 없다 */}
+        {showToolGuide && (
+          <div className="border-b border-white/10 bg-panel-light/30 px-4 py-2.5">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="mb-1 flex items-center gap-1.5">
+                  <span className="rounded bg-blue-600/25 px-1.5 py-0.5 text-[10px] text-blue-200">Locust</span>
+                  <span className="text-[11px] text-gray-300">이럴 때</span>
+                </div>
+                <ul className="space-y-0.5 text-[11px] leading-relaxed text-gray-400">
+                  <li>· 지금 바로 재보고 싶을 때 — 경로만 적으면 앱이 시나리오를 만듭니다</li>
+                  <li>· 돌아가는 동안 화면으로 지켜보고 싶을 때 (앱 안에 대시보드가 들어옵니다)</li>
+                  <li>· 어디서부터 느려지는지 찾을 때 — 인원을 단계로 올리고 시간 그래프로 봅니다</li>
+                  <li>· 실패한 응답의 본문까지 남겨야 할 때</li>
+                  <li className="text-gray-500">필요한 것: Python + pip install locust (앱이 대신 설치해 줍니다)</li>
+                </ul>
+              </div>
+              <div>
+                <div className="mb-1 flex items-center gap-1.5">
+                  <span className="rounded bg-amber-600/25 px-1.5 py-0.5 text-[10px] text-amber-200">JMeter</span>
+                  <span className="text-[11px] text-gray-300">이럴 때</span>
+                </div>
+                <ul className="space-y-0.5 text-[11px] leading-relaxed text-gray-400">
+                  <li>· 팀에 이미 만들어 둔 .jmx 계획이 있을 때 — 그대로 돌립니다</li>
+                  <li>· 로그인·토큰·CSV 데이터처럼 손이 많이 가는 흐름을 GUI 로 짜 둔 경우</li>
+                  <li>· 제출용 보고서가 필요할 때 — 리포트가 더 상세합니다(APDEX·오류 분류)</li>
+                  <li className="text-gray-500">
+                    안 되는 것: 실행 중 화면 · 시간 그래프 · 인원 늘리기 · 워밍업 제외
+                  </li>
+                  <li className="text-gray-500">필요한 것: Java + JMeter 압축 풀기 (경로를 직접 지정)</li>
+                </ul>
+              </div>
+            </div>
+            <p className="mt-2 text-[10.5px] leading-relaxed text-gray-500">
+              둘 다 같은 방식으로 판정하고 회차로 남습니다 — <span className="text-gray-400">고민되면 Locust</span> 로
+              시작하세요. 회차는 도구별로 따로 쌓입니다.
+            </p>
+          </div>
+        )}
+
         {/* 환경 점검 — 안 되면 무엇을 하면 되는지 여기서 말한다 */}
         {envChecking ? (
           <div className="flex items-center gap-2 border-b border-white/10 bg-panel-light/40 px-4 py-1.5 text-[11.5px] text-gray-400">
@@ -1114,8 +1253,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         ) : env?.ok ? (
           <div className="flex items-center gap-2 border-b border-white/10 bg-panel-light/40 px-4 py-1.5 text-[11.5px] text-gray-400">
             <CircleCheck size={12} className="text-emerald-400" />
-            <span className="text-gray-300">{env.version}</span>
-            <span className="text-gray-600">· {env.how}</span>
+            <span className="shrink-0 rounded bg-white/10 px-1.5 text-[10px] text-gray-300">
+              {tool === 'jmeter' ? 'JMeter' : 'Locust'}
+            </span>
+            <span className="min-w-0 truncate text-gray-300" title={env.version}>
+              {env.version}
+            </span>
+            <span className="shrink-0 text-gray-600">· {env.how}</span>
             <button onClick={() => void checkEnv()} className="ml-auto text-[11px] text-gray-500 hover:text-gray-300">
               다시 확인
             </button>
@@ -1126,6 +1270,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               <TriangleAlert size={14} className="mt-0.5 shrink-0 text-amber-300" />
               <div className="min-w-0 flex-1">
                 <p className="text-[12.5px] font-medium text-amber-100">
+                  <span className="mr-1.5 rounded bg-white/10 px-1.5 text-[10px] text-amber-200/80">
+                    {tool === 'jmeter' ? 'JMeter' : 'Locust'}
+                  </span>
                   {env?.problem ?? '부하 도구를 찾을 수 없습니다.'}
                 </p>
                 <p className="mt-1 text-[11.5px] leading-relaxed text-gray-300">
@@ -1199,6 +1346,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
             {/* 대상 — 어디를 때리는가 */}
             <Card icon={<Target size={12} />} title="대상">
+              <div className="mb-0.5 flex items-center gap-1 text-[10px] text-gray-500">
+                대상 세션
+                <HintMark text="주소를 어디서 가져올지 고르는 것입니다. 부하는 이 PC 에서 나가고, 세션은 주소를 채우는 데만 씁니다." />
+              </div>
               <select
                 value={sessionId}
                 onChange={(e) => setSessionId(e.target.value)}
@@ -1208,10 +1359,15 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 {sessions.length === 0 && <option value="">연결된 세션이 없습니다</option>}
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name}
+                    {/* 별칭(IP) — 별칭만 있으면 어느 장비인지, IP 만 있으면 무엇이었는지 알 수 없다 */}
+                    {s.host && s.name !== s.host ? `${s.name} (${s.host})` : s.name}
                   </option>
                 ))}
               </select>
+              <div className="mb-0.5 mt-1.5 flex items-center gap-1 text-[10px] text-gray-500">
+                대상 주소
+                <HintMark text="부하를 받을 곳입니다. https:// 는 443, http:// 는 80 으로 갑니다 — 서비스 포트가 다르면 http://주소:포트 처럼 직접 적으세요." />
+              </div>
               <input
                 value={targetUrl}
                 onChange={(e) => {
@@ -1220,7 +1376,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 }}
                 disabled={!!running}
                 placeholder="https://10.255.233.21:5000"
-                className={inputCls + ' mt-1.5 w-full font-mono disabled:opacity-50'}
+                className={inputCls + ' w-full font-mono disabled:opacity-50'}
               />
               <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
                 세션에서 가져온 주소입니다. 이 PC 에서 안 닿으면 포트 포워딩으로 로컬 포트를 열고 그 주소를 적으세요.
@@ -1369,9 +1525,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               )}
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다 */}
               <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
-                {tool === 'jmeter'
-                  ? '계획(.jmx)이 스레드 수와 시간을 제 안에 갖고 있습니다. 여기 값은 속성으로 넘기기만 합니다 — 계획에서 ${__P(qterm.users)} 처럼 받아 쓰도록 만들어 두셨을 때만 반영됩니다. 넘기는 것: qterm.users · rampup · duration · target · protocol · host · port · path'
-                  : loadSentence}
+                {tool === 'jmeter' ? (
+                  <>
+                    JMeter 는 <span className="text-gray-300">계획 파일이 정한 값</span>으로 돕니다. 여기 숫자는
+                    참고로 함께 넘길 뿐이라, 계획을 그렇게 만들어 두지 않았다면 바뀌지 않습니다.
+                    <br />
+                    <span className="text-gray-500">
+                      계획에서 쓰려면 스레드 수 칸에 {'${__P(qterm.users)}'} 처럼 적으면 됩니다 (넘기는 값: users ·
+                      rampup · duration · protocol · host · port · path).
+                    </span>
+                  </>
+                ) : (
+                  loadSentence
+                )}
               </p>
             </Card>
 
@@ -1427,9 +1593,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 <>
                   {/* 폼/파일이 각각 무엇인지 한 줄로 — Locust 를 안 써 본 사람에게는 둘 다 낯설다 */}
                   <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
-                    적어 주신 경로로 <span className="text-gray-500">앱이 Locust 시나리오 파일(locustfile.py)을
-                    대신 만듭니다.</span> 만들 파일은 <span className="text-gray-500">미리보기</span> 로 실행 전에
-                    확인할 수 있습니다.
+                    아래에 요청할 <span className="text-gray-500">경로만 적으면</span> 나머지는 앱이 만듭니다.
+                    무엇이 실행될지는 <span className="text-gray-500">미리보기</span> 로 먼저 볼 수 있습니다.
                   </p>
                   <div className="mb-1 grid grid-cols-[62px_1fr_36px_auto] items-center gap-1 px-1 text-[9.5px] text-gray-500">
                     <span>방식</span>
@@ -1576,9 +1741,11 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
                     {tool === 'jmeter' ? (
                       <>
-                        JMeter GUI 로 만든 <span className="font-mono text-gray-500">.jmx</span> 계획을 그대로
-                        돌립니다. 계획은 <span className="text-gray-500">폼으로 만들어 드릴 수 없습니다</span> —
-                        스레드 그룹·샘플러가 든 XML 이라 GUI 로 짜는 것이 맞습니다.
+                        JMeter 프로그램에서 만든 <span className="font-mono text-gray-500">.jmx</span> 파일을
+                        고르세요. 그 파일에 <span className="text-gray-500">무엇을 몇 명이 얼마나 요청할지</span>가
+                        다 들어 있습니다.
+                        <br />
+                        아직 없으시면 JMeter 를 실행해 만들어야 합니다 — 앱이 대신 만들어 드릴 수 없습니다.
                       </>
                     ) : (
                       <>
@@ -1903,7 +2070,10 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-white/10 px-3 pb-3 pt-2">
               <div className="flex items-center gap-2">
                 <span className="text-[10.5px] font-medium uppercase tracking-wide text-gray-500">
-                  회차 {runs.length > 0 && <span className="text-gray-600">{runs.length}</span>}
+                  회차 {toolRuns.length > 0 && <span className="text-gray-600">{toolRuns.length}</span>}
+                  <span className="ml-1 font-normal normal-case tracking-normal text-gray-600">
+                    {tool === 'jmeter' ? 'JMeter' : 'Locust'}
+                  </span>
                 </span>
                 <button
                   onClick={() => {
@@ -1976,13 +2146,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </div>
                 </div>
               )}
-              {runs.length === 0 ? (
+              {toolRuns.length === 0 ? (
                 <p className="py-2 text-[11px] leading-relaxed text-gray-600">
-                  아직 돌린 적이 없습니다. 한 번 돌리면 조건과 결과가 여기 쌓여 회차끼리 비교할 수 있습니다.
+                  {tool === 'jmeter' ? 'JMeter' : 'Locust'} 로 돌린 회차가 아직 없습니다. 한 번 돌리면 조건과 결과가
+                  여기 쌓여 회차끼리 비교할 수 있습니다.
+                  {runs.length > toolRuns.length && (
+                    <span className="mt-1 block text-gray-600">
+                      다른 도구의 회차 {runs.length - toolRuns.length}개는 그 도구를 고르면 보입니다.
+                    </span>
+                  )}
                 </p>
               ) : (
                 <div className="mt-1 space-y-1">
-                  {(showAllRuns ? runs : runs.slice(0, RECENT_RUNS)).map((r) => {
+                  {(showAllRuns ? toolRuns : toolRuns.slice(0, RECENT_RUNS)).map((r) => {
                     const sum = r.statsCsv ? parseLocustStats(r.statsCsv) : null
                     const isRunning = running?.id === r.meta.id
                     return (
@@ -2039,12 +2215,12 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       </div>
                     )
                   })}
-                  {runs.length > RECENT_RUNS && (
+                  {toolRuns.length > RECENT_RUNS && (
                     <button
                       onClick={() => setShowAllRuns((v) => !v)}
                       className="w-full rounded border border-dashed border-white/10 py-1 text-[10.5px] text-gray-500 hover:bg-white/5 hover:text-gray-300"
                     >
-                      {showAllRuns ? '최근 것만 보기' : `이전 회차 ${runs.length - RECENT_RUNS}개 더 보기`}
+                      {showAllRuns ? '최근 것만 보기' : `이전 회차 ${toolRuns.length - RECENT_RUNS}개 더 보기`}
                     </button>
                   )}
                 </div>

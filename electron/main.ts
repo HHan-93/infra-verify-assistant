@@ -5972,10 +5972,17 @@ ipcMain.handle('perf:pickScenario', async (_evt, tool?: PerfTool) => {
 // ── 앱 라이프사이클 ────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  // 앱은 다크 하나뿐인데, **끼워 넣는 남의 화면**은 prefers-color-scheme 을 본다.
-  // Locust 대시보드가 흰 배경으로 떠서 창 안에서 혼자 튀었다 — 확인해 보니 그쪽 UI 가
-  // 이 값을 따르므로, 여기서 다크로 못 박아 둔다(네이티브 창틀·대화상자도 같이 어두워진다).
-  nativeTheme.themeSource = 'dark'
+  /**
+   * 창틀 색은 **OS 설정을 따른다.**
+   *
+   * 한때 'dark' 로 못 박았다 — 끼워 넣는 Locust 대시보드가 prefers-color-scheme 을 보기
+   * 때문에 그래야 다크로 떴다. 그런데 그 스위치는 네이티브 창틀·메뉴까지 같이 어둡게 하고,
+   * 사용자가 창틀이 너무 검다고 했다. 기능·리포트에는 아무 영향이 없는 값이라(대시보드가
+   * 밝게 뜰 뿐이다) 창틀 쪽을 택했다.
+   *
+   * 둘을 따로 줄 방법은 Electron 에 없다 — themeSource 는 앱 전체에 걸린다.
+   */
+  nativeTheme.themeSource = 'system'
   createWindow()
   void trimSessionLogs()
   // 패키징된 빌드에서만 자동 업데이트 확인 (GitHub Releases 의 latest.yml 기준)

@@ -2286,7 +2286,12 @@ export default function App() {
         <PerfPanel
           sessions={tabs
             .filter((t) => statuses[t.id]?.status === 'connected')
-            .map((t) => ({ id: t.id, name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title) }))}
+            // 별칭과 접속 주소를 둘 다 넘긴다 — 성능 검증 창에서 '별칭(IP)' 로 보여준다
+            .map((t) => ({
+              id: t.id,
+              name: t.custom ? t.title : (statuses[t.id]?.host ?? t.title),
+              host: statuses[t.id]?.host,
+            }))}
           onClose={() => setShowPerf(false)}
           onAnalyze={analyzeText}
         />
