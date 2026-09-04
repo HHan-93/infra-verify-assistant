@@ -7,7 +7,15 @@
 // 중지한 회차는 아예 판정하지 않는다. 5분 걸 예정이던 부하를 30초에 끊고 얻은 p95 를
 // '통과' 로 적으면, 나중에 그 표를 보는 사람이 5분치 결과로 읽는다.
 
-import { worstP95After, type PerfHistoryPoint, type PerfSummary } from './perfParse'
+import {
+  FAILURE_KIND_LABEL,
+  summarizeFailureKinds,
+  unreachableRatio,
+  worstP95After,
+  type PerfFailure,
+  type PerfHistoryPoint,
+  type PerfSummary,
+} from './perfParse'
 
 export type PerfTone = 'pass' | 'fail' | 'info'
 
@@ -30,7 +38,14 @@ export interface PerfThresholds {
 export function perfVerdict(
   summary: PerfSummary | null,
   th: PerfThresholds,
-  opts: { canceled?: boolean; exitCode?: number; history?: PerfHistoryPoint[] } = {},
+  opts: {
+    canceled?: boolean
+    exitCode?: number
+    history?: PerfHistoryPoint[]
+    failures?: PerfFailure[]
+    /** 어디를 때렸는지 — 주소 때문에 실패한 경우 무엇을 고치면 되는지 짚어 주기 위해 */
+    targetUrl?: string
+  } = {},
 ): PerfVerdict {
   if (opts.canceled) {
     return {
@@ -52,6 +67,51 @@ export function perfVerdict(
 
   const reasons: string[] = []
   const checks: boolean[] = []
+
+  /**
+   * **닿지도 못한 실패**가 대부분이면 그 사실을 맨 앞에 말한다.
+   *
+   * '실패 100%' 만 보면 서버가 무너진 것으로 읽히지만, 연결 거부·타임아웃은 HTTP 요청을
+   * 보내보기 전에 끝난 것이다. 그때 화면의 p95 는 서버 응답 시간이 아니라 **연결이 끊기기까지
+   * 걸린 시간**이라, 그대로 두면 "서버가 2초나 걸린다" 는 거짓 결론이 나온다.
+   */
+  const fails = opts.failures ?? []
+  const unreachable = unreachableRatio(fails)
+  const kinds = summarizeFailureKinds(fails)
+  const kindLine = kinds.length
+    ? kinds.map((k) => `${FAILURE_KIND_LABEL[k.kind]} ${k.count.toLocaleString()}건`).join(' · ')
+    : ''
+  const cannotReach = summary.failRatePct >= 99.9 && unreachable >= 0.9
+  const url = (opts.targetUrl ?? '').trim()
+  const refusedOnHttps =
+    /^https:\/\//i.test(url) && !/:\d+/.test(url.replace(/^https:\/\//i, '')) &&
+    kinds.some((k) => k.kind === 'connect')
+  const httpsHint = refusedOnHttps
+    ? `이 주소는 443 포트로 갑니다. 웹 서버가 TLS 설정 없이 떠 있으면 80 만 열려 있으니 ` +
+      `${url.replace(/^https:/i, 'http:')} 로 먼저 해 보세요.`
+    : ''
+  if (cannotReach) {
+    return {
+      tone: 'info',
+      label: '서비스에 닿지 못했습니다 — 성능을 잰 것이 아닙니다',
+      reasons: [
+        kindLine,
+        '요청이 서버에 도달하지 못했습니다. 화면의 응답 시간은 서버 성능이 아니라 연결이 끊기기까지 걸린 시간입니다.',
+        '주소와 포트를 확인하세요 — https:// 는 443, http:// 는 80 이 기본이라 서비스 포트를 직접 적어야 하는 경우가 많습니다.',
+        // 가장 흔한 한 가지는 여기서 바로 짚어 준다. nginx·아파치는 TLS 를 따로 설정하지
+        // 않으면 80 만 열려 있어서, https:// 로 적으면 443 에서 연결이 거부된다.
+        httpsHint,
+        '사내망에서만 열려 있는 서비스라면 포트 포워딩으로 로컬 포트를 연 뒤 그 주소로 거세요.',
+      ].filter(Boolean),
+    }
+  }
+  if (unreachable > 0 && unreachable < 0.9 && fails.length) {
+    reasons.push(
+      `실패 중 ${Math.round(unreachable * 100)}% 는 서버에 닿지 못한 것입니다(${kindLine}) — 그만큼은 서버 성능이 아닙니다.`,
+    )
+  } else if (kindLine) {
+    reasons.push(`실패 내용: ${kindLine}`)
+  }
 
   /**
    * 워밍업을 뺄 때는 **구간 p95 중 최댓값**으로 p95 를 판정한다.
@@ -104,7 +164,10 @@ export function perfVerdict(
       return {
         tone: 'info',
         label: '전부 실패',
-        reasons: [`${summary.requests}건 모두 실패했습니다. 로그의 오류 내용을 확인하세요.`],
+        reasons: [
+          `${summary.requests}건 모두 실패했습니다.`,
+          kindLine ? `실패 내용: ${kindLine}` : '아래 실패 내용에서 원인을 확인하세요.',
+        ],
       }
     }
     return {

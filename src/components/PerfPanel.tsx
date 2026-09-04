@@ -37,11 +37,15 @@ import { normalizeFormScenario } from '../../electron/shared-types'
 // 브라우저에서 복사한 요청을 그대로 가져오는 파서 — 포털 감시가 쓰는 것과 같은 것을 쓴다
 import { parseCurl } from '../lib/portal'
 import {
+  FAILURE_KIND_LABEL,
+  classifyFailure,
   parseLocustConsole,
   parseLocustFailures,
   parseLocustHistory,
   parseLocustStats,
   parseStatsApi,
+  summarizeFailureKinds,
+  unreachableRatio,
   type PerfHistoryPoint,
   type PerfLive,
   type PerfSummary,
@@ -669,6 +673,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     () => (selected?.statsCsv ? parseLocustStats(selected.statsCsv) : null),
     [selected],
   )
+  const failures = useMemo(
+    () => (selected?.failuresCsv ? parseLocustFailures(selected.failuresCsv) : []),
+    [selected],
+  )
+  /** 실패 중 '서버에 닿지도 못한' 비율 — 이 값이 높으면 응답 시간은 성능이 아니다 */
+  const unreachable = useMemo(() => unreachableRatio(failures), [failures])
+
   const verdict = useMemo(
     () =>
       selected
@@ -681,10 +692,16 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               errorRateThresholdPct: selected.meta.config.errorRateThresholdPct,
               warmupSec: selected.meta.config.warmupSec,
             },
-            { canceled: selected.meta.canceled, exitCode: selected.meta.exitCode, history },
+                        {
+              canceled: selected.meta.canceled,
+              exitCode: selected.meta.exitCode,
+              history,
+              failures,
+              targetUrl: selected.meta.config.targetUrl,
+            },
           )
         : null,
-    [selected, selectedSummary, history],
+    [selected, selectedSummary, history, failures],
   )
 
   useEffect(() => {
@@ -737,10 +754,6 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunId, running, runs])
 
-  const failures = useMemo(
-    () => (selected?.failuresCsv ? parseLocustFailures(selected.failuresCsv) : []),
-    [selected],
-  )
 
   /**
    * 직전 회차와의 비교.
@@ -1844,6 +1857,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다 — 끝나면 통계 파일로 다시 계산합니다.
               </p>
             )}
+            {/* 닿지도 못한 회차의 응답 시간을 '서버가 느리다' 로 읽지 않게, 타일 바로 아래에서 막는다 */}
+            {!running && unreachable >= 0.5 && (
+              <p className="mt-1 rounded border border-amber-500/30 bg-amber-500/[0.07] px-2 py-1 text-[10.5px] leading-relaxed text-amber-100">
+                실패의 {Math.round(unreachable * 100)}% 가 <b>서버에 닿지도 못한 것</b>입니다(연결 거부·시간 초과 등).
+                위의 응답 시간은 서버 성능이 아니라 <b>연결이 끊기기까지 걸린 시간</b>입니다 — 주소·포트를 먼저
+                확인하세요.
+              </p>
+            )}
 
             <div className="mt-2 flex gap-1 border-b border-white/10">
               {(
@@ -2287,9 +2308,25 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       {/* 무엇이 실패했나 — 인프라에서는 실패율 숫자보다 이게 먼저다 */}
                       {failures.length > 0 && (
                         <div className="mt-3">
-                          <div className="mb-1 flex items-center gap-1.5">
+                          <div className="mb-1 flex flex-wrap items-center gap-1.5">
                             <TriangleAlert size={12} className="text-amber-300" />
                             <span className="text-[11px] font-medium text-gray-300">실패 내용</span>
+                            {/* 무엇이 어디서 실패했는지 — 문구를 읽기 전에 종류로 먼저 안다 */}
+                            {summarizeFailureKinds(failures).map((k) => (
+                              <span
+                                key={k.kind}
+                                className={
+                                  'rounded px-1.5 py-0.5 text-[9.5px] ' +
+                                  (k.kind === 'http5xx'
+                                    ? 'bg-red-500/20 text-red-200'
+                                    : k.kind === 'http4xx'
+                                      ? 'bg-amber-500/20 text-amber-200'
+                                      : 'bg-white/10 text-gray-300')
+                                }
+                              >
+                                {FAILURE_KIND_LABEL[k.kind]} {k.count.toLocaleString()}
+                              </span>
+                            ))}
                             <span className="text-[10px] text-gray-600">많은 것부터</span>
                           </div>
                           <table className="w-full table-fixed text-[11.5px]">
@@ -2297,6 +2334,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               {failures.slice(0, 6).map((f, i) => (
                                 <tr key={i} className="border-t border-white/5">
                                   <td className="w-[34%] truncate py-1 font-mono text-gray-400" title={f.name}>
+                                    <span className="mr-1 rounded bg-white/10 px-1 text-[9.5px] text-gray-400">
+                                      {FAILURE_KIND_LABEL[classifyFailure(f.error)]}
+                                    </span>
                                     {f.name}
                                   </td>
                                   <td className="truncate py-1 text-amber-200/90" title={f.error}>
@@ -2334,10 +2374,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                                         <ChevronRight size={11} className="shrink-0 text-gray-500" />
                                       )}
                                       <span className="shrink-0 rounded bg-red-500/15 px-1 text-[10px] text-red-300">
-                                        {sp.code ?? '연결 실패'}
+                                        {/* 연결 단계에서 실패하면 상태 코드가 없다(0 으로 온다) */}
+                                        {sp.code && sp.code > 0 ? sp.code : '연결 실패'}
                                       </span>
                                       <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-400">
                                         {sp.name}
+                                        {!sp.body && sp.error && (
+                                          <span className="ml-1 text-gray-600">— {sp.error}</span>
+                                        )}
                                       </span>
                                       <span className="shrink-0 text-[10px] text-gray-600">
                                         {new Date(sp.t).toLocaleTimeString('ko-KR', { hour12: false })}

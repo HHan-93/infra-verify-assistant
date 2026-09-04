@@ -328,3 +328,63 @@ export function worstP95After(history: PerfHistoryPoint[], warmupSec: number): n
   if (!after.length) return undefined
   return Math.max(...after.map((p) => p.p95Ms as number))
 }
+
+/** 실패의 종류 — 어디까지 갔다가 실패했는지 */
+export type FailureKind = 'connect' | 'timeout' | 'dns' | 'tls' | 'http4xx' | 'http5xx' | 'other'
+
+export const FAILURE_KIND_LABEL: Record<FailureKind, string> = {
+  connect: '연결 거부',
+  timeout: '연결·응답 시간 초과',
+  dns: '주소를 찾지 못함',
+  tls: '인증서·TLS',
+  http4xx: '요청이 거부됨 (4xx)',
+  http5xx: '서버 오류 (5xx)',
+  other: '그 밖',
+}
+
+/**
+ * 실패 문구를 종류로 가른다.
+ *
+ * **왜 필요한가**: '실패 100%' 만으로는 서버가 무너진 것인지, 애초에 주소가 틀려 닿지도
+ * 못한 것인지 알 수 없다. 둘은 완전히 다른 이야기다 — 연결 단계에서 실패했다면 화면의
+ * 응답 시간은 서버 성능이 아니라 **연결이 끊기기까지 걸린 시간**이라, 그 수치를 성능으로
+ * 읽으면 결론이 통째로 거짓이 된다.
+ */
+export function classifyFailure(error: string): FailureKind {
+  const e = error ?? ''
+  if (/ConnectionRefused|Connection refused|ECONNREFUSED|10061/i.test(e)) return 'connect'
+  if (/Timeout|timed out|ETIMEDOUT|10060/i.test(e)) return 'timeout'
+  if (/NameResolution|getaddrinfo|Name or service not known|11001|NXDOMAIN/i.test(e)) return 'dns'
+  if (/SSL|TLS|CERTIFICATE|certificate verify/i.test(e)) return 'tls'
+  const http = e.match(/\b([45])\d{2}\b\s*(Client|Server)?\s*Error/i)
+  if (http) return http[1] === '4' ? 'http4xx' : 'http5xx'
+  if (/ConnectionError|ProtocolError|RemoteDisconnected|Connection aborted/i.test(e)) return 'connect'
+  return 'other'
+}
+
+/** 종류별 건수 (많은 것부터) */
+export function summarizeFailureKinds(failures: PerfFailure[]): { kind: FailureKind; count: number }[] {
+  const map = new Map<FailureKind, number>()
+  for (const f of failures) {
+    const k = classifyFailure(f.error)
+    map.set(k, (map.get(k) ?? 0) + (f.count || 0))
+  }
+  return [...map.entries()]
+    .map(([kind, count]) => ({ kind, count }))
+    .sort((a, b) => b.count - a.count)
+}
+
+/**
+ * **서비스에 닿지도 못한 실패**가 얼마나 되는가 (0~1).
+ *
+ * 연결 거부·타임아웃·DNS·TLS 는 HTTP 요청을 보내보기 전에 끝난 것들이다. 이 비율이 높으면
+ * 응답 시간·처리량 수치는 성능이 아니라 '실패하는 데 걸린 시간' 이다.
+ */
+export function unreachableRatio(failures: PerfFailure[]): number {
+  const total = failures.reduce((a, f) => a + (f.count || 0), 0)
+  if (total <= 0) return 0
+  const pre = failures
+    .filter((f) => ['connect', 'timeout', 'dns', 'tls'].includes(classifyFailure(f.error)))
+    .reduce((a, f) => a + (f.count || 0), 0)
+  return pre / total
+}
