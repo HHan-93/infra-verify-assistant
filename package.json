@@ -12,7 +12,10 @@
     "lint": "tsc --noEmit",
     "dist": "npm run build && electron-builder --win --publish never",
     "dist:dir": "npm run build && electron-builder --win --dir",
-    "dist:mac": "npm run build && electron-builder --mac --config electron-builder.mac.json --publish never"
+    "dist:mac": "npm run build && electron-builder --mac --config electron-builder.mac.json --publish never",
+    "presets:md": "node scripts/presets-md.mjs to-md",
+    "presets:ts": "node scripts/presets-md.mjs to-ts",
+    "presets:check": "node scripts/presets-md.mjs check"
   },
   "build": {
     "appId": "com.okestro.infraverify",

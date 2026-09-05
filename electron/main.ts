@@ -4742,14 +4742,31 @@ interface PerfSettings {
   /** jmeter 실행 파일(jmeter.bat / jmeter) 경로 */
   jmeterPath?: string
 }
+/**
+ * 설정 읽기.
+ *
+ * **파일이 없는 것과 깨진 것을 구분한다.** 둘 다 `{}` 로 뭉개면, 깨진 파일 하나 때문에
+ * 지정해 둔 경로가 사라진 것처럼 보이고("JMeter 를 찾을 수 없습니다") 그다음 저장이 그
+ * 파일을 정말로 덮어써 버린다 — 실제로 그렇게 됐다(2026-09-05). 깨진 파일은 지우지 않고
+ * `.bad` 로 밀어 둔 뒤 빈 설정으로 시작한다. 저장소 규칙(손상은 뭉개지 않는다)과 같다.
+ */
 async function readPerfSettings(): Promise<PerfSettings> {
+  let text: string
   try {
-    const raw = JSON.parse(await readFile(perfSettingsPath(), 'utf-8'))
+    text = await readFile(perfSettingsPath(), 'utf-8')
+  } catch {
+    return {} // 아직 파일 없음 — 정상 초기 상태
+  }
+  try {
+    const raw = JSON.parse(text)
     return {
       locustPath: typeof raw?.locustPath === 'string' ? raw.locustPath : undefined,
       jmeterPath: typeof raw?.jmeterPath === 'string' ? raw.jmeterPath : undefined,
     }
   } catch {
+    const bad = perfSettingsPath() + '.bad'
+    await rename(perfSettingsPath(), bad).catch(() => {})
+    console.error(`[perf] 설정 파일이 깨져 있어 ${path.basename(bad)} 로 옮겼습니다.`)
     return {}
   }
 }
@@ -4883,6 +4900,51 @@ ipcMain.handle('perf:setJmeterPath', async (_evt, p: string | null) => {
 })
 ipcMain.handle('perf:getJmeterPath', async () => (await readPerfSettings()).jmeterPath ?? '')
 
+const JMETER_FIND_HINT =
+  'JMeter 는 압축을 풀어 쓰는 도구라 PATH 에 없는 경우가 많습니다. ' +
+  'apache-jmeter/bin/jmeter.bat 경로를 아래에 직접 지정하세요. ' +
+  '압축을 풀면 폴더가 한 겹 더 생기는 경우가 있으니(…/apache-jmeter-5.6.3/apache-jmeter-5.6.3/bin) ' +
+  '실제 jmeter.bat 이 있는 곳을 확인하세요. Java 8 이상도 함께 필요합니다.'
+
+/**
+ * Java 가 도는지 (0.2초쯤). 되면 첫 줄을 돌려준다.
+ *
+ * JMeter 가 안 도는 이유는 대부분 Java 다. 그걸 확인하는 데 JMeter 를 통째로 올릴 이유가
+ * 없다 — `java -version` 은 이 PC 에서 150ms 였다.
+ */
+function javaVersion(): Promise<string | null> {
+  return new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v: string | null) => {
+      if (!done) {
+        done = true
+        resolve(v)
+      }
+    }
+    try {
+      const child = spawn('java', ['-version'], { windowsHide: true, shell: process.platform === 'win32' })
+      child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+      // java -version 은 stderr 로 나온다 (오래된 관례)
+      child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
+      child.on('error', () => finish(null))
+      child.on('close', (code) =>
+        finish(code === 0 && /version/i.test(out) ? out.trim().split(/\r*\n/)[0].slice(0, 60) : null),
+      )
+      setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          /* 무시 */
+        }
+        finish(null)
+      }, 10000)
+    } catch {
+      finish(null)
+    }
+  })
+}
+
 /**
  * 셸을 거쳐 실행할 때 쓸 따옴표 (Windows).
  *
@@ -4916,8 +4978,58 @@ function shellQuote(v: string): string {
  */
 ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
   const { jmeterPath } = await readPerfSettings()
-  const cands = jmeterPath ? [jmeterPath] : ['jmeter', 'jmeter.bat']
-  for (const cmd of cands) {
+
+  /**
+   * **경로를 직접 지정했으면 JMeter 를 띄우지 않는다.**
+   *
+   * `jmeter --version` 은 JVM 을 통째로 올리고 플러그인 스캔까지 한다 — 이 PC 에서 재 보니
+   * 웜 상태로도 6초, 처음 실행이면(백신이 jar 를 다 훑는다) 훨씬 더 걸린다. 그 시간을
+   * 15초 제한으로 재던 탓에, 파일이 멀쩡히 있는데도 "실행되지 않습니다" 로 떨어지는 일이
+   * 생겼다. 게다가 탭을 누를 때마다 6초씩 멈춰 있었다.
+   *
+   * 그래서 지정 경로가 있으면 **파일이 있는지(즉시) + Java 가 도는지(0.2초)** 만 본다.
+   * "cmd 가 명령 이름을 되받아쳐서 통과했던" 예전의 거짓 초록불과는 다르다 — 여기서는
+   * 사용자가 준 그 파일이 실제로 존재하는 것을 확인한다. 설치본이 깨져 있는 경우는 실행할
+   * 때 로그로 드러난다(그 편이 6초를 매번 무는 것보다 낫다).
+   */
+  if (jmeterPath) {
+    try {
+      await stat(jmeterPath)
+    } catch {
+      return {
+        ok: false,
+        problem: `지정한 경로에 파일이 없습니다: ${jmeterPath}`,
+        hint: JMETER_FIND_HINT,
+      }
+    }
+    const java = await javaVersion()
+    if (!java) {
+      return {
+        ok: false,
+        problem: 'Java 를 찾을 수 없습니다 — JMeter 는 Java 로 도는 도구입니다.',
+        hint:
+          'java -version 이 되는지 확인하세요(Java 8 이상). 방금 Java 를 설치했다면 **앱을 껐다 켜세요** — ' +
+          '실행 중인 앱은 설치 전의 환경변수(PATH)를 그대로 들고 있습니다.',
+      }
+    }
+    // 폴더 이름에 버전이 들어 있다(apache-jmeter-5.6.3) — 없으면 이름만 보여준다
+    const ver = /apache-jmeter[-_ ]?(\d+(?:\.\d+)+)/i.exec(jmeterPath)?.[1]
+    return {
+      ok: true,
+      how: jmeterPath,
+      version: `${ver ? `Apache JMeter ${ver}` : 'Apache JMeter'} · ${java}`,
+    }
+  }
+
+  /**
+   * 지정 경로가 없으면 PATH 에서 찾아본다 — 이때는 실제로 실행해 봐야 한다.
+   *
+   * **출력에 'jmeter' 가 있는지로 판단하면 안 된다.** 셸을 거치므로 실행 파일이 없을 때
+   * cmd.exe 가 `'jmeter'은(는) 내부 또는 외부 명령...` 을 내는데, 거기에 우리가 찾던 이름이
+   * 그대로 들어 있다. 그래서 설치가 안 됐는데도 초록불이 떴다(2026-09-05 확인).
+   * **종료 코드 0** 을 함께 요구한다 — 못 찾으면 1/9009 로 즉시 끝난다.
+   */
+  for (const cmd of ['jmeter', 'jmeter.bat']) {
     const v = await new Promise<string | null>((resolve) => {
       let out = ''
       let done = false
@@ -4928,7 +5040,6 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
         }
       }
       try {
-        // 경로에 공백이 있으면(예: C:\Program Files\...) 따옴표 없이는 여기서 잘린다
         const child = spawn(shellQuote(cmd), ['--version'], {
           windowsHide: true,
           shell: process.platform === 'win32',
@@ -4936,10 +5047,8 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
         child.stdout?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.stderr?.on('data', (b: Buffer) => (out += b.toString('utf-8')))
         child.on('error', () => finish(null))
-        // 종료 코드 0 + 실제 배너(Apache 저작권 줄이나 버전 숫자)까지 봐야 진짜다
-        child.on('close', (code) =>
-          finish(code === 0 && /apache|\d+\.\d+/i.test(out) ? out : null),
-        )
+        child.on('close', (code) => finish(code === 0 && /apache|\d+\.\d+/i.test(out) ? out : null))
+        // 없는 명령은 즉시 끝나고, 있는 명령은 JVM 이 올라오는 만큼 걸린다 — 넉넉히 준다
         setTimeout(() => {
           try {
             child.kill()
@@ -4947,7 +5056,7 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
             /* 무시 */
           }
           finish(null)
-        }, 15000)
+        }, 45000)
       } catch {
         finish(null)
       }
@@ -4958,37 +5067,8 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
       return { ok: true, how: cmd, version: ver ? `Apache JMeter ${ver}` : 'Apache JMeter' }
     }
   }
-  // 파일은 있는데 실행이 안 됐다면 Java 쪽일 가능성이 크다 — 그 경우를 갈라서 말한다.
-  // (jmeter.bat 은 java 를 못 찾으면 JAVA_HOME 을 들먹이는 메시지를 내고 끝난다)
-  if (jmeterPath) {
-    let exists = false
-    try {
-      await stat(jmeterPath)
-      exists = true
-    } catch {
-      /* 경로 자체가 틀렸다 */
-    }
-    if (exists) {
-      return {
-        ok: false,
-        problem: `파일은 있는데 JMeter 가 실행되지 않습니다: ${jmeterPath}`,
-        hint:
-          'Java 가 없거나 이 앱이 아직 그 설치를 모르는 상태일 수 있습니다. java -version 이 되는지 확인하고, ' +
-          '방금 Java 를 설치했다면 **앱을 껐다 켜세요** — 실행 중인 앱은 설치 전의 환경변수(PATH)를 그대로 들고 있습니다.',
-      }
-    }
-  }
-  return {
-    ok: false,
-    problem: jmeterPath
-      ? `지정한 경로에 파일이 없습니다: ${jmeterPath}`
-      : 'JMeter 를 찾을 수 없습니다.',
-    hint:
-      'JMeter 는 압축을 풀어 쓰는 도구라 PATH 에 없는 경우가 많습니다. ' +
-      'apache-jmeter/bin/jmeter.bat 경로를 아래에 직접 지정하세요. ' +
-      '압축을 풀면 폴더가 한 겹 더 생기는 경우가 있으니(…/apache-jmeter-5.6.3/apache-jmeter-5.6.3/bin) ' +
-      '실제 jmeter.bat 이 있는 곳을 확인하세요. Java 8 이상도 함께 필요합니다.',
-  }
+
+  return { ok: false, problem: 'JMeter 를 찾을 수 없습니다.', hint: JMETER_FIND_HINT }
 })
 
 /** 파이썬 문자열 리터럴로 안전하게 (따옴표·역슬래시·개행이 코드를 깨뜨리지 않게) */

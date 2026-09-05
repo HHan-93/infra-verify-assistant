@@ -68,7 +68,11 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 
 ### 프리셋 / 시나리오 데이터
 
-[src/presets.ts](src/presets.ts)(184개 단일 명령어) · [src/scenarios.ts](src/scenarios.ts)(다단계 시나리오)가 **내장 목록**이고, 사용자가 앱에서 추가한 것은 userData JSON 에 따로 저장돼 **런타임에 병합**된다(빌드 없이 추가 가능하게 하려는 설계). 내장 목록을 고칠 때 루트의 `명령어_편집.md`(사람이 편집하는 원본) 와 `cli.md`("presets.ts 에서 자동 생성"이라 적힌 산출물) 가 함께 어긋날 수 있다 — 생성 스크립트는 package.json 에 없다. 세 곳 중 하나만 고치기 전에 사용자에게 확인할 것.
+[src/presets.ts](src/presets.ts)(231개 단일 명령어) · [src/scenarios.ts](src/scenarios.ts)(다단계 시나리오)가 **내장 목록**이고, 사용자가 앱에서 추가한 것은 userData JSON 에 따로 저장돼 **런타임에 병합**된다(빌드 없이 추가 가능하게 하려는 설계).
+
+**단일 명령어는 [명령어_프리셋.md](명령어_프리셋.md) 가 원본이다.** 거기서 고치고 `npm run presets:ts` 를 돌리면 presets.ts 에 반영되고, 반대 방향은 `npm run presets:md`, 어긋났는지 확인은 `npm run presets:check` 다([scripts/presets-md.mjs](scripts/presets-md.mjs)). 왕복이 무손실인 것을 확인하고 넣었다 — 한쪽만 고쳐 두 벌이 갈라지던 문제를 막으려는 것이다.
+
+옛 `명령어_편집.md` 는 **손대지 않은 채 남겨 둔 참고 자료**다(프리셋 + 시나리오 두 문서가 한 파일에 붙어 있고 들여쓰기에 탭·공백이 섞여 있다). 2026-09-05 에 전수 대조한 결과 그 안의 명령은 presets.ts·scenarios.ts 에 모두 들어 있다 — 새로 얻을 것은 없으니 이 파일을 다시 원본으로 삼지 말 것. `cli.md` 도 같은 성격의 옛 산출물이다.
 
 ## 이 코드베이스의 규칙
 

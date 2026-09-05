@@ -321,8 +321,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   /** 이 PC 코어 나눠 쓰기 · 다른 PC 워커 기다리기 */
   const [processes, setProcesses] = useState('1')
   const [expectWorkers, setExpectWorkers] = useState('0')
-  /** 고급 설정 펼침 — 기본은 접힘, 편 상태는 기억한다 */
-  const [advOpen, setAdvOpen] = useState(() => localStorage.getItem('perf_adv_open') === '1')
+  /**
+   * 고급 설정 펼침 — **창을 열 때마다 접힌 채로 시작한다.**
+   *
+   * 한때 편 상태를 localStorage 에 기억했는데, 한 번 펼쳐 두면 그 뒤로 늘 펼쳐진 채 열려
+   * 정작 필수 칸(대상·부하·시나리오)이 아래로 밀렸다. '고급' 은 어쩌다 한 번 건드리는
+   * 것이므로 기억하지 않는다(사용자 요청).
+   */
+  const [advOpen, setAdvOpen] = useState(false)
   const [retention, setRetention] = useState<PerfRetention | null>(null)
   const [editRetention, setEditRetention] = useState<{ maxRuns: string; retentionDays: string } | null>(null)
   /** 저장해 둔 검증 설정 */
@@ -1353,15 +1359,29 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     }
                     className={inputCls + ' min-w-0 flex-1 font-mono'}
                   />
+                  {/* 빈 칸으로 누르면 '지정을 지우고 PATH 에서 찾는다' 는 뜻이 된다 —
+                      전에는 그것이 [적용] 이라는 같은 이름이라, 실수로 눌러 저장해 둔 경로가
+                      조용히 사라져도 알 수 없었다. 이름과 안내로 그 차이를 드러낸다. */}
                   <button
                     onClick={async () => {
-                      if (tool === 'jmeter') await window.electronAPI.perfSetJmeterPath(jmeterPath.trim() || null)
-                      else await window.electronAPI.perfSetLocustPath(locustPath.trim() || null)
+                      const v = (tool === 'jmeter' ? jmeterPath : locustPath).trim()
+                      if (tool === 'jmeter') await window.electronAPI.perfSetJmeterPath(v || null)
+                      else await window.electronAPI.perfSetLocustPath(v || null)
+                      setNote(
+                        v
+                          ? `경로를 저장했습니다 — ${v}`
+                          : '지정한 경로를 지웠습니다 — 이제 PATH 에서 찾습니다.',
+                      )
                       await checkEnv()
                     }}
+                    title={
+                      (tool === 'jmeter' ? jmeterPath : locustPath).trim()
+                        ? '이 경로를 저장하고 다시 확인합니다'
+                        : '저장해 둔 경로를 지우고 PATH 에서 찾습니다'
+                    }
                     className="shrink-0 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
                   >
-                    적용
+                    {(tool === 'jmeter' ? jmeterPath : locustPath).trim() ? '적용' : 'PATH 에서 찾기'}
                   </button>
                 </div>
               </div>
@@ -1886,11 +1906,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               }
             >
               <button
-                onClick={() => {
-                  const next = !advOpen
-                  setAdvOpen(next)
-                  localStorage.setItem('perf_adv_open', next ? '1' : '0')
-                }}
+                onClick={() => setAdvOpen((v) => !v)}
                 className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-gray-400 hover:bg-white/5"
               >
                 {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
