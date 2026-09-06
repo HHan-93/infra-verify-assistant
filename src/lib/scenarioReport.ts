@@ -82,6 +82,22 @@ export function stepGrid(runs: ScenarioRunDetail[]): { title: string; cells: (Sc
   }))
 }
 
+/**
+ * 회차 하나의 **한 줄 결과.**
+ *
+ * 개요 표에서 눈으로 훑는 값이라 셋으로만 나눈다. `미완` 을 따로 두는 이유는 이 앱의 규칙
+ * 그대로다 — **근거 없이 초록을 띄우지 않는다.** 수동 확인이 남았거나 중단된 회차는 실패는
+ * 아니지만 '정상' 도 아니다. 그걸 정상으로 칠하면 아무도 그 회차를 다시 안 본다.
+ */
+export function runVerdict(r: {
+  counts: ScenarioRunCounts
+  stopped?: boolean
+}): { key: 'fail' | 'incomplete' | 'pass'; label: string } {
+  if (r.counts.fail + r.counts.error > 0) return { key: 'fail', label: '실패' }
+  if (r.stopped || r.counts.waiting + r.counts.pending > 0) return { key: 'incomplete', label: '미완' }
+  return { key: 'pass', label: '정상' }
+}
+
 /** 회차를 시간순(오래된 것 → 최근)으로. 추이는 왼쪽에서 오른쪽으로 읽는 것이 자연스럽다 */
 function chrono(runs: ScenarioRunDetail[]): ScenarioRunDetail[] {
   return [...runs].sort((a, b) => a.startedAt - b.startedAt)
@@ -119,17 +135,18 @@ export function buildBundleMd(input: ScenarioRunDetail[], now = Date.now()): str
   }
   L.push('')
 
-  L.push('## 회차별 요약')
+  L.push('## 개요')
   L.push('')
-  L.push('| 회차 | 시나리오 | 정상 | 실패 | 실행오류 | 수동대기 | 건너뜀 | 미실행 | 소요 |')
-  L.push('|---|---|---|---|---|---|---|---|---|')
-  for (const r of runs) {
+  L.push('| No | 회차 | 시나리오 | 결과 | 정상 | 실패 | 실행오류 | 수동대기 | 건너뜀 | 미실행 | 소요 |')
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|')
+  runs.forEach((r, i) => {
     L.push(
-      `| ${runStamp(r.startedAt)}${r.stopped ? ' (중단)' : ''} | ${r.title} | ${r.counts.pass} | ${r.counts.fail} | ` +
+      `| ${i + 1} | ${runStamp(r.startedAt)}${r.stopped ? ' (중단)' : ''} | ${r.title} | ` +
+        `${runVerdict(r).label} | ${r.counts.pass} | ${r.counts.fail} | ` +
         `${r.counts.error} | ${r.counts.waiting} | ${r.counts.skip} | ${r.counts.pending} | ` +
         `${durText(r.endedAt - r.startedAt)} |`,
     )
-  }
+  })
   L.push('')
 
   if (one && runs.length > 1) {
@@ -225,6 +242,42 @@ export function buildBundleHtml(input: ScenarioRunDetail[], now = Date.now()): s
   pre { background:#f7f8fa; border:1px solid #e3e6ec; border-radius:5px; padding:10px 12px;
         font:11.5px/1.6 Consolas, monospace; white-space:pre-wrap; word-break:break-all; overflow-x:auto }
   .foot { margin-top:26px; padding-top:8px; border-top:1px solid #e3e6ec; color:#8b93a1; font-size:11px }
+  td.dim { color:#6b7280; font-size:11px }
+  /* 개요의 한 줄 결과 — 실패만 눈에 걸리게, '미완' 은 초록으로 칠하지 않는다 */
+  .v-pass { color:#047857; font-weight:600 }
+  .v-fail { color:#b91c1c; font-weight:700; background:#fef2f2 }
+  .v-incomplete { color:#a16207; font-weight:600 }
+
+  /*
+    회차 탭 — **자바스크립트 없이** 라디오 + label 로 만든다.
+    이 문서는 메일 첨부·사내 파일서버·인쇄로 돌아다닌다. 스크립트를 넣으면 그중 어딘가에서
+    조용히 막혀 탭이 아예 안 눌리는데, 그때 사람은 '리포트가 깨졌다' 로 읽는다.
+    (라디오는 화면 밖으로 숨기되 display:none 은 쓰지 않는다 — 키보드로 못 고르게 된다)
+  */
+  .tabs > input { position:absolute; opacity:0; width:0; height:0 }
+  .tabbar { display:flex; flex-wrap:wrap; gap:4px; margin:10px 0 0; border-bottom:1px solid #e3e6ec; padding-bottom:0 }
+  .tabbar label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none;
+                  border:1px solid #e3e6ec; border-bottom:0; border-radius:6px 6px 0 0; background:#f6f7f9;
+                  padding:5px 11px; font-size:11.5px; color:#4b5563; margin-bottom:-1px }
+  .tabbar label:hover { background:#eef1f5 }
+  .tabbar label b { font-weight:700; color:#1f2430 }
+  .tabbar label span { font-size:10.5px }
+  .tabs > input:focus-visible + .tabbar label, .tabbar label:focus-within { outline:2px solid #2563eb }
+  .panels > section { display:none; border:1px solid #e3e6ec; border-top:0; border-radius:0 0 6px 6px; padding:14px 16px }
+  .panels > section > h3:first-child { margin-top:0 }
+  table.steps th, table.steps td { vertical-align:top }
+  .rawlabel { margin:14px 0 4px; font-size:11px; color:#6b7280 }
+${Array.from({ length: 40 }, (_, i) =>
+  `  #tab${i}:checked ~ .tabbar label[for="tab${i}"] { background:#fff; color:#1f2430; border-color:#c9cfda; font-weight:600 }\n` +
+  `  #tab${i}:checked ~ .panels > #panel${i} { display:block }`,
+).join('\n')}
+
+  /* 인쇄 — 탭은 화면에서만 쓸모가 있다. 종이에는 전부 펼쳐 나와야 회차가 빠지지 않는다 */
+  @media print {
+    .tabbar { display:none }
+    .panels > section { display:block !important; border:1px solid #e3e6ec; border-radius:6px; margin-bottom:12px;
+                        page-break-inside:avoid }
+  }
 </style></head><body>
 <h1>${esc(title)}</h1>
 <div class="meta">
@@ -252,14 +305,17 @@ ${
     : ''
 }
 
-<h2>회차별 요약</h2>
+<h2>개요</h2>
 <table>
-  <tr><th>회차</th><th>시나리오</th><th>정상</th><th>실패</th><th>실행오류</th><th>수동대기</th><th>건너뜀</th><th>미실행</th><th>소요</th></tr>
+  <tr><th>No</th><th>시나리오</th><th>실행 시각</th><th>결과</th><th>정상</th><th>실패</th><th>실행오류</th><th>수동대기</th><th>건너뜀</th><th>미실행</th><th>소요</th></tr>
   ${runs
-    .map(
-      (r) => `<tr>
-    <td>${esc(runStamp(r.startedAt))}${r.stopped ? ' <sup>중단</sup>' : ''}</td>
+    .map((r, i) => {
+      const v = runVerdict(r)
+      return `<tr>
+    <td class="num">${i + 1}</td>
     <td>${esc(r.title)}</td>
+    <td>${esc(runStamp(r.startedAt))}${r.stopped ? ' <sup>중단</sup>' : ''}</td>
+    <td class="v-${v.key}">${v.label}</td>
     <td class="num">${r.counts.pass}</td>
     <td class="num${r.counts.fail ? ' bad' : ''}">${r.counts.fail}</td>
     <td class="num${r.counts.error ? ' bad' : ''}">${r.counts.error}</td>
@@ -267,8 +323,8 @@ ${
     <td class="num">${r.counts.skip}</td>
     <td class="num">${r.counts.pending}</td>
     <td>${esc(durText(r.endedAt - r.startedAt))}</td>
-  </tr>`,
-    )
+  </tr>`
+    })
     .join('')}
 </table>
 
@@ -284,13 +340,55 @@ ${
 }
 
 <h2>회차 상세</h2>
-${runs
-  .map(
-    (r) => `<h3>${esc(runStamp(r.startedAt))} — ${esc(r.title)} <span class="meta">(${esc(countsText(r.counts))})</span></h3>
-<pre>${esc(r.reportMd.trim())}</pre>`,
-  )
-  .join('')}
+<div class="tabs">
+  ${runs.map((_, i) => `<input type="radio" name="run" id="tab${i}"${i === 0 ? ' checked' : ''}>`).join('')}
+  <div class="tabbar">
+    ${runs
+      .map((r, i) => {
+        const v = runVerdict(r)
+        return `<label for="tab${i}" class="v-${v.key}"><b>${i + 1}</b> ${esc(runStamp(r.startedAt))} <span>${v.label}</span></label>`
+      })
+      .join('')}
+  </div>
+  <div class="panels">
+    ${runs
+      .map(
+        (r, i) => `<section id="panel${i}">
+      <h3>${i + 1}. ${esc(r.title)} <span class="meta">${esc(runStamp(r.startedAt))} · ${esc(durText(r.endedAt - r.startedAt))} · ${esc(countsText(r.counts))}</span></h3>
+      ${
+        r.stopped
+          ? `<div class="warn">${r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''}중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+          : ''
+      }
+      ${
+        r.steps.length
+          ? `<table class="steps">
+        <tr><th>#</th><th>스텝</th><th>판정</th><th>대상</th><th>판정 근거</th></tr>
+        ${r.steps
+          .map(
+            (st) => `<tr>
+          <td class="num">${st.index + 1}</td>
+          <td>${esc(st.title)}</td>
+          ${cell(st)}
+          <td class="dim">${esc(st.sessionName ?? '')}</td>
+          <td class="dim">${esc((st.reasons ?? []).join(', '))}${
+            typeof st.code === 'number' ? `${(st.reasons ?? []).length ? ' · ' : ''}종료 코드 ${st.code}` : ''
+          }${st.retried ? ' · 대응 후 재실행' : ''}</td>
+        </tr>`,
+          )
+          .join('')}
+      </table>`
+          : '<div class="meta">이 회차에는 스텝 기록이 없습니다.</div>'
+      }
+      <div class="rawlabel">그때 만든 리포트 원문 — 명령·출력·판정 근거</div>
+      <pre>${esc(r.reportMd.trim())}</pre>
+    </section>`,
+      )
+      .join('')}
+  </div>
+</div>
 
-<div class="foot">Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차 상세는 그때 만든 리포트 원문이며, 비밀번호·토큰은 저장 시점에 가려졌습니다.</div>
+<div class="foot">Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차 상세는 그때 만든 리포트 원문이며, 비밀번호·토큰은 저장 시점에 가려졌습니다.<br>
+탭은 자바스크립트 없이 동작합니다. <b>인쇄하면 모든 회차가 펼쳐집니다.</b></div>
 </body></html>`
 }
