@@ -430,8 +430,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [running, setRunning] = useState<PerfRunMeta | null>(null)
   const [log, setLog] = useState('')
   const [live, setLive] = useState<PerfLive>({})
-  // 첫 탭은 아래 showDash 에 맞춰 정한다 — 대시보드가 없는 도구에서 빈 탭으로 시작하지 않는다
-  const [tab, setTab] = useState<Tab>('log')
+  /**
+   * 첫 탭은 **요약**이다.
+   *
+   * 창을 열자마자 보이는 실시간 로그는 아직 아무것도 없는 검은 칸이다. 요약은 지난 회차를
+   * 고르면 바로 채워지고, 아직 안 돌렸으면 "한 번 돌리면 결과가 여기 나옵니다" 를 말한다.
+   * 시작을 누르면 그때 대시보드(Locust)나 실시간 로그(JMeter)로 옮긴다.
+   */
+  const [tab, setTab] = useState<Tab>('summary')
   /**
    * 대시보드를 끼울 준비가 됐는가.
    *
@@ -745,7 +751,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     p99ThresholdMs: numOrUndef(p99Th),
     errorRateThresholdPct: numOrUndef(errTh),
     warmupSec: tool === 'jmeter' ? undefined : numOrUndef(warmupSec),
-    insecureTls: tool === 'jmeter' ? undefined : insecure,
+    // 파일 시나리오는 **고른 파일이 정한다** — 화면에서도 잠가 두었다. 그런데 값은 그대로
+    // 보내고 있어서, 실제로는 쓰이지 않은 설정이 회차 요약에 '자체 서명 무시' 로 남았다.
+    insecureTls: tool === 'jmeter' || scenarioKind === 'file' ? undefined : insecure,
     tool,
     // JMeter 에는 없는 개념들 — 값을 보내 두면 회차 요약에 '설정한 것처럼' 남아 오해를 만든다
     ...(tool === 'jmeter'
@@ -1356,34 +1364,68 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
    * 접어 두는 칸이라 **무엇을 건드려 놨는지 잊는다** — 지난번에 워밍업을 넣어 둔 채로 다음
    * 검증을 돌리면 판정 기준이 조용히 달라진다. 머리에 개수를 적고, 되돌리기를 붙인다.
    */
-  const advChanged = (() => {
-    const out: string[] = []
-    if (tool === 'locust' && warmupSec.trim() !== ADV_DEFAULTS.warmupSec) out.push('처음 얼마는 빼고 재기')
-    if (p50Th.trim() !== ADV_DEFAULTS.p50Th) out.push('절반은 이 안에 (p50)')
-    if (p99Th.trim() !== ADV_DEFAULTS.p99Th) out.push('거의 다 이 안에 (p99)')
-    if (tool === 'locust') {
-      if (waitMin !== ADV_DEFAULTS.waitMin || waitMax !== ADV_DEFAULTS.waitMax) out.push('요청 사이 쉬는 시간')
-      if (commonHeaderText.trim() !== ADV_DEFAULTS.commonHeaderText) out.push('공통 헤더')
-      if (captureFailures !== ADV_DEFAULTS.captureFailures) out.push('실패 응답 본문 남기기')
-      if (processes !== ADV_DEFAULTS.processes) out.push('내 PC 를 몇 갈래로')
-      if (expectWorkers !== ADV_DEFAULTS.expectWorkers) out.push('다른 PC 도 함께')
-      if (insecure !== ADV_DEFAULTS.insecure) out.push('자체 서명 인증서 무시')
-    }
-    return out
-  })()
+  /**
+   * 바뀐 항목 — **세는 것과 되돌리는 것을 한 목록에서 만든다.**
+   *
+   * 전에는 세는 쪽만 도구별로 걸러 놓고 되돌리기는 열 칸을 무조건 지웠다. 그래서 Locust
+   * 에서 공통 헤더에 토큰을 넣어 두고 JMeter 로 바꾼 뒤 되돌리면, 창은 "1개를 되돌립니다"
+   * 라고 해 놓고 **토큰까지 지웠다.** 묻는 내용과 하는 일이 다르면 확인 창을 둔 뜻이 없다.
+   */
+  const advItems: { label: string; changed: boolean; reset: () => void }[] = [
+    ...(tool === 'locust'
+      ? [
+          {
+            label: '처음 얼마는 빼고 재기',
+            changed: warmupSec.trim() !== ADV_DEFAULTS.warmupSec,
+            reset: () => setWarmupSec(ADV_DEFAULTS.warmupSec),
+          },
+        ]
+      : []),
+    { label: '절반은 이 안에 (p50)', changed: p50Th.trim() !== ADV_DEFAULTS.p50Th, reset: () => setP50Th(ADV_DEFAULTS.p50Th) },
+    { label: '거의 다 이 안에 (p99)', changed: p99Th.trim() !== ADV_DEFAULTS.p99Th, reset: () => setP99Th(ADV_DEFAULTS.p99Th) },
+    ...(tool === 'locust'
+      ? [
+          {
+            label: '요청 사이 쉬는 시간',
+            changed: waitMin !== ADV_DEFAULTS.waitMin || waitMax !== ADV_DEFAULTS.waitMax,
+            reset: () => {
+              setWaitMin(ADV_DEFAULTS.waitMin)
+              setWaitMax(ADV_DEFAULTS.waitMax)
+            },
+          },
+          {
+            label: '공통 헤더',
+            changed: commonHeaderText.trim() !== ADV_DEFAULTS.commonHeaderText,
+            reset: () => setCommonHeaderText(ADV_DEFAULTS.commonHeaderText),
+          },
+          {
+            label: '실패 응답 본문 남기기',
+            changed: captureFailures !== ADV_DEFAULTS.captureFailures,
+            reset: () => setCaptureFailures(ADV_DEFAULTS.captureFailures),
+          },
+          {
+            label: '내 PC 를 몇 갈래로',
+            changed: processes !== ADV_DEFAULTS.processes,
+            reset: () => setProcesses(ADV_DEFAULTS.processes),
+          },
+          {
+            label: '다른 PC 도 함께',
+            changed: expectWorkers !== ADV_DEFAULTS.expectWorkers,
+            reset: () => setExpectWorkers(ADV_DEFAULTS.expectWorkers),
+          },
+          {
+            label: '자체 서명 인증서 무시',
+            changed: insecure !== ADV_DEFAULTS.insecure,
+            reset: () => setInsecure(ADV_DEFAULTS.insecure),
+          },
+        ]
+      : []),
+  ]
+  const advChanged = advItems.filter((x) => x.changed).map((x) => x.label)
 
-  /** 고급 설정만 기본값으로. 위 판정 기준(p95·실패율)과 부하·시나리오는 건드리지 않는다 */
+  /** 화면에 적어 준 것만 되돌린다. 위 판정 기준(p95·실패율)과 부하·시나리오는 건드리지 않는다 */
   const resetAdv = () => {
-    setWarmupSec(ADV_DEFAULTS.warmupSec)
-    setP50Th(ADV_DEFAULTS.p50Th)
-    setP99Th(ADV_DEFAULTS.p99Th)
-    setWaitMin(ADV_DEFAULTS.waitMin)
-    setWaitMax(ADV_DEFAULTS.waitMax)
-    setCommonHeaderText(ADV_DEFAULTS.commonHeaderText)
-    setCaptureFailures(ADV_DEFAULTS.captureFailures)
-    setProcesses(ADV_DEFAULTS.processes)
-    setExpectWorkers(ADV_DEFAULTS.expectWorkers)
-    setInsecure(ADV_DEFAULTS.insecure)
+    for (const item of advItems) if (item.changed) item.reset()
   }
   /**
    * 시나리오 단계 줄의 **단추 묶음 폭.** 머리글의 빈 칸과 줄의 단추 칸이 같은 값을 써야

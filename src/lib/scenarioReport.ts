@@ -29,6 +29,30 @@ const LABEL: Record<ScenarioRunStep['effective'], string> = {
 /** 격자에서 눈에 걸려야 하는 판정 — 실패·실행오류만 색을 준다 */
 const BAD: ScenarioRunStep['effective'][] = ['fail', 'error']
 
+/** 표 칸에 들어갈 값 — `|` 하나가 표를 통째로 어긋나게 한다(시나리오 제목은 자유 문자열이다) */
+const mdCell = (s: string) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+
+/**
+ * 리포트 원문의 제목 단계만 내린다 — **코드 블록 안은 건드리지 않는다.**
+ *
+ * 원문에는 명령 출력이 ``` 로 묶여 들어 있고, 거기에도 `# ...` 로 시작하는 줄이 있다
+ * (주석·프롬프트). 줄 단위로 일괄 치환하면 그 출력이 바뀌어 버려서, '그때 만든 리포트를
+ * 그대로 싣는다' 는 이 파일의 규칙을 스스로 깬다.
+ */
+function shiftHeadings(md: string): string {
+  let fence = false
+  return md
+    .split('\n')
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        fence = !fence
+        return line
+      }
+      return fence ? line : line.replace(/^(#{1,3}) /, '###$1 ')
+    })
+    .join('\n')
+}
+
 const two = (n: number) => String(n).padStart(2, '0')
 /** 회차 이름에 쓰는 시각 — 같은 날 여러 회차가 있으므로 분까지 */
 export function runStamp(ms: number): string {
@@ -66,19 +90,37 @@ export function countsText(c: ScenarioRunCounts): string {
  * 같은 것이 없으면 그 회차 칸은 비운다.
  */
 export function stepGrid(runs: ScenarioRunDetail[]): { title: string; cells: (ScenarioRunStep | null)[] }[] {
-  const order: string[] = []
+  /**
+   * 짝을 맞추는 열쇠 — 제목 + **그 회차에서 몇 번째로 나온 같은 제목인가.**
+   *
+   * 제목만 쓰면 같은 이름의 스텝이 둘 있는 시나리오에서 뒤엣것이 통째로 사라진다(사용자
+   * 정의 시나리오는 '상태 확인' 을 앞뒤로 두 번 두는 일이 흔하다). 그러면 두 번째의 실패가
+   * 격자에서도, '모든 회차에서 실패한 스텝' 경고에서도 빠진다 — 이 리포트의 핵심 신호가
+   * 조용히 없어지는 것이라 번호를 함께 센다.
+   */
+  const keyed = (r: ScenarioRunDetail) => {
+    const nth = new Map<string, number>()
+    return r.steps.map((st) => {
+      const n = (nth.get(st.title) ?? 0) + 1
+      nth.set(st.title, n)
+      return { key: `${st.title}\u0000${n}`, title: st.title, step: st }
+    })
+  }
+  const byRun = runs.map(keyed)
+  const order: { key: string; title: string }[] = []
   const seen = new Set<string>()
   // 가장 최근 회차의 순서를 기준으로 삼는다 — 지금 쓰는 시나리오의 모양이다
-  for (const r of [...runs].sort((a, b) => b.startedAt - a.startedAt)) {
-    for (const st of r.steps) {
-      if (seen.has(st.title)) continue
-      seen.add(st.title)
-      order.push(st.title)
+  const recentFirst = runs.map((r, i) => ({ r, rows: byRun[i] })).sort((a, b) => b.r.startedAt - a.r.startedAt)
+  for (const { rows } of recentFirst) {
+    for (const row of rows) {
+      if (seen.has(row.key)) continue
+      seen.add(row.key)
+      order.push({ key: row.key, title: row.title })
     }
   }
-  return order.map((title) => ({
+  return order.map(({ key, title }) => ({
     title,
-    cells: runs.map((r) => r.steps.find((st) => st.title === title) ?? null),
+    cells: byRun.map((rows) => rows.find((row) => row.key === key)?.step ?? null),
   }))
 }
 
@@ -95,6 +137,16 @@ export function runVerdict(r: {
 }): { key: 'fail' | 'incomplete' | 'pass'; label: string } {
   if (r.counts.fail + r.counts.error > 0) return { key: 'fail', label: '실패' }
   if (r.stopped || r.counts.waiting + r.counts.pending > 0) return { key: 'incomplete', label: '미완' }
+  /**
+   * **판정된 스텝이 하나도 없으면 초록을 띄우지 않는다.**
+   *
+   * `info`(실행됨)는 '돌긴 했는데 정상 조건이 없어 판정하지 않았다' 는 뜻이다(verdict.ts 의
+   * 3-상태). `df -h` · `ceph -s` 처럼 보기만 하는 스텝으로 이뤄진 시나리오는 전부 info 로
+   * 끝나는데, 그걸 '정상' 으로 칠하면 **아무것도 검증하지 않은 회차가 초록 제출물이 된다.**
+   * 이 저장소가 verdict.ts 에서 지키는 규칙(기준이 없으면 PASS 없음)을 리포트에서 뒤집지
+   * 않는다. 건너뛴 것만 있는 회차도 같다.
+   */
+  if (r.counts.pass === 0) return { key: 'incomplete', label: '판정 없음' }
   return { key: 'pass', label: '정상' }
 }
 
@@ -143,7 +195,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
   L.push('|---|---|---|---|---|---|---|---|---|---|---|')
   runs.forEach((r, i) => {
     L.push(
-      `| ${i + 1} | ${runStamp(r.startedAt)}${r.stopped ? ' (중단)' : ''} | ${r.title} | ` +
+      `| ${i + 1} | ${runStamp(r.startedAt)}${r.stopped ? ' (중단)' : ''} | ${mdCell(r.title)} | ` +
         `${runVerdict(r).label} | ${r.counts.pass} | ${r.counts.fail} | ` +
         `${r.counts.error} | ${r.counts.waiting} | ${r.counts.skip} | ${r.counts.pending} | ` +
         `${durText(r.endedAt - r.startedAt)} |`,
@@ -162,7 +214,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
       const bads = row.cells.filter((c) => c && BAD.includes(c.effective)).length
       const mark = bads === runs.length ? ' ← 계속 실패' : bads > 0 ? '' : ''
       L.push(
-        `| ${row.title} | ` +
+        `| ${mdCell(row.title)} | ` +
           row.cells.map((c) => (c ? LABEL[c.effective] + (c.manual ? '(수동)' : '') : '—')).join(' | ') +
           ` |${mark} |`,
       )
@@ -186,7 +238,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
      * 이 문서의 목차 안에 제대로 들어간다. 한 칸만 내리면 원문 제목이 '회차별 요약' 과 같은
      * 단계가 되어, 목차에서 회차 상세가 최상위 절로 튀어나온다.
      */
-    L.push(r.reportMd.replace(/^(#{1,3}) /gm, '###$1 ').trim())
+    L.push(shiftHeadings(r.reportMd).trim())
     L.push('')
   }
   return L.join('\n')
@@ -290,7 +342,10 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
       : nFail > 0
         ? { key: 'fail', text: `회차 ${runs.length}개 중 ${nFail}개에서 실패가 있습니다` }
         : nIncomplete > 0
-          ? { key: 'incomplete', text: `실패는 없지만 ${nIncomplete}개 회차에 확인이 남아 있습니다` }
+          ? {
+              key: 'incomplete',
+              text: `실패는 없지만 ${nIncomplete}개 회차에 확인이 남아 있습니다 (수동 확인 · 미실행 · 판정 기준이 없는 회차)`,
+            }
           : { key: 'pass', text: `회차 ${runs.length}개 모두 기준을 만족했습니다` }
 
   const stat = (label: string, value: string | number, kind = '') =>
@@ -432,7 +487,9 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
     .rawbox { display:block !important }
     .tw { overflow:visible }
   }
-${Array.from({ length: 60 }, (_, i) =>
+${/* 회차 수만큼만 만든다 — 예전엔 60개로 고정했는데, 61개를 고르면 그 뒤 탭은 여는
+     규칙이 없어 회차 상세가 **빈 칸**으로 나왔다(화면에서만. 인쇄는 전부 펼쳐진다) */ ''}
+${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
   `  #tab${i}:checked ~ .tabbar label[for="tab${i}"] { background:var(--paper); color:var(--ink); font-weight:600; border-bottom-color:var(--paper) }\n` +
   `  #tab${i}:checked ~ .panels > #panel${i} { display:block }`,
 ).join('\n')}

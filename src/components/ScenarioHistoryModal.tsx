@@ -146,6 +146,21 @@ export default function ScenarioHistoryModal({
   )
   const ordered = useMemo(() => [...details].sort((a, b) => a.startedAt - b.startedAt), [details])
 
+  /**
+   * 고른 회차 중 **읽히지 않은 것.**
+   *
+   * 상세 파일이 없어졌으면(외부에서 지웠거나 보존에 밀렸거나) 조용히 빠진 채로 리포트가
+   * 만들어진다 — 5개를 골랐는데 4개짜리 제출물이 나오고 어디에도 그 사실이 없다.
+   */
+  const missing = picked.size - details.length
+  /**
+   * 고른 회차 중 **지금 목록에 안 보이는 것.**
+   *
+   * 거르기를 바꿔도 고른 것은 남는다(그게 여러 시나리오를 묶는 방법이기도 하다). 다만
+   * 화면에 체크 2개만 보이는데 리포트에 5회차가 들어가면 사람이 알 수 없으므로 짚어 준다.
+   */
+  const hiddenPicked = [...picked].filter((id) => !filtered.some((r) => r.id === id)).length
+
   /** 파일 이름 — 제목을 그대로 쓴다(파일서버에서 제목으로 찾게 된다). 경로에 못 쓰는 글자만 바꾼다 */
   const fileBase = (title: string) =>
     (title.trim() || defaultBundleTitle(ordered)).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
@@ -242,8 +257,20 @@ export default function ScenarioHistoryModal({
         </div>
 
         {error && (
-          <div className="border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200">
-            {error} — 이력 파일이 손상되었을 수 있습니다. 지금 검증한 결과는 러너의 [저장]으로 남기세요.
+          <div className="flex items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200">
+            <span className="min-w-0 flex-1">
+              {error} — 목록 파일이 손상되었을 수 있습니다. 회차 본문은 각자 파일로 남아 있으므로 되살릴 수 있습니다.
+            </span>
+            <button
+              onClick={async () => {
+                const r = await window.electronAPI.scenarioRunsRebuild()
+                setNotice(r.ok ? `목록을 다시 만들었습니다 — 회차 ${r.count}개` : (r.error ?? '되살리지 못했습니다.'))
+                if (r.ok) await load()
+              }}
+              className="shrink-0 rounded border border-red-300/40 bg-red-500/20 px-2 py-0.5 hover:bg-red-500/30"
+            >
+              목록 다시 만들기
+            </button>
           </div>
         )}
         {notice && (
@@ -260,9 +287,13 @@ export default function ScenarioHistoryModal({
               </p>
             ) : filtered.length === 0 ? (
               <p className="p-4 text-[11.5px] leading-relaxed text-gray-500">
-                {list.length === 0
-                  ? '아직 이력이 없습니다. 시나리오를 한 번 검증하면 회차가 자동으로 남습니다.'
-                  : '조건에 맞는 회차가 없습니다.'}
+                {/* 손상된 목록을 '아직 없습니다' 로 말하지 않는다 — 사람이 '지워졌구나' 로
+                    읽고 넘어가면, 되살릴 수 있는 회차를 그냥 잃는다 */}
+                {error
+                  ? '목록을 읽지 못했습니다. 위의 [목록 다시 만들기] 를 눌러 보세요.'
+                  : list.length === 0
+                    ? '아직 이력이 없습니다. 시나리오를 한 번 검증하면 회차가 자동으로 남습니다.'
+                    : '조건에 맞는 회차가 없습니다.'}
               </p>
             ) : (
               filtered.map((r) => {
@@ -425,8 +456,16 @@ export default function ScenarioHistoryModal({
 
         {/* 발 */}
         <div className="flex items-center gap-2 border-t border-white/10 bg-white/[0.02] px-3 py-2">
-          <span className="mr-auto text-[11px] text-gray-500">
+          <span className="mr-auto min-w-0 text-[11px] text-gray-500">
             {picked.size ? `${picked.size}개 선택` : '회차를 골라 리포트로 뽑습니다'}
+            {missing > 0 && (
+              <span className="ml-1.5 text-red-300">
+                · {missing}개는 회차 파일을 읽지 못해 리포트에 들어가지 않습니다
+              </span>
+            )}
+            {missing <= 0 && hiddenPicked > 0 && (
+              <span className="ml-1.5 text-amber-300/90">· 그중 {hiddenPicked}개는 지금 목록에 안 보입니다</span>
+            )}
           </span>
           <button
             onClick={() => setConfirmDel(true)}

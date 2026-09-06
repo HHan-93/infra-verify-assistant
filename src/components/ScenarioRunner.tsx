@@ -372,6 +372,18 @@ export default function ScenarioRunner({
    * '1시간 12분' 으로 남는다(리포트의 소요 칸이 그대로 거짓말이 된다).
    */
   const runEndRef = useRef(0)
+  /**
+   * 회차를 **다시 저장할 이유**가 생길 때만 올린다.
+   *
+   * 예전에는 `results` 가 바뀔 때마다 다시 저장했는데, 그러면 끝난 지 20분 뒤에 사람이
+   * 스텝 하나를 개별 '실행' 으로 다시 돌린 것까지 **그 회차 기록을 덮어썼다.** 개별
+   * 재실행은 검증이 아니라 그 뒤의 조치라, 회차에는 남지 않아야 한다.
+   *
+   * 회차에 반영해야 하는 것은 둘뿐이다 — 사람이 내린 **수동 판정**과 **원복 결과**.
+   * 둘 다 '그 회차를 어떻게 판정했는가' 의 일부다.
+   */
+  const [saveTick, setSaveTick] = useState(0)
+  const bumpSave = () => setSaveTick((n) => n + 1)
   const runStoppedRef = useRef<{ stopped: boolean; at?: number }>({ stopped: false })
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -999,6 +1011,24 @@ ${primary?.err ?? ''}`)
     // "원복 n/n" 이 그대로 남아, 방금 다시 만든 것을 이미 정리한 줄로 착각하게 된다.
     setUndoResults({})
     setUndoSkip(new Set())
+    /**
+     * **지난 회차의 결과를 지운다.**
+     *
+     * 안 지우면 이번에 안 도는 스텝(중단 이후 · 대화형 제외 · 입력값 미지정)에 **지난번
+     * 판정이 그대로 남는다.** 화면만이면 눈에 띄기라도 하는데, 이제 그 상태가 회차로
+     * 저장되므로 "돌지도 않은 스텝이 정상으로 남은 검증 기록" 이 만들어진다 — 이 저장소가
+     * 가장 나쁘게 보는 종류의 버그다.
+     *
+     * 다만 **사람이 직접 지정한 판정은 남긴다.** 아래에서 '수동 지정 n개는 그대로 유지'
+     * 라고 알리는 그 동작이고, 수동 판정은 명령 실행과 무관한 사람의 확인이기 때문이다.
+     */
+    setResults((prev) => {
+      const kept: Record<number, StepResult> = {}
+      for (const [k, v] of Object.entries(prev)) {
+        if (v?.manual) kept[Number(k)] = { status: 'pending', manual: v.manual } as StepResult
+      }
+      return kept
+    })
     setNotice('')
     let skipped = 0
     let manualSkipped = 0
@@ -1097,11 +1127,13 @@ ${primary?.err ?? ''}`)
         }
       }
     }
+    // 이력에 쓸 값은 **busy 를 내리기 전에** 확정한다. busy 가 내려가면 저장 effect 가
+    // 돌기 시작하므로, 그 뒤에 쓰면 순서에 기대는 코드가 된다.
+    runEndRef.current = Date.now()
+    // 중단 여부는 이력에 반드시 남긴다 — 그 뒤 스텝은 '미실행' 이며 정상도 실패도 아니다
+    runStoppedRef.current = stoppedAt >= 0 ? { stopped: true, at: stoppedAt + 1 } : { stopped: false }
     setBusy(false)
     setRecovering(null) // 어떤 경로로 끝나든(중단 포함) 진행 배지는 남기지 않는다
-    // 중단 여부는 이력에 반드시 남긴다 — 그 뒤 스텝은 '미실행' 이며 정상도 실패도 아니다
-    runEndRef.current = Date.now()
-    runStoppedRef.current = stoppedAt >= 0 ? { stopped: true, at: stoppedAt + 1 } : { stopped: false }
     const parts: string[] = []
     if (stoppedAt >= 0)
       parts.push(
@@ -1254,8 +1286,10 @@ ${primary?.err ?? ''}`)
     }
   }, [])
 
-  const setManual = (idx: number, v: 'pass' | 'fail' | 'skip') =>
+  const setManual = (idx: number, v: 'pass' | 'fail' | 'skip') => {
     setRes(idx, { manual: results[idx]?.manual === v ? undefined : v })
+    bumpSave() // 수동 판정은 회차 기록에 반영한다 (위 saveTick 주석)
+  }
 
   const summary = useMemo(() => {
     let pass = 0, fail = 0, info = 0, skip = 0, waiting = 0, pending = 0, error = 0
@@ -1397,11 +1431,8 @@ ${primary?.err ?? ''}`)
    * 전이다(스텝마다 setState 로 쌓는다). busy 가 내려간 뒤의 렌더에서 저장해야 마지막
    * 스텝까지 들어간다. 끝난 뒤 사람이 수동 판정·원복을 하면 같은 id 로 다시 저장한다.
    */
-  useEffect(() => {
-    const id = runIdRef.current
-    if (!id || busy) return
-    // 눌린 대로 매번 쓰지 않는다 — 수동 판정을 연달아 누르면 파일을 그만큼 다시 쓴다
-    const timer = setTimeout(() => {
+  /** 지금 상태로 회차 한 건을 만든다 (저장 effect 와 언마운트 flush 가 함께 쓴다) */
+  const buildRunDetail = (id: string): ScenarioRunDetail => {
       const steps: ScenarioRunStep[] = scenario.steps.map((st, i) => {
         const r = results[i]
         return {
@@ -1435,15 +1466,46 @@ ${primary?.err ?? ''}`)
         // 리포트는 마스킹을 거친 것이다(buildReport 의 출구) — 저장본도 같은 규칙을 따른다
         reportMd: buildReport(),
       }
+      return detail
+  }
+
+  /**
+   * 마지막으로 만든 회차 — 언마운트 때 저장이 아직 안 됐으면 이걸로 밀어 넣는다.
+   * (검증은 다시 못 돌리는 일이 많다. 1.2초 사이에 창을 닫았다고 회차가 사라지면 안 된다)
+   */
+  const pendingRef = useRef<ScenarioRunDetail | null>(null)
+
+  useEffect(() => {
+    const id = runIdRef.current
+    if (!id || busy) return
+    const detail = buildRunDetail(id)
+    pendingRef.current = detail
+    // 눌린 대로 매번 쓰지 않는다 — 수동 판정을 연달아 누르면 파일을 그만큼 다시 쓴다
+    const timer = setTimeout(() => {
+      pendingRef.current = null
       void window.electronAPI.scenarioRunsSave(detail).then((r) => {
         // 이력 저장이 실패해도 검증은 끝난 상태다. 조용히 넘기지 않고 사유는 남긴다.
         if (!r.ok) setNotice(`이력 저장 실패: ${r.error ?? '알 수 없음'} — 리포트는 아래 [저장]으로 남기세요.`)
       })
     }, 1200)
     return () => clearTimeout(timer)
-    // buildReport 는 매 렌더 새로 만들어지는 함수라 의존성에 넣지 않는다(넣으면 매 렌더 저장한다)
+    // buildReport 는 매 렌더 새로 만들어지는 함수라 의존성에 넣지 않는다(넣으면 매 렌더 저장한다).
+    // results 도 넣지 않는다 — 끝난 뒤의 개별 재실행까지 회차를 덮어쓰기 때문이다(saveTick 주석).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, results, undoResults, scenario])
+  }, [busy, saveTick, undoResults, scenario])
+
+  /**
+   * 창을 닫을 때 아직 안 쓴 회차가 있으면 밀어 넣는다.
+   *
+   * 저장을 1.2초 미루는 동안 X 를 누르면 그 회차가 통째로 없어졌다 — '저장을 잊은 회차는
+   * 영영 없는 것이 된다' 를 없애려고 만든 기능이 같은 구멍을 다시 만든 셈이라 막는다.
+   */
+  useEffect(() => {
+    return () => {
+      const d = pendingRef.current
+      if (d) void window.electronAPI.scenarioRunsSave(d)
+    }
+  }, [])
 
   const analyzeReport = () => {
     if (!onAnalyze) return

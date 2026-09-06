@@ -115,6 +115,9 @@ const electronAPI = {
     ipcRenderer.invoke('scenarioRuns:read', ids),
   scenarioRunsDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('scenarioRuns:delete', ids),
+  /** 목록이 깨졌을 때 남아 있는 회차 파일들로 되살린다 */
+  scenarioRunsRebuild: (): Promise<{ ok: boolean; error?: string; count: number }> =>
+    ipcRenderer.invoke('scenarioRuns:rebuild'),
 
   // ── 성능 테스트 (Locust, 로컬 부하) ─────────────────────────
   perfEnv: (): Promise<PerfEnvStatus> => ipcRenderer.invoke('perf:env'),

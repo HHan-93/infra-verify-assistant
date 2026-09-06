@@ -4774,6 +4774,16 @@ async function saveScenarioRun(detail: ScenarioRunDetail): Promise<void> {
   if (!SCENARIO_RUN_ID.test(detail.id)) throw new Error('잘못된 회차 id')
   await withStoreLock('scenario-runs', async () => {
     await mkdir(scenarioRunsDir(), { recursive: true })
+    /**
+     * **회차 파일을 먼저 쓴다.**
+     *
+     * 목록이 손상돼 있으면 아래 readScenarioRunIndex 가 던진다(빈 목록으로 뭉개면 다음
+     * 저장이 나머지를 전부 덮어쓰므로 그렇게 두어야 한다). 그런데 그 순서가 뒤였을 때는
+     * **방금 끝난 검증까지 같이 사라졌다** — 다시 돌릴 수 없는 검증이라 그게 더 나쁘다.
+     * 파일만 남아 있으면 아래 rebuild 로 목록을 되살릴 수 있다.
+     */
+    await writeFileAtomic(path.join(scenarioRunsDir(), `${detail.id}.json`), JSON.stringify(detail))
+
     const index = await readScenarioRunIndex()
     const { steps, reportMd, ...summary } = detail
     void steps
@@ -4791,14 +4801,57 @@ async function saveScenarioRun(detail: ScenarioRunDetail): Promise<void> {
       if (keep.length < SCENARIO_RUNS_MAX && r.startedAt >= cutoff) keep.push(r)
       else drop.push(r)
     }
-    await writeFileAtomic(path.join(scenarioRunsDir(), `${detail.id}.json`), JSON.stringify(detail))
     await writeFileAtomic(scenarioRunsIndexPath(), JSON.stringify(keep, null, 2))
     for (const r of drop) {
-      if (!SCENARIO_RUN_ID.test(r.id)) continue
+      // 방금 쓴 회차는 지우지 않는다 — 시계가 뒤로 간 PC 에서는 시작 시각이 보존 기간
+      // 밖으로 계산돼, 한 줄 위에서 쓴 파일을 그대로 지우는 일이 생긴다
+      if (!SCENARIO_RUN_ID.test(r.id) || r.id === detail.id) continue
       await rm(path.join(scenarioRunsDir(), `${r.id}.json`), { force: true }).catch(() => {})
     }
   })
 }
+
+/**
+ * 목록 다시 만들기 — 남아 있는 회차 파일들로 `index.json` 을 되살린다.
+ *
+ * 목록 파일이 깨지면(디스크 문제·강제 종료) 이력 창이 통째로 막힌다. 회차 본문은 각자
+ * 파일로 있으므로 목록은 언제든 다시 만들 수 있다 — 사람이 손으로 고치게 두지 않는다.
+ */
+async function rebuildScenarioRunIndex(): Promise<number> {
+  return withStoreLock('scenario-runs', async () => {
+    let files: string[]
+    try {
+      files = await readdir(scenarioRunsDir())
+    } catch {
+      return 0
+    }
+    const found: ScenarioRunSummary[] = []
+    for (const f of files) {
+      if (f === 'index.json' || !f.endsWith('.json')) continue
+      try {
+        const d = JSON.parse(await readFile(path.join(scenarioRunsDir(), f), 'utf-8')) as ScenarioRunDetail
+        if (!d?.id || !SCENARIO_RUN_ID.test(d.id)) continue
+        const { steps, reportMd, ...summary } = d
+        void steps
+        void reportMd
+        found.push(summary)
+      } catch {
+        /* 읽히지 않는 파일은 건너뛴다 — 나머지라도 살린다 */
+      }
+    }
+    found.sort((a, b) => b.startedAt - a.startedAt)
+    await writeFileAtomic(scenarioRunsIndexPath(), JSON.stringify(found, null, 2))
+    return found.length
+  })
+}
+
+ipcMain.handle('scenarioRuns:rebuild', async () => {
+  try {
+    return { ok: true, count: await rebuildScenarioRunIndex() }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), count: 0 }
+  }
+})
 
 ipcMain.handle('scenarioRuns:save', async (_evt, detail: ScenarioRunDetail) => {
   try {

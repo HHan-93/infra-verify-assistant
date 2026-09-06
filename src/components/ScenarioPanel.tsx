@@ -117,7 +117,11 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
   // 이력 창을 닫을 때도 다시 센다(그 안에서 지웠을 수 있다)
   useEffect(() => {
     if (historyOpen) return
-    void window.electronAPI.scenarioRunsList().then((r) => setRunCount(r.list.length))
+    // 못 읽은 것과 '없는 것' 은 다르다 — 못 읽었으면 숫자를 지우지 않고 그대로 둔다
+    // (0 으로 보이면 이력이 사라진 줄 알고 창을 열어 보지 않는다)
+    void window.electronAPI.scenarioRunsList().then((r) => {
+      if (r.ok) setRunCount(r.list.length)
+    })
   }, [historyOpen])
 
   useEffect(() => {
