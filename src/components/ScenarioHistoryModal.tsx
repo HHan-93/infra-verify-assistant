@@ -5,6 +5,7 @@ import {
   buildBundleHtml,
   buildBundleMd,
   countsText,
+  defaultBundleTitle,
   durText,
   runStamp,
   sameScenario,
@@ -71,6 +72,14 @@ export default function ScenarioHistoryModal({
   const [onlyFail, setOnlyFail] = useState(false)
   const [recent7, setRecent7] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
+  /**
+   * 뽑기 전에 받는 **문서 제목.**
+   *
+   * '시나리오 검증 묶음 리포트' 는 우리가 붙인 이름이지 이 문서가 무엇인지가 아니다 —
+   * 받는 사람에게는 'CONTRABASS V3.0.6 시나리오 수행' 같은 것이 제목이어야 한다. 우리가
+   * 지을 수 없는 값이라 사람에게 묻고, 비워 두면 시나리오 이름으로 만든다.
+   */
+  const [exportAsk, setExportAsk] = useState<{ kind: 'md' | 'html'; title: string } | null>(null)
   const [busy, setBusy] = useState(false)
   /** 고른 회차의 상세 — 격자를 그리려면 필요하다 */
   const [details, setDetails] = useState<ScenarioRunDetail[]>([])
@@ -137,17 +146,17 @@ export default function ScenarioHistoryModal({
   )
   const ordered = useMemo(() => [...details].sort((a, b) => a.startedAt - b.startedAt), [details])
 
-  const fileBase = () => {
-    const one = sameScenario(ordered) ? ordered[ordered.length - 1].title : '시나리오검증'
-    return `검증묶음_${one}_${ordered.length}회차`.replace(/[\\/:*?"<>|]/g, '_')
-  }
+  /** 파일 이름 — 제목을 그대로 쓴다(파일서버에서 제목으로 찾게 된다). 경로에 못 쓰는 글자만 바꾼다 */
+  const fileBase = (title: string) =>
+    (title.trim() || defaultBundleTitle(ordered)).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
 
-  const exportAs = async (kind: 'md' | 'html') => {
+  const exportAs = async (kind: 'md' | 'html', title: string) => {
     if (!ordered.length) return
     setBusy(true)
     try {
-      const content = kind === 'md' ? buildBundleMd(ordered) : buildBundleHtml(ordered)
-      const r = await window.electronAPI.saveReport({ defaultName: `${fileBase()}.${kind}`, content })
+      const content =
+        kind === 'md' ? buildBundleMd(ordered, { title }) : buildBundleHtml(ordered, { title })
+      const r = await window.electronAPI.saveReport({ defaultName: `${fileBase(title)}.${kind}`, content })
       if (r.saved) setNotice(`저장됨: ${r.path}`)
       else if (r.error) setNotice(r.error)
     } finally {
@@ -427,7 +436,7 @@ export default function ScenarioHistoryModal({
             <Trash2 size={11} /> 회차 삭제
           </button>
           <button
-            onClick={() => void exportAs('md')}
+            onClick={() => setExportAsk({ kind: 'md', title: defaultBundleTitle(ordered) })}
             disabled={!picked.size || busy}
             title="Markdown — 붙여넣기·이슈 등록·AI 분석에 쓰기 좋습니다"
             className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
@@ -435,7 +444,7 @@ export default function ScenarioHistoryModal({
             <Download size={11} /> Markdown
           </button>
           <button
-            onClick={() => void exportAs('html')}
+            onClick={() => setExportAsk({ kind: 'html', title: defaultBundleTitle(ordered) })}
             disabled={!picked.size || busy}
             title="한 파일 HTML — 그대로 첨부해 보낼 수 있습니다(외부 자원 없음, 인쇄용 밝은 배경)"
             className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/25 px-2.5 py-1 text-[11px] text-blue-100 hover:bg-blue-600/40 disabled:opacity-40"
@@ -444,6 +453,54 @@ export default function ScenarioHistoryModal({
           </button>
         </div>
       </div>
+
+      {/* 제목 창 — 배경 클릭으로 닫지 않는다(적던 제목이 날아간다). 닫는 것은 취소뿐 */}
+      {exportAsk && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-6">
+          <div className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl">
+            <div className="mb-1 text-sm font-semibold text-gray-100">리포트 제목</div>
+            <p className="mb-2.5 text-[11.5px] leading-relaxed text-gray-400">
+              문서 맨 위와 파일 이름에 그대로 들어갑니다. 무엇을 검증한 문서인지 적어 주세요.
+            </p>
+            <input
+              autoFocus
+              value={exportAsk.title}
+              onChange={(e) => setExportAsk({ ...exportAsk, title: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const a = exportAsk
+                  setExportAsk(null)
+                  void exportAs(a.kind, a.title)
+                }
+              }}
+              placeholder="예: CONTRABASS V3.0.6 시나리오 수행"
+              className="w-full rounded border border-white/10 bg-panel-light px-2 py-1.5 text-[12.5px] text-gray-100 outline-none focus:border-blue-500/60"
+            />
+            <p className="mt-1.5 text-[10.5px] text-gray-600">
+              {ordered.length}회차 · {exportAsk.kind === 'html' ? '한 파일 HTML' : 'Markdown'} 으로 저장합니다.
+              비워 두면 <span className="text-gray-400">{defaultBundleTitle(ordered)}</span> 로 들어갑니다.
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setExportAsk(null)}
+                className="rounded-md border border-white/10 bg-panel-light px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10"
+              >
+                취소
+              </button>
+              <button
+                onClick={() => {
+                  const a = exportAsk
+                  setExportAsk(null)
+                  void exportAs(a.kind, a.title)
+                }}
+                className="rounded-md border border-blue-500/40 bg-blue-600/40 px-3 py-1.5 text-xs text-blue-50 hover:bg-blue-600/60"
+              >
+                저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmDel && (
         <ConfirmDialog

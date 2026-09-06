@@ -110,13 +110,15 @@ export function sameScenario(runs: ScenarioRunDetail[]): boolean {
 
 // ── Markdown ────────────────────────────────────────────────────
 
-export function buildBundleMd(input: ScenarioRunDetail[], now = Date.now()): string {
+export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = {}): string {
   const runs = chrono(input)
-  if (!runs.length) return '# 시나리오 검증 묶음 리포트\n\n고른 회차가 없습니다.'
-  const one = sameScenario(runs)
+  const now = opts.now ?? Date.now()
+  // 제목은 사람이 정한다 — HTML 과 같은 규칙(안 적으면 시나리오 이름으로 만든다)
+  const title = opts.title?.trim() || defaultBundleTitle(runs)
+  if (!runs.length) return `# ${title}\n\n고른 회차가 없습니다.`
   const L: string[] = []
 
-  L.push(`# 시나리오 검증 묶음 리포트${one ? `: ${runs[runs.length - 1].title}` : ''}`)
+  L.push(`# ${title}`)
   L.push('')
   L.push(`- 회차 ${runs.length}개 (${runs.map((r) => runStamp(r.startedAt)).join(' · ')})`)
   const targets = [...new Set(runs.flatMap((r) => r.targets))]
@@ -149,7 +151,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], now = Date.now()): str
   })
   L.push('')
 
-  if (one && runs.length > 1) {
+  if (sameScenario(runs) && runs.length > 1) {
     const grid = stepGrid(runs)
     L.push('## 스텝별 추이')
     L.push('')
@@ -190,12 +192,27 @@ export function buildBundleMd(input: ScenarioRunDetail[], now = Date.now()): str
   return L.join('\n')
 }
 
+
 // ── HTML (제출용 한 장) ─────────────────────────────────────────
+
+/**
+ * 화면 설계의 근거 — 다른 검증 리포트들이 공통으로 하는 것을 따랐다.
+ *
+ *  · **맨 위에 결론부터** (Lighthouse·Allure). 읽는 사람은 대개 "그래서 됐나?" 하나를
+ *    보러 온다. 큰 숫자 넉 장과 한 줄 판정을 먼저 놓고, 근거는 아래에 둔다.
+ *  · **한 줄에 색 막대** (Allure·pytest-html). 표에 숫자만 있으면 회차끼리 비교가 눈에
+ *    안 들어온다. 스텝 구성을 가로 막대로 그려 두면 "이 회차는 절반이 빨갛다" 가 보인다.
+ *  · **색만으로 말하지 않는다.** 판정은 색 + 글자를 함께 쓴다(인쇄·색약·흑백 복사).
+ *  · **제목은 사람이 정한다.** 'CONTRABASS V3.0.6 시나리오 수행' 처럼 무엇을 검증한
+ *    문서인지는 우리가 지을 수 없다. 안 적으면 시나리오 이름으로 만든다.
+ *  · **자바스크립트 없음**(탭·펼치기 모두 CSS). 메일·파일서버·인쇄로 돌아다니는 문서라
+ *    스크립트가 막히면 사람은 '리포트가 깨졌다' 로 읽는다.
+ */
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-/** 판정 한 칸 — 색은 실패 계열에만 준다 */
+/** 판정 한 칸 — 색 + 글자. 색만으로는 흑백 인쇄에서 사라진다 */
 function cell(c: ScenarioRunStep | null): string {
   if (!c) return '<td class="none">—</td>'
   const cls = BAD.includes(c.effective)
@@ -208,187 +225,366 @@ function cell(c: ScenarioRunStep | null): string {
   return `<td class="${cls}">${LABEL[c.effective]}${c.manual ? '<sup>수동</sup>' : ''}</td>`
 }
 
-export function buildBundleHtml(input: ScenarioRunDetail[], now = Date.now()): string {
-  const runs = chrono(input)
+/** 스텝 구성 막대 — 회차 한 줄을 눈으로 비교하게 만드는 장치 */
+function bar(c: ScenarioRunCounts): string {
+  const total = c.pass + c.fail + c.error + c.info + c.skip + c.waiting + c.pending
+  if (!total) return '<span class="bar empty"></span>'
+  const seg = (n: number, k: string, label: string) =>
+    n ? `<i class="s-${k}" style="width:${((n / total) * 100).toFixed(2)}%" title="${label} ${n}"></i>` : ''
+  return (
+    '<span class="bar">' +
+    seg(c.pass, 'pass', '정상') +
+    seg(c.info, 'info', '실행됨') +
+    seg(c.fail, 'fail', '실패') +
+    seg(c.error, 'error', '실행오류') +
+    seg(c.waiting, 'wait', '수동대기') +
+    seg(c.skip, 'skip', '건너뜀') +
+    seg(c.pending, 'pending', '미실행') +
+    '</span>'
+  )
+}
+
+/** 제목을 안 적었을 때 쓸 이름 — 무엇을 몇 번 돌린 문서인지까지만 */
+export function defaultBundleTitle(runs: ScenarioRunDetail[]): string {
+  if (!runs.length) return '시나리오 검증 리포트'
   const one = sameScenario(runs)
-  const title = `시나리오 검증 묶음 리포트${one && runs.length ? ` — ${runs[runs.length - 1].title}` : ''}`
+  return one ? `${runs[0].title} 시나리오 수행` : `시나리오 검증 ${runs.length}회차`
+}
+
+export interface BundleOptions {
+  /** 문서 제목 — 사람이 정한다 (예: 'CONTRABASS V3.0.6 시나리오 수행') */
+  title?: string
+  now?: number
+}
+
+export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions = {}): string {
+  const runs = chrono(input)
+  const now = opts.now ?? Date.now()
+  const title = opts.title?.trim() || defaultBundleTitle(runs)
   const targets = [...new Set(runs.flatMap((r) => r.targets))]
-  const grid = one && runs.length > 1 ? stepGrid(runs) : []
+  const grid = sameScenario(runs) && runs.length > 1 ? stepGrid(runs) : []
   const always = grid.filter((row) => row.cells.every((c) => c && BAD.includes(c.effective)))
+  const verdicts = runs.map((r) => runVerdict(r))
+  const nFail = verdicts.filter((v) => v.key === 'fail').length
+  const nIncomplete = verdicts.filter((v) => v.key === 'incomplete').length
+  const nPass = verdicts.filter((v) => v.key === 'pass').length
+  // 문서 전체의 한 줄 결론 — 읽는 사람이 가장 먼저 찾는 문장이다
+  const headline =
+    runs.length === 0
+      ? { key: 'none', text: '회차가 없습니다' }
+      : nFail > 0
+        ? { key: 'fail', text: `회차 ${runs.length}개 중 ${nFail}개에서 실패가 있습니다` }
+        : nIncomplete > 0
+          ? { key: 'incomplete', text: `실패는 없지만 ${nIncomplete}개 회차에 확인이 남아 있습니다` }
+          : { key: 'pass', text: `회차 ${runs.length}개 모두 기준을 만족했습니다` }
+
+  const stat = (label: string, value: string | number, kind = '') =>
+    `<div class="stat ${kind}"><b>${value}</b><span>${label}</span></div>`
 
   return `<!doctype html>
-<html lang="ko"><head><meta charset="utf-8">
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
 <style>
-  /* 외부 자원을 쓰지 않는다 — 메일로 첨부하거나 망 밖에서 열어도 그대로 보여야 한다.
-     인쇄를 생각해 밝은 배경이다(앱은 어둡지만 이 문서는 제출물이다). */
-  body { font: 13px/1.7 "Malgun Gothic", "맑은 고딕", system-ui, sans-serif; color:#1f2430; background:#fff;
-         margin:0; padding:28px 32px; max-width:1100px }
-  h1 { font-size:19px; margin:0 0 4px }
-  h2 { font-size:15px; margin:26px 0 8px; padding-bottom:4px; border-bottom:1px solid #e3e6ec }
-  h3 { font-size:13.5px; margin:18px 0 6px; color:#333b4a }
-  .meta { color:#5b6577; font-size:11.5px; line-height:1.9 }
-  .warn { margin:10px 0; padding:8px 11px; border-left:3px solid #d97706; background:#fffbeb; font-size:12px }
-  .lede { margin:10px 0 0; padding:8px 11px; border-left:3px solid #dc2626; background:#fef2f2; font-size:12px }
-  table { border-collapse:collapse; width:100%; margin:8px 0 4px; font-size:12px }
-  th, td { border:1px solid #e3e6ec; padding:4px 8px; text-align:left }
-  th { background:#f6f7f9; color:#4b5563; font-weight:600; white-space:nowrap }
-  td.num { text-align:right }
-  td.bad { background:#fef2f2; color:#b91c1c; font-weight:600 }
-  td.good { color:#047857 }
-  td.wait { color:#0369a1 }
-  td.none { color:#9aa3b2 }
-  sup { font-size:9px; color:#6b7280; margin-left:2px }
-  pre { background:#f7f8fa; border:1px solid #e3e6ec; border-radius:5px; padding:10px 12px;
-        font:11.5px/1.6 Consolas, monospace; white-space:pre-wrap; word-break:break-all; overflow-x:auto }
-  .foot { margin-top:26px; padding-top:8px; border-top:1px solid #e3e6ec; color:#8b93a1; font-size:11px }
-  td.dim { color:#6b7280; font-size:11px }
-  /* 개요의 한 줄 결과 — 실패만 눈에 걸리게, '미완' 은 초록으로 칠하지 않는다 */
-  .v-pass { color:#047857; font-weight:600 }
-  .v-fail { color:#b91c1c; font-weight:700; background:#fef2f2 }
-  .v-incomplete { color:#a16207; font-weight:600 }
+  /* 외부 자원을 쓰지 않는다 — 메일 첨부·망 밖에서도 그대로 보여야 한다.
+     밝은 배경인 이유는 이 문서가 앱 화면이 아니라 인쇄·전달되는 제출물이기 때문이다. */
+  :root {
+    --ink:#1b2130; --ink-2:#48546a; --ink-3:#75818f;
+    --line:#e2e6ee; --line-2:#eef1f6; --paper:#ffffff; --bg:#f4f6fa;
+    --pass:#0f766e; --pass-bg:#e9f8f4;
+    --fail:#c02626; --fail-bg:#fdeeee;
+    --warn:#a16207; --warn-bg:#fdf6e7;
+    --info:#4b5563; --accent:#2563eb;
+  }
+  * { box-sizing:border-box }
+  html { -webkit-text-size-adjust:100% }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:13.5px/1.7 -apple-system, "Segoe UI", "Malgun Gothic", "맑은 고딕", system-ui, sans-serif }
+  .wrap { max-width:1180px; margin:0 auto; padding:0 24px 40px }
+
+  /* 머리 — 스크롤해도 무슨 문서인지 잃지 않게 붙여 둔다 */
+  header { position:sticky; top:0; z-index:5; background:var(--paper); border-bottom:1px solid var(--line) }
+  header .wrap { padding-top:14px; padding-bottom:12px }
+  .brand { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3) }
+  h1 { font-size:21px; line-height:1.35; margin:3px 0 6px; font-weight:700; letter-spacing:-.01em }
+  .sub { font-size:11.5px; color:var(--ink-3) }
+  .sub b { color:var(--ink-2); font-weight:600 }
+
+  /* 결론 — 맨 위에 한 줄 */
+  .headline { display:flex; align-items:center; gap:9px; margin:16px 0 12px; padding:11px 14px;
+              border-radius:9px; border:1px solid var(--line); background:var(--paper); font-size:14px; font-weight:600 }
+  .headline.k-fail { border-color:#f3c9c9; background:var(--fail-bg); color:var(--fail) }
+  .headline.k-incomplete { border-color:#eedcae; background:var(--warn-bg); color:var(--warn) }
+  .headline.k-pass { border-color:#bfe6dc; background:var(--pass-bg); color:var(--pass) }
+  .headline .dot { width:9px; height:9px; border-radius:99px; background:currentColor; flex:none }
+
+  .stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:14px }
+  .stat { background:var(--paper); border:1px solid var(--line); border-radius:9px; padding:11px 13px }
+  .stat b { display:block; font-size:23px; line-height:1.2; font-weight:700; letter-spacing:-.02em }
+  .stat span { font-size:11px; color:var(--ink-3) }
+  .stat.k-fail b { color:var(--fail) } .stat.k-pass b { color:var(--pass) } .stat.k-warn b { color:var(--warn) }
+
+  .card { background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:14px }
+  h2 { font-size:14.5px; margin:0 0 10px; font-weight:700; letter-spacing:-.01em }
+  h2 .hint { font-weight:400; font-size:11px; color:var(--ink-3); margin-left:8px }
+  h3 { font-size:13.5px; margin:0 0 8px; font-weight:700 }
+  h3 .meta { font-weight:400; font-size:11px; color:var(--ink-3); margin-left:6px }
+
+  .note { font-size:11.5px; color:var(--ink-3); line-height:1.75 }
+  .banner { margin:0 0 10px; padding:9px 12px; border-radius:8px; font-size:12px; line-height:1.7;
+            border:1px solid #eedcae; background:var(--warn-bg); color:#7a4d06 }
+  .banner.k-fail { border-color:#f3c9c9; background:var(--fail-bg); color:#8f1d1d }
+  .banner b { font-weight:700 }
+
+  /* 좁은 화면에서는 **표만** 옆으로 밀린다. 감싸지 않으면 문서 전체가 옆으로 밀려
+     제목·결론까지 화면 밖으로 나간다(375px 에서 실제로 그랬다). */
+  .tw { overflow-x:auto; -webkit-overflow-scrolling:touch }
+  table { border-collapse:collapse; width:100%; font-size:12.5px }
+  .tw > table { min-width:max-content }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line-2); vertical-align:top }
+  /* 표 머리를 붙여 두지 않는다 — 페이지 머리가 이미 붙어 있어서, 둘이 겹치면 표 머리가
+     그 뒤로 숨는다. 표는 길어야 스텝 열몇 줄이라 붙여 둘 값도 크지 않다. */
+  thead th { font-size:11px; font-weight:600; color:var(--ink-3); background:#fafbfd;
+             border-bottom:1px solid var(--line); white-space:nowrap }
+  tbody tr:last-child td { border-bottom:0 }
+  tbody tr:hover { background:#fafbfd }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--ink-2) }
+  td.dim, .dim { color:var(--ink-3); font-size:11.5px }
+  td.none { color:#b6bdc9 }
+  td.good { color:var(--pass) } td.bad { color:var(--fail); font-weight:600; background:var(--fail-bg) }
+  td.wait { color:var(--warn) }
+  sup { font-size:9px; color:var(--ink-3); margin-left:2px; font-weight:400 }
+
+  /* 판정 알약 — 색 + 글자를 함께 쓴다(흑백 인쇄·색약에서도 읽혀야 한다) */
+  .pill { display:inline-block; padding:1.5px 9px; border-radius:99px; font-size:11px; font-weight:700;
+          border:1px solid transparent; white-space:nowrap }
+  .pill.k-pass { color:var(--pass); background:var(--pass-bg); border-color:#bfe6dc }
+  .pill.k-fail { color:var(--fail); background:var(--fail-bg); border-color:#f3c9c9 }
+  .pill.k-incomplete { color:var(--warn); background:var(--warn-bg); border-color:#eedcae }
+
+  /* 스텝 구성 막대 */
+  .bar { display:flex; width:132px; height:7px; border-radius:99px; overflow:hidden; background:#eef1f6 }
+  .bar.empty { background:#eef1f6 }
+  .bar i { display:block; height:100% }
+  .s-pass { background:#2aa88b } .s-info { background:#8fc7bb } .s-fail { background:#d94b4b }
+  .s-error { background:#a32020 } .s-wait { background:#e0a93c } .s-skip { background:#b3a6d8 }
+  .s-pending { background:#cfd6e0 }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; margin-top:9px; font-size:11px; color:var(--ink-3) }
+  .legend span { display:inline-flex; align-items:center; gap:5px }
+  .legend i { width:9px; height:9px; border-radius:2px; display:inline-block }
 
   /*
     회차 탭 — **자바스크립트 없이** 라디오 + label 로 만든다.
-    이 문서는 메일 첨부·사내 파일서버·인쇄로 돌아다닌다. 스크립트를 넣으면 그중 어딘가에서
-    조용히 막혀 탭이 아예 안 눌리는데, 그때 사람은 '리포트가 깨졌다' 로 읽는다.
     (라디오는 화면 밖으로 숨기되 display:none 은 쓰지 않는다 — 키보드로 못 고르게 된다)
   */
-  .tabs > input { position:absolute; opacity:0; width:0; height:0 }
-  .tabbar { display:flex; flex-wrap:wrap; gap:4px; margin:10px 0 0; border-bottom:1px solid #e3e6ec; padding-bottom:0 }
-  .tabbar label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none;
-                  border:1px solid #e3e6ec; border-bottom:0; border-radius:6px 6px 0 0; background:#f6f7f9;
-                  padding:5px 11px; font-size:11.5px; color:#4b5563; margin-bottom:-1px }
-  .tabbar label:hover { background:#eef1f5 }
-  .tabbar label b { font-weight:700; color:#1f2430 }
-  .tabbar label span { font-size:10.5px }
-  .tabs > input:focus-visible + .tabbar label, .tabbar label:focus-within { outline:2px solid #2563eb }
-  .panels > section { display:none; border:1px solid #e3e6ec; border-top:0; border-radius:0 0 6px 6px; padding:14px 16px }
+  .tabs > input, .raws { position:absolute; opacity:0; width:0; height:0 }
+  .tabbar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:-1px }
+  .tabbar label { display:inline-flex; align-items:center; gap:7px; cursor:pointer; user-select:none;
+                  border:1px solid var(--line); border-bottom-color:transparent; border-radius:9px 9px 0 0;
+                  background:#f7f9fc; padding:7px 13px; font-size:12px; color:var(--ink-2) }
+  .tabbar label:hover { background:#eef2f8; color:var(--ink) }
+  .tabbar label b { font-weight:700; color:var(--ink-3) }
+  .panels > section { display:none; background:var(--paper); border:1px solid var(--line); border-radius:0 10px 10px 10px;
+                      padding:16px 18px }
   .panels > section > h3:first-child { margin-top:0 }
-  table.steps th, table.steps td { vertical-align:top }
-  .rawlabel { margin:14px 0 4px; font-size:11px; color:#6b7280 }
-${Array.from({ length: 40 }, (_, i) =>
-  `  #tab${i}:checked ~ .tabbar label[for="tab${i}"] { background:#fff; color:#1f2430; border-color:#c9cfda; font-weight:600 }\n` +
+
+  /* 리포트 원문 — 접어 두고 필요할 때만 편다. 펴 두면 스텝 표가 안 보인다 */
+  .rawbtn { display:inline-block; margin-top:14px; cursor:pointer; user-select:none; font-size:11.5px;
+            color:var(--accent); border:1px solid #cfdcf7; background:#f3f7ff; border-radius:7px; padding:5px 11px }
+  .rawbtn:hover { background:#e7effd }
+  .rawbox { display:none; margin-top:9px }
+  .raws:checked ~ .rawbox { display:block }
+  .raws:checked ~ .rawbtn { background:#e7effd }
+  pre { background:#fbfcfe; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:0;
+        font:11.5px/1.65 ui-monospace, Consolas, "D2Coding", monospace; color:#2b3444;
+        white-space:pre-wrap; word-break:break-all; overflow-x:auto }
+
+  .top { display:inline-block; margin-top:14px; font-size:11px; color:var(--ink-3); text-decoration:none }
+  .top:hover { color:var(--accent) }
+  footer { color:var(--ink-3); font-size:11px; line-height:1.8; padding:16px 0 0; border-top:1px solid var(--line); margin-top:8px }
+
+  @media (max-width:820px) {
+    .stats { grid-template-columns:repeat(2, 1fr) }
+    .wrap { padding:0 14px 30px }
+  }
+
+  /* 인쇄 — 탭과 접힘은 화면에서만 쓸모가 있다. 종이에는 전부 펼쳐 나와야 회차가 빠지지 않는다 */
+  @media print {
+    body { background:#fff }
+    header { position:static }
+    .tabbar, .rawbtn, .top { display:none !important }
+    .card, .panels > section { border-color:#d7dce6; break-inside:avoid }
+    .panels > section { display:block !important; border-radius:10px; margin-bottom:12px }
+    .rawbox { display:block !important }
+    .tw { overflow:visible }
+  }
+${Array.from({ length: 60 }, (_, i) =>
+  `  #tab${i}:checked ~ .tabbar label[for="tab${i}"] { background:var(--paper); color:var(--ink); font-weight:600; border-bottom-color:var(--paper) }\n` +
   `  #tab${i}:checked ~ .panels > #panel${i} { display:block }`,
 ).join('\n')}
-
-  /* 인쇄 — 탭은 화면에서만 쓸모가 있다. 종이에는 전부 펼쳐 나와야 회차가 빠지지 않는다 */
-  @media print {
-    .tabbar { display:none }
-    .panels > section { display:block !important; border:1px solid #e3e6ec; border-radius:6px; margin-bottom:12px;
-                        page-break-inside:avoid }
-  }
 </style></head><body>
-<h1>${esc(title)}</h1>
-<div class="meta">
-  회차 ${runs.length}개${runs.length ? ` · ${esc(runStamp(runs[0].startedAt))} ~ ${esc(runStamp(runs[runs.length - 1].startedAt))}` : ''}<br>
-  ${targets.length ? `대상 ${esc(targets.join(' · '))}<br>` : ''}
-  뽑은 시각 ${esc(runStamp(now))}
-</div>
-${
-  runs.some((r) => r.stopped)
-    ? `<div class="warn"><b>중단된 회차가 있습니다</b> — ${runs
-        .filter((r) => r.stopped)
-        .map((r) => esc(runStamp(r.startedAt)) + (r.stoppedAt ? ` (${r.stoppedAt}번에서)` : ''))
-        .join(' · ')}. 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
-    : ''
-}
-${
-  runs.some((r) => r.compatShell)
-    ? '<div class="warn">일부 회차는 <b>호환 모드(exec)</b>로 실행됐습니다 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.</div>'
-    : ''
-}
-${
-  always.length
-    ? `<div class="lede"><b>모든 회차에서 실패한 스텝</b> — ${always.map((r) => esc(r.title)).join(' · ')}<br>
-       회차를 거듭해도 같은 곳에서 실패한다는 뜻입니다. 여기서부터 보십시오.</div>`
-    : ''
-}
-
-<h2>개요</h2>
-<table>
-  <tr><th>No</th><th>시나리오</th><th>실행 시각</th><th>결과</th><th>정상</th><th>실패</th><th>실행오류</th><th>수동대기</th><th>건너뜀</th><th>미실행</th><th>소요</th></tr>
-  ${runs
-    .map((r, i) => {
-      const v = runVerdict(r)
-      return `<tr>
-    <td class="num">${i + 1}</td>
-    <td>${esc(r.title)}</td>
-    <td>${esc(runStamp(r.startedAt))}${r.stopped ? ' <sup>중단</sup>' : ''}</td>
-    <td class="v-${v.key}">${v.label}</td>
-    <td class="num">${r.counts.pass}</td>
-    <td class="num${r.counts.fail ? ' bad' : ''}">${r.counts.fail}</td>
-    <td class="num${r.counts.error ? ' bad' : ''}">${r.counts.error}</td>
-    <td class="num">${r.counts.waiting}</td>
-    <td class="num">${r.counts.skip}</td>
-    <td class="num">${r.counts.pending}</td>
-    <td>${esc(durText(r.endedAt - r.startedAt))}</td>
-  </tr>`
-    })
-    .join('')}
-</table>
-
-${
-  grid.length
-    ? `<h2>스텝별 추이</h2>
-<table>
-  <tr><th>스텝</th>${runs.map((r) => `<th>${esc(runStamp(r.startedAt).slice(5))}</th>`).join('')}</tr>
-  ${grid.map((row) => `<tr><td>${esc(row.title)}</td>${row.cells.map(cell).join('')}</tr>`).join('')}
-</table>
-<div class="meta">칸이 <b>—</b> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친 뒤 돌렸을 때).</div>`
-    : ''
-}
-
-<h2>회차 상세</h2>
-<div class="tabs">
-  ${runs.map((_, i) => `<input type="radio" name="run" id="tab${i}"${i === 0 ? ' checked' : ''}>`).join('')}
-  <div class="tabbar">
-    ${runs
-      .map((r, i) => {
-        const v = runVerdict(r)
-        return `<label for="tab${i}" class="v-${v.key}"><b>${i + 1}</b> ${esc(runStamp(r.startedAt))} <span>${v.label}</span></label>`
-      })
-      .join('')}
-  </div>
-  <div class="panels">
-    ${runs
-      .map(
-        (r, i) => `<section id="panel${i}">
-      <h3>${i + 1}. ${esc(r.title)} <span class="meta">${esc(runStamp(r.startedAt))} · ${esc(durText(r.endedAt - r.startedAt))} · ${esc(countsText(r.counts))}</span></h3>
-      ${
-        r.stopped
-          ? `<div class="warn">${r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''}중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+<header>
+  <div class="wrap">
+    <div class="brand">Q-Term 검증 리포트</div>
+    <h1 id="top">${esc(title)}</h1>
+    <div class="sub">
+      회차 <b>${runs.length}개</b>${
+        runs.length
+          ? ` · ${esc(runStamp(runs[0].startedAt))} ~ ${esc(runStamp(runs[runs.length - 1].startedAt))}`
           : ''
-      }
-      ${
-        r.steps.length
-          ? `<table class="steps">
-        <tr><th>#</th><th>스텝</th><th>판정</th><th>대상</th><th>판정 근거</th></tr>
-        ${r.steps
-          .map(
-            (st) => `<tr>
-          <td class="num">${st.index + 1}</td>
-          <td>${esc(st.title)}</td>
-          ${cell(st)}
-          <td class="dim">${esc(st.sessionName ?? '')}</td>
-          <td class="dim">${esc((st.reasons ?? []).join(', '))}${
-            typeof st.code === 'number' ? `${(st.reasons ?? []).length ? ' · ' : ''}종료 코드 ${st.code}` : ''
-          }${st.retried ? ' · 대응 후 재실행' : ''}</td>
-        </tr>`,
-          )
-          .join('')}
-      </table>`
-          : '<div class="meta">이 회차에는 스텝 기록이 없습니다.</div>'
-      }
-      <div class="rawlabel">그때 만든 리포트 원문 — 명령·출력·판정 근거</div>
-      <pre>${esc(r.reportMd.trim())}</pre>
-    </section>`,
-      )
-      .join('')}
+      }${targets.length ? ` · 대상 <b>${esc(targets.join(' · '))}</b>` : ''} · 뽑은 시각 ${esc(runStamp(now))}
+    </div>
   </div>
-</div>
+</header>
 
-<div class="foot">Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차 상세는 그때 만든 리포트 원문이며, 비밀번호·토큰은 저장 시점에 가려졌습니다.<br>
-탭은 자바스크립트 없이 동작합니다. <b>인쇄하면 모든 회차가 펼쳐집니다.</b></div>
+<div class="wrap">
+  <div class="headline k-${headline.key}"><span class="dot"></span>${esc(headline.text)}</div>
+
+  <div class="stats">
+    ${stat('회차', runs.length)}
+    ${stat('정상 회차', nPass, 'k-pass')}
+    ${stat('실패 회차', nFail, 'k-fail')}
+    ${stat('확인 남음', nIncomplete, 'k-warn')}
+  </div>
+
+  ${
+    always.length
+      ? `<div class="banner k-fail"><b>모든 회차에서 실패한 스텝</b> — ${always
+          .map((r) => esc(r.title))
+          .join(' · ')}<br>회차를 거듭해도 같은 곳에서 실패한다는 뜻입니다. 여기서부터 보십시오.</div>`
+      : ''
+  }
+  ${
+    runs.some((r) => r.stopped)
+      ? `<div class="banner"><b>중단된 회차가 있습니다</b> — ${runs
+          .filter((r) => r.stopped)
+          .map((r) => esc(runStamp(r.startedAt)) + (r.stoppedAt ? ` (${r.stoppedAt}번에서)` : ''))
+          .join(' · ')}. 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+      : ''
+  }
+  ${
+    runs.some((r) => r.compatShell)
+      ? '<div class="banner">일부 회차는 <b>호환 모드(exec)</b>로 실행됐습니다 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.</div>'
+      : ''
+  }
+
+  <div class="card">
+    <h2>개요<span class="hint">회차 하나가 한 줄입니다. 막대는 그 회차의 스텝 구성입니다.</span></h2>
+    <div class="tw"><table>
+      <thead>
+        <tr><th>No</th><th>시나리오</th><th>실행 시각</th><th>결과</th><th>스텝 구성</th>
+        <th>정상</th><th>실패</th><th>실행오류</th><th>수동대기</th><th>건너뜀</th><th>미실행</th><th>소요</th></tr>
+      </thead>
+      <tbody>
+        ${runs
+          .map((r, i) => {
+            const v = verdicts[i]
+            return `<tr>
+          <td class="num">${i + 1}</td>
+          <td>${esc(r.title)}</td>
+          <td>${esc(runStamp(r.startedAt))}${r.stopped ? ' <sup>중단</sup>' : ''}</td>
+          <td><span class="pill k-${v.key}">${v.label}</span></td>
+          <td>${bar(r.counts)}</td>
+          <td class="num">${r.counts.pass}</td>
+          <td class="num${r.counts.fail ? ' bad' : ''}">${r.counts.fail}</td>
+          <td class="num${r.counts.error ? ' bad' : ''}">${r.counts.error}</td>
+          <td class="num">${r.counts.waiting}</td>
+          <td class="num">${r.counts.skip}</td>
+          <td class="num">${r.counts.pending}</td>
+          <td class="dim">${esc(durText(r.endedAt - r.startedAt))}</td>
+        </tr>`
+          })
+          .join('')}
+      </tbody>
+    </table></div>
+    <div class="legend">
+      <span><i class="s-pass"></i>정상</span><span><i class="s-info"></i>실행됨</span>
+      <span><i class="s-fail"></i>실패</span><span><i class="s-error"></i>실행오류</span>
+      <span><i class="s-wait"></i>수동대기</span><span><i class="s-skip"></i>건너뜀</span>
+      <span><i class="s-pending"></i>미실행</span>
+    </div>
+  </div>
+
+  ${
+    grid.length
+      ? `<div class="card">
+    <h2>스텝별 추이<span class="hint">스텝은 번호가 아니라 제목으로 맞춥니다 — 중간에 스텝을 끼워 넣어도 짝이 밀리지 않게</span></h2>
+    <div class="tw"><table>
+      <thead><tr><th>스텝</th>${runs
+        .map((r, i) => `<th>${i + 1}. ${esc(runStamp(r.startedAt).slice(5))}</th>`)
+        .join('')}</tr></thead>
+      <tbody>
+        ${grid.map((row) => `<tr><td>${esc(row.title)}</td>${row.cells.map(cell).join('')}</tr>`).join('')}
+      </tbody>
+    </table></div>
+    <div class="note">칸이 <b>—</b> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친 뒤 돌렸을 때).</div>
+  </div>`
+      : ''
+  }
+
+  <h2 style="margin:18px 0 10px">회차 상세<span class="hint">탭을 눌러 회차를 바꿉니다 · 인쇄하면 전부 펼쳐집니다</span></h2>
+  <div class="tabs">
+    ${runs.map((_, i) => `<input type="radio" name="run" id="tab${i}"${i === 0 ? ' checked' : ''}>`).join('')}
+    <div class="tabbar">
+      ${runs
+        .map(
+          (r, i) =>
+            `<label for="tab${i}"><b>${i + 1}</b> ${esc(runStamp(r.startedAt))} <span class="pill k-${
+              verdicts[i].key
+            }">${verdicts[i].label}</span></label>`,
+        )
+        .join('')}
+    </div>
+    <div class="panels">
+      ${runs
+        .map(
+          (r, i) => `<section id="panel${i}">
+        <h3>${i + 1}. ${esc(r.title)}<span class="meta">${esc(runStamp(r.startedAt))} · ${esc(
+          durText(r.endedAt - r.startedAt),
+        )} · ${esc(countsText(r.counts))}${r.targets.length ? ` · 대상 ${esc(r.targets.join(' · '))}` : ''}</span></h3>
+        ${
+          r.stopped
+            ? `<div class="banner">${
+                r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''
+              }중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+            : ''
+        }
+        ${
+          r.steps.length
+            ? `<div class="tw"><table class="steps">
+          <thead><tr><th>#</th><th>스텝</th><th>판정</th><th>대상</th><th>판정 근거</th></tr></thead>
+          <tbody>
+          ${r.steps
+            .map(
+              (st) => `<tr>
+            <td class="num">${st.index + 1}</td>
+            <td>${esc(st.title)}</td>
+            ${cell(st)}
+            <td class="dim">${esc(st.sessionName ?? '')}</td>
+            <td class="dim">${esc((st.reasons ?? []).join(', '))}${
+              typeof st.code === 'number' ? `${(st.reasons ?? []).length ? ' · ' : ''}종료 코드 ${st.code}` : ''
+            }${st.retried ? ' · 대응 후 재실행' : ''}</td>
+          </tr>`,
+            )
+            .join('')}
+          </tbody>
+        </table></div>`
+            : '<div class="note">이 회차에는 스텝 기록이 없습니다.</div>'
+        }
+        <input type="checkbox" class="raws" id="raw${i}">
+        <label class="rawbtn" for="raw${i}">리포트 원문 보기 — 명령 · 출력 · 판정 근거</label>
+        <div class="rawbox"><pre>${esc(r.reportMd.trim())}</pre></div>
+        <br><a class="top" href="#top">↑ 맨 위로</a>
+      </section>`,
+        )
+        .join('')}
+    </div>
+  </div>
+
+  <footer>
+    Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차 상세의 <b>리포트 원문</b>은 그때 만든 것을 그대로 실었고,
+    비밀번호·토큰은 저장 시점에 가려졌습니다.<br>
+    탭과 펼치기는 자바스크립트 없이 동작합니다 — <b>인쇄하면 모든 회차와 원문이 펼쳐집니다.</b>
+  </footer>
+</div>
 </body></html>`
 }
