@@ -374,7 +374,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [running, setRunning] = useState<PerfRunMeta | null>(null)
   const [log, setLog] = useState('')
   const [live, setLive] = useState<PerfLive>({})
-  // 첫 탭은 아래 liveDash 에 맞춰 정한다 — 대시보드가 없는 도구에서 빈 탭으로 시작하지 않는다
+  // 첫 탭은 아래 showDash 에 맞춰 정한다 — 대시보드가 없는 도구에서 빈 탭으로 시작하지 않는다
   const [tab, setTab] = useState<Tab>('log')
   /**
    * 대시보드를 끼울 준비가 됐는가.
@@ -387,17 +387,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   /** 사람이 다시 불러올 때 iframe 을 새로 만들기 위한 키 */
   const [dashKey, setDashKey] = useState(0)
   /**
-   * 지금 **끼워 볼 대시보드가 있는가.**
+   * 대시보드 탭을 낼지 — **그 도구에 실시간 대시보드라는 기능이 있는가**로 정한다.
    *
    * Locust 는 도는 동안 자기 웹 UI 를 띄우고 그 주소가 meta 에 실려 온다. JMeter 에는 그런
-   * 것이 없다 — 끝난 뒤 정적 리포트만 만든다. 끝난 회차도 마찬가지로 끼울 것이 없다(원본
-   * 리포트는 요약의 [도구 리포트] 로 연다).
+   * 것이 없다(끝난 뒤 정적 리포트만 만든다) — 그런데도 탭을 두고 그 안에서 '여기엔 없습니다'
+   * 를 설명했더니, JMeter 로 돌리면 시작하자마자 그 빈 탭에 떨어져 진행이 어디서 보이는지부터
+   * 찾아야 했다(사용자 지적). 그래서 JMeter 에서는 탭 자체를 내지 않는다.
    *
-   * 그래서 **대시보드 탭은 이 값이 참일 때만 낸다.** 전에는 탭을 늘 두고 그 안에서 '여기엔
-   * 없습니다' 를 설명했는데, JMeter 로 돌리면 시작하자마자 그 빈 탭에 떨어져 진행이 어디서
-   * 보이는지부터 찾아야 했다(사용자 지적). 없는 것을 자리로 알리지 않는다.
+   * 한때 `도는 중이고 웹 UI 가 있을 때` 로 좁혔다가 되돌렸다 — **Locust 에서도 시작 전에는
+   * 탭이 사라져** 그 도구에 대시보드가 있다는 사실 자체가 안 보였다(사용자 지적). 도구를
+   * 고르면 무엇을 볼 수 있는지가 탭 줄에 그대로 있어야 한다. Locust 를 고른 동안에는 늘
+   * 두고, 아직 볼 것이 없는 상태는 탭 안에서 말한다.
    */
-  const liveDash = !!running?.webUrl
+  const showDash = tool === 'locust'
   const [startError, setStartError] = useState('')
   const [runs, setRuns] = useState<PerfRunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
@@ -610,12 +612,11 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   }, [])
 
   /**
-   * 대시보드가 사라지는 순간(끝났거나, 애초에 없는 도구) 빈 탭에 남지 않게 한다.
-   * 끝났을 때는 onPerfDone 이 이미 요약으로 옮기지만, 그 밖의 길로 사라질 때의 안전장치다.
+   * 대시보드 탭이 사라지는 순간(도구를 JMeter 로 바꿨을 때) 없는 탭에 남지 않게 한다.
    */
   useEffect(() => {
-    if (tab === 'dash' && !liveDash) setTab(running ? 'log' : 'summary')
-  }, [tab, liveDash, running])
+    if (tab === 'dash' && !showDash) setTab(running ? 'log' : 'summary')
+  }, [tab, showDash, running])
 
   /**
    * 돌고 있는 동안의 숫자는 Locust 통계 API 에서 받는다.
@@ -2382,8 +2383,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             <div className="mt-2 flex gap-1 border-b border-white/10">
               {(
                 [
-                  // 끼울 것이 있을 때만 — 아래 liveDash 주석 참고
-                  ...(liveDash ? ([['dash', '대시보드']] as [Tab, string][]) : []),
+                  // 그 도구에 대시보드가 있을 때만 — 위 showDash 주석 참고
+                  ...(showDash ? ([['dash', '대시보드']] as [Tab, string][]) : []),
                   ['log', '실시간 로그'],
                   ['summary', '요약'],
                 ] as [Tab, string][]
@@ -2405,53 +2406,72 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
             <div className="mt-2 min-h-0 flex-1 overflow-hidden">
               {/*
-                이 탭은 **끼울 것이 있을 때만 존재한다**(liveDash). 그래서 예전에 있던 두 개의
-                빈 화면 — 'JMeter 는 실행 중 대시보드가 없습니다', '실시간 대시보드는 돌고
-                있는 동안만 뜹니다' — 는 닿을 수 없는 자리가 되어 지웠다. 끝난 회차의 원본
-                리포트는 요약의 [도구 리포트] 하나로 연다(같은 버튼이 두 곳에 있었다).
+                이 탭은 Locust 를 고른 동안에만 있다(showDash). 그래서 'JMeter 는 실행 중
+                대시보드가 없습니다' 안내는 닿을 수 없는 자리가 되어 지웠다 — 남은 세 상태는
+                띄워 놓은 대시보드 · 뜨기를 기다리는 중 · 아직 돌리지 않았을 때다.
               */}
               {tab === 'dash' &&
-                running?.webUrl &&
-                (dashReady ? (
+                (running?.webUrl ? (
+                  dashReady ? (
                   // 돌고 있는 동안의 대시보드는 http 라 dev·배포에서 똑같이 끼워진다.
                   // (정적 리포트는 file:// 이라 별도 창으로 띄운다 — perf:openReport)
-                  <div className="flex h-full flex-col">
-                    <div className="mb-1 flex items-center gap-2 text-[10px] text-gray-600">
-                      <span className="min-w-0 flex-1 truncate">{running.webUrl}</span>
-                      <button
-                        onClick={() => setDashKey((k) => k + 1)}
-                        className="shrink-0 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
-                      >
-                        다시 불러오기
-                      </button>
-                      <button
-                        onClick={async () => {
-                          const r = await window.electronAPI.perfOpenDashboard(running.webUrl!)
-                          if (!r.ok) setNote(r.error ?? '창을 열 수 없습니다.')
-                        }}
-                        title="화면이 두 개면 대시보드를 옆으로 빼 두세요"
-                        className="flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
-                      >
-                        <PanelRightOpen size={11} /> 별도 창
-                      </button>
+                    <div className="flex h-full flex-col">
+                      <div className="mb-1 flex items-center gap-2 text-[10px] text-gray-600">
+                        <span className="min-w-0 flex-1 truncate">{running.webUrl}</span>
+                        <button
+                          onClick={() => setDashKey((k) => k + 1)}
+                          className="shrink-0 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                        >
+                          다시 불러오기
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const r = await window.electronAPI.perfOpenDashboard(running.webUrl!)
+                            if (!r.ok) setNote(r.error ?? '창을 열 수 없습니다.')
+                          }}
+                          title="화면이 두 개면 대시보드를 옆으로 빼 두세요"
+                          className="flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-gray-400 hover:bg-white/10 hover:text-gray-200"
+                        >
+                          <PanelRightOpen size={11} /> 별도 창
+                        </button>
+                      </div>
+                      <iframe
+                        key={dashKey}
+                        src={running.webUrl.replace(/\/+$/, '') + '/'}
+                        title="Locust 대시보드"
+                        className="min-h-0 w-full flex-1 rounded-md border border-white/10 bg-white"
+                      />
                     </div>
-                    <iframe
-                      key={dashKey}
-                      src={running.webUrl.replace(/\/+$/, '') + '/'}
-                      title="Locust 대시보드"
-                      className="min-h-0 w-full flex-1 rounded-md border border-white/10 bg-white"
-                    />
-                  </div>
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
+                      <RefreshCw size={18} className="animate-spin text-gray-600" />
+                      <p className="text-[12px] leading-relaxed text-gray-500">
+                        대시보드를 준비하는 중입니다…
+                        <br />
+                        <span className="text-[11px] text-gray-600">
+                          Locust 가 웹 화면을 띄우면 여기 들어옵니다. 그 사이 진행 상황은{' '}
+                          <span className="text-gray-400">실시간 로그</span> 에서 볼 수 있습니다.
+                        </span>
+                      </p>
+                    </div>
+                  )
                 ) : (
+                  /* 아직 돌리지 않았거나 끝난 뒤 — 왜 비어 있는지와, 그럼 어디를 보면 되는지 */
                   <div className="flex h-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-white/15 p-6 text-center">
-                    <RefreshCw size={18} className="animate-spin text-gray-600" />
+                    <Gauge size={20} className="text-gray-600" />
                     <p className="text-[12px] leading-relaxed text-gray-500">
-                      대시보드를 준비하는 중입니다…
+                      실시간 대시보드는 <span className="text-gray-300">Locust 가 도는 동안</span>만 뜹니다.
                       <br />
-                      <span className="text-[11px] text-gray-600">
-                        Locust 가 웹 화면을 띄우면 여기 들어옵니다. 그 사이 진행 상황은{' '}
-                        <span className="text-gray-400">실시간 로그</span> 에서 볼 수 있습니다.
-                      </span>
+                      {selected ? (
+                        <span className="text-[11px] text-gray-600">
+                          끝난 회차는 <span className="text-gray-400">요약</span> 에서 보세요 — 그래프와{' '}
+                          <span className="text-gray-400">도구 리포트</span> 가 거기 있습니다.
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-gray-600">
+                          지난 회차를 보시려면 위의 <span className="text-gray-400">회차</span> 에서 하나를 고르세요.
+                        </span>
+                      )}
                     </p>
                   </div>
                 ))}
