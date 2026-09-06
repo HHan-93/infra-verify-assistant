@@ -1078,3 +1078,68 @@ export interface PerfDoneEvent {
   canceled?: boolean
   error?: string
 }
+
+// ── 시나리오 검증 이력 ─────────────────────────────────────────
+/**
+ * 시나리오 검증 **한 회차**.
+ *
+ * 왜 남기는가: 가용성 검증은 노드를 죽였다 살리는 일이라 **다시 돌려서 남길 수가 없다.**
+ * 그런데 이 앱은 오래 리포트를 '그 자리에서 복사·저장' 만 할 수 있었고, 창을 닫으면
+ * 결과가 사라졌다 — 저장을 잊은 회차는 영영 없는 것이 됐다. 그래서 자동으로 남긴다.
+ *
+ * 목록에 얹는 요약과 상세를 **파일로 나눈다**(index.json + <id>.json). 회차 하나에 스텝
+ * 출력이 수십 KB 라, 목록을 그릴 때마다 그걸 전부 읽으면 창이 느려진다.
+ */
+export interface ScenarioRunCounts {
+  pass: number
+  fail: number
+  info: number
+  skip: number
+  waiting: number
+  pending: number
+  error: number
+}
+
+export interface ScenarioRunSummary {
+  id: string
+  /** 시나리오 id — 같은 시나리오의 회차끼리 나란히 비교하는 기준 */
+  scenarioId: string
+  title: string
+  startedAt: number
+  endedAt: number
+  /** 실제로 돌린 대상 세션 이름들 (스텝별 지정·역할 매핑까지 합친 것) */
+  targets: string[]
+  stepCount: number
+  counts: ScenarioRunCounts
+  /** 사용자 중단 또는 실패로 멈춤 — '전부 돌았다' 와 구분해야 리포트를 잘못 읽지 않는다 */
+  stopped?: boolean
+  /** 멈춘 스텝 번호(1부터). stopped 일 때만 */
+  stoppedAt?: number
+  /** 영속 셸을 열지 못해 호환 모드(exec)로 돈 세션이 있었나 */
+  compatShell?: boolean
+}
+
+/** 회차의 스텝 한 줄 — 회차끼리 나란히 놓는 격자를 이 값으로 그린다 */
+export interface ScenarioRunStep {
+  index: number
+  title: string
+  effective: 'pass' | 'fail' | 'info' | 'skip' | 'manual-wait' | 'pending' | 'error'
+  /** 사람이 직접 지정한 판정인가 */
+  manual?: boolean
+  sessionName?: string
+  reasons?: string[]
+  code?: number
+  retried?: boolean
+}
+
+export interface ScenarioRunDetail extends ScenarioRunSummary {
+  steps: ScenarioRunStep[]
+  /**
+   * 그때 만든 리포트 원문(Markdown).
+   *
+   * 스텝 출력·판정 근거를 구조로 다시 쌓지 않고 **그때의 리포트를 그대로** 둔다. 묶음
+   * 리포트의 '회차 상세' 는 이걸 이어 붙이므로, 사람이 그 자리에서 복사해 본 것과 나중에
+   * 뽑은 것이 다르지 않다. 마스킹도 그때 규칙으로 이미 적용돼 있다.
+   */
+  reportMd: string
+}

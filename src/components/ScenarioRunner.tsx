@@ -26,6 +26,7 @@ import type { CommandCheck, CaptureRule, ExpectRule, OnFailureAction } from '../
 import { judgeOutput, hasCheck, type Verdict } from '../lib/verdict'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
 import { maskForExport } from '../lib/mask'
+import type { ScenarioRunDetail, ScenarioRunStep } from '../../electron/shared-types'
 import { splitShell, opLabel } from '../lib/shellSplit'
 
 export interface RunnerStep {
@@ -50,6 +51,12 @@ export interface RunnerStep {
   undo?: string
 }
 export interface RunnerScenario {
+  /**
+   * 시나리오 id — **이력에서 같은 시나리오의 회차끼리 묶는 기준**이다.
+   * 없으면 제목으로 묶는다(옛 호출부·임시 시나리오). 제목을 고치면 그 뒤 회차가 다른 줄로
+   * 갈리지만, id 를 안 주는 쪽에서 할 수 있는 최선이다.
+   */
+  id?: string
   title: string
   summary: string
   steps: RunnerStep[]
@@ -347,6 +354,19 @@ export default function ScenarioRunner({
   // (역할/스텝 대상은 프로필 키로 들고 있어 세션이 끊겼다 붙어도 자동으로 다시 해석된다 —
   //  id 기반이었다면 여기서 유령 매핑을 걷어내는 정리 로직이 필요했다)
   const [results, setResults] = useState<Record<number, StepResult>>({})
+  /**
+   * ── 이력(회차) ───────────────────────────────────────────
+   * 가용성 검증은 노드를 죽였다 살리는 일이라 **다시 돌려서 남길 수가 없다.** 그런데 이
+   * 창은 오래 '리포트를 그 자리에서 복사·저장' 만 할 수 있었고, 닫으면 결과가 사라졌다 —
+   * 저장을 잊은 회차는 영영 없는 것이 됐다. 그래서 전체 실행마다 자동으로 남긴다.
+   *
+   * 회차 id 는 **전체 실행을 시작할 때** 만든다. 끝난 뒤에 사람이 '수동 확인' 을 판정하고
+   * 원복을 돌리는데, 그때마다 새 회차를 만들면 한 번의 검증이 목록에 여러 줄로 남는다 —
+   * 같은 id 로 갱신한다(메인의 scenarioRuns:save 가 id 로 덮어쓴다).
+   */
+  const runIdRef = useRef<string | null>(null)
+  const runStartRef = useRef(0)
+  const runStoppedRef = useRef<{ stopped: boolean; at?: number }>({ stopped: false })
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   /**
@@ -955,6 +975,10 @@ ${primary?.err ?? ''}`)
 
   const runAll = async () => {
     if (!targetId) return
+    // 새 회차 — 시각까지 담은 id 로 만들어 목록에서 시간순이 그대로 나온다
+    runIdRef.current = `sr${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+    runStartRef.current = Date.now()
+    runStoppedRef.current = { stopped: false }
     setBusy(true)
     abortRef.current = false
     // 지난 회차에서 멈춘 채로 끝났을 수 있다 — 새 실행은 항상 '진행 중' 으로 시작한다
@@ -1069,6 +1093,8 @@ ${primary?.err ?? ''}`)
     }
     setBusy(false)
     setRecovering(null) // 어떤 경로로 끝나든(중단 포함) 진행 배지는 남기지 않는다
+    // 중단 여부는 이력에 반드시 남긴다 — 그 뒤 스텝은 '미실행' 이며 정상도 실패도 아니다
+    runStoppedRef.current = stoppedAt >= 0 ? { stopped: true, at: stoppedAt + 1 } : { stopped: false }
     const parts: string[] = []
     if (stoppedAt >= 0)
       parts.push(
@@ -1357,6 +1383,60 @@ ${primary?.err ?? ''}`)
     if (r.saved) setNotice(`저장됨: ${r.path}`)
     else if (r.error) setNotice(r.error)
   }
+  /**
+   * 회차를 이력에 남긴다.
+   *
+   * **왜 effect 로 하는가**: runAll 안에서 바로 저장하면 그 순간의 `results` 는 아직 갱신
+   * 전이다(스텝마다 setState 로 쌓는다). busy 가 내려간 뒤의 렌더에서 저장해야 마지막
+   * 스텝까지 들어간다. 끝난 뒤 사람이 수동 판정·원복을 하면 같은 id 로 다시 저장한다.
+   */
+  useEffect(() => {
+    const id = runIdRef.current
+    if (!id || busy) return
+    // 눌린 대로 매번 쓰지 않는다 — 수동 판정을 연달아 누르면 파일을 그만큼 다시 쓴다
+    const timer = setTimeout(() => {
+      const steps: ScenarioRunStep[] = scenario.steps.map((st, i) => {
+        const r = results[i]
+        return {
+          index: i,
+          title: st.title,
+          effective: effectiveOf(st, r),
+          ...(r?.manual ? { manual: true } : {}),
+          ...(r?.sessionName ? { sessionName: r.sessionName } : {}),
+          ...(r?.reasons?.length ? { reasons: r.reasons } : {}),
+          ...(typeof r?.code === 'number' ? { code: r.code } : {}),
+          ...(r?.retried ? { retried: true } : {}),
+        }
+      })
+      // 어느 서버에서 돌았는지가 결과 해석의 전제다 — 스텝별 대상까지 모아 둔다
+      const targets = [...new Set(steps.flatMap((st) => (st.sessionName ?? '').split(', ').filter(Boolean)))]
+      const detail: ScenarioRunDetail = {
+        id,
+        scenarioId: scenario.id ?? scenario.title,
+        title: scenario.title,
+        startedAt: runStartRef.current,
+        endedAt: Date.now(),
+        targets: targets.length ? targets : [targetName],
+        stepCount: scenario.steps.length,
+        counts: summary,
+        ...(runStoppedRef.current.stopped
+          ? { stopped: true, ...(runStoppedRef.current.at ? { stoppedAt: runStoppedRef.current.at } : {}) }
+          : {}),
+        ...(Object.values(shellOkRef.current).some((ok) => !ok) ? { compatShell: true } : {}),
+        steps,
+        // 리포트는 마스킹을 거친 것이다(buildReport 의 출구) — 저장본도 같은 규칙을 따른다
+        reportMd: buildReport(),
+      }
+      void window.electronAPI.scenarioRunsSave(detail).then((r) => {
+        // 이력 저장이 실패해도 검증은 끝난 상태다. 조용히 넘기지 않고 사유는 남긴다.
+        if (!r.ok) setNotice(`이력 저장 실패: ${r.error ?? '알 수 없음'} — 리포트는 아래 [저장]으로 남기세요.`)
+      })
+    }, 1200)
+    return () => clearTimeout(timer)
+    // buildReport 는 매 렌더 새로 만들어지는 함수라 의존성에 넣지 않는다(넣으면 매 렌더 저장한다)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, results, undoResults, scenario])
+
   const analyzeReport = () => {
     if (!onAnalyze) return
     const started = onAnalyze(

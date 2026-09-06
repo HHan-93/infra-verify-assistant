@@ -15,6 +15,7 @@ import {
   Plus,
   Pencil,
   Trash2,
+  History,
 } from 'lucide-react'
 import { SCENARIOS, type Scenario, type ScenarioStep } from '../scenarios'
 import type {
@@ -27,6 +28,7 @@ import type {
 import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
 import CustomItemsMenu from './CustomItemsMenu'
+import ScenarioHistoryModal from './ScenarioHistoryModal'
 import { splitShell } from '../lib/shellSplit'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
@@ -37,6 +39,8 @@ interface ScenarioPanelProps {
   onClose: () => void
   /** 시나리오를 검증 러너로 실행 (순차 실행 + 자동 판정 + 리포트) */
   onRunScenario?: (scenario: {
+    /** 이력에서 같은 시나리오의 회차끼리 묶는 기준 */
+    id: string
     title: string
     summary: string
     steps: ScenarioStep[]
@@ -100,6 +104,21 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
   // 드래그앤드롭 이동 — 사용자 정의 항목만 드래그 가능, 내장/사용자 정의 항목 모두 드롭 대상 가능
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [overKey, setOverKey] = useState<string | null>(null)
+  /**
+   * 검증 이력 창.
+   *
+   * 여기(추가 왼쪽)에 두는 이유: 시나리오를 고르는 자리가 곧 "이 시나리오를 언제 어떻게
+   * 돌렸나" 를 묻는 자리다. 러너 안에 두면 검증을 한 번 더 열어야 지난 회차를 볼 수 있다.
+   */
+  const [historyOpen, setHistoryOpen] = useState(false)
+  /** 저장된 회차 수 — 이력이 쌓여 있다는 사실이 버튼에 보여야 눌러 볼 생각이 든다 */
+  const [runCount, setRunCount] = useState(0)
+
+  // 이력 창을 닫을 때도 다시 센다(그 안에서 지웠을 수 있다)
+  useEffect(() => {
+    if (historyOpen) return
+    void window.electronAPI.scenarioRunsList().then((r) => setRunCount(r.list.length))
+  }, [historyOpen])
 
   useEffect(() => {
     window.electronAPI.customScenariosList().then(setCustomScenarios)
@@ -331,6 +350,17 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
         ) : (
           <>
             <button
+              onClick={() => setHistoryOpen(true)}
+              title="지난 검증 회차 — 골라서 한 리포트로 뽑습니다"
+              className="flex shrink-0 items-center gap-1 rounded border border-blue-500/35 bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-200 hover:bg-blue-500/20"
+            >
+              <History size={12} />
+              이력
+              {runCount > 0 && (
+                <span className="rounded-full bg-blue-500/30 px-1.5 text-[9.5px] text-blue-50">{runCount}</span>
+              )}
+            </button>
+            <button
               onClick={() => setEditing('new')}
               title="사용자 정의 시나리오 추가"
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-emerald-300 hover:bg-emerald-500/10"
@@ -505,6 +535,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
               <button
                 onClick={() =>
                   onRunScenario({
+                    id: scenario.id,
                     title: scenario.title,
                     summary: scenario.summary,
                     steps: scenario.steps,
@@ -730,6 +761,12 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
           </div>
         </div>
       </div>
+
+      {/* 지금 고른 시나리오로 걸러 열어 준다 — 대개 "이것을 지난번엔 어땠나" 를 보러 온다.
+          창 안에서 '모든 시나리오' 로 바꿀 수 있다. */}
+      {historyOpen && (
+        <ScenarioHistoryModal initialScenarioId={scenario?.id} onClose={() => setHistoryOpen(false)} />
+      )}
 
       {editing && (
         <ScenarioEditorModal

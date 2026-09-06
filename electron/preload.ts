@@ -36,6 +36,8 @@ import type {
   ExpectRule,
   PortalConfig,
   PortalHttpResult,
+  ScenarioRunSummary,
+  ScenarioRunDetail,
 } from './shared-types'
 
 /** 활성 포트 포워딩 항목 (렌더러 표시용) */
@@ -101,6 +103,18 @@ const electronAPI = {
   logsExport: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('logs:export', id),
   logsGetRetentionSettings: (): Promise<LogRetentionSettings> => ipcRenderer.invoke('logs:getRetentionSettings'),
+
+  // ── 시나리오 검증 이력 ──────────────────────────────────────
+  /** 회차 저장(같은 id 면 갱신) — 전체 실행이 끝난 뒤 자동으로 부른다 */
+  scenarioRunsSave: (detail: ScenarioRunDetail): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('scenarioRuns:save', detail),
+  /** 목록(요약만) — 상세는 read 로 따로 읽는다 */
+  scenarioRunsList: (): Promise<{ ok: boolean; error?: string; list: ScenarioRunSummary[] }> =>
+    ipcRenderer.invoke('scenarioRuns:list'),
+  scenarioRunsRead: (ids: string[]): Promise<{ ok: boolean; list: ScenarioRunDetail[] }> =>
+    ipcRenderer.invoke('scenarioRuns:read', ids),
+  scenarioRunsDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('scenarioRuns:delete', ids),
 
   // ── 성능 테스트 (Locust, 로컬 부하) ─────────────────────────
   perfEnv: (): Promise<PerfEnvStatus> => ipcRenderer.invoke('perf:env'),

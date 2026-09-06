@@ -66,6 +66,8 @@ import {
   type ExpectRule,
   type PortalConfig,
   type PortalHttpResult,
+  type ScenarioRunSummary,
+  type ScenarioRunDetail,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -4734,6 +4736,117 @@ ipcMain.on('monitor:setKillOnExit', (_evt, value: boolean) => {
 // 웹 주소를 127.0.0.1 로 묶는 이유는 부하 도구의 조작 화면이 사내망에 열리지 않게 하는 것이다.
 // ─────────────────────────────────────────────────────────────
 const perfRunsDir = () => path.join(app.getPath('userData'), 'perf-runs')
+
+// ── 시나리오 검증 이력 ───────────────────────────────────────────
+/**
+ * 회차 저장소.
+ *
+ * `index.json` 은 목록에 그릴 요약만, 회차 상세는 `<id>.json` 으로 따로 둔다 — 스텝 출력이
+ * 붙은 리포트 원문이 회차당 수십 KB 라, 목록을 열 때마다 전부 읽으면 창이 느려진다.
+ *
+ * 평문 JSON 이다. 리포트 원문은 렌더러가 **마스킹 규칙을 이미 적용한 뒤** 넘기므로
+ * (mask.ts 의 maskForExport — 화면·저장·AI 세 경로와 같은 출구), 여기서 다시 가리지 않는다.
+ */
+const scenarioRunsDir = () => path.join(app.getPath('userData'), 'scenario-runs')
+const scenarioRunsIndexPath = () => path.join(scenarioRunsDir(), 'index.json')
+/** 회차 id 로 파일 경로를 만들 때 상위 경로 탈출을 막는다 */
+const SCENARIO_RUN_ID = /^sr[0-9a-z]{4,24}$/
+/**
+ * 보존 — 개수와 기간 둘 중 하나라도 넘으면 지운다.
+ *
+ * 성능 회차(perf-runs)와 달리 사용자가 이름을 붙이는 기능이 아직 없어 예외 없이 최근 것을
+ * 남긴다. 회차 하나가 수십 KB 이므로 200개도 몇 MB 수준이다.
+ */
+const SCENARIO_RUNS_MAX = 200
+const SCENARIO_RUNS_DAYS = 90
+
+async function readScenarioRunIndex(): Promise<ScenarioRunSummary[]> {
+  return readJsonArrayStore<ScenarioRunSummary>(scenarioRunsIndexPath())
+}
+
+/**
+ * 회차 저장(같은 id 면 갱신).
+ *
+ * **갱신이 필요한 이유**: 전체 실행이 끝난 뒤에도 사람이 '수동 확인' 스텝을 판정하고
+ * 원복을 돌린다. 그때마다 회차를 새로 만들면 한 번의 검증이 목록에 여러 줄로 남는다.
+ */
+async function saveScenarioRun(detail: ScenarioRunDetail): Promise<void> {
+  if (!SCENARIO_RUN_ID.test(detail.id)) throw new Error('잘못된 회차 id')
+  await withStoreLock('scenario-runs', async () => {
+    await mkdir(scenarioRunsDir(), { recursive: true })
+    const index = await readScenarioRunIndex()
+    const { steps, reportMd, ...summary } = detail
+    void steps
+    void reportMd
+    const at = index.findIndex((x) => x.id === detail.id)
+    if (at >= 0) index[at] = summary
+    else index.unshift(summary)
+    index.sort((a, b) => b.startedAt - a.startedAt)
+
+    // 보존 — 넘치는 것은 목록에서 빼고 파일도 지운다
+    const cutoff = Date.now() - SCENARIO_RUNS_DAYS * 24 * 60 * 60 * 1000
+    const keep: ScenarioRunSummary[] = []
+    const drop: ScenarioRunSummary[] = []
+    for (const r of index) {
+      if (keep.length < SCENARIO_RUNS_MAX && r.startedAt >= cutoff) keep.push(r)
+      else drop.push(r)
+    }
+    await writeFileAtomic(path.join(scenarioRunsDir(), `${detail.id}.json`), JSON.stringify(detail))
+    await writeFileAtomic(scenarioRunsIndexPath(), JSON.stringify(keep, null, 2))
+    for (const r of drop) {
+      if (!SCENARIO_RUN_ID.test(r.id)) continue
+      await rm(path.join(scenarioRunsDir(), `${r.id}.json`), { force: true }).catch(() => {})
+    }
+  })
+}
+
+ipcMain.handle('scenarioRuns:save', async (_evt, detail: ScenarioRunDetail) => {
+  try {
+    await saveScenarioRun(detail)
+    return { ok: true }
+  } catch (e) {
+    // 이력 저장이 실패해도 검증 자체는 끝난 상태다 — 사유만 돌려주고 화면은 계속 쓰게 한다
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('scenarioRuns:list', async () => {
+  try {
+    return { ok: true, list: await readScenarioRunIndex() }
+  } catch (e) {
+    // 손상된 목록을 [] 로 뭉개면 다음 저장이 그 빈 목록을 덮어써 전부 날아간다
+    return { ok: false, error: e instanceof Error ? e.message : String(e), list: [] as ScenarioRunSummary[] }
+  }
+})
+
+ipcMain.handle('scenarioRuns:read', async (_evt, ids: string[]) => {
+  const out: ScenarioRunDetail[] = []
+  for (const id of ids) {
+    if (!SCENARIO_RUN_ID.test(id)) continue
+    try {
+      out.push(JSON.parse(await readFile(path.join(scenarioRunsDir(), `${id}.json`), 'utf-8')) as ScenarioRunDetail)
+    } catch {
+      /* 지워졌거나 손상된 회차는 건너뛴다 — 나머지로 리포트를 뽑을 수 있어야 한다 */
+    }
+  }
+  return { ok: true, list: out }
+})
+
+ipcMain.handle('scenarioRuns:delete', async (_evt, ids: string[]) => {
+  try {
+    await withStoreLock('scenario-runs', async () => {
+      const index = await readScenarioRunIndex()
+      const gone = new Set(ids.filter((id) => SCENARIO_RUN_ID.test(id)))
+      await writeFileAtomic(scenarioRunsIndexPath(), JSON.stringify(index.filter((r) => !gone.has(r.id)), null, 2))
+      for (const id of gone) {
+        await rm(path.join(scenarioRunsDir(), `${id}.json`), { force: true }).catch(() => {})
+      }
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
 const perfSettingsPath = () => path.join(app.getPath('userData'), 'perf-settings.json')
 
 interface PerfSettings {
