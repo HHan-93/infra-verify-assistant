@@ -453,6 +453,30 @@ export function suggestArrayPaths(body: string | undefined, maxDepth = 3): { pat
  * 키 이름으로 고른다(값으로 고르면 우연히 비슷한 문자열을 집는다). 너무 긴 값은 버린다 —
  * 조건에 박아 두면 서버가 문구를 조금만 바꿔도 깨진다.
  */
+/**
+ * 이 값이 **오류를 뜻하는 문구인가.**
+ *
+ * 왜 필요한가: 시험을 눌렀을 때 응답이 오류였는데 그 응답의 상태 문구를 그대로 '정상 조건'
+ * 으로 넣어 버리면(`returnMessage 에 COMMON_BAD_REQUEST 포함`), **서버가 제대로 답할수록
+ * 비정상으로 찍힌다.** 실제로 그렇게 굳어진 대상이 있었다 — 200 에 37ms 인데 계속 빨간
+ * 상태였고, 원인은 서버가 아니라 조건이었다.
+ *
+ * 값만 보고 판단한다(키 이름은 어차피 message/status 류다). 구분자를 공백으로 바꿔 낱말로
+ * 끊고 본다 — `COMMON_BAD_REQUEST` · `TOKEN_NOT_VERIFY` 처럼 붙여 쓰기 때문이다.
+ * 숫자만 있는 값은 HTTP 코드로 보고 2xx·0 만 정상으로 친다.
+ */
+const ERROR_WORDS =
+  /\b(ERROR|ERR|FAIL|FAILED|FAILURE|BAD|INVALID|DENIED|FORBIDDEN|UNAUTHORIZED|UNAUTHENTICATED|EXCEPTION|TIMEOUT|TIMEDOUT|TIMED|UNAVAILABLE|CONFLICT|REJECTED|REFUSED|EXPIRED|MISSING|NOT|NONE|ABORTED|CANCELED|CANCELLED)\b/
+export function looksLikeErrorValue(value: string): boolean {
+  const v = (value ?? '').trim()
+  if (!v) return false
+  if (/^\d+$/.test(v)) {
+    const n = Number(v)
+    return !(n === 0 || (n >= 200 && n < 300))
+  }
+  return ERROR_WORDS.test(v.toUpperCase().replace(/[^A-Z0-9]+/g, ' '))
+}
+
 export function suggestValueChecks(body: string | undefined, maxDepth = 2): { path: string; value: string }[] {
   const root = parseBody(body)
   if (!root || typeof root !== 'object') return []

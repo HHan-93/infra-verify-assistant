@@ -24,6 +24,7 @@ import {
   headersFor,
   jwtExpMs,
   looksEncrypted,
+  looksLikeErrorValue,
   jsonAt,
   judgeResponse,
   newTargetId,
@@ -1172,6 +1173,43 @@ function ConfigView({
   const setAuth = (p: Partial<PortalConfig['auth']>) => onChange({ ...cfg, auth: { ...cfg.auth, ...p } })
   const setTarget = (id: string, p: Partial<PortalTarget>) =>
     onChange({ ...cfg, targets: cfg.targets.map((t) => (t.id === id ? { ...t, ...p } : t)) })
+  /**
+   * **오류 문구를 정상 기준으로 삼은 조건**을 짚어 준다.
+   *
+   * 시험 때 받은 오류 응답의 상태 문구를 그대로 조건으로 넣으면(추천 버튼으로 한 번에
+   * 들어간다) 그 문구가 **있어야** 정상이 된다 — 서버가 고쳐질수록 빨개진다. 200 · 37ms
+   * 인데 계속 비정상이던 대상의 원인이 이것이었다. 판정을 조용히 뒤집지는 않고, 무엇이
+   * 잘못됐는지 적고 **고치는 것은 사람이 누르게** 한다.
+   */
+  const errorCheckWarn = (t: PortalTarget) => {
+    const bad = (t.checks ?? []).filter((c) => c.op === 'contains' && looksLikeErrorValue(c.value ?? ''))
+    if (!bad.length) return null
+    return (
+      <div className="mt-1 rounded border border-red-400/50 bg-red-500/15 px-2 py-1.5 text-[10.5px] leading-relaxed text-red-100">
+        <b>오류 문구가 정상 조건에 들어 있습니다</b> — {bad.map(describeCheck).join(' · ')}
+        <br />그 문구가 <b>있어야</b> 정상으로 치므로, 서버가 제대로 답하면 오히려 비정상으로 찍힙니다.
+        시험할 때 오류 응답이 왔고 그 문구를 그대로 조건에 넣으면 이렇게 됩니다.
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          <button
+            onClick={() =>
+              setTarget(t.id, {
+                checks: (t.checks ?? []).map((c) => (bad.includes(c) ? { ...c, op: 'notContains' as const } : c)),
+              })
+            }
+            className="rounded border border-red-300/50 bg-red-500/20 px-2 py-0.5 hover:bg-red-500/40"
+          >
+            "없음" 조건으로 뒤집기
+          </button>
+          <button
+            onClick={() => setTarget(t.id, { checks: (t.checks ?? []).filter((c) => !bad.includes(c)) })}
+            className="rounded border border-white/20 px-2 py-0.5 text-red-100/80 hover:bg-white/10"
+          >
+            이 조건 지우기
+          </button>
+        </div>
+      </div>
+    )
+  }
   const addTarget = () => {
     const t: PortalTarget = {
       id: newTargetId(),
@@ -1895,13 +1933,28 @@ function ConfigView({
                     */}
                     {res.suggestValues && (
                       <div className="mb-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-amber-100">
-                        <div className="mb-1">
-                          이 응답에는 <b>항목이 있는 목록이 없습니다</b>. 원래 0건일 수 있는 응답이라면
-                          <b> 항목 1개 이상</b> 대신 아래 조건이 맞습니다 — 백엔드가 답을 만들었을 때만 나오는
-                          문구라, 게이트웨이 오류 페이지나 화면 껍데기는 통과하지 못합니다.
-                        </div>
+                        {/* **오류 응답을 정상 기준으로 권하지 않는다.** 지금 온 문구를 그대로 조건으로
+                            넣는 버튼이라, 시험 때 오류가 왔다면 '오류여야 정상' 이 굳어 버린다 */}
+                        {res.suggestValues.some((v) => looksLikeErrorValue(v.value)) && (
+                          <div className="mb-1 rounded border border-red-400/50 bg-red-500/15 px-1.5 py-1 text-red-100">
+                            지금 이 응답은 <b>오류로 보입니다</b> —{' '}
+                            {res.suggestValues
+                              .filter((v) => looksLikeErrorValue(v.value))
+                              .map((v) => `${v.path} = ${v.value}`)
+                              .join(' · ')}
+                            . 이 문구는 정상 조건으로 권하지 않습니다 — 넣으면 서버가 제대로 답할 때 오히려
+                            비정상이 됩니다. 경로·질의값을 고쳐 <b>성공 응답</b>을 받은 뒤 다시 시험하세요.
+                          </div>
+                        )}
+                        {res.suggestValues.some((v) => !looksLikeErrorValue(v.value)) && (
+                          <div className="mb-1">
+                            이 응답에는 <b>항목이 있는 목록이 없습니다</b>. 원래 0건일 수 있는 응답이라면
+                            <b> 항목 1개 이상</b> 대신 아래 조건이 맞습니다 — 백엔드가 답을 만들었을 때만 나오는
+                            문구라, 게이트웨이 오류 페이지나 화면 껍데기는 통과하지 못합니다.
+                          </div>
+                        )}
                         <div className="flex flex-wrap gap-1.5">
-                          {res.suggestValues.map((v) => (
+                          {res.suggestValues.filter((v) => !looksLikeErrorValue(v.value)).map((v) => (
                             <button
                               key={v.path}
                               onClick={() => {
@@ -1916,9 +1969,11 @@ function ConfigView({
                             </button>
                           ))}
                         </div>
-                        <div className="mt-1 text-[10px] text-amber-200/80">
-                          누르면 기존 <b>항목 1개 이상</b> 조건을 대신합니다. 바꾼 뒤 <b>⟳ 시험</b>으로 확인하세요.
-                        </div>
+                        {res.suggestValues.some((v) => !looksLikeErrorValue(v.value)) && (
+                          <div className="mt-1 text-[10px] text-amber-200/80">
+                            누르면 기존 <b>항목 1개 이상</b> 조건을 대신합니다. 바꾼 뒤 <b>⟳ 시험</b>으로 확인하세요.
+                          </div>
+                        )}
                       </div>
                     )}
                     {res.lines.map((line, i) => (
@@ -1926,6 +1981,8 @@ function ConfigView({
                         {line}
                       </div>
                     ))}
+                    {/* 사유를 읽고도 '왜 200 인데 빨갛지' 로 끝나지 않게, 조건 쪽 원인을 여기서 짚는다 */}
+                    {!res.ok && errorCheckWarn(t)}
                     {/* 주소·토큰·응답 원문은 막혔을 때만 필요하다 — 평소엔 접어 둔다 */}
                     {res.detail && res.detail.length > 0 && (
                       <>
@@ -2072,6 +2129,7 @@ function ConfigView({
                           판정: {(t.checks ?? []).map(describeCheck).join(' · 그리고 ')}
                         </p>
                       )}
+                      {errorCheckWarn(t)}
                     </div>
                     {/* ── 3 · 고급 — 대개 기본값 그대로 둔다 ── */}
                     <button
