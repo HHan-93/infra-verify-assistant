@@ -32,6 +32,7 @@ import {
   originHeaders,
   cookieHeaderFrom,
   fillTemplate,
+  suggestStringPaths,
   parseBody,
   parseCurl,
   pathFromUrl,
@@ -191,6 +192,19 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     }
   }
 
+  /**
+   * 응답에서 값을 못 찾았을 때 **어디에 무엇이 있는지 짚어 준다.**
+   *
+   * "찾지 못했습니다" 로 끝내면 개발자도구를 다시 열어 응답을 뒤져야 한다. 후보 경로를
+   * 그 자리에 적어 주면 대개 그중 하나를 그대로 복사해 넣으면 끝난다.
+   */
+  const pathHint = (body: string | undefined): string => {
+    const cands = suggestStringPaths(body)
+    if (cands.length) return `응답에 있는 값: ${cands.map((x) => `${x.path} = ${x.value}`).join(' · ')}`
+    const peek = (body ?? '').trim().slice(0, 200)
+    return peek ? `받은 응답: ${peek}` : '응답이 비어 있습니다.'
+  }
+
   // ── 토큰 ─────────────────────────────────────────────────────
   /** 토큰을 받아온다(로그인 또는 재발급). 실패하면 빈 문자열 + 사유를 남긴다 */
   const doLogin = async (c: PortalConfig): Promise<string> => {
@@ -244,9 +258,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       }
       const mfaToken = String(jsonAt(parseBody(r.body), a.mfaTokenPath ?? '') ?? '')
       if (a.mfaTokenPath?.trim() && !mfaToken) {
-        const peek = (r.body ?? '').trim().slice(0, 200)
         setAuthNote(
-          `1단계 응답에서 중간 토큰을 찾지 못했습니다 (경로: ${a.mfaTokenPath}) — 받은 응답: ${peek}`,
+          `1단계 응답에서 중간 값을 찾지 못했습니다 (적어 둔 위치: ${a.mfaTokenPath}). ` + pathHint(r.body),
         )
         return ''
       }
@@ -295,10 +308,10 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     if (typeof tok !== 'string' || !tok.trim()) {
       // 경로만 알려주면 "그래서 뭐가 왔는데?" 를 확인하러 또 개발자도구를 열어야 한다.
       // 온 것을 그대로 보여주면 대개 그 자리에서 원인이 보인다.
-      const body = (r.body ?? '').trim()
-      const peek = body ? ` · 받은 응답: ${body.slice(0, 200)}${body.length > 200 ? '…' : ''}` : ''
       setAuthNote(
-        `응답에서 토큰을 찾지 못했습니다 (경로: ${c.auth.tokenPath || '(비어 있음)'}) — 설정에서 토큰 위치를 확인하세요${peek}`,
+        `${a.mfaPath?.trim() ? '2차 인증' : '로그인'} 응답에서 토큰을 찾지 못했습니다 ` +
+          `(적어 둔 위치: ${c.auth.tokenPath || '(비어 있음)'}). ` +
+          pathHint(r.body),
       )
       return ''
     }
@@ -1419,8 +1432,9 @@ function ConfigView({
                       <span className="text-gray-500">중간 토큰과 세션 쿠키를 둘 다</span> 2단계로 물려줍니다.
                       <br />
                       <span className="text-amber-300/70">
-                        번호가 30초마다 바뀌는 진짜 OTP 에는 쓸 수 없습니다 — 검증 환경에서 고정해 둔 번호만
-                        됩니다.
+                        번호가 30초마다 바뀌거나 메일로 새로 오는 방식에는 쓸 수 없습니다 — 검증 환경에서 고정해
+                        둔 번호만 됩니다. 재발급 주기마다 1·2단계를 다시 밟으므로, 실제 포털이라면 그때마다 인증
+                        메일이 나갑니다.
                       </span>
                     </p>
                     <div className="grid grid-cols-2 gap-2">
@@ -1430,7 +1444,7 @@ function ConfigView({
                         </div>
                         <input
                           className={`${inputCls} w-full`}
-                          placeholder="/v1/.../token/mfa"
+                          placeholder="/v1/bootfactory/api/mfa/issue"
                           value={cfg.auth.mfaPath ?? ''}
                           onChange={(e) => setAuth({ mfaPath: e.target.value })}
                         />
@@ -1455,7 +1469,7 @@ function ConfigView({
                         </div>
                         <input
                           className={`${inputCls} w-full font-mono`}
-                          placeholder="data.mfaToken (쿠키로만 이어지면 비워 두세요)"
+                          placeholder="data.otpSessionUuid (쿠키로만 이어지면 비워 두세요)"
                           value={cfg.auth.mfaTokenPath ?? ''}
                           onChange={(e) => setAuth({ mfaTokenPath: e.target.value })}
                         />
@@ -1466,7 +1480,7 @@ function ConfigView({
                         </div>
                         <input
                           className={`${inputCls} w-full font-mono`}
-                          placeholder={'{"mfaToken":"{{mfaToken}}","otpCode":"{{otp}}"}'}
+                          placeholder={'{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}'}
                           value={cfg.auth.mfaBody ?? ''}
                           onChange={(e) => setAuth({ mfaBody: e.target.value })}
                         />

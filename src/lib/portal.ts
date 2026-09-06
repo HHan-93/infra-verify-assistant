@@ -475,6 +475,34 @@ export function suggestValueChecks(body: string | undefined, maxDepth = 2): { pa
   return found.sort((a, b) => Number(/^\d+$/.test(a.value)) - Number(/^\d+$/.test(b.value))).slice(0, 4)
 }
 
+/**
+ * 응답 JSON 안의 **문자열 값들이 어느 경로에 있는지** 훑어 준다.
+ *
+ * 토큰 위치를 잘못 적었을 때 "찾지 못했습니다" 로 끝내면, 사람이 개발자도구를 다시 열어
+ * 응답을 뒤져야 한다. 그럴 필요 없이 **후보 경로를 그 자리에 적어 주는** 편이 낫다 —
+ * 대개 그중 하나를 그대로 복사하면 끝난다. (suggestValueChecks 와 같은 발상)
+ *
+ * 값은 짧게 줄여 보여준다. 토큰 자체가 길기 때문에 그대로 붙이면 문구가 화면을 덮는다.
+ */
+export function suggestStringPaths(body: string | undefined, maxDepth = 3): { path: string; value: string }[] {
+  const root = parseBody(body)
+  if (!root || typeof root !== 'object') return []
+  const found: { path: string; value: string }[] = []
+  const walk = (node: unknown, path: string, depth: number) => {
+    if (found.length >= 8 || depth > maxDepth || !node || typeof node !== 'object') return
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      const pth = path ? `${path}.${k}` : k
+      if (typeof v === 'string' && v.trim()) {
+        found.push({ path: pth, value: v.length > 28 ? v.slice(0, 28) + '…' : v })
+      } else if (v && typeof v === 'object') {
+        walk(v, pth, depth + 1)
+      }
+    }
+  }
+  walk(root, '', 0)
+  return found.slice(0, 8)
+}
+
 // ── 브라우저 요청 그대로 가져오기 (cURL) ────────────────────────
 
 /**
@@ -652,10 +680,19 @@ export function defaultPortalConfig(): PortalConfig {
       // 비밀번호를 프런트가 암호화해 보내는 포털이라면, 개발자도구 Payload 의 암호문을
       // 그대로 붙여넣으면 된다 — AES-CBC 는 IV 를 암호문에 동봉하므로 재사용이 통한다.
       mode: 'login',
-      loginPath: '/v1/bootfactory/api/token/issue',
+      // CONTRABASS 포털이 2차 인증으로 바뀌었다(2026-09). 로그인은 이제 세션만 열고,
+      // 이메일로 온 인증번호를 확인해야 토큰이 나온다 — 그래서 요청이 두 번이다.
+      //   1) /mfa/session  {userId, password}          → otpSessionUuid
+      //   2) /mfa/issue    {otpCode, otpSessionUuid}   → accessToken
+      // 예전 /token/issue 한 방 경로는 더 이상 토큰을 주지 않는다.
+      loginPath: '/v1/bootfactory/api/mfa/session',
       loginBody: '{"userId":"{{id}}","password":"{{pw}}"}',
       username: '',
       password: '',
+      mfaPath: '/v1/bootfactory/api/mfa/issue',
+      mfaTokenPath: 'data.otpSessionUuid',
+      mfaBody: '{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}',
+      otp: '',
       tokenPath: 'data.accessToken',
       header: 'Authorization',
       headerFormat: 'Bearer {token}',
