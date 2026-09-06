@@ -1321,10 +1321,23 @@ function ConfigView({
               <div className="mt-1 space-y-2 rounded border border-white/10 bg-black/20 p-2">
                 <div className="grid grid-cols-2 gap-2">
                   <div className="col-span-2">
-                    <div className={labelCls} title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다">
+                    {/* MFA 를 쓰는 포털이 있다 — 바꾼 것은 없고, 원래 되는 것을 적어 둔다.
+                        본문은 통째로 그대로 나가므로 인증번호 칸을 하나 더 적으면 그만이다.
+                        (한 번에 끝나는 로그인만 해당한다 — 로그인 뒤 인증번호를 다시 물어보는
+                        2단계 방식은 요청이 두 번이라 지금 구조로는 안 된다) */}
+                    <div
+                      className={labelCls}
+                      title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다. 그 밖의 칸은 적은 그대로 나갑니다 — MFA 라면 인증번호 칸을 그냥 추가하세요"
+                    >
                       로그인 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                     </div>
                     <input className={`${inputCls} w-full`} value={cfg.auth.loginBody ?? ''} onChange={(e) => setAuth({ loginBody: e.target.value })} />
+                    <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
+                      <span className="text-gray-500">{'{{id}}'}</span> ·{' '}
+                      <span className="text-gray-500">{'{{pw}}'}</span> 만 치환되고 나머지는 적은 그대로 나갑니다.
+                      MFA 를 쓰는 포털이면 인증번호 칸을 그대로 넣으세요 —{' '}
+                      <span className="font-mono text-gray-500">{'{"userId":"{{id}}","password":"{{pw}}","otpCode":"123456"}'}</span>
+                    </p>
                   </div>
                   <div>
                     <div className={labelCls}>토큰 헤더 이름</div>

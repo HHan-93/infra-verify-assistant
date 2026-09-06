@@ -6119,6 +6119,50 @@ ipcMain.handle('perf:saveReport', async (_evt, id: string) => {
   }
 })
 
+/**
+ * 우리 양식으로 만든 **검증 리포트 한 장**을 저장하고 바로 띄운다.
+ *
+ * 도구가 만든 리포트(perf:openReport)와 다른 문서다 — 그쪽은 도구의 통계이고, 이쪽은
+ * "어떤 조건으로 무엇을 확인했고 통과인가" 를 담은 제출용 문서다. HTML 을 렌더러가 만들어
+ * 넘긴다(그쪽에 판정·그래프·서버 지표가 다 있다). 여기서는 저장하고 열기만 한다.
+ */
+ipcMain.handle('perf:saveOnePager', async (_evt, { id, html }: { id: string; html: string }) => {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }
+  if (!html || html.length < 100) return { saved: false, error: '만들 내용이 없습니다.' }
+  let stamp = id.slice(0, 8)
+  try {
+    const meta = JSON.parse(await readFile(path.join(perfRunsDir(), id, 'run.json'), 'utf-8')) as PerfRunMeta
+    const d = new Date(meta.startedAt)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`
+  } catch {
+    /* 이름만 덜 친절해진다 */
+  }
+  const r = await dialog.showSaveDialog(mainWindow!, {
+    title: '검증 리포트 저장',
+    defaultPath: `성능검증_${stamp}.html`,
+    filters: [{ name: 'HTML', extensions: ['html'] }],
+  })
+  if (r.canceled || !r.filePath) return { saved: false }
+  try {
+    await writeFile(r.filePath, html, 'utf-8')
+  } catch (e) {
+    return { saved: false, error: cleanErrorMessage(e) }
+  }
+  // 저장만 하고 끝내면 무엇이 나왔는지 보려고 탐색기를 뒤져야 한다 — 바로 띄운다.
+  // (우리가 만든 문서지만 스크립트가 없으므로 창에도 아무 권한을 주지 않는다)
+  const win = new BrowserWindow({
+    width: 980,
+    height: 900,
+    title: '검증 리포트',
+    backgroundColor: '#ffffff',
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  })
+  win.setMenuBarVisibility(false)
+  await win.loadFile(r.filePath)
+  return { saved: true, path: r.filePath }
+})
+
 /** 통계 CSV 저장 (엑셀로 열어 보고서에 붙이는 용도) */
 ipcMain.handle('perf:saveCsv', async (_evt, id: string) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { saved: false, error: '잘못된 회차 id' }

@@ -26,6 +26,7 @@ import {
   Save,
   Upload,
   History,
+  FileText,
 } from 'lucide-react'
 import type {
   PerfEnvStatus,
@@ -57,6 +58,7 @@ import {
   type PerfSummary,
 } from '../lib/perfParse'
 import { perfVerdict } from '../lib/perfVerdict'
+import { buildOnePager } from '../lib/perfReport'
 import { maskForAI, maskForDisplay } from '../lib/mask'
 import { notifyOs } from '../lib/notify'
 import ConfirmDialog from './ConfirmDialog'
@@ -1057,6 +1059,71 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         .join('') +
       `</table></div>`
     )
+  }
+
+  /**
+   * 제출용 한 장짜리 검증 리포트.
+   *
+   * 도구가 만든 리포트와 **다른 문서**다. 그쪽은 도구의 통계고, 이쪽은 "어떤 조건으로
+   * 무엇을 확인했고 통과인가" 다 — 조건·판정·시간 그래프·같은 시간대 서버 자원까지
+   * 한 장에 담는다. 검수 자리에 내는 것은 대개 이쪽이고, 이 정보는 **도구가 모른다**
+   * (어느 세션을 상대로 돌렸는지, 그때 서버 CPU 가 어땠는지는 우리만 안다).
+   */
+  const onePagerHtml = (): string => {
+    if (!selected || !verdict) return ''
+    const cfg = selected.meta.config
+    const n = cfg.scenario.kind === 'form' ? normalizeFormScenario(cfg.scenario) : null
+    return buildOnePager({
+      toolLabel: (cfg.tool ?? 'locust') === 'jmeter' ? 'JMeter' : 'Locust',
+      runLabel: selected.meta.label,
+      memo: selected.meta.memo,
+      startedAt: selected.meta.startedAt,
+      endedAt: selected.meta.endedAt,
+      canceled: selected.meta.canceled,
+      exitCode: selected.meta.exitCode,
+      targetUrl: cfg.targetUrl,
+      sessionLabel: cfg.sessionLabel,
+      loadText: cfg.stages?.length
+        ? `계단식 ${cfg.stages.map((st) => `${st.users}명(${st.holdSec}초)`).join(' → ')}`
+        : `사용자 ${cfg.users}명 · ${cfg.spawnRate}명/초 · ${Math.round(cfg.durationSec / 60)}분` +
+          (cfg.processes && cfg.processes > 1 ? ` · 프로세스 ${cfg.processes}개` : '') +
+          (cfg.expectWorkers ? ` · 워커 ${cfg.expectWorkers}대` : ''),
+      scenarioLines: n
+        ? n.steps.map(
+            (st) =>
+              `${st.method} ${st.path}` +
+              (n.order === 'weighted' && n.steps.length > 1 ? ` (비율 ${st.weight})` : ''),
+          )
+        : [cfg.scenario.kind === 'file' ? (cfg.scenario.path ?? '') : ''],
+      scenarioNote: n
+        ? (n.order === 'weighted' ? '랜덤 — 비율대로 무작위 선택' : '순차 — 한 사용자가 차례로') +
+          (n.waitMaxSec > 0 ? ` · 요청 사이 ${n.waitMinSec}~${n.waitMaxSec}초 대기` : ' · 쉬지 않고 요청')
+        : undefined,
+      criteriaText:
+        [
+          cfg.p50ThresholdMs !== undefined ? `p50 ${cfg.p50ThresholdMs}ms 이하` : '',
+          cfg.p95ThresholdMs !== undefined ? `p95 ${cfg.p95ThresholdMs}ms 이하` : '',
+          cfg.p99ThresholdMs !== undefined ? `p99 ${cfg.p99ThresholdMs}ms 이하` : '',
+          cfg.errorRateThresholdPct !== undefined ? `실패율 ${cfg.errorRateThresholdPct}% 이하` : '',
+          cfg.warmupSec ? `앞 ${cfg.warmupSec}초는 판정에서 제외` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ') || '없음 — 측정값만 남깁니다',
+      verdict,
+      summary: selectedSummary ?? undefined,
+      history,
+      server: serverSeries,
+      serverNote,
+      failures,
+      failureKinds: summarizeFailureKinds(failures).map((k) => ({
+        label: FAILURE_KIND_LABEL[k.kind],
+        count: k.count,
+      })),
+      samples,
+      p95ThresholdMs: cfg.p95ThresholdMs,
+      // 나가는 문서다 — 화면·AI 와 같은 마스킹을 건다
+      mask: maskForDisplay,
+    })
   }
 
   /** 리포트를 열거나 저장하기 전에 판정 조각을 심어 둔다(여러 번 불러도 쌓이지 않는다) */
@@ -2937,16 +3004,33 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
                       {/* 내보내기 */}
                       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/10 pt-2.5">
+                        {/* 제출용 문서가 먼저다 — 도구 리포트는 원인을 파고들 때 본다 */}
+                        <button
+                          onClick={async () => {
+                            const html = onePagerHtml()
+                            if (!html) {
+                              setNote('아직 만들 내용이 없습니다.')
+                              return
+                            }
+                            const r = await window.electronAPI.perfSaveOnePager(selected.meta.id, html)
+                            if (r.saved) setNote(`검증 리포트를 저장했습니다 — ${r.path}`)
+                            else if (r.error) setNote(r.error)
+                          }}
+                          title="조건·판정·그래프·서버 자원을 한 장에 담은 제출용 문서를 만들어 저장하고 바로 띄웁니다"
+                          className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/20 px-2 py-1 text-[11px] text-blue-100 hover:bg-blue-600/30"
+                        >
+                          <FileText size={11} /> 검증 리포트 (한 장)
+                        </button>
                         <button
                           onClick={async () => {
                             await ensureBranded()
                             const r = await window.electronAPI.perfOpenReport(selected.meta.id)
                             if (!r.ok) setNote(r.error ?? '리포트를 열 수 없습니다.')
                           }}
-                          title="맨 앞에 우리 판정이 얹힌 리포트가 열립니다"
+                          title="도구(Locust·JMeter)가 만든 원본 리포트 — 맨 앞에 우리 판정이 얹힙니다"
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
                         >
-                          <ExternalLink size={11} /> 리포트 열기
+                          <ExternalLink size={11} /> 도구 리포트
                         </button>
                         {/* JMeter 리포트는 index.html 혼자서는 아무것도 못 그린다(content/·js/
                             를 참조) — 한 파일로 저장하는 버튼을 두지 않고 [폴더 열기] 로 보낸다 */}

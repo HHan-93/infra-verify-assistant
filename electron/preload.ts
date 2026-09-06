@@ -128,6 +128,9 @@ const electronAPI = {
     ipcRenderer.invoke('perf:saveReport', id),
   perfSaveCsv: (id: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('perf:saveCsv', id),
+  /** 우리 양식의 검증 리포트 한 장 — HTML 은 렌더러가 만들어 넘긴다 */
+  perfSaveOnePager: (id: string, html: string): Promise<{ saved: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('perf:saveOnePager', { id, html }),
   perfReadHistory: (id: string): Promise<{ ok: boolean; csv?: string; error?: string }> =>
     ipcRenderer.invoke('perf:readHistory', id),
   perfBrandReport: (id: string, html: string): Promise<{ ok: boolean }> =>
