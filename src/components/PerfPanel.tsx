@@ -117,8 +117,12 @@ const LOAD_PRESETS = [
  * 처음에는 `title` 속성(브라우저 기본 툴팁)을 썼는데 **안 뜬다는 말을 들었다** — 뜨기까지
  * 1~2초가 걸리고, 좁은 칸에서는 잘리기도 한다. 그래서 카드 아래에 자리를 만들어 거기에
  * 글로 펼친다. 위치가 늘 같아 어디를 봐야 할지 헷갈리지 않고, 잘릴 일도 없다.
+ *
+ * `pinned` 를 같이 넘기는 이유는 아래 Card 의 주석에 있다 — **마우스만 올렸을 때는
+ * 화면을 밀지 않아야 한다.**
  */
-const HintSlot = createContext<(text: string | null) => void>(() => {})
+type Hint = { text: string; pinned: boolean }
+const HintSlot = createContext<(h: Hint | null) => void>(() => {})
 
 /** 설정 묶음 하나 — 제목과 내용을 테두리로 묶는다(전에는 라벨만 있어 어디까지가 한 묶음인지 안 보였다) */
 function Card({
@@ -132,9 +136,9 @@ function Card({
   badge?: ReactNode
   children: ReactNode
 }) {
-  const [hint, setHint] = useState<string | null>(null)
+  const [hint, setHint] = useState<Hint | null>(null)
   return (
-    <div className="mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2.5">
+    <div className="relative mb-2 rounded-md border border-white/10 bg-panel-light/25 p-2.5">
       {/* 머리까지 통로 안에 둔다 — 뱃지에 물음표를 달아 긴 안내를 접어 두는 자리가 있다 */}
       <HintSlot.Provider value={setHint}>
       <div className="mb-1.5 flex items-center gap-1.5">
@@ -144,11 +148,29 @@ function Card({
       </div>
       {children}
       </HintSlot.Provider>
-      {hint && (
-        <p className="mt-1.5 rounded border border-blue-500/25 bg-blue-500/[0.08] px-2 py-1.5 text-[10.5px] leading-relaxed text-gray-200">
-          {hint}
-        </p>
-      )}
+      {/*
+        **마우스를 올렸을 때는 화면을 밀지 않는다.**
+
+        전에는 올리든 누르든 카드 끝에 글을 끼워 넣었다. 그러면 왼쪽 칸의 높이가 늘어나며
+        스크롤바가 생겼다 없어졌다 하고, 그때마다 칸이 15px 좁아져 위쪽 문단까지 전부
+        다시 줄바꿈된다 — 물음표가 커서 밑에서 밀려나 mouseleave, 되돌아와 mouseenter 가
+        되풀이되며 **화면이 떨렸다**(판정 기준의 물음표에서 사용자가 겪었다).
+
+        그래서 올렸을 때는 카드 바로 아래에 **떠 있게** 그린다(자리를 차지하지 않는다).
+        `pointer-events-none` 은 이 글이 커서를 가로채 같은 되풀이를 만들지 않게 하는 것이다.
+        눌러 고정한 것은 읽으려고 일부러 한 동작이니 그때는 자리를 차지해도 된다 — 오히려
+        아래 내용을 가리지 않는 편이 낫다.
+      */}
+      {hint &&
+        (hint.pinned ? (
+          <p className="mt-1.5 rounded border border-blue-500/25 bg-blue-500/[0.08] px-2 py-1.5 text-[10.5px] leading-relaxed text-gray-200">
+            {hint.text}
+          </p>
+        ) : (
+          <p className="pointer-events-none absolute left-0 right-0 top-full z-30 mt-1 rounded border border-blue-500/40 bg-panel px-2 py-1.5 text-[10.5px] leading-relaxed text-gray-200 shadow-lg shadow-black/50">
+            {hint.text}
+          </p>
+        ))}
     </div>
   )
 }
@@ -184,13 +206,13 @@ function HintMark({ text }: { text: string }) {
   return (
     <button
       type="button"
-      onMouseEnter={() => setHint(text)}
+      onMouseEnter={() => !pinned && setHint({ text, pinned: false })}
       onMouseLeave={() => !pinned && setHint(null)}
       onClick={(e) => {
         e.preventDefault()
         const next = !pinned
         setPinned(next)
-        setHint(next ? text : null)
+        setHint(next ? { text, pinned: true } : null)
       }}
       title="설명 보기"
       className={
@@ -1463,7 +1485,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         <div className="flex min-h-0 flex-1">
           {/* 왼쪽 — 설정만. 회차는 머리의 [회차] 버튼으로 창에서 본다 */}
           <div className="flex w-[392px] shrink-0 flex-col overflow-hidden border-r border-white/10">
-            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {/* scrollbarGutter — 내용이 늘어 스크롤바가 생기는 순간 칸이 좁아지면 위쪽 문단까지
+                전부 다시 줄바꿈된다. 자리를 늘 비워 두어 폭이 변하지 않게 한다. */}
+            <div className="min-h-0 flex-1 overflow-y-auto p-3" style={{ scrollbarGutter: 'stable' }}>
             {/* ── 필수 ─────────────────────────────────────────── */}
 
             {/* 대상 — 어디를 때리는가 */}
