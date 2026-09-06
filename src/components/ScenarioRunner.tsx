@@ -366,6 +366,12 @@ export default function ScenarioRunner({
    */
   const runIdRef = useRef<string | null>(null)
   const runStartRef = useRef(0)
+  /**
+   * 검증이 **끝난** 시각. 저장할 때의 Date.now() 를 쓰면 안 된다 — 끝난 뒤 사람이 '수동
+   * 확인' 을 판정하면 같은 회차를 다시 저장하는데, 그때 시각으로 덮으면 30초짜리 검증이
+   * '1시간 12분' 으로 남는다(리포트의 소요 칸이 그대로 거짓말이 된다).
+   */
+  const runEndRef = useRef(0)
   const runStoppedRef = useRef<{ stopped: boolean; at?: number }>({ stopped: false })
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -1094,6 +1100,7 @@ ${primary?.err ?? ''}`)
     setBusy(false)
     setRecovering(null) // 어떤 경로로 끝나든(중단 포함) 진행 배지는 남기지 않는다
     // 중단 여부는 이력에 반드시 남긴다 — 그 뒤 스텝은 '미실행' 이며 정상도 실패도 아니다
+    runEndRef.current = Date.now()
     runStoppedRef.current = stoppedAt >= 0 ? { stopped: true, at: stoppedAt + 1 } : { stopped: false }
     const parts: string[] = []
     if (stoppedAt >= 0)
@@ -1415,7 +1422,8 @@ ${primary?.err ?? ''}`)
         scenarioId: scenario.id ?? scenario.title,
         title: scenario.title,
         startedAt: runStartRef.current,
-        endedAt: Date.now(),
+        // 다시 저장해도 끝난 시각은 그대로 (위 runEndRef 주석)
+        endedAt: runEndRef.current || Date.now(),
         targets: targets.length ? targets : [targetName],
         stepCount: scenario.steps.length,
         counts: summary,

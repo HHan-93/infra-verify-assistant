@@ -225,6 +225,21 @@ function cell(c: ScenarioRunStep | null): string {
   return `<td class="${cls}">${LABEL[c.effective]}${c.manual ? '<sup>수동</sup>' : ''}</td>`
 }
 
+/**
+ * 스텝 한 줄의 '판정 근거' 문구.
+ *
+ * 종료 코드를 무조건 덧붙이면 **같은 말이 두 번 나온다** — 러너의 판정 근거에 이미
+ * '종료 코드 0' 이 들어 있는 경우가 흔하다(실제 회차에서 `종료 코드 0, 출력에 위험 키워드
+ * 없음 · 종료 코드 0` 로 찍혔다). 근거가 이미 말하고 있으면 덧붙이지 않는다.
+ */
+export function reasonText(st: ScenarioRunStep): string {
+  const parts = [...(st.reasons ?? [])]
+  const said = parts.some((r) => /종료\s*코드/.test(r))
+  if (typeof st.code === 'number' && !said) parts.push(`종료 코드 ${st.code}`)
+  if (st.retried) parts.push('대응 후 재실행')
+  return parts.join(' · ')
+}
+
 /** 스텝 구성 막대 — 회차 한 줄을 눈으로 비교하게 만드는 장치 */
 function bar(c: ScenarioRunCounts): string {
   const total = c.pass + c.fail + c.error + c.info + c.skip + c.waiting + c.pending
@@ -560,9 +575,7 @@ ${Array.from({ length: 60 }, (_, i) =>
             <td>${esc(st.title)}</td>
             ${cell(st)}
             <td class="dim">${esc(st.sessionName ?? '')}</td>
-            <td class="dim">${esc((st.reasons ?? []).join(', '))}${
-              typeof st.code === 'number' ? `${(st.reasons ?? []).length ? ' · ' : ''}종료 코드 ${st.code}` : ''
-            }${st.retried ? ' · 대응 후 재실행' : ''}</td>
+            <td class="dim">${esc(reasonText(st))}</td>
           </tr>`,
             )
             .join('')}
