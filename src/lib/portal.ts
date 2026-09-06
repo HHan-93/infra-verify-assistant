@@ -682,15 +682,19 @@ export function defaultPortalConfig(): PortalConfig {
       mode: 'login',
       // CONTRABASS 포털이 2차 인증으로 바뀌었다(2026-09). 로그인은 이제 세션만 열고,
       // 이메일로 온 인증번호를 확인해야 토큰이 나온다 — 그래서 요청이 두 번이다.
-      //   1) /mfa/session  {userId, password}          → otpSessionUuid
-      //   2) /mfa/issue    {otpCode, otpSessionUuid}   → accessToken
+      //   1) /mfa/session  {userId, password}          → data.sessionUuid
+      //   2) /mfa/issue    {otpCode, otpSessionUuid}   → data.accessToken
       // 예전 /token/issue 한 방 경로는 더 이상 토큰을 주지 않는다.
+      //
+      // **이름이 양쪽에서 다르다** — 1단계가 돌려주는 칸은 `sessionUuid` 인데, 2단계가
+      // 받는 칸은 `otpSessionUuid` 다. 받은 곳의 이름으로 짐작해 적으면 틀린다(실제로
+      // otpSessionUuid 로 적어 두었다가 "찾지 못했습니다" 를 만났다). 응답 기준으로 적는다.
       loginPath: '/v1/bootfactory/api/mfa/session',
       loginBody: '{"userId":"{{id}}","password":"{{pw}}"}',
       username: '',
       password: '',
       mfaPath: '/v1/bootfactory/api/mfa/issue',
-      mfaTokenPath: 'data.otpSessionUuid',
+      mfaTokenPath: 'data.sessionUuid',
       mfaBody: '{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}',
       otp: '',
       tokenPath: 'data.accessToken',

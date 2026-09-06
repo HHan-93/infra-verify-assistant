@@ -1469,10 +1469,16 @@ function ConfigView({
                         </div>
                         <input
                           className={`${inputCls} w-full font-mono`}
-                          placeholder="data.otpSessionUuid (쿠키로만 이어지면 비워 두세요)"
+                          placeholder="data.sessionUuid (쿠키로만 이어지면 비워 두세요)"
                           value={cfg.auth.mfaTokenPath ?? ''}
                           onChange={(e) => setAuth({ mfaTokenPath: e.target.value })}
                         />
+                        <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
+                          <span className="text-gray-500">1단계가 돌려준 이름</span>으로 적으세요 — 2단계가 받는
+                          칸 이름과 다를 수 있습니다(예: 응답은 sessionUuid, 요청은 otpSessionUuid). 틀리면 아래
+                          <span className="text-gray-500"> 로그인 시험</span> 이 실제 응답의 후보 경로를 적어
+                          줍니다.
+                        </p>
                       </div>
                       <div className="col-span-2">
                         <div className={labelCls} title="{{otp}} {{mfaToken}} {{id}} 가 치환됩니다">
