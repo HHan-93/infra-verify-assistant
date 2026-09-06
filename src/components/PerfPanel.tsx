@@ -227,6 +227,61 @@ function HintMark({ text }: { text: string }) {
   )
 }
 
+/**
+ * 추천값 알약.
+ *
+ * 고급 설정의 칸은 대부분 '얼마가 적당한지' 를 사람이 알아야 채울 수 있었다. 그런데 그 값
+ * 중 몇은 **앱이 이미 알고 있다** — 사용자가 다 붙는 데 걸리는 시간(램프업), 이 PC 의 코어
+ * 수. 아는 값은 눌러서 넣게 한다. 지금 값과 같으면 켜진 것으로 보인다.
+ */
+function Chip({
+  label,
+  on,
+  onClick,
+  disabled,
+  title,
+}: {
+  label: string
+  on: boolean
+  onClick: () => void
+  disabled?: boolean
+  title?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={
+        'shrink-0 rounded-full border px-2 py-0.5 text-[10px] transition disabled:opacity-40 ' +
+        (on
+          ? 'border-blue-400/60 bg-blue-500/20 text-blue-100'
+          : 'border-white/15 bg-white/[0.04] text-gray-400 hover:border-white/30 hover:bg-white/10 hover:text-gray-100')
+      }
+    >
+      {label}
+    </button>
+  )
+}
+
+/**
+ * 고급 설정의 기본값 — **몇 개를 바꿨는지 세고, 되돌리기 위해** 한곳에 적어 둔다.
+ * 위 useState 의 초기값과 반드시 같아야 한다.
+ */
+const ADV_DEFAULTS = {
+  warmupSec: '',
+  p50Th: '',
+  p99Th: '',
+  waitMin: '1',
+  waitMax: '2',
+  commonHeaderText: '',
+  captureFailures: true,
+  processes: '1',
+  expectWorkers: '0',
+  insecure: true,
+} as const
+
 function Field({
   label,
   unit,
@@ -236,7 +291,8 @@ function Field({
   placeholder,
   hint,
 }: {
-  label: string
+  // 라벨에 용어를 회색으로 덧붙인다 — '절반은 이 안에 <span>p50</span>' 같은 꼴
+  label: ReactNode
   unit: string
   value: string
   onChange: (v: string) => void
@@ -404,6 +460,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const [runs, setRuns] = useState<PerfRunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<PerfRunRecord | null>(null)
+  /** 고급 설정 되돌리기 확인 — 적어 둔 인증 토큰이 한 번에 날아갈 수 있어 묻는다 */
+  const [confirmAdvReset, setConfirmAdvReset] = useState(false)
   const [note, setNote] = useState('')
   /** 앱이 만들어 줄 locustfile 미리보기 (null 이면 안 열림) */
   const [preview, setPreview] = useState<string | null>(null)
@@ -1275,6 +1333,58 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
   const inputCls =
     'rounded border border-white/10 bg-panel-light px-2 py-1 text-[11.5px] text-gray-100 outline-none focus:border-blue-500/60'
+
+  // ── 고급 설정: 앱이 아는 추천값 ───────────────────────────
+  /**
+   * 사용자가 붙는 데 걸리는 시간 — 워밍업으로 뺄 값이 바로 이것이다.
+   * 계단식이면 **첫 단계**의 것을 쓴다(그 뒤 단계는 이미 부하가 올라와 있는 구간이라,
+   * 거기까지 빼면 정작 보려던 구간이 없어진다).
+   */
+  const rampSecNow = (() => {
+    if (loadMode === 'stages') {
+      const first = stages.find((st) => (Number(st.users) || 0) > 0)
+      return Math.max(0, Math.ceil((Number(first?.users) || 0) / (Number(first?.spawnRate) || 1)))
+    }
+    return Math.max(0, Math.ceil((Number(users) || 0) / (Number(spawnRate) || 1)))
+  })()
+  /** 이 PC 의 코어 수 — 프로세스를 몇 개까지 늘려도 되는지 */
+  const coreCount = Math.max(1, navigator.hardwareConcurrency || 4)
+
+  /**
+   * 기본값과 다른 고급 항목의 이름.
+   *
+   * 접어 두는 칸이라 **무엇을 건드려 놨는지 잊는다** — 지난번에 워밍업을 넣어 둔 채로 다음
+   * 검증을 돌리면 판정 기준이 조용히 달라진다. 머리에 개수를 적고, 되돌리기를 붙인다.
+   */
+  const advChanged = (() => {
+    const out: string[] = []
+    if (tool === 'locust' && warmupSec.trim() !== ADV_DEFAULTS.warmupSec) out.push('처음 얼마는 빼고 재기')
+    if (p50Th.trim() !== ADV_DEFAULTS.p50Th) out.push('절반은 이 안에 (p50)')
+    if (p99Th.trim() !== ADV_DEFAULTS.p99Th) out.push('거의 다 이 안에 (p99)')
+    if (tool === 'locust') {
+      if (waitMin !== ADV_DEFAULTS.waitMin || waitMax !== ADV_DEFAULTS.waitMax) out.push('요청 사이 쉬는 시간')
+      if (commonHeaderText.trim() !== ADV_DEFAULTS.commonHeaderText) out.push('공통 헤더')
+      if (captureFailures !== ADV_DEFAULTS.captureFailures) out.push('실패 응답 본문 남기기')
+      if (processes !== ADV_DEFAULTS.processes) out.push('내 PC 를 몇 갈래로')
+      if (expectWorkers !== ADV_DEFAULTS.expectWorkers) out.push('다른 PC 도 함께')
+      if (insecure !== ADV_DEFAULTS.insecure) out.push('자체 서명 인증서 무시')
+    }
+    return out
+  })()
+
+  /** 고급 설정만 기본값으로. 위 판정 기준(p95·실패율)과 부하·시나리오는 건드리지 않는다 */
+  const resetAdv = () => {
+    setWarmupSec(ADV_DEFAULTS.warmupSec)
+    setP50Th(ADV_DEFAULTS.p50Th)
+    setP99Th(ADV_DEFAULTS.p99Th)
+    setWaitMin(ADV_DEFAULTS.waitMin)
+    setWaitMax(ADV_DEFAULTS.waitMax)
+    setCommonHeaderText(ADV_DEFAULTS.commonHeaderText)
+    setCaptureFailures(ADV_DEFAULTS.captureFailures)
+    setProcesses(ADV_DEFAULTS.processes)
+    setExpectWorkers(ADV_DEFAULTS.expectWorkers)
+    setInsecure(ADV_DEFAULTS.insecure)
+  }
   /**
    * 시나리오 단계 줄의 **단추 묶음 폭.** 머리글의 빈 칸과 줄의 단추 칸이 같은 값을 써야
    * '순서' 글자가 숫자 위에 온다. 위·아래 화살표는 단계가 둘 이상일 때만 나오므로 폭도
@@ -2031,7 +2141,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
             {/* ── 고급 설정 ─────────────────────────────────────
                 안 건드려도 돌아가는 것들만 여기 넣는다. 처음 여는 사람에게 스무 칸을 한꺼번에
-                보여주면 무엇이 필수인지 알 수 없다. 기본은 접고, 편 상태는 기억한다. */}
+                보여주면 무엇이 필수인지 알 수 없다. 기본은 접고, 편 상태는 기억한다.
+
+                묶음은 **기능이 아니라 목적**으로 나눈다. 한동안 '연결 · 요청 방식 · 부하
+                발생기' 였는데, 그건 코드를 나눈 기준이지 사람이 무엇을 하려는지가 아니어서
+                어느 것을 열어야 할지 알 수 없었다(사용자 지적). 제목이 '~할 때' 면 열지
+                말지가 제목에서 끝난다. 설명도 물음표 안에 숨기지 않고 회색 한 줄로 늘 둔다 —
+                물음표만 여섯 개였다. */}
             {/* 펼친 내용을 **이 테두리 안에** 담는다 — 전에는 버튼과 카드가 따로 떠 있어
                 어디까지가 고급 설정인지 알 수 없었다(사용자 지적). */}
             <div
@@ -2046,23 +2162,223 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               >
                 {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 고급 설정
+                {/* 접혀 있으면 안을 못 본다 — 건드려 둔 것이 있다는 사실만은 밖에 남긴다 */}
+                {advChanged.length > 0 && (
+                  <span
+                    title={'기본값과 다름 — ' + advChanged.join(' · ')}
+                    className="rounded bg-blue-500/20 px-1.5 py-0.5 text-[9.5px] text-blue-100"
+                  >
+                    {advChanged.length}개 바꿈
+                  </span>
+                )}
                 <span className="ml-auto text-[10px] text-gray-600">
-                  {advOpen
-                    ? '접기'
-                    : tool === 'jmeter'
-                      ? '백분위 기준 · 워밍업'
-                      : '인증서 · 백분위 · 워밍업 · 대기 · 헤더 · 프로세스'}
+                  {advOpen ? '접기' : tool === 'jmeter' ? '판정을 더 촘촘히' : '더 정확하게 · 실제처럼 · 부하 늘리기'}
                 </span>
               </button>
 
             {advOpen && (
               <div className="border-t border-white/10 px-2 pb-0.5 pt-2 [&>div:last-child]:mb-0">
-                {/* JMeter 에는 아예 두지 않는다 — 그 도구는 인증서를 검사하지 않아 켤 것이
-                    없고, '켤 것이 없다' 는 한 줄만 남은 칸은 자리만 차지한다(사용자 지적).
-                    그 사실은 탭 옆 [?] 의 도구 안내에 적어 둔다. */}
+                <div className="mb-2 flex items-start gap-2 px-0.5">
+                  <p className="min-w-0 flex-1 text-[10px] leading-relaxed text-gray-600">
+                    대개 그대로 둬도 됩니다 — 아래 <span className="text-gray-400">필요할 때만</span> 여세요.
+                  </p>
+                  {/* 되돌리기는 눌린 자리에 두지 않는다 — 머리 단추 안에 단추를 넣을 수 없기도 하고,
+                      바꾼 것이 있을 때만 나오는 편이 조용하다 */}
+                  {advChanged.length > 0 && (
+                    <button
+                      onClick={() => setConfirmAdvReset(true)}
+                      disabled={!!running}
+                      className="shrink-0 rounded border border-white/15 px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-white/10 hover:text-gray-200 disabled:opacity-40"
+                    >
+                      기본값으로 되돌리기
+                    </button>
+                  )}
+                </div>
+
+                {/* ① 더 정확하게 — 워밍업·p50·p99. 두 도구 모두 백분위는 있으나
+                    워밍업은 Locust 에서만 쓴다(buildConfig 에서 JMeter 는 빼고 보낸다).
+                    쓰이지도 않을 칸을 보여 주면 적어 놓고 안 먹는다고 여기게 된다. */}
+                <Card icon={<CircleCheck size={12} />} title="더 정확하게 재고 싶을 때">
+                  <p className="mb-2 text-[10px] leading-relaxed text-gray-600">
+                    사람이 붙는 동안의 느린 구간을 빼거나, 기준을 더 촘촘히 볼 때
+                  </p>
+
+                  {tool === 'locust' && (
+                    <div className="mb-2.5">
+                      <div className="mb-1 text-[10px] text-gray-500">처음 얼마는 빼고 재기</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="flex w-[86px] shrink-0 items-center rounded border border-white/10 bg-panel-light focus-within:border-blue-500/60">
+                          <input
+                            value={warmupSec}
+                            onChange={(e) => setWarmupSec(e.target.value)}
+                            disabled={!!running}
+                            placeholder="0"
+                            className="min-w-0 flex-1 bg-transparent px-2 py-1 text-[11.5px] text-gray-100 outline-none disabled:opacity-50"
+                          />
+                          <span className="shrink-0 pr-2 text-[10px] text-gray-500">초</span>
+                        </span>
+                        <Chip
+                          label={`붙는 시간만큼 (${rampSecNow}초)`}
+                          on={warmupSec.trim() === String(rampSecNow) && rampSecNow > 0}
+                          disabled={!!running || rampSecNow <= 0}
+                          onClick={() => setWarmupSec(String(rampSecNow))}
+                          title="위에서 정한 인원과 붙는 속도로 계산한 시간입니다"
+                        />
+                        <Chip
+                          label="빼지 않기"
+                          on={!warmupSec.trim() || warmupSec.trim() === '0'}
+                          disabled={!!running}
+                          onClick={() => setWarmupSec('')}
+                        />
+                      </div>
+                      <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                        {rampSecNow > 0
+                          ? loadMode === 'stages'
+                            ? `첫 단계가 다 붙는 데 ${rampSecNow}초가 걸립니다. `
+                            : `${Number(users) || 0}명이 붙는 데 ${rampSecNow}초가 걸립니다. `
+                          : ''}
+                        그동안은 원래 느려서, 빼지 않으면 p95 가 실제보다 나쁘게 나옵니다. 뺄 때는 남은 구간의 p95
+                        최댓값으로 판정합니다.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field
+                      label={
+                        <>
+                          절반은 이 안에 <span className="text-gray-600">p50</span>
+                        </>
+                      }
+                      unit="ms"
+                      value={p50Th}
+                      onChange={setP50Th}
+                      disabled={!!running}
+                      placeholder="비움"
+                      hint="절반의 요청이 이 시간 안에 끝났다는 뜻(중간값)입니다. '보통은 빠른가' 를 봅니다 — p95 는 통과했는데 p50 이 나쁘면 전체가 느린 것입니다."
+                    />
+                    <Field
+                      label={
+                        <>
+                          거의 다 이 안에 <span className="text-gray-600">p99</span>
+                        </>
+                      }
+                      unit="ms"
+                      value={p99Th}
+                      onChange={setP99Th}
+                      disabled={!!running}
+                      placeholder="비움"
+                      hint="100번 중 99번. 드물게 아주 오래 걸리는 요청(GC·락·재시도)을 잡습니다. 값이 잘 튀니 p95 보다 넉넉하게 잡으세요."
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                    비워 두면 판정에 쓰지 않습니다. 위의 p95 · 실패율만으로도 대개 충분합니다.
+                  </p>
+                </Card>
+
+                {/* ② 어떻게 보낼까 — 대기·헤더·실패 본문은 앱이 만든 시나리오에서만 정할 수
+                    있고, 인증서는 파일 시나리오에서도 '파일이 정한다' 는 사실을 알려야 하므로
+                    Locust 면 늘 낸다. */}
                 {tool === 'locust' && (
-                <Card icon={<Target size={12} />} title="연결">
-                    <label className="flex items-start gap-2 text-[11px] text-gray-300">
+                  <Card icon={<FileCode size={12} />} title="요청을 실제처럼 보내고 싶을 때">
+                    <p className="mb-2 text-[10px] leading-relaxed text-gray-600">
+                      쉬는 시간·인증 토큰을 실제 화면과 맞출 때
+                    </p>
+
+                    {scenarioKind === 'form' && (
+                      <>
+                        <div className="mb-1 text-[10px] text-gray-500">한 사람이 다음 요청까지 쉬는 시간</div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Chip
+                            label="짧게 1~2초"
+                            on={waitMin === '1' && waitMax === '2'}
+                            disabled={!!running}
+                            onClick={() => {
+                              setWaitMin('1')
+                              setWaitMax('2')
+                            }}
+                          />
+                          <Chip
+                            label="사람처럼 1~3초"
+                            on={waitMin === '1' && waitMax === '3'}
+                            disabled={!!running}
+                            onClick={() => {
+                              setWaitMin('1')
+                              setWaitMax('3')
+                            }}
+                          />
+                          <Chip
+                            label="쉬지 않고 계속"
+                            on={waitMin === '0' && waitMax === '0'}
+                            disabled={!!running}
+                            onClick={() => {
+                              setWaitMin('0')
+                              setWaitMax('0')
+                            }}
+                          />
+                          <span className="flex shrink-0 items-center gap-1">
+                            <input
+                              value={waitMin}
+                              onChange={(e) => setWaitMin(e.target.value)}
+                              disabled={!!running}
+                              className={inputCls + ' w-10 shrink-0 text-center disabled:opacity-50'}
+                            />
+                            <span className="text-gray-600">~</span>
+                            <input
+                              value={waitMax}
+                              onChange={(e) => setWaitMax(e.target.value)}
+                              disabled={!!running}
+                              className={inputCls + ' w-10 shrink-0 text-center disabled:opacity-50'}
+                            />
+                            <span className="text-[10.5px] text-gray-500">초</span>
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                          사람은 화면을 보고 생각하니 1~3초쯤이 실제에 가깝습니다. 쉬지 않게 하면 같은 인원으로 훨씬
+                          센 부하가 됩니다.
+                        </p>
+
+                        <div className="mb-1 mt-2.5 flex items-center gap-1 text-[10px] text-gray-500">
+                          모든 요청에 붙일 헤더
+                          <HintMark text="한 줄에 하나, '이름: 값' 형식입니다. 여기 적은 헤더는 모든 단계에 붙고, 단계마다 따로 적은 헤더가 있으면 그쪽이 이깁니다." />
+                        </div>
+                        <textarea
+                          value={commonHeaderText}
+                          onChange={(e) => setCommonHeaderText(e.target.value)}
+                          disabled={!!running}
+                          rows={2}
+                          placeholder={'X-Auth-Token: ...'}
+                          className={inputCls + ' w-full resize-y font-mono disabled:opacity-50'}
+                        />
+                        <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
+                          인증이 필요한 API 면 여기에 토큰을 넣으세요. 로그·리포트·AI 로 나갈 때는 값이 가려집니다.
+                        </p>
+
+                        <label className="mt-2.5 flex items-start gap-2 text-[11px] text-gray-300">
+                          <input
+                            type="checkbox"
+                            checked={captureFailures}
+                            disabled={!!running}
+                            onChange={(e) => setCaptureFailures(e.target.checked)}
+                            className="mt-0.5"
+                          />
+                          <span>
+                            실패한 응답의 본문도 남기기
+                            <span className="block text-[10px] text-gray-600">
+                              Locust 는 한 줄 문구만 남깁니다. 본문이 있어야 게이트웨이가 막은 것인지 앱이 낸 오류인지
+                              갈립니다 (앞 50건)
+                            </span>
+                          </span>
+                        </label>
+                      </>
+                    )}
+
+                    <label
+                      className={
+                        'flex items-start gap-2 text-[11px] text-gray-300 ' +
+                        (scenarioKind === 'form' ? 'mt-2.5' : '')
+                      }
+                    >
                       <input
                         type="checkbox"
                         checked={insecure}
@@ -2075,127 +2391,54 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         <span className="block text-[10px] text-gray-600">
                           {scenarioKind === 'file'
                             ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
-                            : '사내 인프라는 대개 필요합니다'}
-                        </span>
-                      </span>
-                    </label>
-                </Card>
-                )}
-
-                <Card icon={<CircleCheck size={12} />} title="판정 기준 — 더">
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <Field
-                      label="p50 이하"
-                      unit="ms"
-                      value={p50Th}
-                      onChange={setP50Th}
-                      disabled={!!running}
-                      placeholder="—"
-                      hint="절반의 요청이 이 시간 안에 끝났다는 뜻(중간값)입니다. '보통은 빠른가' 를 봅니다 — p95 는 통과했는데 p50 이 나쁘면 전체가 느린 것입니다."
-                    />
-                    <Field
-                      label="p99 이하"
-                      unit="ms"
-                      value={p99Th}
-                      onChange={setP99Th}
-                      disabled={!!running}
-                      placeholder="—"
-                      hint="100번 중 99번. 드물게 아주 오래 걸리는 요청(GC·락·재시도)을 잡습니다. 값이 잘 튀니 p95 보다 넉넉하게 잡으세요."
-                    />
-                  </div>
-                  <div className="mt-1.5 flex items-end gap-2">
-                    <div className="w-24">
-                      <Field
-                        label="워밍업 제외"
-                        unit="초"
-                        value={warmupSec}
-                        onChange={setWarmupSec}
-                        disabled={!!running}
-                        placeholder="0"
-                      />
-                    </div>
-                    <p className="min-w-0 flex-1 pb-1 text-[10px] leading-relaxed text-gray-600">
-                      사용자가 붙는 동안은 응답이 느려 전체 p95 를 끌어올립니다. 이 시간을 빼면 남은 구간의 p95
-                      최댓값으로 판정합니다.
-                    </p>
-                  </div>
-                </Card>
-
-                {tool === 'locust' && scenarioKind === 'form' && (
-                  <Card icon={<FileCode size={12} />} title="요청 방식">
-                    <div className="flex items-center gap-1.5">
-                      <span className="flex shrink-0 items-center gap-1 text-[10.5px] text-gray-500">
-                        요청 사이 대기
-                        <HintMark text="한 사용자가 요청을 끝낸 뒤 다음 요청까지 쉬는 시간입니다. 사람은 화면을 보고 생각하니 1~3초쯤이 실제에 가깝습니다. 0~0 으로 두면 쉬지 않고 계속 보내 같은 인원으로 훨씬 센 부하가 됩니다." />
-                      </span>
-                      <input
-                        value={waitMin}
-                        onChange={(e) => setWaitMin(e.target.value)}
-                        disabled={!!running}
-                        className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
-                      />
-                      <span className="shrink-0 text-gray-600">~</span>
-                      <input
-                        value={waitMax}
-                        onChange={(e) => setWaitMax(e.target.value)}
-                        disabled={!!running}
-                        className={inputCls + ' w-11 shrink-0 text-center disabled:opacity-50'}
-                      />
-                      <span className="shrink-0 text-[10.5px] text-gray-500">초</span>
-                    </div>
-                    <div className="mt-1.5 mb-0.5 flex items-center gap-1 text-[10px] text-gray-500">
-                      공통 헤더
-                      <HintMark text="모든 요청에 똑같이 붙일 헤더입니다. 인증이 필요한 API 라면 여기에 토큰을 넣으세요 (예: X-Auth-Token: gAAAAA…). 한 줄에 하나, '이름: 값' 형식입니다. 로그·리포트·AI 로 나갈 때는 값이 가려집니다." />
-                    </div>
-                    <textarea
-                      value={commonHeaderText}
-                      onChange={(e) => setCommonHeaderText(e.target.value)}
-                      disabled={!!running}
-                      rows={2}
-                      placeholder={'X-Auth-Token: ...'}
-                      className={inputCls + ' w-full resize-y font-mono disabled:opacity-50'}
-                    />
-                    <label className="mt-1.5 flex items-start gap-2 text-[11px] text-gray-300">
-                      <input
-                        type="checkbox"
-                        checked={captureFailures}
-                        disabled={!!running}
-                        onChange={(e) => setCaptureFailures(e.target.checked)}
-                        className="mt-0.5"
-                      />
-                      <span>
-                        실패 응답 본문 남기기
-                        <span className="block text-[10px] text-gray-600">
-                          Locust 는 한 줄 문구만 남깁니다. 본문이 있어야 게이트웨이 오류인지 앱 오류인지 갈립니다 (앞 50건)
+                            : '사내 https 는 대개 필요합니다 — 끄면 인증서가 맞지 않을 때 전부 실패로 셉니다'}
                         </span>
                       </span>
                     </label>
                   </Card>
                 )}
 
+                {/* ③ 부하를 더 — 내 PC 가 먼저 막히면 그 숫자는 서버 성능이 아니다 */}
                 {tool === 'locust' && (
-                <Card icon={<Gauge size={12} />} title="부하 발생기">
+                  <Card icon={<Gauge size={12} />} title="부하가 모자랄 때">
+                    <p className="mb-2 text-[10px] leading-relaxed text-gray-600">
+                      인원을 올렸는데 초당 요청이 더 안 늘면 대상이 아니라 내 PC 가 막힌 것입니다
+                    </p>
                     <div className="grid grid-cols-2 gap-1.5">
                       <Field
-                        label="이 PC 프로세스"
+                        label="내 PC 를 몇 갈래로"
                         unit="개"
                         value={processes}
                         onChange={setProcesses}
                         disabled={!!running}
-                        hint="이 PC 에서 몇 개로 나눠 돌릴지. 1 이면 코어 하나만 씁니다. 사용자 수를 수백 명으로 올렸는데 초당 요청이 더 안 늘면 내 PC 가 막힌 것이니 코어 수만큼 올리세요."
+                        hint="파이썬 한 갈래(프로세스)는 코어 하나만 씁니다. 갈래를 늘리면 이 PC 가 더 센 부하를 낼 수 있습니다."
                       />
                       <Field
-                        label="다른 PC 워커"
+                        label="다른 PC 도 함께"
                         unit="대"
                         value={expectWorkers}
                         onChange={setExpectWorkers}
                         disabled={!!running}
-                        hint="한 대로 부족할 때 다른 PC 를 붙입니다. 0 이면 이 PC 만 씁니다. 1 이상이면 그 수만큼 붙을 때까지 시작을 기다리고, 붙일 명령을 아래에 보여줍니다 — 그 PC 에도 locust 가 설치돼 있어야 합니다."
+                        hint="한 대로 부족할 때 다른 PC 를 붙입니다. 1 이상이면 그 수만큼 붙을 때까지 시작을 기다리고, 붙일 명령을 아래에 보여줍니다 — 그 PC 에도 locust 가 설치돼 있어야 합니다."
+                      />
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <Chip
+                        label="1개면 충분"
+                        on={processes === '1'}
+                        disabled={!!running}
+                        onClick={() => setProcesses('1')}
+                      />
+                      <Chip
+                        label={`코어만큼 (${coreCount}개)`}
+                        on={processes === String(coreCount)}
+                        disabled={!!running}
+                        onClick={() => setProcesses(String(coreCount))}
+                        title="이 PC 의 코어 수입니다"
                       />
                     </div>
                     <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
-                      파이썬 한 프로세스는 코어 하나만 씁니다. 부하가 크면 프로세스를 늘리세요 — 대상이 아니라 내 PC 가
-                      먼저 막히면 그 응답 시간은 서버 성능이 아닙니다.
+                      내 PC 가 먼저 막히면 그때 잰 응답 시간은 서버 성능이 아닙니다.
                       {Number(expectWorkers) > 0 && (
                         <>
                           <br />
@@ -2205,8 +2448,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                           </span>
                         </>
                       )}
-                  </p>
-                </Card>
+                    </p>
+                  </Card>
                 )}
               </div>
             )}
@@ -3168,6 +3411,26 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             } finally {
               setInstalling(false)
             }
+          }}
+        />
+      )}
+
+      {/* 고급 설정 되돌리기 — 되돌리면 공통 헤더에 적어 둔 토큰까지 사라진다. 다시 받아
+          붙여야 하는 값이라 되돌리기 전에 무엇이 지워지는지 보여주고 묻는다. */}
+      {confirmAdvReset && (
+        <ConfirmDialog
+          title="고급 설정을 기본값으로 되돌릴까요?"
+          confirmLabel="되돌리기"
+          message={
+            `기본값과 다른 ${advChanged.length}개를 되돌립니다.\n\n` +
+            advChanged.map((x) => `· ${x}`).join('\n') +
+            '\n\n위의 대상 · 부하 · 시나리오 · 판정 기준(p95 · 실패율)은 그대로 둡니다.'
+          }
+          onCancel={() => setConfirmAdvReset(false)}
+          onConfirm={() => {
+            resetAdv()
+            setConfirmAdvReset(false)
+            setNote('고급 설정을 기본값으로 되돌렸습니다.')
           }}
         />
       )}
