@@ -32,6 +32,7 @@ import {
   originHeaders,
   cookieHeaderFrom,
   fillTemplate,
+  MFA_DEFAULTS,
   mfaEnabledOf,
   suggestStringPaths,
   parseBody,
@@ -201,9 +202,11 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
    */
   const pathHint = (body: string | undefined): string => {
     const cands = suggestStringPaths(body)
-    if (cands.length) return `응답에 있는 값: ${cands.map((x) => `${x.path} = ${x.value}`).join(' · ')}`
+    // 한 줄로 이어 붙이면 후보가 서넛만 돼도 문단이 되어 어디가 경로고 어디가 값인지
+    // 눈으로 못 가른다. 한 줄에 하나씩 — 그대로 복사해 넣을 수 있게.
+    if (cands.length) return '응답에 있는 값\n' + cands.map((x) => `  · ${x.path} = ${x.value}`).join('\n')
     const peek = (body ?? '').trim().slice(0, 200)
-    return peek ? `받은 응답: ${peek}` : '응답이 비어 있습니다.'
+    return peek ? `받은 응답\n  ${peek}` : '응답이 비어 있습니다.'
   }
 
   // ── 토큰 ─────────────────────────────────────────────────────
@@ -253,6 +256,19 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
      * 1단계가 400/401 이면 여기까지 오지 않는다(아래 상태 검사가 먼저 걸린다).
      */
     if (mfaEnabledOf(a)) {
+      // 스위치가 곧 상태이므로 '켜 놓고 칸은 빈' 상태가 있을 수 있다. 그대로 보내면
+      // 404·400 을 받고 원인을 서버 쪽에서 찾게 된다 — 먼저 여기서 짚는다.
+      if (!a.mfaPath?.trim()) {
+        setAuthNote(
+          '2차 인증이 켜져 있는데 보낼 경로가 비어 있습니다.\n' +
+            '설정에서 2차 인증 경로를 채우거나, 스위치를 꺼서 로그인 한 번으로 끝내세요.',
+        )
+        return ''
+      }
+      if ((a.mfaBody ?? '').includes('{{otp}}') && !a.otp?.trim()) {
+        setAuthNote('2차 인증이 켜져 있는데 인증번호가 비어 있습니다 — 설정에서 6자리를 채우세요.')
+        return ''
+      }
       if ((r.status ?? 0) >= 400) {
         setAuthNote(`로그인 HTTP ${r.status} — 2차 인증까지 가지 못했습니다 (계정·비밀번호를 확인하세요)`)
         return ''
@@ -260,7 +276,9 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       const mfaToken = String(jsonAt(parseBody(r.body), a.mfaTokenPath ?? '') ?? '')
       if (a.mfaTokenPath?.trim() && !mfaToken) {
         setAuthNote(
-          `1단계 응답에서 중간 값을 찾지 못했습니다 (적어 둔 위치: ${a.mfaTokenPath}). ` + pathHint(r.body),
+          '1단계 응답에서 중간 값을 찾지 못했습니다.\n' +
+            `적어 둔 위치: ${a.mfaTokenPath}\n` +
+            pathHint(r.body),
         )
         return ''
       }
@@ -283,9 +301,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       }
       if ((r.status ?? 0) >= 400) {
         setAuthNote(
-          `2차 인증 HTTP ${r.status} — 인증번호나 요청 본문을 확인하세요 (받은 응답: ${(r.body ?? '')
-            .trim()
-            .slice(0, 200)})`,
+          `2차 인증 HTTP ${r.status} — 인증번호나 요청 본문을 확인하세요.\n` +
+            `받은 응답\n  ${(r.body ?? '').trim().slice(0, 200)}`,
         )
         return ''
       }
@@ -309,10 +326,21 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     if (typeof tok !== 'string' || !tok.trim()) {
       // 경로만 알려주면 "그래서 뭐가 왔는데?" 를 확인하러 또 개발자도구를 열어야 한다.
       // 온 것을 그대로 보여주면 대개 그 자리에서 원인이 보인다.
+      /**
+       * 2차 인증을 꺼 둔 채 **1단계 경로로 로그인한** 경우가 실제로 있었다 — 응답에는
+       * sessionUuid 만 있고 토큰이 없어서 "토큰을 찾지 못했습니다" 로만 끝났고, 그때
+       * 무엇을 해야 하는지는 화면에 없었다. 그 자리에서 짚어 준다.
+       */
+      const looksStage1 =
+        !mfaEnabledOf(a) && (/\/mfa\//i.test(a.loginPath ?? '') || /sessionUuid/i.test(r.body ?? ''))
       setAuthNote(
-        `${mfaEnabledOf(a) ? '2차 인증' : '로그인'} 응답에서 토큰을 찾지 못했습니다 ` +
-          `(적어 둔 위치: ${c.auth.tokenPath || '(비어 있음)'}). ` +
-          pathHint(r.body),
+        `${mfaEnabledOf(a) ? '2차 인증' : '로그인'} 응답에서 토큰을 찾지 못했습니다.\n` +
+          `적어 둔 위치: ${c.auth.tokenPath || '(비어 있음)'}\n` +
+          pathHint(r.body) +
+          (looksStage1
+            ? '\n이 응답은 2차 인증 1단계(세션) 응답처럼 보입니다 — 위 2차 인증을 켜기로 두면\n' +
+              '인증번호까지 확인하고 그 응답에서 토큰을 받습니다.'
+            : ''),
       )
       return ''
     }
@@ -747,7 +775,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
         <div className="mx-3 mb-2 rounded border border-white/10 bg-black/20 px-2 py-1.5 text-[11px] text-gray-400">
           {notice && <div className="text-amber-300/90">{notice}</div>}
           {authNote && (
-            <div>
+            <div className="whitespace-pre-wrap">
               인증: {authNote}
               {tokenStat.count > 0 && (
                 <span className="text-gray-500">
@@ -1129,6 +1157,14 @@ function ConfigView({
   /** 목록 위의 cURL 붙여넣기 상자 (새 대상을 만드는 가장 확실한 길) */
   const [curlNew, setCurlNew] = useState<string | null>(null)
   const [curlErr, setCurlErr] = useState('')
+  /**
+   * 비밀번호를 지금 치고 있는가.
+   *
+   * '암호문처럼 보입니다' 안내는 base64 판정(길이가 4의 배수)에 걸리는데, 타이핑 중에는
+   * **네 글자마다 참·거짓이 뒤집혀** 안내가 켜졌다 꺼졌다 하며 아래 칸들을 밀어 올린다
+   * (사용자 지적). 다 치고 손을 뗀 뒤에만 판단한다 — 그때 한 번 보면 충분한 안내다.
+   */
+  const [pwEditing, setPwEditing] = useState(false)
   useEffect(() => {
     if (loginTest?.ok) setAuthOpen(false)
   }, [loginTest?.ok])
@@ -1196,6 +1232,21 @@ function ConfigView({
    * 끌 때 지우게 하지 않는다. 다시 켤 때 다시 적는 일이 없어야 한다.
    */
   const mfaOn = mfaEnabledOf(cfg.auth)
+  /**
+   * 2차 인증 스위치. **켜면 빈 칸은 기본값으로 채워** 곧바로 쓸 수 있게 한다 —
+   * 켠 뒤 네 칸을 처음부터 적어야 하면 스위치를 둔 뜻이 없다. 이미 적어 둔 값은
+   * 건드리지 않는다(껐다 켜는 것만으로 환경 설정이 날아가면 안 된다).
+   */
+  const toggleMfa = (on: boolean) => {
+    if (!on) return setAuth({ mfaEnabled: false })
+    const a = cfg.auth
+    setAuth({
+      mfaEnabled: true,
+      ...(a.mfaPath?.trim() ? {} : { mfaPath: MFA_DEFAULTS.mfaPath }),
+      ...(a.mfaTokenPath?.trim() ? {} : { mfaTokenPath: MFA_DEFAULTS.mfaTokenPath }),
+      ...(a.mfaBody?.trim() ? {} : { mfaBody: MFA_DEFAULTS.mfaBody }),
+    })
+  }
 
   /** 접힌 줄에 다는 조건 요약 — 무엇을 정상으로 보는지가 목록에서 보여야 한다 */
   const checkSummary = (t: PortalTarget) => {
@@ -1331,7 +1382,7 @@ function ConfigView({
             ) : (
               <>
                 {/* 이 안내는 아직 통과하지 못한 동안에만 값어치가 있다 */}
-                {looksEncrypted(cfg.auth.password ?? '') && !loginTest?.ok && (
+                {looksEncrypted(cfg.auth.password ?? '') && !loginTest?.ok && !pwEditing && (
                   <div className="rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-sky-200">
                     비밀번호 칸의 값이 <b>암호화된 문자열처럼</b> 보입니다 — 개발자도구 Payload 에서 그대로 옮기신
                     것이라면 대개 <b>그대로 다시 보내도 통합니다</b>(AES-CBC 는 복호화에 필요한 값을 암호문 안에
@@ -1369,7 +1420,14 @@ function ConfigView({
                     <div className={labelCls}>
                       비밀번호 <span className="text-gray-600">· OS 키체인에 암호화 저장</span>
                     </div>
-                    <input type="password" className={`${inputCls} w-full`} value={cfg.auth.password ?? ''} onChange={(e) => setAuth({ password: e.target.value })} />
+                    <input
+                      type="password"
+                      className={`${inputCls} w-full`}
+                      value={cfg.auth.password ?? ''}
+                      onFocus={() => setPwEditing(true)}
+                      onBlur={() => setPwEditing(false)}
+                      onChange={(e) => setAuth({ password: e.target.value })}
+                    />
                   </div>
                 </div>
 
@@ -1394,14 +1452,18 @@ function ConfigView({
             )}
 
             {/* 실패는 접지 않는다 — 사유가 곧 다음에 할 일이다 */}
+            {/* 사유가 한 줄로 이어지면 '적어 둔 위치' 와 '응답에 있는 값' 이 한 문단으로
+                뭉쳐 읽히지 않는다 — 문구 쪽에서 넣은 줄바꿈을 그대로 살린다 */}
             {loginTest && !loginTest.ok && (
               <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber-200">
-                <b>로그인 시험 실패</b> — {loginTest.text}
+                <div className="font-medium">로그인 시험 실패</div>
+                <div className="mt-0.5 whitespace-pre-wrap text-amber-200/90">{loginTest.text}</div>
               </div>
             )}
             {loginTest?.ok && authOpen && (
               <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-emerald-200">
-                <b>로그인 시험</b> — {loginTest.text}
+                <div className="font-medium">로그인 시험 통과</div>
+                <div className="mt-0.5 whitespace-pre-wrap text-emerald-200/90">{loginTest.text}</div>
               </div>
             )}
 
@@ -1429,14 +1491,15 @@ function ConfigView({
                       <span className="font-mono text-gray-500">{'{"userId":"{{id}}","password":"{{pw}}","otpCode":"123456"}'}</span>
                       <br />
                       로그인한 뒤 인증번호를 <span className="text-gray-500">다시 묻는</span> 포털이면 아래 2차 인증을
-                      채우세요.
+                      <span className="text-gray-500"> 켜기</span> 로 두세요.
                     </p>
                   </div>
 
                   {/*
                     ── 2차 인증 ───────────────────────────────────────
-                    로그인 뒤 6자리를 다시 묻는 포털용. 경로를 비워 두면 아예 하지 않으므로,
-                    쓰지 않는 사람에게는 칸 네 개가 늘어날 뿐 동작은 그대로다.
+                    로그인 뒤 6자리를 다시 묻는 포털용. **기본은 꺼짐**이라 쓰지 않는 사람에게는
+                    흐린 칸 네 개가 늘어날 뿐 동작은 그대로다. 칸의 값은 미리 채워 두므로
+                    켜기만 누르면 된다 — 켜고 나서 네 칸을 처음부터 적게 하지 않는다.
 
                     **고정 인증번호에만 쓸 수 있다** — 30초마다 바뀌는 진짜 OTP 는 비밀키가
                     있어야 만들 수 있고, 우리는 그것을 받지 않는다. 검증 환경에서 코드를
@@ -1446,14 +1509,16 @@ function ConfigView({
                     <div className="mb-1 flex items-center gap-1.5">
                       <span className="text-[11px] font-medium text-gray-300">2차 인증 (MFA)</span>
                       {/* 경로를 지웠다 적었다 하지 않게 스위치를 둔다 — 환경마다 경로·본문·
-                          중간 값 위치가 고정이라, 끌 때 지우면 켤 때 다시 적어야 했다 */}
+                          중간 값 위치가 고정이라, 끌 때 지우면 켤 때 다시 적어야 했다.
+                          **스위치가 곧 상태다** — 한때 '경로가 있어야 켜진다' 였는데, 경로가
+                          빈 설정에서는 켜기를 눌러도 화면이 그대로여서 버튼이 죽은 줄 알았다. */}
                       {/* 고르지 않은 쪽도 **누를 수 있다는 것이 보여야 한다** — 글자만 흐리게
                           두었더니 버튼인 줄 몰랐다(사용자 지적). 옅은 테두리와 바탕을 준다. */}
                       <span className="flex gap-0.5 rounded border border-white/15 bg-black/40 p-0.5">
                         {([true, false] as const).map((on) => (
                           <button
                             key={String(on)}
-                            onClick={() => setAuth({ mfaEnabled: on })}
+                            onClick={() => toggleMfa(on)}
                             title={on ? '로그인 뒤 인증번호까지 확인합니다' : '로그인 한 번으로 끝냅니다 (아래 값은 그대로 둡니다)'}
                             className={
                               'rounded border px-2 py-0.5 text-[10px] transition ' +
@@ -1470,10 +1535,8 @@ function ConfigView({
                       </span>
                       <span className="text-[10px] text-gray-600">
                         {mfaOn
-                          ? '로그인 뒤 인증번호까지 확인합니다'
-                          : cfg.auth.mfaPath?.trim()
-                            ? '아래 값은 그대로 두고 쓰지 않습니다 — 로그인 한 번으로 끝냅니다'
-                            : '아래 2차 인증 경로를 채워야 켤 수 있습니다'}
+                          ? '로그인 → 인증번호 확인, 두 번 보냅니다'
+                          : '로그인 한 번으로 끝냅니다 — 아래 값은 그대로 둡니다'}
                       </span>
                     </div>
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
@@ -1486,20 +1549,32 @@ function ConfigView({
                         메일이 나갑니다.
                       </span>
                     </p>
+                    {/* 켜 놓고 칸이 빈 것은 눌러 보기 전에는 모른다 — 그 자리에서 짚는다.
+                        (로그인 시험도 같은 문장으로 막지만, 여기서 먼저 보이는 편이 낫다) */}
+                    {mfaOn && (!cfg.auth.mfaPath?.trim() || !cfg.auth.otp?.trim()) && (
+                      <p className="mb-1.5 text-[10px] text-amber-300/80">
+                        켜져 있지만{' '}
+                        {[!cfg.auth.mfaPath?.trim() && '2차 인증 경로', !cfg.auth.otp?.trim() && '인증번호']
+                          .filter(Boolean)
+                          .join(' · ')}{' '}
+                        이(가) 비어 있습니다 — 채워야 로그인이 끝까지 갑니다.
+                      </p>
+                    )}
                     <div className="grid grid-cols-2 gap-2">
-                      <div>
+                      {/* 꺼져 있으면 네 칸 모두 쓰이지 않는다 — 값이 남아 있어도 무시되므로
+                          지우게 하지 않고 '지금은 안 쓴다' 는 것만 눈으로 보이게 한다 */}
+                      <div className={mfaOn ? '' : 'opacity-40'}>
                         <div className={labelCls} title="인증번호를 확인하는 API 경로 (POST)">
                           2차 인증 경로 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                         </div>
                         <input
                           className={`${inputCls} w-full`}
                           placeholder="/v1/bootfactory/api/mfa/issue"
+                          disabled={!mfaOn}
                           value={cfg.auth.mfaPath ?? ''}
                           onChange={(e) => setAuth({ mfaPath: e.target.value })}
                         />
                       </div>
-                      {/* 경로가 비면 아래 세 칸은 쓰이지 않는다 — 값이 남아 있어도 무시되므로
-                          지우게 하지 않고 '지금은 안 쓴다' 는 것만 눈으로 보이게 한다 */}
                       <div className={mfaOn ? '' : 'opacity-40'}>
                         <div className={labelCls} title="고정된 6자리 인증번호">
                           인증번호 <HelpCircle size={9} className="mb-px inline text-gray-600" />

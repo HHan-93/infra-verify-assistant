@@ -479,14 +479,18 @@ export function suggestValueChecks(body: string | undefined, maxDepth = 2): { pa
  * 지금 2차 인증을 쓰는 상태인가 — **판단은 한 곳에서만 한다.**
  *
  * 화면과 로그인 코드가 각자 판단하면 "화면에는 켜짐인데 로그인은 한 번만 보내는" 어긋남이
- * 생긴다. 규칙은 둘이다:
- *   · 스위치가 명시돼 있으면 그대로 따른다
- *   · 없으면(예전 설정) 경로가 채워졌는지로 본다 — 조용히 꺼지지 않게
- * 그리고 어느 쪽이든 **경로가 없으면 켤 수 없다** (보낼 곳이 없다).
+ * 생긴다.
+ *
+ * **경로가 비었는지는 더 이상 보지 않는다.** 처음에는 `경로 && 스위치` 였는데, 경로가 빈
+ * 설정에서 '켜기' 를 눌러도 화면이 그대로여서 버튼이 고장 난 것처럼 보였다(사용자 지적).
+ * 스위치는 누른 대로 켜져야 한다 — 켜 놓고 보낼 곳이 없는 것은 화면에서 따로 짚어 주고,
+ * 켤 때 빈 칸은 MFA_DEFAULTS 로 채워 주므로 실제로 비어 있는 채 켜지는 일은 드물다.
+ *
+ * `undefined` 는 **예전 설정**이다 — 그때는 경로가 채워져 있으면 켠 것으로 본다. 그래야
+ * 이 값을 모르는 채 저장된 설정이 조용히 꺼지지 않는다.
  */
 export function mfaEnabledOf(a: { mfaEnabled?: boolean; mfaPath?: string }): boolean {
-  const path = !!a.mfaPath?.trim()
-  return path && (a.mfaEnabled ?? true)
+  return a.mfaEnabled ?? !!a.mfaPath?.trim()
 }
 
 /**
@@ -664,6 +668,19 @@ let seq = 0
 export const newTargetId = () => `pt${Date.now().toString(36)}${(seq++).toString(36)}`
 
 /**
+ * 2차 인증 칸들의 기본값 (CONTRABASS 기준).
+ *
+ * 기본 설정과 **스위치를 켤 때 빈 칸을 채우는 데** 같이 쓴다 — 두 곳에 따로 적어 두면
+ * 한쪽만 고쳐져 갈라진다. 채우는 것은 **비어 있는 칸뿐**이다: 사람이 적어 둔 값을
+ * 스위치가 덮어쓰면, 껐다 켜는 것만으로 환경 설정이 날아간다.
+ */
+export const MFA_DEFAULTS = {
+  mfaPath: '/v1/bootfactory/api/mfa/issue',
+  mfaTokenPath: 'data.sessionUuid',
+  mfaBody: '{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}',
+} as const
+
+/**
  * 기본값 — CONTRABASS 포털 기준으로 채워 두되 전부 화면에서 고칠 수 있다.
  * 도메인·경로·정상조건 어느 것도 코드에 박아두지 않는다.
  */
@@ -707,10 +724,11 @@ export function defaultPortalConfig(): PortalConfig {
       loginBody: '{"userId":"{{id}}","password":"{{pw}}"}',
       username: '',
       password: '',
-      mfaEnabled: true,
-      mfaPath: '/v1/bootfactory/api/mfa/issue',
-      mfaTokenPath: 'data.sessionUuid',
-      mfaBody: '{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}',
+      // **처음에는 꺼 둔다.** 2차 인증이 없는 환경이 아직 있고, 켜 둔 채로 두면 로그인
+      // 한 번으로 끝나는 포털에서 2단계를 헛되이 더 두드린다. 칸의 값은 채워 두므로
+      // 켜기만 누르면 바로 쓸 수 있다.
+      mfaEnabled: false,
+      ...MFA_DEFAULTS,
       otp: '',
       tokenPath: 'data.accessToken',
       header: 'Authorization',
