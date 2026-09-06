@@ -1447,18 +1447,21 @@ function ConfigView({
                       <span className="text-[11px] font-medium text-gray-300">2차 인증 (MFA)</span>
                       {/* 경로를 지웠다 적었다 하지 않게 스위치를 둔다 — 환경마다 경로·본문·
                           중간 값 위치가 고정이라, 끌 때 지우면 켤 때 다시 적어야 했다 */}
-                      <span className="flex gap-0.5 rounded bg-black/40 p-0.5">
+                      {/* 고르지 않은 쪽도 **누를 수 있다는 것이 보여야 한다** — 글자만 흐리게
+                          두었더니 버튼인 줄 몰랐다(사용자 지적). 옅은 테두리와 바탕을 준다. */}
+                      <span className="flex gap-0.5 rounded border border-white/15 bg-black/40 p-0.5">
                         {([true, false] as const).map((on) => (
                           <button
                             key={String(on)}
                             onClick={() => setAuth({ mfaEnabled: on })}
+                            title={on ? '로그인 뒤 인증번호까지 확인합니다' : '로그인 한 번으로 끝냅니다 (아래 값은 그대로 둡니다)'}
                             className={
-                              'rounded px-2 py-0.5 text-[10px] transition ' +
+                              'rounded border px-2 py-0.5 text-[10px] transition ' +
                               (mfaOn === on
                                 ? on
-                                  ? 'bg-emerald-600/70 text-white'
-                                  : 'bg-white/15 text-gray-200'
-                                : 'text-gray-500 hover:text-gray-300')
+                                  ? 'border-emerald-400/60 bg-emerald-600/70 text-white'
+                                  : 'border-white/30 bg-white/20 text-gray-100'
+                                : 'border-white/10 bg-white/[0.04] text-gray-400 hover:border-white/25 hover:bg-white/10 hover:text-gray-100')
                             }
                           >
                             {on ? '켜기' : '끄기'}

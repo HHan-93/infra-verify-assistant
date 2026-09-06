@@ -397,9 +397,13 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   useEffect(() => {
     if (urlTouched.current) return
     const h = session ? hostOf(session.host || session.name) : ''
+    // 세션 이름이 별칭(예: '게이트웨이')뿐이면 그것으로 주소를 만들 수 없다 —
+    // http://게이트웨이 를 채워 두면 시작하자마자 '전부 실패' 가 되고, 그 원인이 우리가
+    // 채운 값이라는 것을 알기 어렵다. 주소로 쓸 수 있는 글자일 때만 채운다.
+    const usable = /^[A-Za-z0-9._\-:[\]]+$/.test(h)
     // http 를 기본으로 둔다 — 사내 검증 대상은 대개 평문이고, https 로 채워 두면 인증서·
     // 포트 문제로 '전부 실패' 부터 보게 된다. 필요하면 한 글자 고치면 된다.
-    setTargetUrl(h ? `http://${h}` : '')
+    setTargetUrl(h && usable ? `http://${h}` : '')
   }, [session])
 
   /**
@@ -1094,7 +1098,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               `${st.method} ${st.path}` +
               (n.order === 'weighted' && n.steps.length > 1 ? ` (비율 ${st.weight})` : ''),
           )
-        : [cfg.scenario.kind === 'file' ? (cfg.scenario.path ?? '') : ''],
+        : [cfg.scenario.kind === 'file' ? (cfg.scenario.path ?? '') : ''].filter(Boolean),
       scenarioNote: n
         ? (n.order === 'weighted' ? '랜덤 — 비율대로 무작위 선택' : '순차 — 한 사용자가 차례로') +
           (n.waitMaxSec > 0 ? ` · 요청 사이 ${n.waitMinSec}~${n.waitMaxSec}초 대기` : ' · 쉬지 않고 요청')

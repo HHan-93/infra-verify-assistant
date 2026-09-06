@@ -21,7 +21,11 @@ export default function ConfirmDialog({
     // 배경(어두운 영역)을 눌러도 닫지 않는다 — 이 앱의 모든 모달이 같은 규칙이다.
     // 설정 관리 창처럼 불러온 내용·입력하던 값이 있는 창이 손이 스친 클릭 한 번에 닫혀
     // 처음부터 다시 하게 되는 일이 잦았다. 닫는 것은 X · 닫기 · 취소 버튼으로만.
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+    //
+    // **확인 창은 늘 맨 앞이어야 한다(z-[70]).** 이 앱에는 창 위에 뜨는 창이 있다(z-[60]) —
+    // 성능 검증의 회차 창에서 삭제를 누르면 확인 창이 z-50 이라 그 뒤에 깔려, 누른 사람에게는
+    // 아무 일도 안 일어난 것처럼 보였다. 무엇을 지울지 묻는 창이 가려지는 것은 그 자체로 위험하다.
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-6">
       <div
         className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
