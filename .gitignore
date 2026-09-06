@@ -6,3 +6,6 @@ release
 .DS_Store
 npm-debug.log*
 /session-*.log
+# 개발 중 만들어지는 실행 로그 (npm run dev · JMeter)
+dev.log
+jmeter.log
