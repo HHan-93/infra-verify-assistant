@@ -30,6 +30,8 @@ import {
   headersFromCurl,
   normalizeConfig,
   originHeaders,
+  cookieHeaderFrom,
+  fillTemplate,
   parseBody,
   parseCurl,
   pathFromUrl,
@@ -210,7 +212,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     }
     const body = fillLoginBody(a.loginBody ?? '', a.username, a.password)
 
-    const r = await window.electronAPI.portalRequest({
+    let r = await window.electronAPI.portalRequest({
       url,
       method,
       headers,
@@ -221,6 +223,58 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     if (!r.ok) {
       setAuthNote(`${label} 요청 실패 — ${r.error ?? '알 수 없음'}`)
       return ''
+    }
+
+    /**
+     * ── 2차 인증 ──────────────────────────────────────────
+     *
+     * 로그인 뒤 인증번호를 다시 묻는 포털이 있다. 그런 곳의 1단계 응답에는 **아직 진짜
+     * 토큰이 없다** — 중간 토큰이나 세션 쿠키만 있고, 인증번호를 확인해야 토큰을 준다.
+     * 그래서 여기서 한 번 더 보내고, 그 응답을 아래 토큰 추출로 넘긴다.
+     *
+     * 둘 다 물려준다 — 중간 토큰을 본문으로 받는 포털도 있고 쿠키로만 잇는 포털도 있어서,
+     * 어느 쪽인지 사람이 알아내게 하기보다 둘 다 실어 보내는 편이 실패가 적다.
+     *
+     * 1단계가 400/401 이면 여기까지 오지 않는다(아래 상태 검사가 먼저 걸린다).
+     */
+    if (a.mfaPath?.trim()) {
+      if ((r.status ?? 0) >= 400) {
+        setAuthNote(`로그인 HTTP ${r.status} — 2차 인증까지 가지 못했습니다 (계정·비밀번호를 확인하세요)`)
+        return ''
+      }
+      const mfaToken = String(jsonAt(parseBody(r.body), a.mfaTokenPath ?? '') ?? '')
+      if (a.mfaTokenPath?.trim() && !mfaToken) {
+        const peek = (r.body ?? '').trim().slice(0, 200)
+        setAuthNote(
+          `1단계 응답에서 중간 토큰을 찾지 못했습니다 (경로: ${a.mfaTokenPath}) — 받은 응답: ${peek}`,
+        )
+        return ''
+      }
+      const cookie = cookieHeaderFrom(r.setCookies)
+      r = await window.electronAPI.portalRequest({
+        url: urlOf(c, a.mfaPath),
+        method: 'POST',
+        headers: { ...headers, ...(cookie ? { Cookie: cookie } : {}) },
+        body: fillTemplate(a.mfaBody ?? '', {
+          id: a.username ?? '',
+          otp: a.otp ?? '',
+          mfaToken,
+        }),
+        timeoutMs: c.timeoutMs,
+        insecure: c.insecureTLS,
+      })
+      if (!r.ok) {
+        setAuthNote(`2차 인증 요청 실패 — ${r.error ?? '알 수 없음'}`)
+        return ''
+      }
+      if ((r.status ?? 0) >= 400) {
+        setAuthNote(
+          `2차 인증 HTTP ${r.status} — 인증번호나 요청 본문을 확인하세요 (받은 응답: ${(r.body ?? '')
+            .trim()
+            .slice(0, 200)})`,
+        )
+        return ''
+      }
     }
     if ((r.status ?? 0) >= 400) {
       // 404/405 는 '서비스가 안 떴다' 가 아니라 '주소가 틀렸다' 다. 뭉뚱그리면 엉뚱한 데를 뒤지게 된다.
@@ -248,7 +302,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       )
       return ''
     }
-    setAuthNote(`${label} 성공 — 토큰 갱신 ${fmtClock(Date.now())}`)
+    setAuthNote(`${label}${a.mfaPath?.trim() ? '·2차 인증' : ''} 성공 — 토큰 갱신 ${fmtClock(Date.now())}`)
     return tok.trim()
   }
 
@@ -1335,9 +1389,96 @@ function ConfigView({
                     <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
                       <span className="text-gray-500">{'{{id}}'}</span> ·{' '}
                       <span className="text-gray-500">{'{{pw}}'}</span> 만 치환되고 나머지는 적은 그대로 나갑니다.
-                      MFA 를 쓰는 포털이면 인증번호 칸을 그대로 넣으세요 —{' '}
+                      인증번호를 <span className="text-gray-500">한 번에 같이 보내는</span> 포털이면 여기에 칸을 하나
+                      더 적으면 됩니다 —{' '}
                       <span className="font-mono text-gray-500">{'{"userId":"{{id}}","password":"{{pw}}","otpCode":"123456"}'}</span>
+                      <br />
+                      로그인한 뒤 인증번호를 <span className="text-gray-500">다시 묻는</span> 포털이면 아래 2차 인증을
+                      채우세요.
                     </p>
+                  </div>
+
+                  {/*
+                    ── 2차 인증 ───────────────────────────────────────
+                    로그인 뒤 6자리를 다시 묻는 포털용. 경로를 비워 두면 아예 하지 않으므로,
+                    쓰지 않는 사람에게는 칸 네 개가 늘어날 뿐 동작은 그대로다.
+
+                    **고정 인증번호에만 쓸 수 있다** — 30초마다 바뀌는 진짜 OTP 는 비밀키가
+                    있어야 만들 수 있고, 우리는 그것을 받지 않는다. 검증 환경에서 코드를
+                    고정해 둔 경우를 위한 자리라는 것을 화면에도 적어 둔다.
+                  */}
+                  <div className="col-span-2 rounded border border-white/10 bg-black/20 p-2">
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-gray-300">2차 인증 (MFA)</span>
+                      <span className="text-[10px] text-gray-600">
+                        {cfg.auth.mfaPath?.trim() ? '켜짐' : '경로를 비워 두면 하지 않습니다'}
+                      </span>
+                    </div>
+                    <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
+                      로그인 → 인증번호 확인 → 그때 토큰을 주는 포털용입니다. 1단계 응답의{' '}
+                      <span className="text-gray-500">중간 토큰과 세션 쿠키를 둘 다</span> 2단계로 물려줍니다.
+                      <br />
+                      <span className="text-amber-300/70">
+                        번호가 30초마다 바뀌는 진짜 OTP 에는 쓸 수 없습니다 — 검증 환경에서 고정해 둔 번호만
+                        됩니다.
+                      </span>
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <div className={labelCls} title="인증번호를 확인하는 API 경로 (POST)">
+                          2차 인증 경로 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                        </div>
+                        <input
+                          className={`${inputCls} w-full`}
+                          placeholder="/v1/.../token/mfa"
+                          value={cfg.auth.mfaPath ?? ''}
+                          onChange={(e) => setAuth({ mfaPath: e.target.value })}
+                        />
+                      </div>
+                      <div>
+                        <div className={labelCls} title="고정된 6자리 인증번호">
+                          인증번호 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                        </div>
+                        <input
+                          className={`${inputCls} w-full font-mono`}
+                          placeholder="123456"
+                          value={cfg.auth.otp ?? ''}
+                          onChange={(e) => setAuth({ otp: e.target.value })}
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <div
+                          className={labelCls}
+                          title="1단계 응답에서 중간 토큰을 꺼낼 위치. 쿠키로만 잇는 포털이면 비워 두세요"
+                        >
+                          1단계 중간 토큰 위치 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                        </div>
+                        <input
+                          className={`${inputCls} w-full font-mono`}
+                          placeholder="data.mfaToken (쿠키로만 이어지면 비워 두세요)"
+                          value={cfg.auth.mfaTokenPath ?? ''}
+                          onChange={(e) => setAuth({ mfaTokenPath: e.target.value })}
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <div className={labelCls} title="{{otp}} {{mfaToken}} {{id}} 가 치환됩니다">
+                          2차 인증 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                        </div>
+                        <input
+                          className={`${inputCls} w-full font-mono`}
+                          placeholder={'{"mfaToken":"{{mfaToken}}","otpCode":"{{otp}}"}'}
+                          value={cfg.auth.mfaBody ?? ''}
+                          onChange={(e) => setAuth({ mfaBody: e.target.value })}
+                        />
+                        <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
+                          <span className="text-gray-500">{'{{otp}}'}</span> ·{' '}
+                          <span className="text-gray-500">{'{{mfaToken}}'}</span> ·{' '}
+                          <span className="text-gray-500">{'{{id}}'}</span> 가 치환됩니다. 토큰은 위{' '}
+                          <span className="text-gray-500">토큰 위치</span> 로 2단계 응답에서 꺼냅니다 — 1단계가
+                          아니라 <span className="text-gray-500">2단계</span> 응답 기준입니다.
+                        </p>
+                      </div>
+                    </div>
                   </div>
                   <div>
                     <div className={labelCls}>토큰 헤더 이름</div>

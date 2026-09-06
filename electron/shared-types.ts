@@ -681,6 +681,27 @@ export interface PortalAuth {
   /** 저장 시 safeStorage 로 암호화된다 (평문으로 파일에 남지 않는다) */
   password?: string
 
+  /**
+   * ── 2차 인증(MFA) ────────────────────────────────────────
+   *
+   * 로그인 한 번으로 끝나지 않고 **인증번호 6자리를 다시 묻는** 포털이 있다. 그런 곳은
+   * 요청이 두 번이다: 로그인 → (중간 토큰/세션) → 인증번호 확인 → 그때 진짜 토큰.
+   *
+   * 인증번호가 본문에 같이 실려 한 번에 끝나는 포털이라면 여기를 비워 두고
+   * `loginBody` 에 칸을 하나 더 적으면 된다 — 본문은 적은 그대로 나간다.
+   *
+   * **고정 인증번호에만 쓸 수 있다.** 30초마다 바뀌는 진짜 OTP 는 우리가 만들어 낼 수
+   * 없으므로(비밀키가 있어야 한다), 검증 환경에서 코드를 고정해 둔 경우만 해당한다.
+   * 자리를 비워 두면 2차 인증을 하지 않는다.
+   */
+  mfaPath?: string
+  /** 1단계 응답에서 중간 토큰을 꺼낼 위치. 쿠키로만 이어지는 포털이면 비워 둔다 */
+  mfaTokenPath?: string
+  /** 2단계 요청 본문. {{otp}} {{mfaToken}} {{id}} 가 치환된다 */
+  mfaBody?: string
+  /** 고정 인증번호 (예: 123456) */
+  otp?: string
+
   /** 응답에서 access token 을 꺼낼 위치. 예: "accessToken", "data.accessToken" */
   tokenPath?: string
   /** 토큰을 실을 헤더 이름과 형식 */
@@ -729,6 +750,14 @@ export interface PortalHttpResult {
   status?: number
   /** 소문자 키로 정규화된 응답 헤더 */
   headers?: Record<string, string>
+  /**
+   * Set-Cookie 를 **쪼개지 않은 원본 그대로**.
+   *
+   * `headers['set-cookie']` 는 여러 줄을 ', ' 로 이어 붙인 값이라 다시 가를 수 없다 —
+   * 쿠키 속성에 쉼표가 들어가기 때문이다(`Expires=Wed, 21 Oct …`). 2차 인증처럼 1단계
+   * 세션을 2단계로 물려줘야 하는 곳에서는 원본이 필요하다.
+   */
+  setCookies?: string[]
   body?: string
   /** 요청 시작 → 본문 수신 완료까지 */
   latencyMs?: number

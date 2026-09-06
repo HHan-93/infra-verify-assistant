@@ -341,8 +341,47 @@ export function headersFor(cfg: PortalConfig, t: PortalTarget, token: string): R
 
 /** 로그인 본문 템플릿 채우기 — 값은 JSON 문자열로 안전하게 넣는다 */
 export function fillLoginBody(tpl: string, id: string, pw: string): string {
-  const esc = (s: string) => JSON.stringify(s).slice(1, -1)
-  return (tpl ?? '').replace(/\{\{\s*id\s*\}\}/g, esc(id)).replace(/\{\{\s*pw\s*\}\}/g, esc(pw))
+  return fillTemplate(tpl, { id, pw })
+}
+
+/**
+ * 본문 템플릿의 `{{이름}}` 을 값으로 바꾼다.
+ *
+ * 값은 **JSON 문자열 안에 들어갈 수 있게** 이스케이프한다 — 비밀번호에 따옴표나 역슬래시가
+ * 들어 있으면 그대로 넣는 순간 본문이 JSON 이 아니게 된다(그러면 포털은 400 을 주고, 화면에는
+ * "계정이 거부되었습니다" 로 보여 엉뚱한 데를 뒤지게 된다).
+ *
+ * 이름을 모르는 자리표시자는 **그대로 둔다.** 지우면 `{"otp":""}` 같은 그럴듯한 본문이
+ * 만들어져 왜 거부되는지 알 수 없다 — 남아 있으면 화면에서 바로 눈에 띈다.
+ */
+export function fillTemplate(tpl: string, vars: Record<string, string | undefined>): string {
+  const esc = (v: string) => JSON.stringify(v).slice(1, -1)
+  return (tpl ?? '').replace(/\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g, (whole, key: string) => {
+    const v = vars[key]
+    return v === undefined ? whole : esc(v)
+  })
+}
+
+/**
+ * 1단계 응답의 Set-Cookie 를 2단계 요청에 실을 `Cookie` 헤더로 바꾼다.
+ *
+ * 2차 인증은 중간 토큰을 본문으로 주는 포털도 있고 **세션 쿠키로만 잇는 포털도** 있다.
+ * 후자는 쿠키를 안 물려주면 2단계에서 "세션이 없습니다" 로 떨어진다. 속성(Path·Expires·
+ * HttpOnly…)은 버리고 `이름=값` 만 남긴다 — 우리가 브라우저 노릇을 할 필요는 없다.
+ */
+export function cookieHeaderFrom(setCookies: string[] | undefined): string {
+  const pairs: string[] = []
+  const seen = new Set<string>()
+  for (const line of setCookies ?? []) {
+    const first = String(line).split(';')[0].trim()
+    const eq = first.indexOf('=')
+    if (eq <= 0) continue
+    const name = first.slice(0, eq).trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    pairs.push(first)
+  }
+  return pairs.join('; ')
 }
 
 /**

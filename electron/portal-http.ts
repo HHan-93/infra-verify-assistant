@@ -72,10 +72,13 @@ export function portalRequest(opts: {
               headers[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v ?? '')
             }
             const up = parseInt(headers['x-envoy-upstream-service-time'] ?? '', 10)
+            // 이어 붙이기 전의 Set-Cookie 도 같이 준다 — 이어 붙이면 다시 못 가른다
+            const sc = res.headers['set-cookie']
             done({
               ok: true,
               status: res.statusCode,
               headers,
+              setCookies: Array.isArray(sc) ? sc : sc ? [String(sc)] : undefined,
               body: Buffer.concat(chunks).toString('utf-8'),
               latencyMs: Date.now() - started,
               upstreamMs: Number.isNaN(up) ? undefined : up,
