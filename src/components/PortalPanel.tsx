@@ -32,6 +32,7 @@ import {
   originHeaders,
   cookieHeaderFrom,
   fillTemplate,
+  mfaEnabledOf,
   suggestStringPaths,
   parseBody,
   parseCurl,
@@ -251,7 +252,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
      *
      * 1단계가 400/401 이면 여기까지 오지 않는다(아래 상태 검사가 먼저 걸린다).
      */
-    if (a.mfaPath?.trim()) {
+    if (mfaEnabledOf(a)) {
       if ((r.status ?? 0) >= 400) {
         setAuthNote(`로그인 HTTP ${r.status} — 2차 인증까지 가지 못했습니다 (계정·비밀번호를 확인하세요)`)
         return ''
@@ -265,7 +266,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       }
       const cookie = cookieHeaderFrom(r.setCookies)
       r = await window.electronAPI.portalRequest({
-        url: urlOf(c, a.mfaPath),
+        url: urlOf(c, a.mfaPath ?? ''),
         method: 'POST',
         headers: { ...headers, ...(cookie ? { Cookie: cookie } : {}) },
         body: fillTemplate(a.mfaBody ?? '', {
@@ -309,13 +310,13 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       // 경로만 알려주면 "그래서 뭐가 왔는데?" 를 확인하러 또 개발자도구를 열어야 한다.
       // 온 것을 그대로 보여주면 대개 그 자리에서 원인이 보인다.
       setAuthNote(
-        `${a.mfaPath?.trim() ? '2차 인증' : '로그인'} 응답에서 토큰을 찾지 못했습니다 ` +
+        `${mfaEnabledOf(a) ? '2차 인증' : '로그인'} 응답에서 토큰을 찾지 못했습니다 ` +
           `(적어 둔 위치: ${c.auth.tokenPath || '(비어 있음)'}). ` +
           pathHint(r.body),
       )
       return ''
     }
-    setAuthNote(`${label}${a.mfaPath?.trim() ? '·2차 인증' : ''} 성공 — 토큰 갱신 ${fmtClock(Date.now())}`)
+    setAuthNote(`${label}${mfaEnabledOf(a) ? '·2차 인증' : ''} 성공 — 토큰 갱신 ${fmtClock(Date.now())}`)
     return tok.trim()
   }
 
@@ -1194,7 +1195,7 @@ function ConfigView({
    * 보낸다. 나머지 칸(인증번호·중간 값 위치·2단계 본문)은 남아 있어도 쓰이지 않으므로
    * 끌 때 지우게 하지 않는다. 다시 켤 때 다시 적는 일이 없어야 한다.
    */
-  const mfaOn = !!cfg.auth.mfaPath?.trim()
+  const mfaOn = mfaEnabledOf(cfg.auth)
 
   /** 접힌 줄에 다는 조건 요약 — 무엇을 정상으로 보는지가 목록에서 보여야 한다 */
   const checkSummary = (t: PortalTarget) => {
@@ -1348,14 +1349,14 @@ function ConfigView({
                     <div
                       className={labelCls}
                       title={
-                        cfg.auth.mfaPath?.trim()
+                        mfaOn
                           ? '2차 인증(2단계) 응답 JSON 안에서 토큰이 있는 자리'
                           : '로그인 응답 JSON 안에서 토큰이 있는 자리. 예: data.accessToken'
                       }
                     >
                       토큰 위치 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                       <span className="ml-1 font-normal text-gray-600">
-                        {cfg.auth.mfaPath?.trim() ? '2단계 응답 기준' : '로그인 응답 기준'}
+                        {mfaOn ? '2단계 응답 기준' : '로그인 응답 기준'}
                       </span>
                     </div>
                     <input className={`${inputCls} w-full`} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
@@ -1444,18 +1445,32 @@ function ConfigView({
                   <div className="col-span-2 rounded border border-white/10 bg-black/20 p-2">
                     <div className="mb-1 flex items-center gap-1.5">
                       <span className="text-[11px] font-medium text-gray-300">2차 인증 (MFA)</span>
-                      <span
-                        className={
-                          'rounded px-1.5 py-0.5 text-[10px] ' +
-                          (mfaOn ? 'bg-emerald-500/20 text-emerald-200' : 'bg-white/10 text-gray-400')
-                        }
-                      >
-                        {mfaOn ? '켜짐' : '꺼짐'}
+                      {/* 경로를 지웠다 적었다 하지 않게 스위치를 둔다 — 환경마다 경로·본문·
+                          중간 값 위치가 고정이라, 끌 때 지우면 켤 때 다시 적어야 했다 */}
+                      <span className="flex gap-0.5 rounded bg-black/40 p-0.5">
+                        {([true, false] as const).map((on) => (
+                          <button
+                            key={String(on)}
+                            onClick={() => setAuth({ mfaEnabled: on })}
+                            className={
+                              'rounded px-2 py-0.5 text-[10px] transition ' +
+                              (mfaOn === on
+                                ? on
+                                  ? 'bg-emerald-600/70 text-white'
+                                  : 'bg-white/15 text-gray-200'
+                                : 'text-gray-500 hover:text-gray-300')
+                            }
+                          >
+                            {on ? '켜기' : '끄기'}
+                          </button>
+                        ))}
                       </span>
                       <span className="text-[10px] text-gray-600">
                         {mfaOn
-                          ? '아래 경로를 지우면 꺼집니다 (나머지 칸은 남겨 둬도 됩니다)'
-                          : '아래 2차 인증 경로를 채우면 켜집니다'}
+                          ? '로그인 뒤 인증번호까지 확인합니다'
+                          : cfg.auth.mfaPath?.trim()
+                            ? '아래 값은 그대로 두고 쓰지 않습니다 — 로그인 한 번으로 끝냅니다'
+                            : '아래 2차 인증 경로를 채워야 켤 수 있습니다'}
                       </span>
                     </div>
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">

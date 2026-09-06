@@ -476,6 +476,20 @@ export function suggestValueChecks(body: string | undefined, maxDepth = 2): { pa
 }
 
 /**
+ * 지금 2차 인증을 쓰는 상태인가 — **판단은 한 곳에서만 한다.**
+ *
+ * 화면과 로그인 코드가 각자 판단하면 "화면에는 켜짐인데 로그인은 한 번만 보내는" 어긋남이
+ * 생긴다. 규칙은 둘이다:
+ *   · 스위치가 명시돼 있으면 그대로 따른다
+ *   · 없으면(예전 설정) 경로가 채워졌는지로 본다 — 조용히 꺼지지 않게
+ * 그리고 어느 쪽이든 **경로가 없으면 켤 수 없다** (보낼 곳이 없다).
+ */
+export function mfaEnabledOf(a: { mfaEnabled?: boolean; mfaPath?: string }): boolean {
+  const path = !!a.mfaPath?.trim()
+  return path && (a.mfaEnabled ?? true)
+}
+
+/**
  * 응답 JSON 안의 **문자열 값들이 어느 경로에 있는지** 훑어 준다.
  *
  * 토큰 위치를 잘못 적었을 때 "찾지 못했습니다" 로 끝내면, 사람이 개발자도구를 다시 열어
@@ -693,6 +707,7 @@ export function defaultPortalConfig(): PortalConfig {
       loginBody: '{"userId":"{{id}}","password":"{{pw}}"}',
       username: '',
       password: '',
+      mfaEnabled: true,
       mfaPath: '/v1/bootfactory/api/mfa/issue',
       mfaTokenPath: 'data.sessionUuid',
       mfaBody: '{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}',
