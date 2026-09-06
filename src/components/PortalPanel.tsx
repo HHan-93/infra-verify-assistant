@@ -1187,6 +1187,15 @@ function ConfigView({
     setCurlErr('')
   }
 
+  /**
+   * 2차 인증을 쓰는 상태인가.
+   *
+   * **경로 한 칸이 스위치다** — 채우면 로그인 뒤 한 번 더 보내고, 비우면 예전처럼 한 번만
+   * 보낸다. 나머지 칸(인증번호·중간 값 위치·2단계 본문)은 남아 있어도 쓰이지 않으므로
+   * 끌 때 지우게 하지 않는다. 다시 켤 때 다시 적는 일이 없어야 한다.
+   */
+  const mfaOn = !!cfg.auth.mfaPath?.trim()
+
   /** 접힌 줄에 다는 조건 요약 — 무엇을 정상으로 보는지가 목록에서 보여야 한다 */
   const checkSummary = (t: PortalTarget) => {
     const cs = t.checks ?? []
@@ -1334,8 +1343,20 @@ function ConfigView({
                     <input className={`${inputCls} w-full`} value={cfg.auth.loginPath ?? ''} onChange={(e) => setAuth({ loginPath: e.target.value })} />
                   </div>
                   <div>
-                    <div className={labelCls} title="응답 JSON 안에서 토큰이 있는 자리. 예: data.accessToken">
+                    {/* 같은 칸인데 **어느 응답을 가리키는지가 2차 인증 여부로 바뀐다** —
+                        그 사실을 적어 두지 않으면 1단계 응답을 보고 경로를 적게 된다 */}
+                    <div
+                      className={labelCls}
+                      title={
+                        cfg.auth.mfaPath?.trim()
+                          ? '2차 인증(2단계) 응답 JSON 안에서 토큰이 있는 자리'
+                          : '로그인 응답 JSON 안에서 토큰이 있는 자리. 예: data.accessToken'
+                      }
+                    >
                       토큰 위치 <HelpCircle size={9} className="mb-px inline text-gray-600" />
+                      <span className="ml-1 font-normal text-gray-600">
+                        {cfg.auth.mfaPath?.trim() ? '2단계 응답 기준' : '로그인 응답 기준'}
+                      </span>
                     </div>
                     <input className={`${inputCls} w-full`} value={cfg.auth.tokenPath ?? ''} placeholder="accessToken 또는 data.token" onChange={(e) => setAuth({ tokenPath: e.target.value })} />
                   </div>
@@ -1423,8 +1444,18 @@ function ConfigView({
                   <div className="col-span-2 rounded border border-white/10 bg-black/20 p-2">
                     <div className="mb-1 flex items-center gap-1.5">
                       <span className="text-[11px] font-medium text-gray-300">2차 인증 (MFA)</span>
+                      <span
+                        className={
+                          'rounded px-1.5 py-0.5 text-[10px] ' +
+                          (mfaOn ? 'bg-emerald-500/20 text-emerald-200' : 'bg-white/10 text-gray-400')
+                        }
+                      >
+                        {mfaOn ? '켜짐' : '꺼짐'}
+                      </span>
                       <span className="text-[10px] text-gray-600">
-                        {cfg.auth.mfaPath?.trim() ? '켜짐' : '경로를 비워 두면 하지 않습니다'}
+                        {mfaOn
+                          ? '아래 경로를 지우면 꺼집니다 (나머지 칸은 남겨 둬도 됩니다)'
+                          : '아래 2차 인증 경로를 채우면 켜집니다'}
                       </span>
                     </div>
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
@@ -1449,18 +1480,21 @@ function ConfigView({
                           onChange={(e) => setAuth({ mfaPath: e.target.value })}
                         />
                       </div>
-                      <div>
+                      {/* 경로가 비면 아래 세 칸은 쓰이지 않는다 — 값이 남아 있어도 무시되므로
+                          지우게 하지 않고 '지금은 안 쓴다' 는 것만 눈으로 보이게 한다 */}
+                      <div className={mfaOn ? '' : 'opacity-40'}>
                         <div className={labelCls} title="고정된 6자리 인증번호">
                           인증번호 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                         </div>
                         <input
                           className={`${inputCls} w-full font-mono`}
                           placeholder="123456"
+                          disabled={!mfaOn}
                           value={cfg.auth.otp ?? ''}
                           onChange={(e) => setAuth({ otp: e.target.value })}
                         />
                       </div>
-                      <div className="col-span-2">
+                      <div className={'col-span-2 ' + (mfaOn ? '' : 'opacity-40')}>
                         <div
                           className={labelCls}
                           title="1단계 응답에서 중간 토큰을 꺼낼 위치. 쿠키로만 잇는 포털이면 비워 두세요"
@@ -1470,6 +1504,7 @@ function ConfigView({
                         <input
                           className={`${inputCls} w-full font-mono`}
                           placeholder="data.sessionUuid (쿠키로만 이어지면 비워 두세요)"
+                          disabled={!mfaOn}
                           value={cfg.auth.mfaTokenPath ?? ''}
                           onChange={(e) => setAuth({ mfaTokenPath: e.target.value })}
                         />
@@ -1480,13 +1515,14 @@ function ConfigView({
                           줍니다.
                         </p>
                       </div>
-                      <div className="col-span-2">
+                      <div className={'col-span-2 ' + (mfaOn ? '' : 'opacity-40')}>
                         <div className={labelCls} title="{{otp}} {{mfaToken}} {{id}} 가 치환됩니다">
                           2차 인증 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                         </div>
                         <input
                           className={`${inputCls} w-full font-mono`}
                           placeholder={'{"otpCode":"{{otp}}","otpSessionUuid":"{{mfaToken}}"}'}
+                          disabled={!mfaOn}
                           value={cfg.auth.mfaBody ?? ''}
                           onChange={(e) => setAuth({ mfaBody: e.target.value })}
                         />
