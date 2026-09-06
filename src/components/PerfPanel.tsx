@@ -1252,6 +1252,12 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
   const inputCls =
     'rounded border border-white/10 bg-panel-light px-2 py-1 text-[11.5px] text-gray-100 outline-none focus:border-blue-500/60'
+  /**
+   * 시나리오 단계 줄의 **단추 묶음 폭.** 머리글의 빈 칸과 줄의 단추 칸이 같은 값을 써야
+   * '순서' 글자가 숫자 위에 온다. 위·아래 화살표는 단계가 둘 이상일 때만 나오므로 폭도
+   * 그때만 넓다. (펼치기 16 + 화살표 16 + 지우기 16 + 사이 4·4)
+   */
+  const stepActionW = order === 'sequential' && steps.length > 1 ? 'w-14' : 'w-9'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
@@ -1737,11 +1743,17 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     아래에 요청할 <span className="text-gray-500">경로만 적으면</span> 나머지는 앱이 만듭니다.
                     무엇이 실행될지는 <span className="text-gray-500">미리보기</span> 로 먼저 볼 수 있습니다.
                   </p>
-                  <div className="mb-1 grid grid-cols-[62px_1fr_36px_auto] items-center gap-1 px-1 text-[9.5px] text-gray-500">
-                    <span>방식</span>
-                    <span>경로</span>
-                    <span className="text-center">{order === 'weighted' ? '비율' : '순서'}</span>
-                    <span />
+                  {/*
+                    머리글을 아래 줄과 **같은 flex 구조**로 만든다. 전에는 grid 4칸으로 그렸는데
+                    실제 줄에는 단추가 셋 더 있어서 '순서' 글자가 숫자 위가 아니라 단추 위에
+                    얹혔고, 그래서 그 칸이 비좁아 보였다(사용자 지적). 폭을 상수로 묶어 둘이
+                    같은 자리를 쓰게 한다.
+                  */}
+                  <div className="mb-1 flex items-center gap-1 px-1 text-[9.5px] text-gray-500">
+                    <span className="w-[66px] shrink-0">방식</span>
+                    <span className="min-w-0 flex-1">경로</span>
+                    <span className="w-10 shrink-0 text-center">{order === 'weighted' ? '비율' : '순서'}</span>
+                    <span className={stepActionW + ' shrink-0'} />
                   </div>
                   <div className="space-y-1">
                     {steps.map((st, i) => (
@@ -1751,7 +1763,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                             value={st.method}
                             onChange={(e) => updateStep(i, { method: e.target.value as PerfStep['method'] })}
                             disabled={!!running}
-                            className={inputCls + ' shrink-0 !px-1 disabled:opacity-50'}
+                            className={inputCls + ' w-[66px] shrink-0 !px-1 disabled:opacity-50'}
                           >
                             {(['GET', 'POST', 'PUT', 'DELETE'] as const).map((m) => (
                               <option key={m} value={m}>
@@ -1772,46 +1784,51 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               onChange={(e) => updateStep(i, { weight: Number(e.target.value) || 1 })}
                               disabled={!!running}
                               title="상대 비율 — 10 이면 비율 1 인 단계보다 10배 자주 실행됩니다"
-                              className={inputCls + ' w-9 shrink-0 text-center disabled:opacity-50'}
+                              className={inputCls + ' w-10 shrink-0 text-center disabled:opacity-50'}
                             />
                           ) : (
-                            <span className="w-9 shrink-0 text-center text-[10px] text-gray-600">{i + 1}번</span>
+                            <span className="w-10 shrink-0 text-center text-[10px] text-gray-600">{i + 1}번</span>
                           )}
-                          <button
-                            onClick={() => setOpenStep(openStep === i ? null : i)}
-                            title="이름·본문·헤더"
-                            className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
-                          >
-                            {openStep === i ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                          </button>
-                          {order === 'sequential' && (
-                            <span className="flex shrink-0 flex-col">
-                              <button
-                                onClick={() => moveStep(i, -1)}
-                                disabled={!!running || i === 0}
-                                className="text-gray-600 hover:text-gray-300 disabled:opacity-30"
-                                title="위로"
-                              >
-                                <ChevronUp size={10} />
-                              </button>
-                              <button
-                                onClick={() => moveStep(i, 1)}
-                                disabled={!!running || i === steps.length - 1}
-                                className="text-gray-600 hover:text-gray-300 disabled:opacity-30"
-                                title="아래로"
-                              >
-                                <ChevronDown size={10} />
-                              </button>
-                            </span>
-                          )}
-                          <button
-                            onClick={() => removeStep(i)}
-                            disabled={!!running || steps.length <= 1}
-                            title="이 단계 삭제"
-                            className="shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 disabled:opacity-30"
-                          >
-                            <Trash2 size={11} />
-                          </button>
+                          {/* 단추는 한 묶음으로 — 값 칸(순서·비율)과 붙어 있으면 숫자까지 단추처럼 보인다 */}
+                          <span className={'flex shrink-0 items-center justify-end gap-1 ' + stepActionW}>
+                            <button
+                              onClick={() => setOpenStep(openStep === i ? null : i)}
+                              title="이름·본문·헤더"
+                              className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                            >
+                              {openStep === i ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            </button>
+                            {/* 단계가 하나뿐이면 올리고 내릴 곳이 없다 — 눌리지도 않는 화살표로
+                                칸만 좁히지 않는다. 둘 이상일 때만 낸다. */}
+                            {order === 'sequential' && steps.length > 1 && (
+                              <span className="flex w-4 shrink-0 flex-col items-center">
+                                <button
+                                  onClick={() => moveStep(i, -1)}
+                                  disabled={!!running || i === 0}
+                                  className="rounded text-gray-600 hover:bg-white/10 hover:text-gray-300 disabled:opacity-30"
+                                  title="위로"
+                                >
+                                  <ChevronUp size={11} />
+                                </button>
+                                <button
+                                  onClick={() => moveStep(i, 1)}
+                                  disabled={!!running || i === steps.length - 1}
+                                  className="rounded text-gray-600 hover:bg-white/10 hover:text-gray-300 disabled:opacity-30"
+                                  title="아래로"
+                                >
+                                  <ChevronDown size={11} />
+                                </button>
+                              </span>
+                            )}
+                            <button
+                              onClick={() => removeStep(i)}
+                              disabled={!!running || steps.length <= 1}
+                              title="이 단계 삭제"
+                              className="shrink-0 rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-red-300 disabled:opacity-30"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </span>
                         </div>
                         {openStep === i && (
                           <div className="space-y-1 border-t border-white/10 p-1.5">
