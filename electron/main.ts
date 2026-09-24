@@ -68,6 +68,7 @@ import {
   type PortalHttpResult,
   type ScenarioRunSummary,
   type ScenarioRunDetail,
+  type ScenarioRunRetention,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -3132,8 +3133,18 @@ interface RunnerShell {
  * 사용자는 명령이 틀린 줄 알고 엉뚱한 데를 뒤지게 된다.
  */
 const SUDO_PROMPT_RE = /\[sudo\] password for [^\n:]*:\s*$|^password( for [^\n:]*)?:\s*$/im
+/**
+ * 아무도 답하지 않으면 멈춰 버리는 프롬프트들.
+ *
+ * 뒤의 셋은 실제로 검증을 세운 것들이라 나중에 채웠다 —
+ *   `(y,N)`             mkfs "…contains a ext4 file system. Proceed anyway?"
+ *   `(Y/I/N/O/D/Z)`     dpkg 설정 파일 충돌
+ *   `[default=N] ?`     그 밖의 dpkg/debconf 질문
+ * 여기에 없으면 제한 시간(기본 2분)까지 통째로 기다리므로, 사람은 "명령이 잘못됐나" 하고
+ * 엉뚱한 데를 뒤지게 된다. 걸리면 2.5초 뒤 무엇이 물었는지 적고 끝낸다.
+ */
 const ANY_PROMPT_RE =
-  /(\[sudo\] password for [^\n:]*:|password( for [^\n:]*)?:|passphrase[^\n:]*:|\[y\/n\]|\[Y\/n\]|\(yes\/no[^)]*\)|Do you want to continue\?|Are you sure[^\n]*\?)\s*$/i
+  /(\[sudo\] password for [^\n:]*:|password( for [^\n:]*)?:|passphrase[^\n:]*:|\[y\/n\]|\[Y\/n\]|\(yes\/no[^)]*\)|\(y,N\)|\(Y\/I\/N\/O\/D\/Z\)[^\n]*|\[default=[^\]\n]*\]\s*\?|Do you want to continue\?|Are you sure[^\n]*\?)[:\s]*$/i
 /** 프롬프트를 감지한 뒤 아무도 답하지 않으면 이만큼 기다렸다가 포기한다 */
 const PROMPT_STUCK_MS = 2500
 const runnerShells = new Map<string, RunnerShell>() // runnerId → shell
@@ -4772,6 +4783,56 @@ const SCENARIO_RUN_ID = /^sr[0-9a-z]{4,24}$/
  */
 const SCENARIO_RUNS_MAX = 200
 const SCENARIO_RUNS_DAYS = 90
+const DEFAULT_SCENARIO_RETENTION: ScenarioRunRetention = {
+  maxRuns: SCENARIO_RUNS_MAX,
+  retentionDays: SCENARIO_RUNS_DAYS,
+}
+const scenarioRetentionPath = () => path.join(app.getPath('userData'), 'scenario-run-retention.json')
+
+/**
+ * 보관 설정 읽기 — **손상됐다고 조용히 기본값으로 되돌리면 안 된다.**
+ *
+ * 로그 보관 설정과 같은 이유다. 사용자가 '500회차/365일' 로 늘려 뒀는데 파일이 깨져
+ * 기본값(200/90)으로 읽히면, 다음 저장의 자동 정리가 **남겨야 할 회차를 영구 삭제**한다.
+ * 그래서 읽기는 던지고, 부르는 쪽이 '정리를 건너뛸지' 를 정한다.
+ */
+async function readScenarioRetention(): Promise<ScenarioRunRetention> {
+  let raw: string
+  try {
+    raw = await readFile(scenarioRetentionPath(), 'utf-8')
+  } catch {
+    return { ...DEFAULT_SCENARIO_RETENTION } // 아직 정한 적 없음 (정상)
+  }
+  const parsed = JSON.parse(raw)
+  const maxRuns = Number(parsed?.maxRuns)
+  const retentionDays = Number(parsed?.retentionDays)
+  if (!(Number.isFinite(maxRuns) && maxRuns > 0 && Number.isFinite(retentionDays) && retentionDays > 0)) {
+    throw new Error('scenario-run-retention.json: 보관 설정 값이 올바르지 않습니다 (파일 손상 가능성)')
+  }
+  return { maxRuns, retentionDays }
+}
+/** 화면 표시 전용 — 여기서는 아무것도 지우지 않으므로 기본값으로 보여줘도 안전하다 */
+async function readScenarioRetentionForDisplay(): Promise<ScenarioRunRetention> {
+  try {
+    return await readScenarioRetention()
+  } catch {
+    return { ...DEFAULT_SCENARIO_RETENTION }
+  }
+}
+
+ipcMain.handle('scenarioRuns:getRetention', () => readScenarioRetentionForDisplay())
+ipcMain.handle('scenarioRuns:setRetention', async (_evt, v: ScenarioRunRetention) => {
+  // 터무니없는 값으로 전부 지워지는 일이 없게 범위를 묶는다
+  const clamped: ScenarioRunRetention = {
+    maxRuns: Math.min(2000, Math.max(10, Math.round(Number(v?.maxRuns) || SCENARIO_RUNS_MAX))),
+    retentionDays: Math.min(3650, Math.max(1, Math.round(Number(v?.retentionDays) || SCENARIO_RUNS_DAYS))),
+  }
+  await withStoreLock('scenario-runs', async () => {
+    await mkdir(scenarioRunsDir(), { recursive: true })
+    await writeFileAtomic(scenarioRetentionPath(), JSON.stringify(clamped, null, 2))
+  })
+  return { ok: true, settings: clamped }
+})
 
 async function readScenarioRunIndex(): Promise<ScenarioRunSummary[]> {
   return readJsonArrayStore<ScenarioRunSummary>(scenarioRunsIndexPath())
@@ -4806,12 +4867,23 @@ async function saveScenarioRun(detail: ScenarioRunDetail): Promise<void> {
     else index.unshift(summary)
     index.sort((a, b) => b.startedAt - a.startedAt)
 
-    // 보존 — 넘치는 것은 목록에서 빼고 파일도 지운다
-    const cutoff = Date.now() - SCENARIO_RUNS_DAYS * 24 * 60 * 60 * 1000
+    /**
+     * 보존 — 넘치는 것은 목록에서 빼고 파일도 지운다.
+     *
+     * 설정을 **못 읽으면 아무것도 지우지 않는다.** 기본값으로 정리하면, 한도를 늘려 둔
+     * 사용자의 회차를 파일이 깨졌다는 이유로 없애게 된다(위 readScenarioRetention 주석).
+     */
+    let limit: ScenarioRunRetention | null = null
+    try {
+      limit = await readScenarioRetention()
+    } catch {
+      limit = null
+    }
+    const cutoff = limit ? Date.now() - limit.retentionDays * 24 * 60 * 60 * 1000 : 0
     const keep: ScenarioRunSummary[] = []
     const drop: ScenarioRunSummary[] = []
     for (const r of index) {
-      if (keep.length < SCENARIO_RUNS_MAX && r.startedAt >= cutoff) keep.push(r)
+      if (!limit || (keep.length < limit.maxRuns && r.startedAt >= cutoff)) keep.push(r)
       else drop.push(r)
     }
     await writeFileAtomic(scenarioRunsIndexPath(), JSON.stringify(keep, null, 2))

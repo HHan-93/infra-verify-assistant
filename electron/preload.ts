@@ -38,6 +38,7 @@ import type {
   PortalHttpResult,
   ScenarioRunSummary,
   ScenarioRunDetail,
+  ScenarioRunRetention,
 } from './shared-types'
 
 /** 활성 포트 포워딩 항목 (렌더러 표시용) */
@@ -115,6 +116,10 @@ const electronAPI = {
     ipcRenderer.invoke('scenarioRuns:read', ids),
   scenarioRunsDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('scenarioRuns:delete', ids),
+  /** 회차 보관 한도(개수·기간) 조회 · 변경 */
+  scenarioRunsGetRetention: (): Promise<ScenarioRunRetention> => ipcRenderer.invoke('scenarioRuns:getRetention'),
+  scenarioRunsSetRetention: (v: ScenarioRunRetention): Promise<{ ok: boolean; settings: ScenarioRunRetention }> =>
+    ipcRenderer.invoke('scenarioRuns:setRetention', v),
   /** 목록이 깨졌을 때 남아 있는 회차 파일들로 되살린다 */
   scenarioRunsRebuild: (): Promise<{ ok: boolean; error?: string; count: number }> =>
     ipcRenderer.invoke('scenarioRuns:rebuild'),

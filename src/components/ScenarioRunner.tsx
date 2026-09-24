@@ -264,6 +264,21 @@ function resolveCwd(current: string, target: string): string {
   return current ? `${current}/${target}` : target // 상대 → 이어붙임
 }
 
+/**
+ * 이 스텝이 값을 받아야 하는 자리들 — 명령뿐 아니라 **expect 의 응답값**까지 센다.
+ *
+ * 전에는 명령만 훑었다. 그래서 비밀번호처럼 '프롬프트가 뜨면 보낼 값'을 `<비밀번호>` 로
+ * 적어 두면 입력칸이 만들어지지 않았고, 미입력 검사에도 걸리지 않아 **치환되지 않은
+ * `<비밀번호>` 라는 글자 그대로가 원격에 입력**됐다. 명령에 남은 `<...>` 는 셸이 오류를
+ * 내며 티가 나기라도 하는데, 프롬프트 응답은 그대로 받아들여져 조용히 잘못된 값이 들어간다.
+ */
+function placeholdersOfStep(step: { command: string; expect?: ExpectRule[] }): string[] {
+  const out = extractPlaceholders(step.command)
+  for (const e of step.expect ?? [])
+    for (const ph of extractPlaceholders(e.send)) if (!out.includes(ph)) out.push(ph)
+  return out
+}
+
 /** 출력에서 값을 뽑아 이후 스텝의 플레이스홀더로 넘길 값들을 계산 */
 function applyCaptures(rules: CaptureRule[] | undefined, text: string): { values: Record<string, string>; misses: string[] } {
   const values: Record<string, string> = {}
@@ -417,7 +432,7 @@ export default function ScenarioRunner({
   const allPlaceholders = useMemo(() => {
     const s: string[] = []
     for (const step of scenario.steps)
-      for (const p of extractPlaceholders(step.command)) if (!s.includes(p)) s.push(p)
+      for (const p of placeholdersOfStep(step)) if (!s.includes(p)) s.push(p)
     return s
   }, [scenario.steps])
   const [phValues, setPhValues] = useState<Record<string, string>>({})
@@ -748,7 +763,9 @@ export default function ScenarioRunner({
   }
   /** 이 스텝이 실제로 쓰는 플레이스홀더 이름들 (캡처로 채워지는 건 입력받지 않는다) */
   const phOfStep = (idx: number) =>
-    extractPlaceholders(commandOf(idx)).filter((p) => !captureNames.has(p))
+    placeholdersOfStep({ command: commandOf(idx), expect: scenario.steps[idx]?.expect }).filter(
+      (p) => !captureNames.has(p),
+    )
   const setStepPhValue = (idx: number, title: string, name: string, v: string) =>
     setStepPh((m) => {
       const k = stepKeyOf(idx, title)
@@ -873,9 +890,14 @@ export default function ScenarioRunner({
     if (!rawCmd.trim() || !sids.length) return 'skipped'
     const names = sids.map(nameOfSession).join(', ')
     const cmd = fillPlaceholders(rawCmd, valuesForStep(idx, step.title))
-    // 값이 안 채워진 <...> 가 남아 있으면 실행하지 않고 안내 — 잘못된 명령이 나가는 것을 방지.
-    if (hasUnfilled(cmd)) {
-      const missing = extractPlaceholders(cmd)
+    // expect 응답값도 같은 시점에 채운다 — 아래 미입력 검사가 이것까지 봐야 하기 때문이다
+    const expect = step.expect?.map((e) => ({ ...e, send: fillPlaceholders(e.send, valuesForStep(idx, step.title)) }))
+    // 값이 안 채워진 <...> 가 남아 있으면 실행하지 않고 안내 — 잘못된 명령/응답이 나가는 것을 방지.
+    const unfilledExpect = (expect ?? []).filter((e) => hasUnfilled(e.send)).flatMap((e) => extractPlaceholders(e.send))
+    if (hasUnfilled(cmd) || unfilledExpect.length) {
+      const missing = [...(hasUnfilled(cmd) ? extractPlaceholders(cmd) : []), ...unfilledExpect].filter(
+        (v, i, a) => a.indexOf(v) === i,
+      )
       setRes(idx, {
         status: 'error',
         sessionName: names,
@@ -892,7 +914,6 @@ export default function ScenarioRunner({
     }
 
     setRes(idx, { status: 'running', manual: undefined, sessionName: names, runs: undefined, retried: undefined })
-    const expect = step.expect?.map((e) => ({ ...e, send: fillPlaceholders(e.send, valuesForStep(idx, step.title)) }))
 
     const runs: StepRun[] = []
     for (const sid of sids) {
@@ -996,6 +1017,7 @@ ${primary?.err ?? ''}`)
     // 새 회차 — 시각까지 담은 id 로 만들어 목록에서 시간순이 그대로 나온다
     runIdRef.current = `sr${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
     runStartRef.current = Date.now()
+    runEndRef.current = 0 // 지난 회차의 끝 시각을 물려받지 않는다
     runStoppedRef.current = { stopped: false }
     setBusy(true)
     abortRef.current = false
@@ -1067,7 +1089,11 @@ ${primary?.err ?? ''}`)
         continue
       }
       // 캡처로 채워질 이름은 '미입력'으로 보지 않는다 (앞 스텝이 채워줄 값이므로)
-      const pending = extractPlaceholders(fillPlaceholders(c, valuesForStep(i, step.title))).filter((p) => !captureNames.has(p))
+      const vals = valuesForStep(i, step.title)
+      const pending = placeholdersOfStep({
+        command: fillPlaceholders(c, vals),
+        expect: step.expect?.map((e) => ({ ...e, send: fillPlaceholders(e.send, vals) })),
+      }).filter((p) => !captureNames.has(p))
       if (pending.length) {
         skipped++
         continue
@@ -1151,6 +1177,47 @@ ${primary?.err ?? ''}`)
     setNotice(parts.join(' · '))
   }
 
+  /** secret 응답에 쓰인 입력값 이름 — 이 값이 든 원복 명령은 회차에 저장하지 않는다(평문 .json) */
+  const secretNames = useMemo(() => {
+    const s = new Set<string>()
+    for (const st of scenario.steps)
+      for (const e of st.expect ?? []) if (e.secret) for (const p of extractPlaceholders(e.send)) s.add(p)
+    return s
+  }, [scenario.steps])
+
+  /**
+   * 지난 회차에서 되살린 원복 목록.
+   *
+   * 검증을 마치고 창을 닫아 `lsblk` 로 확인한 뒤 돌아오면 화면 상태가 사라져 **되돌릴 방법이
+   * 같이 없어졌다**(사용자 지적). 회차는 이미 자동 저장되므로 그때 나갈 원복 명령을 꺼내 온다.
+   * '항상 보여주기' 로 하지 않는 이유는 아래 undoTargets 주석과 같다 — 하지도 않은 일을
+   * 되돌리는 명령이 나가면, 검증과 무관한 실제 자원을 지운다.
+   */
+  const [prevUndo, setPrevUndo] = useState<{ at: number; items: { i: number; undo: string }[] } | null>(null)
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      const sid = scenario.id ?? scenario.title
+      const r = await window.electronAPI.scenarioRunsList()
+      if (!alive || !r.ok) return
+      const last = r.list.filter((x) => x.scenarioId === sid).sort((a, b) => b.startedAt - a.startedAt)[0]
+      if (!last) return
+      const d = await window.electronAPI.scenarioRunsRead([last.id])
+      if (!alive || !d.ok || !d.list.length) return
+      const detail = d.list[0]
+      const items = detail.steps
+        // 옛 회차에는 ran·undoCmd 가 없다 = '모른다' → 넣지 않는다.
+        // 제목까지 맞춰 보는 것은 그 뒤 시나리오가 편집돼 번호가 밀렸을 수 있어서다.
+        .filter((st) => st.ran && st.undoCmd && scenario.steps[st.index]?.title === st.title)
+        .map((st) => ({ i: st.index, undo: st.undoCmd as string }))
+      if (items.length) setPrevUndo({ at: detail.startedAt, items })
+    })()
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenario.id, scenario.title])
+
   // ── 원복 (검증이 만든 변경 되돌리기) ──────────────────────────
   /**
    * 원복 대상 — **실제로 실행된** 스텝 중 원복 명령이 있는 것을 **역순**으로.
@@ -1175,6 +1242,19 @@ ${primary?.err ?? ''}`)
         .reverse(),
     [scenario.steps, results],
   )
+  /** 지난 회차 목록을 이번 회차와 같은 모양으로 (역순은 여기서 맞춘다) */
+  const undoPrev = useMemo(
+    () =>
+      (prevUndo?.items ?? [])
+        .map((it) => ({ i: it.i, step: scenario.steps[it.i], undo: it.undo }))
+        .filter((x) => !!x.step)
+        .reverse(),
+    [prevUndo, scenario.steps],
+  )
+  /** 이번 창에서 실행한 것이 있으면 그쪽이 우선이다 — 지난 회차는 아무것도 안 돌렸을 때만 쓴다 */
+  const fromPrev = undoTargets.length === 0 && undoPrev.length > 0
+  const undoList = fromPrev ? undoPrev : undoTargets
+
   const [undoOpen, setUndoOpen] = useState(false)
   /** 확인 모달에서 체크 해제한 스텝 인덱스 */
   const [undoSkip, setUndoSkip] = useState<Set<number>>(new Set())
@@ -1194,7 +1274,7 @@ ${primary?.err ?? ''}`)
 
   /** 원복 실행 — 역순으로, 하나가 실패해도 나머지는 계속 진행한다 */
   const runUndo = async () => {
-    const list = undoTargets.filter((t) => !undoSkip.has(t.i))
+    const list = undoList.filter((t) => !undoSkip.has(t.i))
     if (!list.length) return
     setUndoOpen(false)
     setUndoBusy(true)
@@ -1250,6 +1330,8 @@ ${primary?.err ?? ''}`)
       setExpanded((e) => new Set(e).add(t.i))
     }
     setUndoBusy(false)
+    // 지난 회차를 되돌렸으면 그 목록은 더 이상 유효하지 않다 (결과는 아래 스텝에 남는다)
+    if (fromPrev) setPrevUndo(null)
     const failed = Object.values(done).filter((d) => d.runs.some((r) => !r.ok)).length
     setNotice(
       failed
@@ -1435,10 +1517,18 @@ ${primary?.err ?? ''}`)
   const buildRunDetail = (id: string): ScenarioRunDetail => {
       const steps: ScenarioRunStep[] = scenario.steps.map((st, i) => {
         const r = results[i]
+        // 원복 목록과 **같은 기준**으로 판단한다 (위 undoTargets 주석)
+        const ran = !!r && r.status !== 'pending' && (r.status !== 'error' || !!r.runs?.length)
+        const undoRaw = st.undo?.trim() ?? ''
+        const undoCmd = undoRaw ? fillPlaceholders(undoRaw, valuesForStep(i, st.title)) : ''
+        const keepUndo =
+          ran && !!undoCmd && !hasUnfilled(undoCmd) && !extractPlaceholders(undoRaw).some((p) => secretNames.has(p))
         return {
           index: i,
           title: st.title,
           effective: effectiveOf(st, r),
+          ...(ran ? { ran: true } : {}),
+          ...(keepUndo ? { undoCmd } : {}),
           ...(r?.manual ? { manual: true } : {}),
           ...(r?.sessionName ? { sessionName: r.sessionName } : {}),
           ...(r?.reasons?.length ? { reasons: r.reasons } : {}),
@@ -1474,6 +1564,18 @@ ${primary?.err ?? ''}`)
    * (검증은 다시 못 돌리는 일이 많다. 1.2초 사이에 창을 닫았다고 회차가 사라지면 안 된다)
    */
   const pendingRef = useRef<ScenarioRunDetail | null>(null)
+  /**
+   * **지금 상태로 회차를 만드는 손잡이.**
+   *
+   * 언마운트 정리 함수는 빈 의존성으로 걸려 있어 그때의 state 를 붙잡지 못한다. 매 렌더마다
+   * 최신 클로저를 여기 걸어 두면, 닫히는 순간의 화면 그대로를 남길 수 있다.
+   * (바로 위 capturedRef 와 같은 방식이다)
+   */
+  const buildNowRef = useRef<(() => ScenarioRunDetail | null) | null>(null)
+  buildNowRef.current = () => (runIdRef.current ? buildRunDetail(runIdRef.current) : null)
+  /** 지금 검증이 돌고 있는가 — 언마운트 정리 함수는 state 를 보지 못한다 */
+  const busyRef = useRef(false)
+  busyRef.current = busy
 
   useEffect(() => {
     const id = runIdRef.current
@@ -1502,8 +1604,26 @@ ${primary?.err ?? ''}`)
    */
   useEffect(() => {
     return () => {
-      const d = pendingRef.current
-      if (d) void window.electronAPI.scenarioRunsSave(d)
+      // 1) 다 돌고 저장만 기다리던 회차
+      if (pendingRef.current) {
+        void window.electronAPI.scenarioRunsSave(pendingRef.current)
+        return
+      }
+      /**
+       * 2) **아직 돌고 있던 회차.**
+       *
+       * 저장 effect 는 busy 인 동안 아예 돌지 않는다(끝난 뒤에 한 번만 쓰려고). 그래서
+       * 검증 중에 창을 닫으면 그때까지 실제로 서버에 한 일이 **어디에도 남지 않았다** —
+       * 이력에도, 원복에도. 검증은 다시 못 돌리는 일이 많으니 그 시점까지를 남긴다.
+       *
+       * 끝까지 돌지 않았으므로 **중단으로 적는다.** 그래야 리포트가 '전부 돌았다' 로 읽히지
+       * 않는다. 멈춘 스텝 번호는 모르므로 비워 둔다(사람이 닫은 시점이라 '그 뒤는 미실행').
+       */
+      // 돌고 있던 것만이다. 이미 끝난 회차는 위에서 저장을 마쳤고, 그걸 여기서 다시 쓰면
+      // **멀쩡히 끝난 회차가 '중단' 으로 덮어써진다.**
+      if (!busyRef.current) return
+      const d = buildNowRef.current?.()
+      if (d) void window.electronAPI.scenarioRunsSave({ ...d, stopped: true, endedAt: Date.now() })
     }
   }, [])
 
@@ -1554,6 +1674,17 @@ ${primary?.err ?? ''}`)
               <span className="text-sm font-semibold text-gray-100">검증 중 만든 변경 되돌리기</span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              {/* 무엇을 되돌리는지 — '이번에 돌린 것' 과 '지난 회차' 는 전혀 다른 이야기다 */}
+              {fromPrev && prevUndo && (
+                <p className="mb-3 rounded border border-amber-400/30 bg-amber-500/10 px-2.5 py-2 text-[11.5px] leading-relaxed text-amber-200">
+                  이번 창에서 실행한 스텝이 없어 <strong>지난 회차</strong>(
+                  {new Date(prevUndo.at).toLocaleString('ko-KR', { hour12: false })})에서 실제로 실행된 것을 되돌립니다.
+                  <br />
+                  <span className="text-amber-200/70">
+                    그 뒤에 사람이 직접 바꾼 것은 반영돼 있지 않으니, 대상 서버의 현재 상태를 먼저 확인하세요.
+                  </span>
+                </p>
+              )}
               <p className="mb-3 text-[12px] leading-relaxed text-gray-300">
                 실제로 실행된 스텝만 <strong>역순으로</strong> 되돌립니다. 하나가 실패해도 나머지는 계속 진행합니다.
                 <br />
@@ -1562,7 +1693,7 @@ ${primary?.err ?? ''}`)
                 </span>
               </p>
               <div className="space-y-1.5">
-                {undoTargets.map((t) => {
+                {undoList.map((t) => {
                   const on = !undoSkip.has(t.i)
                   return (
                     <button
@@ -1607,7 +1738,7 @@ ${primary?.err ?? ''}`)
             </div>
             <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5">
               <span className="text-[11px] text-gray-500">
-                {undoTargets.length - undoSkip.size}건 실행 · {undoSkip.size}건 제외
+                {undoList.length - undoSkip.size}건 실행 · {undoSkip.size}건 제외
               </span>
               <div className="ml-auto flex gap-2">
                 <button
@@ -1618,7 +1749,7 @@ ${primary?.err ?? ''}`)
                 </button>
                 <button
                   onClick={runUndo}
-                  disabled={undoTargets.length === undoSkip.size}
+                  disabled={undoList.length === undoSkip.size}
                   className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-40"
                 >
                   원복 실행
@@ -1842,18 +1973,22 @@ ${primary?.err ?? ''}`)
 
           {/* 리포트 액션 */}
           <div className="ml-auto flex items-center gap-1.5">
-            {undoTargets.length > 0 && (
+            {undoList.length > 0 && (
               <button
                 onClick={() => {
                   setUndoSkip(new Set())
                   setUndoOpen(true)
                 }}
                 disabled={running || undoBusy}
-                title="검증 중 만든 변경을 되돌립니다 (실행된 스텝만, 역순)"
+                title={
+                  fromPrev
+                    ? '지난 회차에서 실행된 스텝을 되돌립니다 (역순)'
+                    : '검증 중 만든 변경을 되돌립니다 (실행된 스텝만, 역순)'
+                }
                 className="flex items-center gap-1 rounded-md border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/20 disabled:opacity-40"
               >
-                {undoBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} 원복 실행 (
-                {undoTargets.length})
+                {undoBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}{' '}
+                {fromPrev ? '지난 회차 원복' : '원복 실행'} ({undoList.length})
               </button>
             )}
             {onAnalyze && (

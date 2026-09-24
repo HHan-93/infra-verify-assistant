@@ -319,6 +319,19 @@ export interface LogRetentionSettings {
   maxEntries: number
 }
 
+/**
+ * 시나리오 검증 회차의 보관 한도 — **둘 중 하나라도 넘으면 지운다.**
+ *
+ * 로그(LogRetentionSettings)와 같은 이유로 사용자가 정할 수 있어야 한다. 장기 검증에서는
+ * 몇 달치를 남겨야 하고, 짧게 쓰는 PC 에서는 쌓아 둘 이유가 없다.
+ */
+export interface ScenarioRunRetention {
+  /** 남길 최대 회차 수 */
+  maxRuns: number
+  /** 이 일수보다 오래된 회차는 지운다 */
+  retentionDays: number
+}
+
 /** 실시간 로그 뷰어(logtail)의 조회 대상 — 파일 tail -f 또는 Kubernetes 파드 로그 */
 export type LogTailTarget =
   | { kind: 'file'; path: string }
@@ -1130,6 +1143,26 @@ export interface ScenarioRunStep {
   reasons?: string[]
   code?: number
   retried?: boolean
+  /**
+   * 이 스텝의 명령이 **실제로 원격에 나갔는가.**
+   *
+   * 판정(effective)만으로는 가릴 수 없다 — 입력값이 없어 못 돈 것도, 돌았는데 실패한 것도
+   * 똑같이 error 다. 원복은 '실제로 만든 것' 만 되돌려야 하므로 이 구분이 필요하다.
+   * 옛 회차에는 없다(undefined) — 그때는 '모른다' 이므로 원복 대상에 넣지 않는다.
+   */
+  ran?: boolean
+  /**
+   * 그때 **값이 채워진 상태로 나갈 원복 명령.**
+   *
+   * 입력값을 따로 저장해 나중에 다시 조립하지 않는 이유: 스텝별 재정의·역할 자동값·앞 스텝
+   * 캡처값이 섞여 있어서, 복원한 값과 그때 실제로 쓰인 값이 어긋날 여지가 크다. 되돌릴 명령
+   * 자체를 남기는 편이 정확하다.
+   *
+   * 비밀번호처럼 **secret 으로 다루는 입력값이 들어가는 원복 명령은 저장하지 않는다** —
+   * 이 저장소는 평문 .json 이다. 그런 스텝은 창을 다시 열었을 때 원복 목록에 나오지 않고,
+   * 사람이 입력값을 다시 채워 되돌려야 한다.
+   */
+  undoCmd?: string
 }
 
 export interface ScenarioRunDetail extends ScenarioRunSummary {
