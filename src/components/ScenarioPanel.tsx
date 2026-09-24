@@ -638,9 +638,14 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                               )}
                             </button>
                             {(() => {
-                              // warn 이 달린 스텝 = 실행 후 터미널에서 사용자 입력(Enter/비밀번호 등)이 필요.
-                              // 플레이스홀더 '입력'(amber)과 구분해 주황색 + 경고 아이콘 + '실행·입력' 으로 표시.
-                              const needsInput = !ph && !!step.warn
+                              // 버튼은 **아는 것만** 말한다.
+                              //   needsInput  → 실행 뒤 터미널에서 사람이 입력해야 끝나는 단계 ('실행·입력')
+                              //   warn 만 있음 → 주의 사항이 있을 뿐 입력은 없다 ('실행', 주황 + 경고 아이콘)
+                              // 예전에는 warn 만 보고 입력이 필요하다고 추측해, "데이터가 지워집니다" 같은
+                              // 단순 경고에까지 '실행·입력' 이 붙었다(사용자 지적). warn 스텝 36개 중 실제로
+                              // 입력을 받는 것은 7개뿐이라, 나머지 29개는 받지도 않을 입력을 예고하고 있었다.
+                              const needsInput = !ph && !!step.needsInput
+                              const cautious = !ph && !!step.warn
                               return (
                                 <button
                                   onClick={() =>
@@ -653,23 +658,25 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                                     !connected
                                       ? 'SSH 연결 필요'
                                       : ph
-                                        ? '값 입력란 펼치기 (비워두면 기본 명령어 그대로 실행)'
+                                        ? '값 입력란 펼치기 (비우면 <이름> 이 치환되지 않고 그대로 남습니다)'
                                         : needsInput
                                           ? '실행 후 터미널에서 입력(Enter/비밀번호 등)이 필요합니다 — 아래 경고 확인'
-                                          : '터미널에서 실행'
+                                          : cautious
+                                            ? '주의 사항이 있는 단계입니다 — 아래 경고를 먼저 읽으세요'
+                                            : '터미널에서 실행'
                                   }
                                   className={
                                     'flex items-center gap-1 rounded px-2 py-1 text-[11px] text-white disabled:cursor-not-allowed disabled:opacity-40 ' +
                                     (ph
                                       ? 'bg-amber-600/80 hover:bg-amber-500'
-                                      : needsInput
+                                      : needsInput || cautious
                                         ? 'bg-orange-600/80 hover:bg-orange-500'
                                         : 'bg-blue-600/80 hover:bg-blue-500')
                                   }
                                 >
                                   {ph ? (
                                     <CornerDownLeft size={11} />
-                                  ) : needsInput ? (
+                                  ) : needsInput || cautious ? (
                                     <AlertTriangle size={11} />
                                   ) : (
                                     <Play size={11} />
@@ -737,25 +744,55 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                                 if (e.key === 'Enter') submitPlaceholders()
                                 if (e.key === 'Escape') setOpenPh(null)
                               }}
-                              placeholder="비워두면 기본 명령어 그대로 실행"
+                              placeholder="비우면 <이름> 이 그대로 남습니다"
                               className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-[12px] text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
                             />
                           </div>
                         ))}
-                        <div className="flex justify-end gap-2 pt-0.5">
-                          <button
-                            onClick={() => setOpenPh(null)}
-                            className="rounded px-2 py-1 text-[11px] text-gray-400 hover:text-gray-200"
-                          >
-                            취소
-                          </button>
-                          <button
-                            onClick={submitPlaceholders}
-                            className="rounded bg-blue-600/80 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500"
-                          >
-                            치환 후 실행
-                          </button>
-                        </div>
+                        {/*
+                          비운 칸은 자동으로 채워지지 않는다 — `<이름>` 이 **명령에 그대로 들어간다**.
+                          힌트가 "비워두면 기본 명령어 그대로 실행" 이라 기본값이 들어오는 줄 알고
+                          비워 둔 채 실행해, 설정 파일에 리터럴 `<공인IP>` 가 박힌 일이 있었다
+                          (사용자 지적). 실행 직전에 몇 개가 비었는지 세어서 보여 준다.
+                        */}
+                        {(() => {
+                          const blank = openPh.placeholders.filter((p) => !phValues[p]?.trim())
+                          return (
+                            <>
+                              {blank.length > 0 && (
+                                <p className="flex items-start gap-1.5 rounded border border-red-500/30 bg-red-500/10 px-1.5 py-1 text-[11px] leading-relaxed text-red-300">
+                                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                                  <span>
+                                    비운 칸 {blank.length}개 —{' '}
+                                    <span className="font-mono">
+                                      {blank.map((p) => `<${p}>`).join(' ')}
+                                    </span>{' '}
+                                    가 치환되지 않고 명령에 그대로 들어갑니다
+                                  </span>
+                                </p>
+                              )}
+                              <div className="flex justify-end gap-2 pt-0.5">
+                                <button
+                                  onClick={() => setOpenPh(null)}
+                                  className="rounded px-2 py-1 text-[11px] text-gray-400 hover:text-gray-200"
+                                >
+                                  취소
+                                </button>
+                                <button
+                                  onClick={submitPlaceholders}
+                                  className={
+                                    'rounded px-2.5 py-1 text-[11px] text-white ' +
+                                    (blank.length > 0
+                                      ? 'bg-orange-600/80 hover:bg-orange-500'
+                                      : 'bg-blue-600/80 hover:bg-blue-500')
+                                  }
+                                >
+                                  {blank.length > 0 ? '비운 채로 실행' : '치환 후 실행'}
+                                </button>
+                              </div>
+                            </>
+                          )
+                        })()}
                       </div>
                     )}
                   </div>
@@ -769,7 +806,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
       {/* 지금 고른 시나리오로 걸러 열어 준다 — 대개 "이것을 지난번엔 어땠나" 를 보러 온다.
           창 안에서 '모든 시나리오' 로 바꿀 수 있다. */}
       {historyOpen && (
-        <ScenarioHistoryModal initialScenarioId={scenario?.id} onClose={() => setHistoryOpen(false)} />
+        <ScenarioHistoryModal onClose={() => setHistoryOpen(false)} />
       )}
 
       {editing && (

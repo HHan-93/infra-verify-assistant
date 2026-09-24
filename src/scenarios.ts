@@ -12,6 +12,15 @@ export interface ScenarioStep {
   info?: string
   /** 빨간 경고 박스 (Enter 여러 번 필요 등, 다음 단계 실행 전 주의) */
   warn?: string
+  /**
+   * 실행한 뒤 **터미널에서 사람이 직접 입력**해야 끝나는 단계 (vi 편집기, 포트 점유 후 Ctrl+C,
+   * 비밀번호 프롬프트 등). 목록의 버튼을 '실행·입력' 으로 표시한다.
+   *
+   * 예전에는 warn 이 있으면 입력이 필요하다고 **추측**했다. 그런데 warn 은 "데이터가 모두
+   * 지워집니다" 같은 파괴적 동작 경고에도 쓰는 필드라, 입력을 전혀 받지 않는 단계에까지
+   * '실행·입력' 이 붙었다. 받지도 않을 입력을 예고하는 것은 이 앱이 피해야 할 거짓 신호다.
+   */
+  needsInput?: boolean
   /** 아코디언 코드 예시 (conf 파일 등 긴 입력 내용) */
   code?: string
   /** 실행 결과 자동 판정 기준 (선택) */
@@ -62,6 +71,21 @@ export interface Scenario {
  * apt 저장소가 막혔을 때의 표준 대응. **여러 시나리오가 같은 명령을 리터럴로 복붙**하고 있었다 —
  * 한 번 고치려면 그 전부를 고쳐야 했고, 설명을 붙이려면 또 전부에 붙여야 했다. 여기 한 곳에 둔다.
  */
+/**
+ * apt 를 **사람 없이** 돌리기 위한 앞머리.
+ *
+ * 러너는 영속 PTY 라, 원격이 무언가를 물으면 아무도 답하지 않은 채 제한 시간까지 멈춰 있다.
+ * apt 가 그렇게 멈추는 길이 셋이다 —
+ *   · needrestart   — "다시 시작할 서비스를 고르세요" 전체 화면 대화상자 (Ubuntu 22.04+)
+ *   · 설정 파일 충돌 — `*** file (Y/I/N/O/D/Z) [default=N] ?`
+ *   · dpkg 잠금      — unattended-upgrades 가 물고 있으면 "Waiting for cache lock" 을 끝없이 찍는다
+ *
+ * 앞의 둘은 **묻지 않게** 하고, 마지막은 기다리는 한도를 정해 **분명한 실패로 끝나게** 한다.
+ * 끝없이 도는 것보다 2분 뒤 이유를 말하며 실패하는 편이 낫다 — 재시도는 러너가 한다.
+ * (`sudo env` 를 쓰는 이유: `sudo VAR=v cmd` 는 sudo 설정에 따라 막히는 곳이 있다)
+ */
+const APT = 'sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -q -o DPkg::Lock::Timeout=120'
+
 const APT_FIX =
   "getent hosts archive.ubuntu.com >/dev/null 2>&1 || sudo resolvectl dns \"$(ip route show default | awk '{print $5; exit}')\" 8.8.8.8 1.1.1.1 2>/dev/null; sudo add-apt-repository -y universe 2>/dev/null; sudo apt-get update -q"
 /**
@@ -116,10 +140,11 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "설정 드라이브 마운트",
-        "command": "sudo mount /dev/sr0 /mnt/config",
-        "check": { "requireExitZero": true, "failContains": ["does not exist", "wrong fs type", "no medium found"] },
+        "command": "DEV=$(lsblk -o NAME,LABEL -nr | awk '$2==\"config-2\"{print \"/dev/\"$1; exit}'); echo \"장치: ${DEV:-못 찾음}\"; if [ -n \"$DEV\" ]; then sudo mount \"$DEV\" /mnt/config && echo '마운트되었습니다'; else echo '주의 — config-2 라벨을 가진 장치를 찾지 못했습니다'; fi",
+        "check": { "passContains": ["마운트되었습니다"], "failContains": ["주의 —", "wrong fs type"] },
         "undo": "sudo umount /mnt/config",
-        "desc": "config-2 장치를 /mnt/config 에 마운트합니다. lsblk에서 확인한 장치명이 sr0 가 아닌 경우 해당 이름으로 교체하세요."
+        "desc": "config-2 라벨이 붙은 장치를 찾아 /mnt/config 에 마운트합니다. 장치명을 자동으로 찾으므로 sr0 가 아니어도 됩니다.",
+        "info": "예전에는 /dev/sr0 를 명령에 박아 두고 '다르면 해당 이름으로 교체하세요' 라고만 적어 두었는데, 정작 바꿀 입력칸이 없었습니다(사용자가 직접 명령을 고치는 수밖에). 라벨로 찾도록 바꿨습니다."
       },
       {
         "title": "마운트 상태 확인",
@@ -180,12 +205,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
+        "target": "하이퍼바이저",
         "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
+        "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 iotune",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <iotune> 블록에 read_iops_sec, write_iops_sec 등이 설정값대로 출력되어야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
@@ -202,14 +229,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 저장소 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "fio 및 libaio 설치",
-        "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
+        "command": `${APT} install -y fio libaio1t64 || ${APT} install -y fio libaio1`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -275,19 +302,23 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
+        "target": "하이퍼바이저",
         "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
+        "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <interface> 내 <bandwidth> 블록에 inbound/outbound average, peak, burst 값이 출력되어야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
       },
       {
         "title": "iperf3 서버 구성 (별도 인스턴스)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3 && iperf3 -s -D",
+        "target": "iperf3 서버",
+        "command": `${APT} update && ${APT} install -y iperf3 && iperf3 -s -D`,
+        "undo": "pkill -f 'iperf3 -s' || echo 'iperf3 서버가 떠 있지 않습니다 (이미 정리됨)'",
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -302,14 +333,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 저장소 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "iperf3 패키지 설치 전 저장소를 업데이트합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "iperf3 설치",
-        "command": "sudo apt-get install -y -q iperf3",
+        "command": `${APT} install -y iperf3`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -321,14 +352,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
-        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n구간별 Bitrate가 초반에 높다가 이후 수렴하는 것은 burst 소진 후 average 제한이 걸린 정상 동작입니다."
+        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래에 sender 와 receiver 두 줄이 나옵니다. 실제로 전달된 속도는 receiver 줄입니다(sender 는 보낸 쪽이 버퍼에 넣은 양이라 조금 더 크게 나올 수 있습니다).\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n구간별 Bitrate가 초반에 높다가 이후 수렴하는 것은 burst 소진 후 average 제한이 걸린 정상 동작입니다."
       },
       {
         "title": "인바운드(다운로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5 -R",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "-R 플래그로 트래픽 방향을 역전(서버 → 이 인스턴스)하여 인바운드 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
-        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래 sender 줄의 Bitrate 열을 확인하세요.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  sender  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n-R(Reverse): 서버 → 이 인스턴스 방향으로 전송하므로 인바운드 QoS 제한이 측정됩니다."
+        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래에 sender 와 receiver 두 줄이 나옵니다. -R 이라 보내는 쪽이 서버이고 받는 쪽이 이 인스턴스이므로, 인바운드 제한이 걸리는 것은 receiver 줄입니다.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n-R(Reverse): 서버 → 이 인스턴스 방향으로 전송하므로 인바운드 QoS 제한이 측정됩니다."
       }
     ]
   },
@@ -351,19 +382,27 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "requireExitZero": true },
         "desc": "nginx 설치 전 패키지 목록을 최신화합니다. 인스턴스 2대 모두 수행하세요.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "nginx 설치",
-        "command": "sudo apt-get install -y -q nginx",
+        "command": `${APT} install -y nginx`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
         "check": { "requireExitZero": true, "failContains": ["Unable to locate package", "has no installation candidate"] },
         "desc": "웹서버(nginx)를 설치합니다. 인스턴스 2대 모두 수행하세요."
+      },
+      {
+        "title": "서버별 응답 내용 구분",
+        "command": "hostname | sudo tee /var/www/html/index.html && curl -s --max-time 3 http://127.0.0.1/",
+        "check": { "requireExitZero": true },
+        "desc": "각 인스턴스가 자기 호스트명을 응답하도록 index.html 을 만듭니다. 인스턴스 2대 모두 수행하세요.",
+        "info": "이 단계가 없으면 두 대가 똑같은 nginx 기본 페이지를 돌려주어, VIP 로 요청했을 때 어느 쪽이 응답했는지 구분할 수 없습니다. 그러면 ROUND ROBIN 이 도는지 확인할 방법이 없습니다.",
+        "undo": "sudo rm -f /var/www/html/index.html"
       },
       {
         "title": "로드밸런서 생성",
@@ -373,8 +412,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "ROUND ROBIN 통신 확인",
-        "command": "curl http://<vip>",
-        "desc": "로드밸런서 VIP로 curl 요청을 반복해 인스턴스 간 순차적 통신(ROUND ROBIN)을 확인합니다.",
+        "command": "for i in $(seq 1 10); do curl -s --max-time 3 http://<VIP>/; done | sort | uniq -c > /tmp/qterm-lb.txt; cat /tmp/qterm-lb.txt; N=$(wc -l < /tmp/qterm-lb.txt); rm -f /tmp/qterm-lb.txt; if [ \"$N\" -ge 2 ]; then echo \"서로 다른 응답 $N 종 — 분산되고 있습니다\"; else echo '주의 — 응답이 한 종류뿐입니다 (분산되지 않음)'; fi",
+        "check": { "passContains": ["분산되고 있습니다"], "failContains": ["주의 —"] },
+        "desc": "VIP 로 10번 요청해 어느 서버가 몇 번 응답했는지 셉니다. 앞 단계에서 호스트명을 넣어 두었으므로 응답 종류가 2가지로 갈리면 ROUND ROBIN 이 도는 것입니다.",
+        "info": "출력의 맨 앞 숫자가 그 응답을 받은 횟수입니다. ROUND ROBIN 이면 10번 중 5:5 에 가깝게 나뉩니다. 한쪽으로 크게 치우치면 풀 멤버 하나가 헬스 체크에서 빠졌는지 확인하세요.",
         "note": "로드밸런서와 통신이 되는 대역의 인스턴스 또는 풀 멤버 인스턴스에서 실행하세요."
       }
     ]
@@ -399,7 +440,9 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "[클라이언트 인스턴스] 작업 디렉토리 생성",
         "command": "mkdir -p ssl-certs && cd ssl-certs",
-        "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)"
+        "undo": "cd ~ && rm -rf ~/ssl-certs",
+        "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)",
+        "note": "원복하면 ~/ssl-certs 를 **통째로** 지웁니다(CA 개인키·서비스 키·p12 포함). 이름이 고정이라, 검증 전부터 같은 이름의 디렉토리를 쓰고 있었다면 그것도 함께 사라집니다 — 남겨야 할 것이 있으면 원복 창에서 이 항목의 체크를 해제하세요."
       },
       {
         "title": "작업 디렉토리 확인",
@@ -486,6 +529,10 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "생성 파일 목록 확인",
         "command": "ls -l",
+        "check": {
+          "requireExitZero": true,
+          "passContains": ["ca.key", "ca.crt", "service.key", "service.crt", "service.p12", "service.p12.base64"]
+        },
         "desc": "ca.key, ca.crt, service.key, service.crt, service.p12, service.p12.base64 파일이 모두 생성되었는지 확인합니다."
       },
       {
@@ -507,21 +554,35 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "[클라이언트 인스턴스] 터미널 접속",
         "command": "",
-        "desc": "클라이언트용 인스턴스에 SSH로 접속합니다. 앞서 생성한 ca.crt 파일이 해당 인스턴스에 있어야 합니다. scp 등으로 미리 전송하세요."
+        "desc": "인증서를 만든 그 클라이언트 인스턴스에서 이어서 진행합니다. 앞 단계에서 ~/ssl-certs 에 ca.crt 를 이미 만들어 두었으므로 따로 옮길 것이 없습니다.",
+        "info": "인증서를 다른 장비에서 만들었다면 그때만 scp 등으로 ca.crt 를 이 인스턴스로 옮기세요."
       },
       {
         "title": "CA 인증서 시스템에 복사",
         "command": "sudo cp ca.crt /usr/local/share/ca-certificates/",
+        "undo": "sudo rm -f /usr/local/share/ca-certificates/ca.crt && sudo update-ca-certificates --fresh",
         "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다. (ca.crt 가 있는 디렉토리에서 실행 — 시스템 경로 쓰기라 sudo 필요)"
       },
       {
         "title": "시스템 인증서 업데이트",
         "command": "sudo update-ca-certificates",
-        "desc": "시스템 CA 인증서 목록을 갱신합니다. 'Updating certificates in /etc/ssl/certs...' 메시지와 함께 1 added 가 출력되면 정상입니다."
+        "check": { "requireExitZero": true },
+        "desc": "시스템 CA 인증서 목록을 갱신합니다. 처음 넣을 때는 '1 added' 가 나오고, 이미 등록돼 있으면 '0 added' 가 나옵니다 — 둘 다 정상입니다.",
+        "note": "'0 added' 를 실패로 보지 않습니다. 같은 인증서를 두 번 넣는 것이 오류는 아니기 때문입니다(재실행에서 그렇게 나옵니다)."
       },
       {
         "title": "HTTPS 통신 확인",
         "command": "curl -v --cacert /usr/local/share/ca-certificates/ca.crt https://<로드밸런서 VIP>",
+        "check": {
+          "requireExitZero": true,
+          "failContains": [
+            "SSL certificate problem",
+            "unable to get local issuer",
+            "self signed certificate",
+            "Connection refused",
+            "Could not resolve host"
+          ]
+        },
         "desc": "로드밸런서 VIP로 HTTPS 요청을 보냅니다. SSL 핸드셰이크가 성공하고 풀 멤버의 HTTP 응답 본문이 반환되면 정상입니다.",
         "note": "응답에서 'SSL connection using TLS...' 및 'Server certificate' 정보가 출력되면 인증서가 올바르게 적용된 것입니다."
       }
@@ -529,6 +590,7 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     "id": "scn-nc-port-check",
+    "roleValues": {"인스턴스A_IP":"인스턴스 A"},
     "solution": "OpenStack",
     "title": "[네트워크] nc 포트 연결 상태 체크 동작 확인",
     "summary": "nc(netcat)로 VM 간 포트 연결 상태를 실시간으로 확인하며, Live 및 Cold 마이그레이션 중 통신 중단 여부를 검증합니다.",
@@ -545,14 +607,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 목록 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "netcat 설치에 앞서 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "netcat 설치",
-        "command": "sudo apt-get install -y -q netcat-openbsd",
+        "command": `${APT} install -y netcat-openbsd`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -562,22 +624,28 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "포트 수신 대기 시작 (인스턴스 A)",
-        "command": "nc -l <포트번호>",
-        "warn": "'입력'으로 포트를 채운 뒤 실행하면 해당 포트로 수신 대기하며 터미널을 점유합니다. 연결 테스트가 끝나면 Ctrl+C 로 종료한 뒤 다음 단계를 진행하세요.",
-        "desc": "인스턴스 A에서 지정한 포트로 수신 대기 상태로 진입합니다. 다른 VM이 해당 포트로 연결을 시도하면 응답합니다.",
-        "info": "포트 번호 예시: 9999 (SSH 22 대신 임의 포트 권장). 이 명령은 터미널을 점유하므로 별도 탭/창을 사용하세요."
+        "target": "인스턴스 A",
+        "command": "(nohup nc -l -k <포트번호> >/dev/null 2>&1 &); sleep 1; ss -tlnp 2>/dev/null | grep -q ':<포트번호> ' && echo '수신 대기 중입니다' || echo '주의 — 리스너가 뜨지 않았습니다'",
+        "check": { "passContains": ["수신 대기 중입니다"], "failContains": ["주의 —"] },
+        "undo": "pkill -f 'nc -l -k <포트번호>' || echo '수신 대기 프로세스가 없습니다 (이미 정리됨)'",
+        "warn": "이 단계는 포트를 열어 둡니다. 시험이 끝나면 반드시 원복으로 정리하세요.",
+        "desc": "인스턴스 A에서 지정한 포트를 백그라운드로 수신 대기시킵니다. 터미널을 점유하지 않으므로 다음 단계로 바로 넘어갈 수 있습니다.",
+        "info": "포트 번호 예시: 9999 (SSH 22 대신 임의 포트 권장). -k 는 연결이 끊겨도 계속 수신하는 옵션이라 반복 시험에 맞습니다.\n끝나면 이 시나리오의 원복으로 정리됩니다 — 남겨 두면 그 포트를 계속 점유합니다."
       },
       {
         "title": "포트 연결 일회성 확인 (인스턴스 B 또는 다른 터미널)",
+        "target": "인스턴스 B",
         "command": "nc -zv <인스턴스A_IP> <포트번호>",
+        "check": { "passContains": ["succeeded"], "failContains": ["Connection refused", "No route to host", "timed out"] },
         "desc": "인스턴스 B 또는 동일 네트워크의 다른 서버에서 인스턴스 A IP로 포트 연결을 시도합니다.",
         "note": "성공 시: Connection to <IP> <port> port [tcp] succeeded!\n실패 시: nc: connect to <IP> port <port> (tcp) failed: Connection refused"
       },
       {
         "title": "지속 통신 루프 시작",
-        "command": "while true; do nc -zv <인스턴스A_IP> <포트번호>; sleep 1; done",
-        "desc": "1초 간격으로 포트 연결을 반복 시도합니다. 마이그레이션 진행 중 통신이 끊기는지 실시간으로 관찰합니다.",
-        "info": "루프를 실행한 상태로 다음 마이그레이션 단계를 진행합니다. 종료: Ctrl+C"
+        "target": "인스턴스 B",
+        "command": "for i in $(seq 1 120); do printf '%s ' \"$(date +%H:%M:%S)\"; nc -zv -w 1 <인스턴스A_IP> <포트번호> 2>&1 | tail -1; sleep 1; done; echo '--- 120초 관찰 종료'",
+        "desc": "1초 간격으로 120초 동안 포트 연결을 반복 시도합니다. 각 줄에 시각이 찍히므로, 마이그레이션 중 통신이 끊긴 구간과 길이를 리포트에서 셀 수 있습니다.",
+        "info": "이 루프가 도는 동안 포털에서 다음 단계(마이그레이션)를 진행하세요. 120초가 지나면 스스로 끝납니다.\n마이그레이션이 더 걸리면 이 단계를 이어서 다시 실행하면 됩니다. 끝나지 않는 while 루프를 쓰면 검증 실행이 제한 시간까지 멈춘 채 아무 기록도 남기지 못해서 시간을 끊어 두었습니다."
       },
       {
         "title": "[Live] 인스턴스 A Live 마이그레이션 실행",
@@ -605,6 +673,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "Cold 마이그레이션 후 통신 재연결 확인",
         "command": "nc -zv <인스턴스A_IP> <포트번호>",
+        "check": { "passContains": ["succeeded"], "failContains": ["Connection refused", "No route to host", "timed out"] },
         "desc": "인스턴스 A가 재시작된 후 포트 연결이 재개되는지 확인합니다. 마이그레이션 중에는 통신이 끊기고, 재시작 완료 후 succeeded! 메시지가 출력되면 재연결 성공입니다.",
         "note": "인스턴스 A에서 nc -l -p <포트> 를 다시 실행한 뒤 확인하세요."
       },
@@ -629,6 +698,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인터페이스 비활성화",
         "command": "sudo ip link set <IFACE> down",
+        "undo": "sudo ip link set <IFACE> up",
         "warn": "SSH 접속에 쓰는 인터페이스를 내리면 즉시 연결이 끊기고 콘솔로만 복구할 수 있습니다. 대상 인터페이스가 접속 경로가 아닌지 반드시 확인하세요.",
         "desc": "특정 인터페이스를 내립니다. <IFACE> 는 eth1 등 대상 인터페이스명으로 바꾸세요.",
         "note": "⚠️ SSH 로 접속 중인 인터페이스를 내리면 연결이 끊깁니다. 관리용이 아닌 NIC 에만 사용하세요."
@@ -641,6 +711,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "Netplan 설정 편집",
         "command": "sudo vi /etc/netplan/50-cloud-init.yaml",
+        "needsInput": true,
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "IP 주소, 게이트웨이, nameservers(DNS) 를 설정합니다. (Ubuntu 기준)",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -656,7 +727,18 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "외부 통신 확인",
         "command": "ping -c 4 google.com",
-        "desc": "DNS 이름 해석과 외부 인터넷 도달 여부를 한 번에 확인합니다."
+        "check": {
+          "requireExitZero": true,
+          "failContains": [
+            "100% packet loss",
+            "Name or service not known",
+            "Temporary failure in name resolution",
+            "Destination Host Unreachable",
+            "Network is unreachable"
+          ]
+        },
+        "desc": "DNS 이름 해석과 외부 인터넷 도달 여부를 한 번에 확인합니다.",
+        "note": "이름 해석 실패와 도달 실패를 따로 짚습니다 — 'Name or service not known' 은 DNS 문제, '100% packet loss' 는 경로·방화벽 문제입니다."
       }
     ]
   },
@@ -669,7 +751,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (서버·클라이언트 양쪽)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q netcat-openbsd nmap",
+        "command": `${APT} update && ${APT} install -y netcat-openbsd nmap`,
         "target": "서버, 클라이언트",
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
@@ -767,14 +849,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "requireExitZero": true },
         "desc": "ceph-common 설치 전 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "Ceph 클라이언트 설치",
-        "command": "sudo apt-get install -y -q ceph-common",
+        "command": `${APT} install -y ceph-common`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -785,6 +867,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "ceph.conf 생성",
         "command": "sudo vi /etc/ceph/ceph.conf",
+        "needsInput": true,
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "호스트에 설정된 ceph.conf 내용을 참고해 클라이언트용 설정 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -793,6 +876,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "키링 파일 생성",
         "command": "sudo vi /etc/ceph/ceph.client.<액세스 경로>.keyring",
+        "needsInput": true,
         "warn": "'입력'으로 경로 값을 채운 뒤 실행하면 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "액세스 규칙 생성 시 발급된 액세스 키를 사용해 클라이언트 키링 파일을 생성합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -813,18 +897,22 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "CephFS 마운트",
-        "command": "sudo mount -t ceph <추출위치> /mnt/data -o name=<액세스 경로>,secret=<액세스 키>,mds_namespace=cephfs",
+        "command": "sudo mount -t ceph <추출위치> /mnt/data -o name=<액세스 경로>,secret=<액세스 키>,mds_namespace=cephfs && mountpoint -q /mnt/data && echo '마운트되었습니다' && df -h /mnt/data",
+        "check": { "requireExitZero": true, "passContains": ["마운트되었습니다"] },
+        "undo": "sudo umount /mnt/data || echo '/mnt/data 가 이미 해제되어 있습니다'",
         "desc": "공유파일 상세에서 확인한 추출위치를 입력해 CephFS를 마운트합니다. name은 액세스 경로(예: meta), secret은 액세스 키 값을 입력하세요."
       },
       {
         "title": "마운트 확인",
         "command": "df -h",
+        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
         "desc": "/mnt/data 항목이 표시되면 정상적으로 마운트된 것입니다."
       },
       {
         "title": "파일 쓰기 테스트",
         "command": "echo \"Test\" | sudo tee /mnt/data/test.txt",
-        "desc": "read-write 규칙이면 정상 쓰기됩니다. read-only 규칙이면 'Read-only file system' 오류가 출력되어 RO 정책이 정상 동작함을 확인할 수 있습니다."
+        "desc": "read-write 규칙이면 정상 쓰기됩니다. read-only 규칙이면 'Read-only file system' 오류가 출력되어 RO 정책이 정상 동작함을 확인할 수 있습니다.",
+        "note": "자동 판정하지 않습니다 — 이 시나리오는 RW·RO 두 규칙을 모두 다루므로, 쓰기 성공과 쓰기 거부가 **둘 다 정상**일 수 있습니다. 어느 규칙으로 걸었는지 보고 사람이 판정하세요."
       },
       {
         "title": "파일 읽기 테스트",
@@ -839,7 +927,9 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "해제 확인",
         "command": "df -h",
-        "desc": "/mnt/data 항목이 사라졌으면 정상적으로 해제된 것입니다."
+        "check": { "requireExitZero": true, "failContains": ["/mnt/data"] },
+        "desc": "/mnt/data 항목이 사라졌으면 정상적으로 해제된 것입니다.",
+        "note": "여기서는 목록에 남아 있는 것이 실패입니다 — 앞의 마운트 확인과 정반대 기준입니다."
       }
     ]
   },
@@ -880,12 +970,15 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "디스크 마운트",
         "command": "sudo mount /dev/<DISK> /mnt/data",
+        "undo": "sudo umount /mnt/data",
         "desc": "파티션을 마운트 포인트에 연결합니다. <DISK>에는 파티션 장치명을 입력하세요. (예: vdb1)"
       },
       {
         "title": "마운트 확인",
         "command": "df -h /mnt/data",
-        "desc": "용량이 표시되면 정상적으로 마운트된 것입니다."
+        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
+        "desc": "용량이 표시되면 정상적으로 마운트된 것입니다.",
+        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다 — 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
       },
       {
         "title": "데이터 쓰기 및 보존 확인 (공통 적용 구간)",
@@ -896,6 +989,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "테스트 데이터 쓰기 (dd)",
         "command": "sudo dd if=/dev/zero of=/mnt/data/testfile bs=10k count=1000",
+        "undo": "sudo rm -f /mnt/data/testfile",
         "desc": "마운트된 경로에 10MB(10k × 1000)의 빈 데이터 파일을 생성합니다. 용량을 늘리려면 count 값을 조정하세요. (count=10000 → 100MB)"
       },
       {
@@ -911,13 +1005,17 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "UUID 확인",
         "command": "sudo blkid /dev/<DISK>",
-        "desc": "fstab 등록에 사용할 파티션의 UUID를 확인합니다."
+        "capture": [{ "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" }],
+        "desc": "fstab 등록에 사용할 파티션의 UUID를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>에 자동으로 들어갑니다.",
+        "note": "정규식이 PARTUUID가 아니라 파일시스템 UUID를 잡습니다. 둘을 바꿔 쓰면 다음 부팅에서 emergency mode로 빠집니다."
       },
       {
         "title": "fstab 자동 마운트 등록",
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
+        "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
-        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계에서 확인한 UUID를 입력하세요."
+        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
+        "note": "원복 시 이 UUID가 들어간 줄을 /etc/fstab에서 지웁니다. 지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로, 같은 UUID를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
@@ -942,6 +1040,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "마운트 유지 확인",
         "command": "df -h",
+        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
         "desc": "/mnt/data 항목이 표시되면 재부팅 후에도 자동 마운트가 정상적으로 동작하는 것입니다."
       }
     ]
@@ -970,6 +1069,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "파일시스템 생성",
         "command": "sudo mkfs.ext4 /dev/<DISK>",
+        "expect": [{ "match": "Proceed anyway", "send": "y" }],
         "warn": "지정한 장치의 데이터가 모두 지워집니다. 앞 단계 lsblk 출력에서 장치명이 맞는지 다시 확인하세요.",
         "check": { "requireExitZero": true },
         "desc": "빈 볼륨에 ext4 파일시스템을 생성합니다. <DISK>에는 장치명을 입력하세요. (예: vdb)",
@@ -998,12 +1098,15 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "디스크 마운트",
         "command": "sudo mount /dev/<DISK> /mnt/data",
+        "undo": "sudo umount /mnt/data",
         "desc": "볼륨을 마운트 포인트에 연결합니다."
       },
       {
         "title": "마운트 확인",
         "command": "df -h /mnt/data",
-        "desc": "용량이 표시되면 정상적으로 마운트된 것입니다."
+        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
+        "desc": "용량이 표시되면 정상적으로 마운트된 것입니다.",
+        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다 — 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
       },
       {
         "title": "데이터 쓰기 및 보존 확인 (공통 적용 구간)",
@@ -1014,6 +1117,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "테스트 데이터 쓰기 (dd)",
         "command": "sudo dd if=/dev/zero of=/mnt/data/testfile bs=10k count=1000",
+        "undo": "sudo rm -f /mnt/data/testfile",
         "desc": "마운트된 경로에 10MB(10k × 1000)의 빈 데이터 파일을 생성합니다. 용량을 늘리려면 count 값을 조정하세요. (count=10000 → 100MB)"
       },
       {
@@ -1029,13 +1133,17 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "UUID 확인",
         "command": "sudo blkid /dev/<DISK>",
-        "desc": "fstab 등록에 사용할 볼륨의 UUID를 확인합니다."
+        "capture": [{ "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" }],
+        "desc": "fstab 등록에 사용할 볼륨의 UUID를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>에 자동으로 들어갑니다.",
+        "note": "정규식이 PARTUUID가 아니라 파일시스템 UUID를 잡습니다. 둘을 바꿔 쓰면 다음 부팅에서 emergency mode로 빠집니다."
       },
       {
         "title": "fstab 자동 마운트 등록",
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
+        "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
-        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계에서 확인한 UUID를 입력하세요."
+        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
+        "note": "원복 시 이 UUID가 들어간 줄을 /etc/fstab에서 지웁니다. 지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로, 같은 UUID를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
@@ -1060,6 +1168,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "마운트 유지 확인",
         "command": "df -h",
+        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
         "desc": "/mnt/data 항목이 표시되면 재부팅 후에도 자동 마운트가 정상적으로 동작하는 것입니다."
       }
     ]
@@ -1089,6 +1198,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "fstab 등록 제거",
         "command": "sudo vi /etc/fstab",
+        "needsInput": true,
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요. fstab 오작성 시 부팅 실패에 주의하세요.",
         "desc": "영구적으로 분리하려면 fstab 에서 해당 디스크 줄을 삭제합니다. 안 지우면 재부팅 시 다시 마운트를 시도합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -1117,7 +1227,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q lvm2 xfsprogs",
+        "command": `${APT} update && ${APT} install -y lvm2 xfsprogs`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1133,10 +1243,15 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "물리 볼륨(PV) 생성",
         "command": "sudo pvcreate /dev/<DISK>",
+        "undo": "sudo pvremove -y /dev/<DISK>",
+        "expect": [
+          { "match": "Wipe it", "send": "y" },
+          { "match": "Really INITIALIZE", "send": "y" }
+        ],
         "check": { "requireExitZero": true },
         "desc": "디스크를 LVM 물리 볼륨으로 초기화합니다.",
-        "note": "⚠️ 해당 디스크의 기존 데이터가 삭제됩니다.",
-        "warn": "이 단계부터는 디스크 구조를 바꿉니다. 원복은 데이터 삭제를 동반하므로 자동 원복 대상에 넣지 않았습니다 — 정리하려면 검증 후 수동으로 lvremove → vgremove → pvremove 순서로 진행하세요."
+        "note": "⚠️ 해당 디스크의 기존 데이터가 삭제됩니다. 이전 검증에서 만든 파일시스템이 남아 있으면 pvcreate 가 \"Wipe it? [y/n]\" 을 묻는데, 여기서 자동으로 y 를 보냅니다.",
+        "warn": "이 단계부터는 디스크 구조를 바꿉니다. 검증이 끝나면 우측 상단 [원복 실행] 이 lvremove → vgremove → pvremove 순서로 되돌립니다."
       },
       {
         "title": "PV 생성 확인",
@@ -1147,6 +1262,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "볼륨 그룹(VG) 생성",
         "command": "sudo vgcreate data_vg /dev/<DISK>",
+        "undo": "sudo vgremove -y data_vg",
         "check": { "requireExitZero": true },
         "desc": "PV 들을 묶는 볼륨 그룹 data_vg 를 만듭니다."
       },
@@ -1159,6 +1275,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "논리 볼륨(LV) 생성",
         "command": "sudo lvcreate -l 100%FREE -n data_lv data_vg",
+        "undo": "sudo umount /mnt/data 2>/dev/null; sudo lvremove -y data_vg/data_lv",
         "check": { "requireExitZero": true },
         "desc": "VG 의 남은 공간 전부로 논리 볼륨 data_lv 를 만듭니다."
       },
@@ -1198,8 +1315,14 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "(확장) VG 에 디스크 추가",
         "command": "sudo vgextend data_vg /dev/<NEW_DISK>",
+        "expect": [
+          { "match": "Wipe it", "send": "y" },
+          { "match": "Really INITIALIZE", "send": "y" }
+        ],
+        "note": "원복은 VG·LV·PV(첫 디스크)까지 되돌립니다. 확장용 디스크는 VG 제거 뒤에도 PV 표식이 남으니, 완전히 비우려면 'sudo pvremove -y /dev/<NEW_DISK>' 를 직접 실행하세요.",
         "check": { "requireExitZero": true },
-        "desc": "용량이 부족해지면 새 디스크를 PV 로 만든 뒤 VG 에 추가합니다. (먼저 pvcreate 필요)"
+        "desc": "용량이 부족해지면 새 디스크를 VG 에 추가합니다. <NEW_DISK>에는 아직 아무 데도 쓰지 않은 빈 디스크(예: vdc)를 적으세요 — 따로 pvcreate 할 필요 없이 vgextend 가 PV 초기화까지 함께 합니다.",
+        "warn": "지정한 디스크의 기존 데이터는 지워집니다. 이전에 쓰던 흔적이 남아 있으면 3번과 같은 \"Wipe it? [y/n]\" 을 묻는데, 여기서도 자동으로 y 를 보냅니다."
       },
       {
         "title": "(확장) VG 확장 확인",
@@ -1267,12 +1390,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인스턴스 별칭 확인",
+        "target": "하이퍼바이저",
         "command": "sudo virsh list --all",
         "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias를 확인합니다.",
         "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
       },
       {
         "title": "QoS 적용 여부 확인 (인스턴스 배치 호스트)",
+        "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -E -A 5 \"bandwidth|iotune\"",
         "desc": "위에서 확인한 인스턴스 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 호스트(하이퍼바이저)에 접속해서 실행해야 합니다.\n정상 적용 시 아래와 같이 iotune 블록에 설정값이 출력됩니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>"
@@ -1289,14 +1414,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 목록 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "fio 설치 전 패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "fio 및 libaio 설치",
-        "command": "sudo apt-get install -y -q fio libaio1t64 || sudo apt-get install -y -q fio libaio1",
+        "command": `${APT} install -y fio libaio1t64 || ${APT} install -y fio libaio1`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1355,14 +1480,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "패키지 업데이트",
-        "command": "sudo apt-get update -q",
+        "command": `${APT} update`,
         "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
         "desc": "패키지 목록을 최신화합니다.",
         "note": "업데이트가 실패하면 DNS 설정을 확인하세요. nameserver가 없으면 외부 패키지 서버에 접근할 수 없습니다.\n확인: cat /etc/resolv.conf\n미설정 시: netplan 또는 /etc/resolv.conf에 nameserver를 추가 후 적용하세요."
       },
       {
         "title": "커널 헤더 및 빌드 도구 설치",
-        "command": "sudo apt-get install -y -q build-essential dkms linux-headers-$(uname -r)",
+        "command": `${APT} install -y build-essential dkms linux-headers-$(uname -r)`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1407,6 +1532,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "MIG 지원 여부 확인",
         "command": "nvidia-smi --query-gpu=name,mig.mode.current --format=csv,noheader",
+        "check": { "requireExitZero": true, "failContains": ["N/A"] },
         "desc": "GPU 이름과 현재 MIG 모드 상태를 조회합니다. MIG는 NVIDIA A100, H100 등 Ampere 아키텍처 이상에서 지원됩니다.",
         "note": "Disabled 상태이면 다음 단계에서 활성화합니다. N/A로 출력되면 해당 GPU는 MIG를 지원하지 않습니다."
       },
@@ -1499,7 +1625,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "command": `${APT} update && ${APT} install -y stress-ng htop`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1516,6 +1642,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "CPU 부하 발생 (60초)",
         "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --cpu 4 --timeout 60s --metrics-brief",
+        "undo": "sudo rm -f /tmp/qterm-stress.log",
         "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
         "desc": "CPU 코어 4개에 60초 부하. 뒤에서 vmstat 이 5초 간격으로 부하 전·중·후를 함께 기록합니다.",
         "note": "부하 전 구간을 남기려고 6초 기다렸다가 시작합니다. 코어 수는 환경에 맞게 --cpu 값을 조절하세요."
@@ -1544,7 +1671,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "command": `${APT} update && ${APT} install -y stress-ng htop`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1561,6 +1688,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "메모리 부하 발생 (60초)",
         "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --vm 2 --vm-bytes 1G --vm-keep --timeout 60s --metrics-brief",
+        "undo": "sudo rm -f /tmp/qterm-stress.log",
         "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
         "desc": "가상 메모리 워커 2개 ×1GB(총 2GB)를 60초 동안 점유. 뒤에서 vmstat 이 여유 메모리 변화를 기록합니다.",
         "warn": "여유 메모리보다 큰 값을 주면 OOM Killer 가 다른 프로세스를 죽일 수 있습니다. 앞 단계의 MemAvailable 을 확인하고 --vm-bytes 를 조절하세요."
@@ -1589,7 +1717,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q stress-ng htop",
+        "command": `${APT} update && ${APT} install -y stress-ng htop`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1606,6 +1734,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "CPU+메모리 동시 부하 발생 (60초)",
         "command": "(vmstat 5 16 > /tmp/qterm-stress.log 2>&1 &); sleep 6; sudo stress-ng --cpu 4 --vm 2 --vm-bytes 1G --vm-keep --timeout 60s --metrics-brief",
+        "undo": "sudo rm -f /tmp/qterm-stress.log",
         "check": { "requireExitZero": true, "passContains": ["successful run completed"] },
         "desc": "CPU 4코어 + 메모리 2GB 를 60초 동안 동시 부하. 뒤에서 vmstat 이 CPU·메모리 변화를 함께 기록합니다.",
         "warn": "여유 메모리보다 큰 값을 주면 OOM Killer 가 다른 프로세스를 죽일 수 있습니다. 앞 단계의 free 출력을 확인하고 --vm-bytes 를 조절하세요."
@@ -1628,7 +1757,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (서버·클라이언트 양쪽)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q iperf3",
+        "command": `${APT} update && ${APT} install -y iperf3`,
         "target": "서버, 클라이언트",
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
@@ -1671,7 +1800,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
+        "command": `${APT} update && ${APT} install -y fio`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1681,19 +1810,27 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data",
-        "desc": "테스트할 마운트 볼륨 경로로 이동.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생성됩니다."
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의 — /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
+        "undo": "mountpoint -q /mnt/data && echo '마운트된 볼륨이라 폴더를 지우지 않습니다' || sudo rmdir /mnt/data",
+        "check": {
+          "requireExitZero": true,
+          "passContains": ["마운트되어 있습니다"],
+          "failContains": ["별도 마운트가 아닙니다"]
+        },
+        "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생성됩니다.\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다. 볼륨 성능으로 적어 두면 숫자 자체가 틀린 것이라 멈춥니다 — 볼륨을 먼저 마운트하거나(디스크 마운트 시나리오), 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요."
       },
       {
         "title": "랜덤 쓰기 IOPS",
         "command": "sudo fio --name=randwrite --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "undo": "sudo rm -f /mnt/data/randwrite.*",
         "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 쓰기 IOPS/지연 측정. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다."
       },
       {
         "title": "랜덤 읽기 IOPS",
         "command": "sudo fio --name=randread --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "undo": "sudo rm -f /mnt/data/randread.*",
         "check": { "passContains": ["Run status group"] },
         "desc": "4k 블록 랜덤 읽기 IOPS/지연 측정. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
       },
@@ -1712,7 +1849,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "도구 설치 (필요 시)",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q fio",
+        "command": `${APT} update && ${APT} install -y fio`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -1722,19 +1859,27 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data",
-        "desc": "테스트할 마운트 볼륨 경로로 이동.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생성됩니다."
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의 — /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
+        "undo": "mountpoint -q /mnt/data && echo '마운트된 볼륨이라 폴더를 지우지 않습니다' || sudo rmdir /mnt/data",
+        "check": {
+          "requireExitZero": true,
+          "passContains": ["마운트되어 있습니다"],
+          "failContains": ["별도 마운트가 아닙니다"]
+        },
+        "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생성됩니다.\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다. 볼륨 성능으로 적어 두면 숫자 자체가 틀린 것이라 멈춥니다 — 볼륨을 먼저 마운트하거나(디스크 마운트 시나리오), 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요."
       },
       {
         "title": "순차 읽기 대역폭",
         "command": "sudo fio --name=seqread --ioengine=libaio --iodepth=32 --rw=read --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "undo": "sudo rm -f /mnt/data/seqread.*",
         "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 읽기 처리량 측정. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "순차 쓰기 대역폭",
         "command": "sudo fio --name=seqwrite --ioengine=libaio --iodepth=32 --rw=write --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
+        "undo": "sudo rm -f /mnt/data/seqwrite.*",
         "check": { "passContains": ["Run status group"] },
         "desc": "1M 블록 순차 쓰기 처리량 측정. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
@@ -1800,8 +1945,9 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "복구 진행 감시",
-        "command": "watch -n 5 'sudo ceph -s'",
-        "desc": "OSD 가 up 으로 전환되고 복구(recovery/backfill)가 진행·완료되는지 실시간 감시합니다. (종료: Ctrl+C)"
+        "command": "for i in $(seq 1 12); do date +%H:%M:%S; sudo ceph -s | sed -n '1,12p'; echo; sleep 5; done; echo '--- 60초 관찰 종료'",
+        "desc": "OSD 가 up 으로 전환되고 복구(recovery/backfill)가 진행되는지 60초 동안 5초 간격으로 관찰합니다. 시각이 함께 찍히므로 복구가 줄어드는 추세인지 리포트에서도 확인됩니다.",
+        "info": "더 오래 지켜보려면 이 단계를 여러 번 실행하거나, 터미널에서 직접 watch -n 5 'sudo ceph -s' 를 쓰세요. 검증 실행에서는 끝나지 않는 명령을 쓸 수 없어 시간을 끊어 두었습니다."
       }
     ]
   },
@@ -1857,9 +2003,14 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "사용자 생성",
-        "command": "sudo adduser <사용자명>",
-        "warn": "'입력'으로 사용자명을 채운 뒤 실행하면 비밀번호 설정 및 사용자 정보(Full Name 등) 입력 프롬프트가 순서대로 나타납니다. 프롬프트가 끝날 때까지 값을 입력/Enter 하세요.",
-        "desc": "홈 디렉토리와 비밀번호를 설정하며 계정을 만듭니다. 실행하면 대화형 프롬프트가 나오니 안내에 따라 입력하세요."
+        "command": "sudo adduser --gecos \"\" <사용자명>",
+        "expect": [
+          { "match": "Retype new password", "send": "<비밀번호>", "secret": true },
+          { "match": "New password", "send": "<비밀번호>", "secret": true }
+        ],
+        "undo": "sudo deluser --remove-home <사용자명>",
+        "warn": "위 '검증 입력값' 에 <사용자명> 과 <비밀번호> 를 채운 뒤 실행하세요. 비밀번호 프롬프트는 자동으로 응답하며, 입력한 값은 화면·리포트에 가려서 남습니다.",
+        "desc": "홈 디렉토리와 함께 계정을 만듭니다. --gecos \"\" 로 이름·전화 질문을 건너뛰므로 남는 대화형 질문은 비밀번호 둘뿐이고, 그건 expect 로 자동 응답합니다."
       },
       {
         "title": "계정 생성 확인",
@@ -1870,6 +2021,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "sudo 권한 부여",
         "command": "sudo usermod -aG sudo <사용자명>",
+        "undo": "sudo deluser <사용자명> sudo",
         "desc": "사용자를 sudo 그룹에 추가해 관리자 명령을 쓸 수 있게 합니다.",
         "note": "RHEL/CentOS 계열은 sudo 대신 wheel 그룹을 사용합니다 (usermod -aG wheel)."
       },
@@ -1888,6 +2040,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "계정 전환 테스트",
         "command": "su - <사용자명>",
+        "needsInput": true,
         "warn": "'입력'으로 사용자명을 채운 뒤 실행하면 대상 계정의 비밀번호를 물어봅니다. 이후 해당 사용자 쉘로 전환되므로, 다음 단계로 넘어가기 전 반드시 'exit' 로 원래 계정으로 돌아오세요.",
         "desc": "새 계정으로 전환해 로그인이 되는지 테스트합니다. (원래 계정으로 돌아오기: exit)"
       }
@@ -1895,6 +2048,312 @@ export const SCENARIOS: Scenario[] = [
   },
 
   // ───────────────────────── etc ─────────────────────────
+
+  {
+    "id": "scn-wireguard-vpn",
+    "solution": "구축 · 배포",
+    "title": "[VPN] WireGuard 서버 구축 및 클라이언트 발급",
+    "summary": "사설망 안에 WireGuard VPN 서버를 세우고, 유동 IP 를 통해 밖에서 그 사설 대역으로 들어오게 합니다. 사용자 계정 발급 → 클라이언트 설치·등록·활성화 → 실제 접근까지 확인합니다. wg-easy 컨테이너를 씁니다.",
+    "steps": [
+      {
+        "title": "OS·커널 확인",
+        "command": ". /etc/os-release && echo \"$PRETTY_NAME\" && uname -r && sudo modprobe wireguard 2>/dev/null; [ -d /sys/module/wireguard ] && echo '커널 모듈 적재됨' || echo '아직 적재 안 됨 (컨테이너가 기동하며 올립니다)'",
+        "desc": "기준 환경은 Ubuntu 24.04 입니다. 커널 5.6 이상이면 WireGuard 가 커널에 들어 있어 따로 설치하지 않아도 됩니다.",
+        "info": "여기서 '아직 적재 안 됨' 이 나와도 문제가 아닙니다. wg-easy 컨테이너가 SYS_MODULE 권한과 /lib/modules 마운트로 직접 올립니다."
+      },
+      {
+        "title": "클라이언트가 접속할 주소 정하기",
+        "command": "echo '[이 VM 에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[밖으로 나갈 때 보이는 주소 — 참고용, 그대로 쓰지 말 것]'; curl -s --max-time 5 ifconfig.me && echo || echo '   (조회 실패 — 폐쇄망이면 정상)'",
+        "desc": "다음 단계의 INIT_HOST(엔드포인트)에 넣을 값을 정합니다. 기준은 하나입니다 — 밖에 있는 클라이언트가 실제로 닿는 주소.",
+        "info": "표준 구성은 이렇습니다 — VM 은 사설 IP 를 갖고, 거기에 유동(floating) IP 를 붙입니다. 그러면 엔드포인트는 그 유동 IP 입니다.\n· 유동 IP 는 VM 안에서 보이지 않습니다. 위 [이 VM 에 붙은 주소] 에는 사설 IP 만 나오니, 유동 IP 는 포털이나 openstack server show 로 확인하세요.\n· 앞단 공유기·방화벽에서 포트포워딩한다면 그 장비의 주소입니다.\n· 클라이언트가 같은 사내망 안에만 있다면 VM 의 사설 IP 를 그대로 써도 됩니다. 다만 밖에서도 붙을 거라면 유동 IP 여야 합니다.\n\n[밖으로 나갈 때 보이는 주소] 는 이 VM 이 인터넷으로 나갈 때 쓰는 출발지 주소(SNAT)일 뿐, 이 VM 에 할당된 주소가 아닙니다. 들어오는 연결이 그 주소로 닿는다는 보장이 없으니 그대로 쓰지 마세요.\n\n이와 별개로, **접근하려는 VM 들이 있는 사설 대역**(예: 192.168.50.0/24)을 적어 두세요. 뒤에서 \"터널로 보낼 대역\" 으로 씁니다. 이 서버가 붙어 있는 대역과 같을 수도, 다를 수도 있습니다.",
+        "warn": "이 주소가 틀려도 설정 파일은 멀쩡히 만들어지고 컨테이너도 잘 뜹니다. 클라이언트에서 handshake 만 안 됩니다 — 뒤에서 원인을 찾기 어려우니 여기서 확실히 정하세요."
+      },
+      {
+        "title": "패키지 저장소 업데이트",
+        "command": `${APT} update`,
+        "onFailure": "retry",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
+        "desc": "Docker 설치 전에 저장소를 갱신합니다."
+      },
+      {
+        "title": "Docker 저장소 키 등록",
+        "command": `${APT} install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && ls -l /etc/apt/keyrings/docker.asc`,
+        "check": { "requireExitZero": true, "passContains": ["docker.asc"] },
+        "desc": "Docker 공식 apt 저장소의 GPG 키를 내려받습니다.",
+        "undo": "sudo rm -f /etc/apt/keyrings/docker.asc"
+      },
+      {
+        "title": "Docker 저장소 추가",
+        "command": `echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && ${APT} update && echo '저장소 등록 완료'`,
+        "check": { "passContains": ["저장소 등록 완료"], "failContains": ["Err:", "Failed to fetch"] },
+        "desc": "현재 배포판 코드명(24.04 는 noble)에 맞는 Docker 저장소를 등록합니다.",
+        "undo": "sudo rm -f /etc/apt/sources.list.d/docker.list && sudo apt-get update -q"
+      },
+      {
+        "title": "Docker 설치",
+        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단 — Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
+        "onFailure": "retry",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
+        "check": { "requireExitZero": true, "failContains": ["중단 —", "Unable to locate package", "has no installation candidate"] },
+        "desc": "Docker 엔진과 compose 플러그인을 설치합니다.",
+        "undo": "sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && sudo apt-get autoremove -y"
+      },
+      {
+        "title": "Docker 동작 확인",
+        "command": "sudo systemctl is-active docker && sudo docker version --format 'server {{.Server.Version}}' && sudo docker compose version",
+        "check": { "requireExitZero": true, "passContains": ["active"] },
+        "desc": "데몬이 떠 있고 compose 플러그인이 붙었는지 봅니다."
+      },
+      {
+        "title": "wg-easy 설정 파일 작성",
+        "command": "sudo mkdir -p /opt/wg-easy && cd /opt/wg-easy && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  wg-easy:\n    image: ghcr.io/wg-easy/wg-easy:15\n    container_name: wg-easy\n    restart: unless-stopped\n    cap_add:\n      - NET_ADMIN\n      - SYS_MODULE\n    sysctls:\n      - net.ipv4.ip_forward=1\n      - net.ipv4.conf.all.src_valid_mark=1\n    environment:\n      - INIT_ENABLED=true\n      - INIT_USERNAME=<관리자ID>\n      - INIT_PASSWORD=<관리자비밀번호>\n      - INIT_HOST=<접속주소>\n      - INIT_PORT=51820\n      - INIT_DNS=1.1.1.1,8.8.8.8\n      - INIT_IPV4_CIDR=10.8.0.0/24\n      - PORT=51821\n      - HOST=0.0.0.0\n      - INSECURE=true\n    ports:\n      - \"51820:51820/udp\"\n      - \"51821:51821/tcp\"\n    volumes:\n      - ./wireguard-config:/etc/wireguard\n      - /lib/modules:/lib/modules:ro\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; sudo grep -n 'image:\\|INIT_HOST\\|INIT_USERNAME' docker-compose.yml; fi",
+        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
+        "desc": "wg-easy 15 버전 설정을 만듭니다. 원 문서는 저장소를 git clone 한 뒤 이 파일을 덮어쓰는데, 실제로 쓰이는 것은 이 파일 하나라 바로 만듭니다.",
+        "info": "입력값\n· 관리자ID / 관리자비밀번호 — WebUI 로그인 계정 (비밀번호는 12자 이상)\n· 접속주소 — 앞 단계에서 정한, 클라이언트가 접속할 주소\n원 문서에는 WG_ALLOWED_IPS 줄이 있으나 뺐습니다. 14 버전 환경변수라 15 버전에서는 적용되지 않습니다 — 값을 넣어도 관리 패널의 \"허용된 IP\" 는 기본값(0.0.0.0/0 · ::/0)  그대로이고, 기동 로그에 \"Firewall filtering disabled\" 가 찍힙니다(실측 확인).\n클라이언트가 VPN 으로 보낼 대역은 뒤의 \"사용자(클라이언트) 계정 발급\" 단계에서 관리 패널 → 구성 → 허용된 IP 로 정합니다.\n\nINIT_IPV4_CIDR(10.8.0.0/24)은 클라이언트에게 나눠 줄 VPN 전용 대역입니다. 접속할 사설 대역이나 클라이언트의 집·사무실 대역과 겹치면 경로가 꼬이니, 겹치면 다른 대역으로 바꾸세요.\n\n원 문서의 IPv6 설정은 뺐습니다 — 테넌트 네트워크에 IPv6 가 없으면 컨테이너가 기동하지 못합니다. 필요하면 문서대로 다시 넣으세요.",
+        "warn": "비밀번호는 이 설정 파일에 그대로 들어갑니다. 검증 리포트에서는 가려지지만 서버의 /opt/wg-easy/docker-compose.yml 에는 평문으로 남습니다.",
+        "undo": "sudo rm -rf /opt/wg-easy"
+      },
+      {
+        "title": "컨테이너 기동",
+        "command": "cd /opt/wg-easy && sudo docker compose up -d && sleep 8 && sudo docker compose ps",
+        "check": { "requireExitZero": true, "passContains": ["wg-easy"] },
+        "desc": "이미지를 내려받고 컨테이너를 띄웁니다. 처음이면 이미지 내려받기에 시간이 걸립니다.",
+        "undo": "cd /opt/wg-easy && sudo docker compose down -v"
+      },
+      {
+        "title": "컨테이너 상태 확인",
+        "command": "sudo docker ps -a --filter name=wg-easy --format '{{.Names}} | {{.Status}} | {{.Ports}}'",
+        "check": { "passContains": ["Up"], "failContains": ["Restarting", "Exited", "Created"] },
+        "desc": "Up 상태이고 51820/udp · 51821/tcp 가 매핑돼 있어야 정상입니다.",
+        "info": "Restarting 이 반복되면 설정 오류입니다. 다음 단계의 로그에서 이유를 봅니다."
+      },
+      {
+        "title": "기동 로그 확인",
+        "command": "sudo docker logs --tail 40 wg-easy",
+        "check": { "failContains": ["EADDRINUSE", "permission denied", "operation not permitted"] },
+        "desc": "기동 과정에서 막힌 것이 없는지 봅니다.",
+        "info": "자주 나오는 실패\n· EADDRINUSE — 51820/51821 을 다른 프로세스가 이미 쓰고 있음\n· operation not permitted — 커널 모듈 접근 실패. cap_add 의 SYS_MODULE 이나 /lib/modules 마운트가 빠졌는지 확인"
+      },
+      {
+        "title": "포트 리스닝 확인",
+        "command": "sudo ss -lntup | grep -E '51820|51821' || echo '주의 — 51820/51821 리스닝이 없습니다'",
+        "check": { "passContains": ["51821"], "failContains": ["주의 —"] },
+        "desc": "서버 자신이 두 포트를 열고 있는지 확인합니다.",
+        "note": "여기까지는 인스턴스 안쪽입니다. 클라이언트가 붙으려면 보안그룹·방화벽에서도 열려 있어야 합니다.\n\n51820/UDP — VPN 터널 (필수). TCP 로 열면 WebUI 는 보이는데 터널만 안 붙어, 원인을 찾기 어려워집니다.\n51821/TCP — 관리 WebUI. 구축이 끝나면 관리자 대역으로 좁히는 것을 권합니다."
+      },
+      {
+        "title": "WebUI 응답 확인",
+        "command": "curl -s -o /dev/null -w 'WebUI 응답 코드: %{http_code}\\n' http://127.0.0.1:51821/",
+        "check": { "passRegex": "응답 코드: (200|30[0-9])" },
+        "desc": "관리 화면이 응답하는지 서버 안에서 먼저 확인합니다. 로그인 화면으로 넘기느라 30x 가 나올 수 있고, 그것도 정상입니다.",
+        "info": "INSECURE=true 라 http 로 응답합니다. 외부에 그대로 노출하지 말고, 앞단에 리버스 프록시나 방화벽을 두세요."
+      },
+      {
+        "title": "서버가 목표 사설 대역에 닿는지 확인",
+        "command": "echo '[이 서버에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[대상 VM 으로 가는 경로]'; ip route get <대상VM_IP> 2>&1 | head -2; echo; echo '[도달 확인]'; ping -c 2 -W 2 <대상VM_IP> > /dev/null 2>&1 && echo '   닿습니다' || echo '   주의 — 닿지 않습니다'",
+        "check": { "passContains": ["닿습니다"], "failContains": ["주의 —"] },
+        "desc": "클라이언트가 접근할 사설 대역의 VM 하나를 골라, 이 서버에서 그리로 갈 수 있는지 봅니다. 터널을 뚫어도 서버가 그 대역에 닿지 못하면 아무것도 전달되지 않습니다.",
+        "info": "이 서버가 그 대역에 닿는 길은 둘입니다.\n· 그 네트워크의 포트를 이 VM 에 직접 붙이기 — OpenStack 에서 인터페이스를 추가합니다(openstack server add port). 위 [이 서버에 붙은 주소] 에 그 대역이 함께 보이면 된 것입니다.\n· 라우터를 통해 가기 — 그 대역으로 가는 경로가 있으면 됩니다. [대상 VM 으로 가는 경로] 출력의 via 주소가 그 라우터입니다.\n\n닿기만 하면 전달은 wg-easy 가 합니다. 클라이언트 트래픽을 이 서버 주소로 NAT 해서 내보내므로, 대상 VM 쪽에 10.8.0.0/24 로 돌아오는 경로를 따로 넣지 않아도 됩니다.",
+        "warn": "여기서 닿지 않는데 그대로 진행하면, 클라이언트는 핸드셰이크까지 잘 되고 나서 '연결은 됐는데 아무 데도 안 되는' 상태가 됩니다. 원인을 찾기 가장 어려운 모양이니 이 단계에서 해결하고 넘어가세요.",
+        "note": "ping 이 막힌 환경이면 닿아도 '주의' 로 나올 수 있습니다. 그때는 위 [대상 VM 으로 가는 경로] 에 경로가 잡히는지, 또는 nc -zv 대상IP 22 같은 포트 확인으로 판단하세요."
+      },
+      {
+        "title": "터널로 보낼 대역 정하기 (관리 패널 → 구성)",
+        "command": "",
+        "desc": "관리 패널 → 구성 에서 두 값을 확인합니다. 이 단계를 건너뛰면 기본값이 전체 터널이라, 클라이언트의 인터넷과 기존 VPN 이 통째로 끊깁니다.",
+        "info": "한국어 UI 기준입니다 (영문이면 Admin Panel → Config).\n\n· 호스트 — 앞에서 정한 엔드포인트(보통 유동 IP)가 들어가 있어야 합니다\n· 허용된 IP — 클라이언트가 이 터널로 보낼 대역입니다. 기본값은 0.0.0.0/0 과 ::/0 입니다.\n\n사설망에 들어가려고 만든 VPN 이라면 그 두 줄을 지우고 **접근하려는 VM 들이 있는 대역**만 넣으세요 (예: 192.168.50.0/24). 앞 단계에서 닿는 것을 확인한 그 대역입니다. 여러 대역이면 추가 버튼으로 줄을 늘립니다. 맨 아래 저장을 누릅니다.\n\n· 사설 대역만 적음(스플릿 터널) — 그 대역만 VPN 으로 가고, 인터넷과 회사 VPN 은 원래대로 유지됩니다. 사내 자원 접근이 목적이면 이쪽입니다.\n· 0.0.0.0/0(전체 터널) — 클라이언트의 모든 트래픽이 VPN 서버를 거칩니다. 출발지 IP 를 서버 것으로 바꾸려는 게 목적일 때만 쓰세요.\nIPv6 를 쓰지 않으면 ::/0 도 지우는 편이 안전합니다.",
+        "warn": "0.0.0.0/0 은 엔드포인트로 가는 경로까지 터널 안으로 넣습니다. 그 경로가 다른 VPN(예: FortiClient) 위에 얹혀 있었다면 그 VPN 이 끊기면서 서버에 닿을 길 자체가 사라져, 핸드셰이크가 영영 안 됩니다. 실제로 겪은 사고입니다."
+      },
+      {
+        "title": "사용자(클라이언트) 계정 발급",
+        "command": "",
+        "desc": "클라이언트 화면에서 새로 만들기를 눌러 사용자를 추가합니다. 추가하면 10.8.0.x 주소가 하나 배정되고, 오른쪽 아이콘으로 QR 코드 보기 · 설정 파일(.conf) 내려받기 · 비활성화 · 삭제를 할 수 있습니다.",
+        "info": "사람마다 또는 기기마다 하나씩 만드는 것이 원칙입니다. 하나를 여러 기기에 나눠 쓰면 접속이 서로 밀어내고, 누가 무엇을 썼는지도 구분되지 않습니다.\n기기별 송수신 통계와 마지막 접속 시각도 이 목록에서 봅니다."
+      },
+      {
+        "title": "클라이언트 프로그램 설치·등록·활성화",
+        "command": "",
+        "desc": "설정 파일을 받는 것만으로는 연결되지 않습니다. 단말에 WireGuard 클라이언트를 깔고, 받은 파일을 등록한 뒤, 활성화를 눌러야 붙습니다.",
+        "note": "1) 설치 — https://www.wireguard.com/install 에서 단말에 맞는 것을 받습니다 (Windows · macOS · Linux · Android · iOS)\n2) 등록\n   · PC — 터널 추가 → 파일에서 추가 → 내려받은 .conf 선택\n   · 휴대폰 — 앱에서 + → QR 코드 스캔\n3) 활성화 — 터널을 고르고 활성화를 누릅니다. 이걸 눌러야 실제로 연결됩니다.",
+        "info": "활성화한 뒤 클라이언트 화면에서 볼 것\n· 주소 — 10.8.0.x/32 가 잡혀 있는지\n· 엔드포인트 — 앞에서 정한 엔드포인트:51820 인지\n· 허용된 IP — 앞 단계에서 정한 대역이 들어와 있는지 (0.0.0.0/0 이면 전체 터널입니다)\n· 전송 — 보내기와 받기가 **둘 다** 올라가야 정상입니다"
+      },
+      {
+        "title": "서버에서 연결 상태 확인",
+        "command": "sudo docker exec wg-easy wg show",
+        "check": { "passContains": ["interface"], "failContains": ["No such container"] },
+        "desc": "발급한 클라이언트가 peer 로 잡히는지 봅니다. 실제로 연결되면 latest handshake 에 시각이 찍히고 transfer 의 received 가 0 이 아니게 됩니다.",
+        "warn": "클라이언트 쪽이 '보내기'만 올라가고 '받기'가 0 이면 핸드셰이크가 안 된 것입니다. 순서대로 보세요 — ① 허용된 IP 가 0.0.0.0/0 이라 엔드포인트로 가는 경로까지 터널에 들어갔는지 ② 51820/UDP 가 열려 있는지(TCP 아님) ③ 엔드포인트 주소가 그 단말에서 실제로 닿는 주소인지."
+      },
+      {
+        "title": "클라이언트에서 통신 확인",
+        "command": "",
+        "desc": "활성화한 단말에서 확인합니다. 여기까지 되면 구축이 끝난 것입니다.",
+        "note": "1) 배정 주소 — 10.8.0.x 를 받았는지 (ipconfig / ip addr)\n2) 사설망 접근 — 목표였던 사설 대역의 VM 에 ping 또는 ssh 가 되는지. 이게 이 VPN 의 본래 목적입니다\n3) 기존 경로 유지 — 인터넷과 회사 VPN 이 그대로인지. 스플릿 터널이면 그대로여야 합니다\n4) 전체 터널로 만든 경우에만 — VPN 끄고 curl ifconfig.me, 켜고 다시 재어 값이 서버 쪽 주소로 바뀌는지",
+        "info": "\"외부 통신\" 은 방향에 따라 담당이 다릅니다. 헷갈리기 쉬운 부분입니다.\n· 클라이언트 → 사설 VM 접근 — 이 VPN 이 하는 일입니다\n· 사설 VM → 인터넷 — 이 VPN 과 무관합니다. OpenStack 라우터의 SNAT 이나 그 VM 에 붙인 유동 IP 가 해 줍니다. 터널을 뚫는다고 사설 VM 이 인터넷에 나갈 수 있게 되지는 않습니다.\n\n2) 가 안 될 때 볼 곳\n· 사설 대역이 허용된 IP 에 들어 있는지\n· 앞의 \"서버가 목표 사설 대역에 닿는지 확인\" 이 통과했는지\n· 대상 VM 의 보안그룹이 VPN 서버 주소에서 오는 접속을 허용하는지"
+      },
+      {
+        "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "command": `if [ -d /opt/wg-easy ]; then (cd /opt/wg-easy && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/wg-easy /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
+        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
+        "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 컨테이너를 내리고 Docker 패키지·데이터·저장소 등록까지 한 번에 걷어냅니다.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다. 이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요. 당연히 VPN 도 끊깁니다.",
+        "info": "하는 일 순서\n1) wg-easy 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/wg-easy · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제 후 apt 갱신\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\nVPN 만 내리고 Docker 는 남기려면 이 단계 대신 아래만 실행하세요.\ncd /opt/wg-easy && sudo docker compose down -v"
+      }
+    ]
+  },
+
+  {
+    "id": "scn-docker-app-deploy",
+    "solution": "구축 · 배포",
+    "title": "[컨테이너] Docker 설치 및 애플리케이션 배포·운영 확인",
+    "summary": "일반 VM 에 Docker 를 설치하고 애플리케이션 컨테이너를 올려, 서비스 응답·로그·재기동·자동 복구·새 버전 배포까지 한 번에 확인합니다.",
+    "steps": [
+      {
+        "title": "OS·자원 확인",
+        "command": ". /etc/os-release && echo \"$PRETTY_NAME\"; uname -r; echo \"CPU: $(nproc) core\"; free -h | awk 'NR==2{print \"메모리: \" $2 \" (여유 \" $7 \")\"}'; df -h / | awk 'NR==2{print \"루트 여유: \" $4}'",
+        "desc": "컨테이너를 올릴 VM 의 기본 자원을 봅니다.",
+        "info": "이미지와 레이어는 /var/lib/docker 아래에 쌓입니다. 루트 여유가 5GB 미만이면 이미지를 내려받다 막힐 수 있습니다."
+      },
+      {
+        "title": "패키지 저장소 업데이트",
+        "command": `${APT} update`,
+        "onFailure": "retry",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
+        "check": { "failContains": ["Err:", "Failed to fetch", "Could not resolve", "Temporary failure resolving"], "passContains": ["Reading package lists"] },
+        "desc": "Docker 설치 전에 저장소를 갱신합니다."
+      },
+      {
+        "title": "Docker 저장소 키 등록",
+        "command": `${APT} install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && ls -l /etc/apt/keyrings/docker.asc`,
+        "check": { "requireExitZero": true, "passContains": ["docker.asc"] },
+        "desc": "Docker 공식 apt 저장소의 GPG 키를 내려받습니다.",
+        "undo": "sudo rm -f /etc/apt/keyrings/docker.asc"
+      },
+      {
+        "title": "Docker 저장소 추가",
+        "command": `echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && ${APT} update && echo '저장소 등록 완료'`,
+        "check": { "passContains": ["저장소 등록 완료"], "failContains": ["Err:", "Failed to fetch"] },
+        "desc": "현재 배포판 코드명에 맞는 Docker 저장소를 등록합니다.",
+        "undo": "sudo rm -f /etc/apt/sources.list.d/docker.list && sudo apt-get update -q"
+      },
+      {
+        "title": "Docker 설치",
+        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단 — Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
+        "onFailure": "retry",
+        "onFailureCommand": APT_FIX,
+        "onFailureDesc": APT_FIX_DESC,
+        "check": { "requireExitZero": true, "failContains": ["중단 —", "Unable to locate package", "has no installation candidate"] },
+        "desc": "Docker 엔진과 compose 플러그인을 설치합니다.",
+        "undo": "sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && sudo apt-get autoremove -y"
+      },
+      {
+        "title": "Docker 동작 확인",
+        "command": "sudo systemctl is-active docker && sudo docker run --rm hello-world",
+        "check": { "requireExitZero": true, "passContains": ["Hello from Docker"] },
+        "desc": "데몬이 떠 있는지, 이미지를 내려받아 컨테이너를 돌릴 수 있는지까지 한 번에 확인합니다.",
+        "info": "여기서 막히면 대개 외부 레지스트리(registry-1.docker.io)로 못 나가는 것입니다. 폐쇄망이면 사내 레지스트리를 /etc/docker/daemon.json 에 등록해야 합니다.",
+        "undo": "sudo docker image rm -f hello-world"
+      },
+      {
+        "title": "현재 사용자로 docker 쓰기",
+        "command": "sudo usermod -aG docker $USER && echo \"$USER 를 docker 그룹에 넣었습니다\"",
+        "check": { "requireExitZero": true, "passContains": ["docker 그룹에 넣었습니다"] },
+        "desc": "sudo 없이 docker 를 쓰려면 docker 그룹에 들어가야 합니다.",
+        "info": "지금 접속에는 반영되지 않습니다 — 다시 로그인해야 적용됩니다. 그래서 이 시나리오의 나머지 단계는 계속 sudo 를 붙입니다.",
+        "warn": "docker 그룹은 사실상 root 권한입니다(호스트 파일시스템을 컨테이너로 마운트할 수 있음). 필요한 사람에게만 주세요.",
+        "undo": "sudo gpasswd -d $USER docker"
+      },
+      {
+        "title": "배포할 애플리케이션 준비",
+        "command": "sudo mkdir -p /opt/qterm-app/html && cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v1' | sudo tee html/index.html > /dev/null && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  app:\n    image: nginx:1.27-alpine\n    container_name: qterm-app\n    restart: unless-stopped\n    ports:\n      - \"<서비스포트>:80\"\n    volumes:\n      - ./html:/usr/share/nginx/html:ro\n    healthcheck:\n      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost/\"]\n      interval: 10s\n      timeout: 3s\n      retries: 3\n      start_period: 5s\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; ls -l /opt/qterm-app /opt/qterm-app/html; fi",
+        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
+        "desc": "nginx 컨테이너와 그 안에 띄울 내용(index.html)을 만듭니다. 내용에 버전 문자열을 넣어 두어, 뒤에서 새 버전 배포가 실제로 반영됐는지 눈으로 확인합니다.",
+        "info": "서비스포트 — 호스트에서 쓸 포트(예: 8080). 이미 쓰는 포트를 넣으면 기동이 실패합니다.\nhealthcheck 를 붙여 두었기에 docker ps 의 Status 에 (healthy) 가 표시됩니다.",
+        "undo": "sudo rm -rf /opt/qterm-app"
+      },
+      {
+        "title": "컨테이너 기동",
+        "command": "cd /opt/qterm-app && sudo docker compose up -d && sleep 8 && sudo docker compose ps",
+        "check": { "requireExitZero": true, "passContains": ["qterm-app"] },
+        "desc": "이미지를 내려받고 컨테이너를 띄웁니다.",
+        "undo": "cd /opt/qterm-app && sudo docker compose down"
+      },
+      {
+        "title": "상태·헬스 확인",
+        "command": "sudo docker ps -a --filter name=qterm-app --format '{{.Names}} | {{.Status}}'",
+        "check": { "passContains": ["healthy"], "failContains": ["Exited", "Restarting"] },
+        "desc": "Status 에 (healthy) 가 나와야 정상입니다.",
+        "info": "start_period(5초) 안이면 (health: starting) 으로 보입니다. 그럴 때는 10초쯤 뒤에 이 단계를 다시 실행하세요."
+      },
+      {
+        "title": "서비스 응답 확인",
+        "command": "curl -s -o /dev/null -w '응답 코드: %{http_code} / 소요 %{time_total}s\\n' http://127.0.0.1:<서비스포트>/ && curl -s http://127.0.0.1:<서비스포트>/",
+        "check": { "passContains": ["응답 코드: 200", "배포 버전: v1"] },
+        "desc": "컨테이너가 떠 있는 것과 서비스가 응답하는 것은 다릅니다. 실제로 내용이 내려오는지까지 봅니다.",
+        "info": "외부에서도 확인하려면 보안그룹에 서비스포트를 열고, 다른 장비에서 curl http://공인IP:포트/ 로 확인하세요."
+      },
+      {
+        "title": "로그 확인",
+        "command": "sudo docker logs --tail 30 qterm-app",
+        "check": { "failContains": ["emerg", "cannot load", "bind() to"] },
+        "desc": "접근 로그와 오류 로그를 봅니다. 앞 단계의 curl 요청이 접근 로그에 남아 있어야 합니다.",
+        "info": "bind() to 0.0.0.0:80 failed — 컨테이너 안 포트 충돌\nemerg — nginx 설정 오류"
+      },
+      {
+        "title": "자원 사용 확인",
+        "command": "sudo docker stats --no-stream --format '{{.Name}} | CPU {{.CPUPerc}} | MEM {{.MemUsage}} | NET {{.NetIO}}'",
+        "desc": "컨테이너가 쓰는 CPU·메모리를 한 번만 찍어 봅니다. 배포 직후 기준값으로 남겨 두면 나중에 비교하기 좋습니다.",
+        "info": "--no-stream 을 빼면 계속 갱신되며 단계가 끝나지 않습니다. 시나리오에서는 반드시 붙여야 합니다."
+      },
+      {
+        "title": "재기동 확인",
+        "command": "cd /opt/qterm-app && sudo docker compose restart && sleep 8 && sudo docker ps --filter name=qterm-app --format '{{.Names}} | {{.Status}}' && curl -s -o /dev/null -w '재기동 후 응답 코드: %{http_code}\\n' http://127.0.0.1:<서비스포트>/",
+        "check": { "passContains": ["재기동 후 응답 코드: 200"], "failContains": ["Exited"] },
+        "desc": "계획된 재기동입니다. 내린 뒤 다시 올라오고 서비스가 그대로 응답하는지 봅니다."
+      },
+      {
+        "title": "강제 종료 후 자동 복구 확인",
+        "command": "echo '[컨테이너 안에서 주 프로세스 종료]'; sudo docker exec qterm-app sh -c 'kill -TERM 1' 2>&1 | head -2; sleep 15; echo '[상태]'; sudo docker ps -a --filter name=qterm-app --format '{{.Names}} | {{.Status}}'; echo '[서비스]'; curl -s -o /dev/null -w '복구 후 응답 코드: %{http_code}\\n' http://127.0.0.1:<서비스포트>/",
+        "check": { "passContains": ["복구 후 응답 코드: 200"], "failContains": ["Exited"] },
+        "desc": "계획되지 않은 종료입니다. 컨테이너 안에서 주 프로세스를 죽여, restart: unless-stopped 정책이 스스로 다시 띄우는지 봅니다 — 실제 장애에서 서비스가 저절로 돌아오는지를 보는 단계입니다.",
+        "warn": "운영 중인 컨테이너에는 하지 마세요. 이 단계는 시험용 qterm-app 만 대상으로 합니다.",
+        "info": "왜 docker kill 이 아닌가 — 밖에서 docker kill / docker stop 으로 죽이면 Docker 는 그것을 '사람이 일부러 내린 것' 으로 보고 restart 정책을 건너뜁니다(공식 문서: manually stop 하면 정책은 데몬 재시작이나 수동 재시작 전까지 무시됨). 그래서 컨테이너가 그대로 죽은 채 남고 응답 코드가 000 이 됩니다. 장애를 흉내 내려면 안에서 프로세스가 죽어야 합니다.\nPID 1 에 SIGKILL 을 보내면 커널이 무시합니다(네임스페이스 init 보호). nginx 가 처리하는 SIGTERM 을 씁니다.\n\n복구가 안 되면\n· 정책 확인 — sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' qterm-app 이 unless-stopped 인지\n· 되살리기 — sudo docker start qterm-app 또는 cd /opt/qterm-app && sudo docker compose up -d",
+        "note": "restart 정책은 컨테이너가 10초 이상 정상으로 떠 있어야 무장됩니다. 기동 직후 바로 이 단계를 돌리면 복구되지 않을 수 있으니, 앞 단계들을 순서대로 거친 뒤 실행하세요."
+      },
+      {
+        "title": "호스트 재부팅 후 자동 기동",
+        "command": "",
+        "desc": "호스트를 껐다 켜도 컨테이너가 스스로 올라오는지는 실제 재부팅으로만 확인됩니다. 재부팅하면 이 창의 연결이 끊기므로 시나리오 안에서 돌리지 않습니다.",
+        "note": "재부팅        sudo reboot\n다시 접속한 뒤  sudo docker ps --filter name=qterm-app\n도커 자동 기동  systemctl is-enabled docker   (enabled 여야 함)"
+      },
+      {
+        "title": "새 버전 배포 확인",
+        "command": "cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v2' | sudo tee html/index.html > /dev/null && sudo docker compose pull && sudo docker compose up -d --force-recreate && sleep 8 && curl -s http://127.0.0.1:<서비스포트>/",
+        "check": { "passContains": ["배포 버전: v2"] },
+        "desc": "내용을 바꾸고 다시 배포해, 새 버전이 실제로 반영되는지 봅니다. 운영에서는 이미지 태그를 올린 뒤 같은 명령을 씁니다.",
+        "info": "v1 이 그대로 나오면 브라우저나 프록시 캐시가 아니라 컨테이너가 옛 내용을 들고 있는 것입니다. --force-recreate 없이 up -d 만 하면 바뀐 게 없다고 판단해 그대로 두는 경우가 있습니다."
+      },
+      {
+        "title": "시험 컨테이너 정리",
+        "command": "if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down); fi; echo '--- 남은 컨테이너 확인'; N=$(sudo docker ps -a --filter name=qterm-app --format '{{.Names}}' | wc -l); if [ \"$N\" = \"0\" ]; then echo '정리 완료 — 남은 컨테이너 없음'; else echo \"주의 — 아직 $N 개 남아 있습니다\"; sudo docker ps -a --filter name=qterm-app; fi",
+        "check": { "passContains": ["정리 완료 — 남은 컨테이너 없음"], "failContains": ["주의 —"] },
+        "desc": "시험 컨테이너를 내립니다. 목록에 qterm-app 이 남지 않아야 정상입니다.",
+        "info": "이미지까지 지우려면 sudo docker image rm nginx:1.27-alpine 를, 안 쓰는 것을 한 번에 치우려면 sudo docker system prune -a 를 씁니다(후자는 다른 이미지도 지우니 주의)."
+      },
+      {
+        "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "command": `if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/qterm-app /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; sudo gpasswd -d $USER docker 2>/dev/null || true; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
+        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
+        "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 앞 단계가 컨테이너만 내렸다면, 여기서 Docker 패키지·데이터·저장소 등록까지 걷어냅니다.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다. 이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요.",
+        "info": "하는 일 순서\n1) qterm-app 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/qterm-app · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제, docker 그룹에서 현재 사용자 빼기\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\n컨테이너만 내리고 Docker 는 남기려면 이 단계 대신 앞의 '시험 컨테이너 정리' 까지만 하세요."
+      }
+    ]
+  },
 
   {
     "id": "scn4",
@@ -1948,6 +2407,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "sysctl.conf 편집",
         "command": "sudo vi /etc/sysctl.conf",
+        "needsInput": true,
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "예: net.ipv4.tcp_tw_reuse=1, net.core.somaxconn=1024 등 튜닝 값을 추가합니다.",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
@@ -1956,7 +2416,8 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "즉시 적용",
         "command": "sudo sysctl -p",
-        "desc": "sysctl.conf 의 변경분을 즉시 커널에 적용합니다."
+        "desc": "sysctl.conf 의 변경분을 즉시 커널에 적용합니다.",
+        "note": "원복 대상이 아닙니다 — 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다. 되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
       },
       {
         "title": "반영 확인",
@@ -1991,13 +2452,15 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "서비스 로그 추적",
-        "command": "sudo journalctl -u <서비스명> -f",
-        "desc": "해당 서비스의 재시작/크래시 로그를 실시간으로 추적합니다. (종료: Ctrl+C)"
+        "command": "sudo timeout 30 journalctl -u <서비스명> -f; echo '--- 30초 추적 종료'",
+        "desc": "해당 서비스의 재시작·크래시 로그를 30초 동안 추적합니다.",
+        "info": "계속 지켜보려면 터미널에서 sudo journalctl -u 서비스명 -f 를 직접 쓰세요(종료는 Ctrl+C). 검증 실행에서는 끝나지 않는 명령을 쓸 수 없어 시간을 끊어 두었습니다."
       },
       {
         "title": "시스템 로그 추적",
-        "command": "sudo tail -f /var/log/syslog",
-        "desc": "전체 시스템 로그를 실시간 추적합니다. (RHEL 계열은 /var/log/messages)"
+        "command": "sudo timeout 30 tail -f /var/log/syslog; echo '--- 30초 추적 종료'",
+        "desc": "전체 시스템 로그를 30초 동안 추적합니다. (RHEL 계열은 /var/log/messages)",
+        "info": "계속 지켜보려면 터미널에서 sudo tail -f /var/log/syslog 를 직접 쓰세요(종료는 Ctrl+C)."
       }
     ]
   },
@@ -2015,7 +2478,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "qemu-img 설치",
-        "command": "sudo apt-get update -q && sudo apt-get install -y -q qemu-utils",
+        "command": `${APT} update && ${APT} install -y qemu-utils`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
@@ -2032,11 +2495,14 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "연결된 디스크 목록 확인",
         "command": "lsblk",
-        "desc": "볼륨이 정상 연결됐는지 확인합니다. vda(OS 디스크) 외에 vdb 등 추가 디스크가 표시되면 정상입니다. 이후 단계에서 해당 디스크명을 사용합니다."
+        "check": { "requireExitZero": true, "passContains": ["vdb"] },
+        "desc": "볼륨이 정상 연결됐는지 확인합니다. vda(OS 디스크) 외에 vdb 등 추가 디스크가 표시되면 정상입니다. 이후 단계에서 해당 디스크명을 사용합니다.",
+        "note": "이 시나리오는 뒤에서 /dev/vdb 를 그대로 포맷합니다 — 여기서 vdb 가 안 보이면 더 진행하면 안 됩니다."
       },
       {
         "title": "저장용 디스크 포맷",
         "command": "sudo mkfs.ext4 /dev/vdb",
+        "expect": [{ "match": "Proceed anyway", "send": "y" }],
         "warn": "/dev/vdb 의 데이터가 모두 지워집니다. 새로 붙인 빈 디스크가 맞는지 앞 단계 lsblk 로 확인하세요.",
         "desc": "이미지 파일을 저장할 추가 디스크(vdb)를 ext4로 포맷합니다. lsblk에서 확인한 디스크명으로 교체하세요.",
         "note": "⚠️ vda는 OS 디스크입니다. 반드시 추가 연결한 디스크(vdb 등)에만 포맷을 진행하세요."
@@ -2077,6 +2543,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "vda 디스크를 qcow2 이미지로 변환",
         "command": "sudo qemu-img convert -O qcow2 /dev/vda /mnt/backup/ubuntu_image.qcow2",
+        "undo": "sudo rm -f /mnt/backup/ubuntu_image.qcow2",
         "desc": "OS 디스크(vda) 전체를 qcow2 포맷 이미지 파일로 변환합니다. 디스크 용량에 따라 수 분~수십 분 소요됩니다.",
         "info": "변환 중 인스턴스를 사용하면 이미지가 불일치 상태가 될 수 있습니다. 가능하면 서비스를 중지한 상태에서 진행하세요."
       },
@@ -2088,6 +2555,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "이미지 압축 변환 (선택)",
         "command": "sudo qemu-img convert -c -O qcow2 /mnt/backup/ubuntu_image.qcow2 /mnt/backup/ubuntu_image_compressed.qcow2",
+        "undo": "sudo rm -f /mnt/backup/ubuntu_image_compressed.qcow2",
         "desc": "생성된 이미지에 압축을 적용해 파일 크기를 줄입니다. 다운로드 시간을 단축하려면 이 단계를 먼저 진행하세요.",
         "note": "압축 옵션(-c)은 변환 시간이 더 걸리지만 파일 크기를 크게 줄여줍니다. 원본 이미지는 삭제해 공간을 확보할 수 있습니다."
       },
