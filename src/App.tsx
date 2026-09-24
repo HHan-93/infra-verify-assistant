@@ -320,12 +320,15 @@ export default function App() {
   const [maskReport, setMaskReport] = useState(() => maskReportEnabled())
   const [maskDisplay, setMaskDisplay] = useState(() => maskDisplayEnabled())
   const [maskIp, setMaskIp] = useState(() => maskIpEnabled())
-  // 유휴 마스코트 등장까지의 시간(ms) — 기본 5분, 외형 설정에서 조절 가능
+  // 유휴 마스코트 등장까지의 시간(ms) — 외형 설정에서 조절 가능
   const [idleDelayMs, setIdleDelayMs] = useState(() => {
     // 0('끄기')도 유효값으로 보존 — `|| 기본값` 을 쓰면 0 이 falsy 라 기본값으로 되돌아간다.
     const raw = localStorage.getItem('mascot_idle_delay_ms')
     const n = raw == null ? NaN : Number(raw)
-    return Number.isFinite(n) ? n : 300_000
+    // 기본값은 **끄기**다. 예전 기본은 5분이었는데, 검증 중에는 화면을 켜 둔 채 원격을
+    // 지켜보는 시간이 길어 마스코트가 제 발로 나타난다 — "화면이 저절로 움직이지 않게 한다"는
+    // 이 저장소의 원칙과 어긋난다. 보고 싶은 사람이 설정에서 켜는 쪽으로 뒤집었다.
+    return Number.isFinite(n) ? n : 0
   })
   const idleDelayRef = useRef(idleDelayMs)
   useEffect(() => {
@@ -2740,7 +2743,7 @@ export default function App() {
                         onChange={(e) => changeIdleDelay(Number(e.target.value))}
                         className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
                       >
-                        <option value={0}>끄기 (표시 안 함)</option>
+                        <option value={0}>끄기 (기본)</option>
                         <option value={60_000}>1분</option>
                         <option value={180_000}>3분</option>
                         <option value={300_000}>5분</option>
@@ -2748,7 +2751,9 @@ export default function App() {
                         <option value={1_200_000}>20분</option>
                       </select>
                       <p className="mt-1 text-[11px] text-gray-500">
-                        아무 동작이 없으면 이 시간 뒤에 등장합니다
+                        {idleDelayMs === 0
+                          ? '마스코트를 표시하지 않습니다'
+                          : '아무 동작이 없으면 이 시간 뒤에 등장합니다'}
                       </p>
                     </div>
                   </>
