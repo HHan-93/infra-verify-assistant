@@ -127,16 +127,26 @@ export function stepGrid(runs: ScenarioRunDetail[]): { title: string; cells: (Sc
 /**
  * 회차 하나의 **한 줄 결과.**
  *
- * 개요 표에서 눈으로 훑는 값이라 셋으로만 나눈다. `미완` 을 따로 두는 이유는 이 앱의 규칙
- * 그대로다 — **근거 없이 초록을 띄우지 않는다.** 수동 확인이 남았거나 중단된 회차는 실패는
- * 아니지만 '정상' 도 아니다. 그걸 정상으로 칠하면 아무도 그 회차를 다시 안 본다.
+ * 개요 표에서 눈으로 훑는 값이라 셋으로만 나눈다 — **실패 / 정상 / 그 외.** 그 외(중단 ·
+ * 판정 없음)를 남겨 두는 이유는 이 앱의 규칙 그대로다: **근거 없이 초록을 띄우지 않는다.**
+ * 끝까지 돌지 않았거나 판정된 스텝이 하나도 없는 회차를 정상으로 칠하면 아무도 그 회차를
+ * 다시 안 본다. 반대로 사람 확인이 남은 것만으로는 막지 않는다(아래 주석).
  */
 export function runVerdict(r: {
   counts: ScenarioRunCounts
   stopped?: boolean
 }): { key: 'fail' | 'incomplete' | 'pass'; label: string } {
   if (r.counts.fail + r.counts.error > 0) return { key: 'fail', label: '실패' }
-  if (r.stopped || r.counts.waiting + r.counts.pending > 0) return { key: 'incomplete', label: '미완' }
+  /**
+   * 중단된 회차는 정상으로 치지 않는다 — 끝까지 돌지 않았으니 '전부 만족했다' 고 말할 근거가 없다.
+   *
+   * 반대로 **수동대기(명령이 없는 안내 스텝)는 더 이상 막지 않는다.** 예전에는 막았는데,
+   * 그러면 "LNB 에서 인스턴스를 생성하세요" 같은 안내가 하나라도 있는 시나리오는 사람이
+   * 스텝마다 체크를 눌러 주지 않는 한 **영원히 정상이 될 수 없었다**(사용자 지적). 그건
+   * 검증 결과가 아니라 체크를 눌렀는지를 재는 것이다. 남은 수는 개요 막대와 회차 칩에
+   * 그대로 보이므로 사실이 감춰지지도 않는다.
+   */
+  if (r.stopped) return { key: 'incomplete', label: '중단' }
   /**
    * **판정된 스텝이 하나도 없으면 초록을 띄우지 않는다.**
    *
@@ -335,6 +345,8 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   const nFail = verdicts.filter((v) => v.key === 'fail').length
   const nIncomplete = verdicts.filter((v) => v.key === 'incomplete').length
   const nPass = verdicts.filter((v) => v.key === 'pass').length
+  /** 사람이 눈으로 봐야 하는 스텝 수 — 회차 판정은 막지 않지만 남았다는 사실은 말한다 */
+  const nWait = runs.reduce((a, r) => a + r.counts.waiting, 0)
   // 문서 전체의 한 줄 결론 — 읽는 사람이 가장 먼저 찾는 문장이다
   const headline =
     runs.length === 0
@@ -344,60 +356,64 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
         : nIncomplete > 0
           ? {
               key: 'incomplete',
-              text: `실패는 없지만 ${nIncomplete}개 회차에 확인이 남아 있습니다 (수동 확인 · 미실행 · 판정 기준이 없는 회차)`,
+              text: `실패는 없지만 ${nIncomplete}개 회차는 정상으로 볼 수 없습니다 (중단 · 판정 기준 없음)`,
             }
           : { key: 'pass', text: `회차 ${runs.length}개 모두 기준을 만족했습니다` }
 
-  const stat = (label: string, value: string | number, kind = '') =>
-    `<div class="stat ${kind}"><b>${value}</b><span>${label}</span></div>`
+  const kpi = (label: string, value: string | number, kind = '') =>
+    `<div class="kpi ${kind}"><b>${value}</b><span>${label}</span></div>`
 
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
 <style>
   /* 외부 자원을 쓰지 않는다 — 메일 첨부·망 밖에서도 그대로 보여야 한다.
-     밝은 배경인 이유는 이 문서가 앱 화면이 아니라 인쇄·전달되는 제출물이기 때문이다. */
+     본문이 밝은 배경인 이유는 이 문서가 앱 화면이 아니라 인쇄·전달되는 제출물이기 때문이다. */
   :root {
     --ink:#1b2130; --ink-2:#48546a; --ink-3:#75818f;
     --line:#e2e6ee; --line-2:#eef1f6; --paper:#ffffff; --bg:#f4f6fa;
     --pass:#0f766e; --pass-bg:#e9f8f4;
     --fail:#c02626; --fail-bg:#fdeeee;
     --warn:#a16207; --warn-bg:#fdf6e7;
-    --info:#4b5563; --accent:#2563eb;
+    --accent:#2563eb;
   }
   * { box-sizing:border-box }
   html { -webkit-text-size-adjust:100% }
   body { margin:0; background:var(--bg); color:var(--ink);
          font:13.5px/1.7 -apple-system, "Segoe UI", "Malgun Gothic", "맑은 고딕", system-ui, sans-serif }
-  .wrap { max-width:1180px; margin:0 auto; padding:0 24px 40px }
+  .wrap { max-width:1120px; margin:0 auto; padding:0 24px }
 
-  /* 머리 — 스크롤해도 무슨 문서인지 잃지 않게 붙여 둔다 */
-  header { position:sticky; top:0; z-index:5; background:var(--paper); border-bottom:1px solid var(--line) }
-  header .wrap { padding-top:14px; padding-bottom:12px }
-  .brand { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3) }
-  h1 { font-size:21px; line-height:1.35; margin:3px 0 6px; font-weight:700; letter-spacing:-.01em }
-  .sub { font-size:11.5px; color:var(--ink-3) }
-  .sub b { color:var(--ink-2); font-weight:600 }
+  /*
+    머리 — 어두운 띠 하나에 '무슨 문서인지'와 '결론 숫자'를 몰아 둔다.
+    붙여 두지(sticky) 않는다: 아래 회차 카드를 펼치면 화면이 좁아지는데, 그 상태에서
+    머리까지 자리를 먹으면 정작 봐야 할 표가 안 보인다. 결론은 어차피 맨 위에 있다.
+  */
+  .top { background:linear-gradient(180deg,#1e2534,#252d3f); color:#fff; padding:26px 0 24px }
+  .brand { font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:#8e9ab0 }
+  h1 { font-size:24px; line-height:1.3; margin:7px 0 5px; font-weight:700; letter-spacing:-.015em }
+  .sub { font-size:12px; color:#9aa5ba; margin:0 }
+  .sub b { color:#d7dee9; font-weight:600 }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:11px; margin-top:20px }
+  .kpi { background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.1);
+         border-radius:10px; padding:12px 15px }
+  .kpi b { display:block; font-size:25px; line-height:1.15; font-weight:700; letter-spacing:-.02em;
+           font-variant-numeric:tabular-nums }
+  .kpi span { font-size:11.5px; color:#9aa5ba }
+  .kpi.k-pass b { color:#6fdcb0 } .kpi.k-fail b { color:#ff9494 } .kpi.k-warn b { color:#f0c674 }
 
-  /* 결론 — 맨 위에 한 줄 */
-  .headline { display:flex; align-items:center; gap:9px; margin:16px 0 12px; padding:11px 14px;
+  .body { padding:22px 0 44px }
+
+  /* 결론 — 본문 첫 줄 */
+  .headline { display:flex; align-items:center; gap:9px; margin:0 0 14px; padding:11px 14px;
               border-radius:9px; border:1px solid var(--line); background:var(--paper); font-size:14px; font-weight:600 }
   .headline.k-fail { border-color:#f3c9c9; background:var(--fail-bg); color:var(--fail) }
   .headline.k-incomplete { border-color:#eedcae; background:var(--warn-bg); color:var(--warn) }
   .headline.k-pass { border-color:#bfe6dc; background:var(--pass-bg); color:var(--pass) }
   .headline .dot { width:9px; height:9px; border-radius:99px; background:currentColor; flex:none }
 
-  .stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:14px }
-  .stat { background:var(--paper); border:1px solid var(--line); border-radius:9px; padding:11px 13px }
-  .stat b { display:block; font-size:23px; line-height:1.2; font-weight:700; letter-spacing:-.02em }
-  .stat span { font-size:11px; color:var(--ink-3) }
-  .stat.k-fail b { color:var(--fail) } .stat.k-pass b { color:var(--pass) } .stat.k-warn b { color:var(--warn) }
-
   .card { background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:14px }
   h2 { font-size:14.5px; margin:0 0 10px; font-weight:700; letter-spacing:-.01em }
   h2 .hint { font-weight:400; font-size:11px; color:var(--ink-3); margin-left:8px }
-  h3 { font-size:13.5px; margin:0 0 8px; font-weight:700 }
-  h3 .meta { font-weight:400; font-size:11px; color:var(--ink-3); margin-left:6px }
 
   .note { font-size:11.5px; color:var(--ink-3); line-height:1.75 }
   .banner { margin:0 0 10px; padding:9px 12px; border-radius:8px; font-size:12px; line-height:1.7;
@@ -411,8 +427,6 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   table { border-collapse:collapse; width:100%; font-size:12.5px }
   .tw > table { min-width:max-content }
   th, td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line-2); vertical-align:top }
-  /* 표 머리를 붙여 두지 않는다 — 페이지 머리가 이미 붙어 있어서, 둘이 겹치면 표 머리가
-     그 뒤로 숨는다. 표는 길어야 스텝 열몇 줄이라 붙여 둘 값도 크지 않다. */
   thead th { font-size:11px; font-weight:600; color:var(--ink-3); background:#fafbfd;
              border-bottom:1px solid var(--line); white-space:nowrap }
   tbody tr:last-child td { border-bottom:0 }
@@ -443,80 +457,88 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   .legend i { width:9px; height:9px; border-radius:2px; display:inline-block }
 
   /*
-    회차 탭 — **자바스크립트 없이** 라디오 + label 로 만든다.
-    (라디오는 화면 밖으로 숨기되 display:none 은 쓰지 않는다 — 키보드로 못 고르게 된다)
+    회차 카드 — **자바스크립트 없이** 체크박스 + label 로 펼친다.
+    <details> 를 쓰지 않는 이유: 브라우저 기본 스타일이 닫힌 내용을 감춰서 인쇄할 때
+    CSS 로 강제로 펼 수가 없다. 종이에는 모든 회차가 펼쳐져 나와야 한다.
+    (체크박스는 화면 밖으로 숨기되 display:none 은 쓰지 않는다 — 키보드로 못 고르게 된다)
   */
-  .tabs > input, .raws { position:absolute; opacity:0; width:0; height:0 }
-  .tabbar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:-1px }
-  .tabbar label { display:inline-flex; align-items:center; gap:7px; cursor:pointer; user-select:none;
-                  border:1px solid var(--line); border-bottom-color:transparent; border-radius:9px 9px 0 0;
-                  background:#f7f9fc; padding:7px 13px; font-size:12px; color:var(--ink-2) }
-  .tabbar label:hover { background:#eef2f8; color:var(--ink) }
-  .tabbar label b { font-weight:700; color:var(--ink-3) }
-  .panels > section { display:none; background:var(--paper); border:1px solid var(--line); border-radius:0 10px 10px 10px;
-                      padding:16px 18px }
-  .panels > section > h3:first-child { margin-top:0 }
+  .rt, .raws { position:absolute; opacity:0; width:0; height:0 }
+  .run { position:relative; background:var(--paper); border:1px solid var(--line); border-radius:10px;
+         margin-bottom:10px; overflow:hidden }
+  .run::before { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; background:#cfd6e0 }
+  .run.k-pass::before { background:#2aa88b }
+  .run.k-fail::before { background:#d94b4b }
+  .run.k-incomplete::before { background:#e0a93c }
+  .rhead { display:flex; align-items:center; gap:13px; padding:13px 16px 13px 20px; cursor:pointer; user-select:none }
+  .rhead:hover { background:#fafbfd }
+  .rno { font-variant-numeric:tabular-nums; color:var(--ink-3); font-size:12px; flex:none }
+  .rttl { flex:1; min-width:0 }
+  .rttl b { display:block; font-size:13.5px; font-weight:650 }
+  .rttl span { font-size:11.5px; color:var(--ink-3) }
+  .rhead .bar { flex:none }
+  .chev { color:var(--ink-3); font-size:10px; flex:none; transition:transform .15s }
+  .rt:checked ~ .rhead .chev { transform:rotate(180deg) }
+  .rbody { display:none; border-top:1px solid var(--line-2); padding:14px 16px 16px 20px }
+  .rt:checked ~ .rbody { display:block }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px }
+  .chip { font-size:11.5px; color:var(--ink-3); background:#f6f8fb; border:1px solid var(--line-2);
+          border-radius:7px; padding:3px 9px }
+  .chip b { color:var(--ink); font-weight:650 }
+  .chip.k-fail b { color:var(--fail) }
 
-  /* 리포트 원문 — 접어 두고 필요할 때만 편다. 펴 두면 스텝 표가 안 보인다 */
-  .rawbtn { display:inline-block; margin-top:14px; cursor:pointer; user-select:none; font-size:11.5px;
+  /* 리포트 원문 — 스텝 표 **위**에 둔다. 아래에 두면 긴 표를 다 내려야 보여서 있는 줄을 모른다 */
+  .rawbtn { display:inline-block; margin-bottom:12px; cursor:pointer; user-select:none; font-size:11.5px;
             color:var(--accent); border:1px solid #cfdcf7; background:#f3f7ff; border-radius:7px; padding:5px 11px }
   .rawbtn:hover { background:#e7effd }
-  .rawbox { display:none; margin-top:9px }
+  .rawbox { display:none; margin:0 0 14px }
   .raws:checked ~ .rawbox { display:block }
   .raws:checked ~ .rawbtn { background:#e7effd }
   pre { background:#fbfcfe; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:0;
         font:11.5px/1.65 ui-monospace, Consolas, "D2Coding", monospace; color:#2b3444;
-        white-space:pre-wrap; word-break:break-all; overflow-x:auto }
-
-  .top { display:inline-block; margin-top:14px; font-size:11px; color:var(--ink-3); text-decoration:none }
-  .top:hover { color:var(--accent) }
-  footer { color:var(--ink-3); font-size:11px; line-height:1.8; padding:16px 0 0; border-top:1px solid var(--line); margin-top:8px }
+        white-space:pre-wrap; word-break:break-all; overflow-x:auto; max-height:520px; overflow-y:auto }
+  footer { color:var(--ink-3); font-size:11px; line-height:1.8; padding:16px 0 0; border-top:1px solid var(--line); margin-top:14px }
 
   @media (max-width:820px) {
-    .stats { grid-template-columns:repeat(2, 1fr) }
-    .wrap { padding:0 14px 30px }
+    .kpis { grid-template-columns:repeat(2, 1fr) }
+    .wrap { padding:0 14px }
+    .rhead .bar { display:none }
   }
 
-  /* 인쇄 — 탭과 접힘은 화면에서만 쓸모가 있다. 종이에는 전부 펼쳐 나와야 회차가 빠지지 않는다 */
+  /* 인쇄 — 펼침은 화면에서만 쓸모가 있다. 종이에는 전부 펼쳐 나와야 회차가 빠지지 않는다 */
   @media print {
     body { background:#fff }
-    header { position:static }
-    .tabbar, .rawbtn, .top { display:none !important }
-    .card, .panels > section { border-color:#d7dce6; break-inside:avoid }
-    .panels > section { display:block !important; border-radius:10px; margin-bottom:12px }
-    .rawbox { display:block !important }
+    .top { background:#fff !important; color:#000; padding-bottom:10px; border-bottom:2px solid #1b2130 }
+    .brand, .sub { color:#555 !important } .sub b { color:#000 !important }
+    .kpi { background:#fff !important; border-color:#d7dce6 !important }
+    .kpi span { color:#555 !important }
+    .kpi b, .kpi.k-pass b, .kpi.k-fail b, .kpi.k-warn b { color:#000 !important }
+    .rawbtn, .chev { display:none !important }
+    .card, .run { border-color:#d7dce6; break-inside:avoid }
+    .rbody, .rawbox { display:block !important }
+    pre { max-height:none; overflow:visible }
     .tw { overflow:visible }
   }
-${/* 회차 수만큼만 만든다 — 예전엔 60개로 고정했는데, 61개를 고르면 그 뒤 탭은 여는
-     규칙이 없어 회차 상세가 **빈 칸**으로 나왔다(화면에서만. 인쇄는 전부 펼쳐진다) */ ''}
-${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
-  `  #tab${i}:checked ~ .tabbar label[for="tab${i}"] { background:var(--paper); color:var(--ink); font-weight:600; border-bottom-color:var(--paper) }\n` +
-  `  #tab${i}:checked ~ .panels > #panel${i} { display:block }`,
-).join('\n')}
 </style></head><body>
-<header>
-  <div class="wrap">
-    <div class="brand">Q-Term 검증 리포트</div>
-    <h1 id="top">${esc(title)}</h1>
-    <div class="sub">
-      회차 <b>${runs.length}개</b>${
-        runs.length
-          ? ` · ${esc(runStamp(runs[0].startedAt))} ~ ${esc(runStamp(runs[runs.length - 1].startedAt))}`
-          : ''
-      }${targets.length ? ` · 대상 <b>${esc(targets.join(' · '))}</b>` : ''} · 뽑은 시각 ${esc(runStamp(now))}
-    </div>
+<div class="top"><div class="wrap">
+  <div class="brand">Q-Term 검증 리포트</div>
+  <h1 id="top">${esc(title)}</h1>
+  <p class="sub">
+    회차 <b>${runs.length}개</b>${
+      runs.length
+        ? ` · ${esc(runStamp(runs[0].startedAt))} ~ ${esc(runStamp(runs[runs.length - 1].startedAt))}`
+        : ''
+    }${targets.length ? ` · 대상 <b>${esc(targets.join(' · '))}</b>` : ''} · 뽑은 시각 ${esc(runStamp(now))}
+  </p>
+  <div class="kpis">
+    ${kpi('회차', runs.length)}
+    ${kpi('정상', nPass, 'k-pass')}
+    ${kpi('실패', nFail, 'k-fail')}
+    ${kpi('사람이 볼 스텝', nWait, 'k-warn')}
   </div>
-</header>
+</div></div>
 
-<div class="wrap">
+<div class="body"><div class="wrap">
   <div class="headline k-${headline.key}"><span class="dot"></span>${esc(headline.text)}</div>
-
-  <div class="stats">
-    ${stat('회차', runs.length)}
-    ${stat('정상 회차', nPass, 'k-pass')}
-    ${stat('실패 회차', nFail, 'k-fail')}
-    ${stat('확인 남음', nIncomplete, 'k-warn')}
-  </div>
 
   ${
     always.length
@@ -544,12 +566,13 @@ ${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
     <div class="tw"><table>
       <thead>
         <tr><th>No</th><th>시나리오</th><th>실행 시각</th><th>결과</th><th>스텝 구성</th>
-        <th>정상</th><th>실패</th><th>실행오류</th><th>수동대기</th><th>건너뜀</th><th>미실행</th><th>소요</th></tr>
+        <th>정상</th><th>실패</th><th>소요</th></tr>
       </thead>
       <tbody>
         ${runs
           .map((r, i) => {
             const v = verdicts[i]
+            const bad = r.counts.fail + r.counts.error
             return `<tr>
           <td class="num">${i + 1}</td>
           <td>${esc(r.title)}</td>
@@ -557,11 +580,7 @@ ${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
           <td><span class="pill k-${v.key}">${v.label}</span></td>
           <td>${bar(r.counts)}</td>
           <td class="num">${r.counts.pass}</td>
-          <td class="num${r.counts.fail ? ' bad' : ''}">${r.counts.fail}</td>
-          <td class="num${r.counts.error ? ' bad' : ''}">${r.counts.error}</td>
-          <td class="num">${r.counts.waiting}</td>
-          <td class="num">${r.counts.skip}</td>
-          <td class="num">${r.counts.pending}</td>
+          <td class="num${bad ? ' bad' : ''}">${bad}</td>
           <td class="dim">${esc(durText(r.endedAt - r.startedAt))}</td>
         </tr>`
           })
@@ -571,9 +590,10 @@ ${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
     <div class="legend">
       <span><i class="s-pass"></i>정상</span><span><i class="s-info"></i>실행됨</span>
       <span><i class="s-fail"></i>실패</span><span><i class="s-error"></i>실행오류</span>
-      <span><i class="s-wait"></i>수동대기</span><span><i class="s-skip"></i>건너뜀</span>
+      <span><i class="s-wait"></i>수동 확인</span><span><i class="s-skip"></i>건너뜀</span>
       <span><i class="s-pending"></i>미실행</span>
     </div>
+    <div class="note">실패 칸은 <b>실패 + 실행오류</b>를 합한 수입니다. 나머지 구성은 막대에 있습니다(칸에 마우스를 올리면 수가 나옵니다).</div>
   </div>
 
   ${
@@ -593,68 +613,121 @@ ${Array.from({ length: Math.max(runs.length, 1) }, (_, i) =>
       : ''
   }
 
-  <h2 style="margin:18px 0 10px">회차 상세<span class="hint">탭을 눌러 회차를 바꿉니다 · 인쇄하면 전부 펼쳐집니다</span></h2>
-  <div class="tabs">
-    ${runs.map((_, i) => `<input type="radio" name="run" id="tab${i}"${i === 0 ? ' checked' : ''}>`).join('')}
-    <div class="tabbar">
-      ${runs
-        .map(
-          (r, i) =>
-            `<label for="tab${i}"><b>${i + 1}</b> ${esc(runStamp(r.startedAt))} <span class="pill k-${
-              verdicts[i].key
-            }">${verdicts[i].label}</span></label>`,
-        )
-        .join('')}
+  <h2 style="margin:18px 0 10px">회차 상세<span class="hint">카드를 눌러 펼칩니다 · 실패한 회차는 펼쳐 두었습니다 · 인쇄하면 전부 펼쳐집니다</span></h2>
+  ${runs
+    .map((r, i) => {
+      const v = verdicts[i]
+      const bad = r.counts.fail + r.counts.error
+      return `<div class="run k-${v.key}">
+    ${/* 실패한 회차는 펼쳐 둔다 — 문서를 여는 이유가 대개 그것이다 */ ''}
+    <input type="checkbox" class="rt" id="r${i}"${v.key === 'fail' ? ' checked' : ''}>
+    <label class="rhead" for="r${i}">
+      <span class="rno">${i + 1}</span>
+      <span class="rttl"><b>${esc(r.title)}</b><span>${esc(runStamp(r.startedAt))} · ${esc(
+        durText(r.endedAt - r.startedAt),
+      )}${r.targets.length ? ` · 대상 ${esc(r.targets.join(' · '))}` : ''}</span></span>
+      ${bar(r.counts)}
+      <span class="pill k-${v.key}">${v.label}</span>
+      <span class="chev">▼</span>
+    </label>
+    <div class="rbody">
+      ${
+        r.stopped
+          ? `<div class="banner">${
+              r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''
+            }중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+          : ''
+      }
+      <div class="chips">
+        <span class="chip">정상 <b>${r.counts.pass}</b></span>
+        <span class="chip${bad ? ' k-fail' : ''}">실패 <b>${bad}</b></span>
+        <span class="chip">실행됨 <b>${r.counts.info}</b></span>
+        <span class="chip">사람이 볼 것 <b>${r.counts.waiting}</b></span>
+        <span class="chip">건너뜀 <b>${r.counts.skip}</b></span>
+        <span class="chip">미실행 <b>${r.counts.pending}</b></span>
+      </div>
+      <input type="checkbox" class="raws" id="raw${i}">
+      <label class="rawbtn" for="raw${i}">리포트 원문 보기 — 명령 · 출력 · 판정 근거</label>
+      <div class="rawbox"><pre>${esc(r.reportMd.trim())}</pre></div>
+      ${
+        r.steps.length
+          ? `<div class="tw"><table class="steps">
+        <thead><tr><th>#</th><th>스텝</th><th>판정</th><th>대상</th><th>판정 근거</th></tr></thead>
+        <tbody>
+        ${r.steps
+          .map(
+            (st) => `<tr>
+          <td class="num">${st.index + 1}</td>
+          <td>${esc(st.title)}</td>
+          ${cell(st)}
+          <td class="dim">${esc(st.sessionName ?? '')}</td>
+          <td class="dim">${esc(reasonText(st))}</td>
+        </tr>`,
+          )
+          .join('')}
+        </tbody>
+      </table></div>`
+          : '<div class="note">이 회차에는 스텝 기록이 없습니다.</div>'
+      }
     </div>
-    <div class="panels">
-      ${runs
-        .map(
-          (r, i) => `<section id="panel${i}">
-        <h3>${i + 1}. ${esc(r.title)}<span class="meta">${esc(runStamp(r.startedAt))} · ${esc(
-          durText(r.endedAt - r.startedAt),
-        )} · ${esc(countsText(r.counts))}${r.targets.length ? ` · 대상 ${esc(r.targets.join(' · '))}` : ''}</span></h3>
-        ${
-          r.stopped
-            ? `<div class="banner">${
-                r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''
-              }중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
-            : ''
-        }
-        ${
-          r.steps.length
-            ? `<div class="tw"><table class="steps">
-          <thead><tr><th>#</th><th>스텝</th><th>판정</th><th>대상</th><th>판정 근거</th></tr></thead>
-          <tbody>
-          ${r.steps
-            .map(
-              (st) => `<tr>
-            <td class="num">${st.index + 1}</td>
-            <td>${esc(st.title)}</td>
-            ${cell(st)}
-            <td class="dim">${esc(st.sessionName ?? '')}</td>
-            <td class="dim">${esc(reasonText(st))}</td>
-          </tr>`,
-            )
-            .join('')}
-          </tbody>
-        </table></div>`
-            : '<div class="note">이 회차에는 스텝 기록이 없습니다.</div>'
-        }
-        <input type="checkbox" class="raws" id="raw${i}">
-        <label class="rawbtn" for="raw${i}">리포트 원문 보기 — 명령 · 출력 · 판정 근거</label>
-        <div class="rawbox"><pre>${esc(r.reportMd.trim())}</pre></div>
-        <br><a class="top" href="#top">↑ 맨 위로</a>
-      </section>`,
-        )
-        .join('')}
-    </div>
-  </div>
+  </div>`
+    })
+    .join('')}
 
   <footer>
-    Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차 상세의 <b>리포트 원문</b>은 그때 만든 것을 그대로 실었고,
+    Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차마다 <b>리포트 원문</b>(명령·출력)을 그대로 실었고,
     비밀번호·토큰은 저장 시점에 가려졌습니다.<br>
-    탭과 펼치기는 자바스크립트 없이 동작합니다 — <b>인쇄하면 모든 회차와 원문이 펼쳐집니다.</b>
+    <b>사람이 볼 스텝</b>은 명령이 없는 안내 단계입니다 — 자동으로 판정할 것이 없어 회차 결과를 좌우하지 않습니다.<br>
+    펼치기는 자바스크립트 없이 동작합니다 — <b>인쇄하면 모든 회차와 원문이 펼쳐집니다.</b>
   </footer>
-</div>
+</div></div>
 </body></html>`
+}
+
+// ── 저장된 리포트 원문에서 스텝별 명령·출력 꺼내기 ──────────────
+
+/** 스텝 하나의 '무엇을 실행했고 무엇이 나왔나' */
+export interface StepBody {
+  /** 실제로 나간 명령 (값이 채워진 상태) */
+  command?: string
+  /** 출력 덩어리 — 대상이 여럿이면 대상마다 하나씩 */
+  outputs: { label: string; text: string }[]
+}
+
+/**
+ * 회차의 리포트 원문(reportMd)에서 스텝별 **명령과 출력**을 꺼낸다.
+ *
+ * **왜 다시 파싱하나**: 회차 요약(ScenarioRunStep)에는 판정과 근거만 있고 출력이 없다.
+ * 그런데 사람이 이력에서 정말 보고 싶은 것은 "무엇을 실행했고 무엇이 나왔나" 다 —
+ * `종료 코드 0` 같은 판정 근거만으로는 알 수 없다(사용자 지적).
+ *
+ * 출력을 요약에도 따로 저장하지 않는 이유는 **같은 것을 두 군데 두지 않기 위해서**다.
+ * 원문은 이미 마스킹을 거쳐 저장돼 있고, 그걸 정본으로 삼으면 옛 회차도 그대로 보인다.
+ * (저장 형식을 바꿨다면 지금까지 쌓인 회차는 영영 출력 없이 남았을 것이다)
+ *
+ * 형식은 ScenarioRunner.buildReport 가 만든다 — 그쪽을 고치면 여기도 같이 고쳐야 한다.
+ */
+export function parseReportSteps(md: string): Map<number, StepBody> {
+  const out = new Map<number, StepBody>()
+  if (!md?.trim()) return out
+  // `## 3. 제목  [정상]` 로 시작하는 덩어리로 자른다
+  const heads = [...md.matchAll(/^## (\d+)\. /gm)]
+  for (let i = 0; i < heads.length; i++) {
+    const idx = Number(heads[i][1]) - 1
+    if (!Number.isInteger(idx) || idx < 0) continue
+    const start = heads[i].index ?? 0
+    const end = i + 1 < heads.length ? (heads[i + 1].index ?? md.length) : md.length
+    const sec = md.slice(start, end)
+    const body: StepBody = { outputs: [] }
+    // 명령 — 머리 바로 아래의 ``` 블록 중 `$ ` 로 시작하는 것
+    const cmd = /```\n\$ ([\s\S]*?)\n```/.exec(sec)
+    if (cmd) body.command = cmd[1].trim()
+    // 출력 — <details><summary>…</summary> 안의 ``` 블록 (대상마다 하나씩 나올 수 있다)
+    for (const m of sec.matchAll(/<summary>([^<]*)<\/summary>\s*```\n([\s\S]*?)\n```/g)) {
+      const text = m[2]
+      if (text.trim()) body.outputs.push({ label: m[1].trim(), text })
+    }
+    out.set(idx, body)
+  }
+  return out
 }

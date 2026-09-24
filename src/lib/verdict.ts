@@ -46,18 +46,18 @@ export function judgeOutput(
     // 1) 금지 문자열 — 하나라도 있으면 즉시 FAIL
     const hitFail = (c.failContains ?? []).filter((w) => w.trim() && includesCI(text, w))
     if (hitFail.length) {
-      return { verdict: 'fail', reasons: hitFail.map((w) => `금지 문자열 발견: "${w}"`) }
+      return { verdict: 'fail', reasons: hitFail.map((w) => `실패로 정한 문구가 나옴: "${w}"`) }
     }
 
     // 2) 종료코드 — 명시적으로 요구(requireExitZero === true)했을 때만 적용
     if (c.requireExitZero === true && typeof code === 'number' && code !== 0) {
-      return { verdict: 'fail', reasons: [`종료 코드 ${code} (0 아님)`] }
+      return { verdict: 'fail', reasons: [`명령이 오류로 끝남 (종료 코드 ${code})`] }
     }
 
     // 3) 필수 문자열 — 하나라도 없으면 FAIL
     const missing = (c.passContains ?? []).filter((w) => w.trim() && !includesCI(text, w))
     if (missing.length) {
-      return { verdict: 'fail', reasons: missing.map((w) => `필수 문자열 없음: "${w}"`) }
+      return { verdict: 'fail', reasons: missing.map((w) => `기대한 문구가 없음: "${w}"`) }
     }
 
     // 4) 정규식 — 불일치면 FAIL
@@ -69,14 +69,22 @@ export function judgeOutput(
         return { verdict: 'fail', reasons: [`정규식 오류: /${c.passRegex}/`] }
       }
       if (!re.test(text)) {
-        return { verdict: 'fail', reasons: [`정규식 불일치: /${c.passRegex}/`] }
+        return { verdict: 'fail', reasons: [`기대한 형태와 다름 (정규식 /${c.passRegex}/)`] }
       }
-      reasons.push(`정규식 매칭: /${c.passRegex}/`)
+      reasons.push(`기대한 형태와 맞음 (정규식 /${c.passRegex}/)`)
     }
 
-    if ((c.passContains ?? []).some((w) => w.trim())) reasons.push('필수 문자열 모두 존재')
-    if (c.requireExitZero === true && typeof code === 'number') reasons.push(`종료 코드 ${code}`)
-    return { verdict: 'pass', reasons: reasons.length ? reasons : ['기준 충족'] }
+    /**
+     * 통과 근거는 **무엇을 기대했는지까지** 적는다.
+     *
+     * 예전에는 '필수 문자열 모두 존재' 였는데, 읽는 사람은 *무슨* 문자열인지 알 수 없어
+     * 결국 시나리오 정의를 열어 봐야 했다. 리포트는 돌린 사람 말고 다른 사람이 읽는다.
+     */
+    const want = (c.passContains ?? []).filter((w) => w.trim())
+    if (want.length)
+      reasons.push(`기대한 문구가 모두 나옴: ${want.map((w) => `"${w}"`).join(', ')}`)
+    if (c.requireExitZero === true && typeof code === 'number') reasons.push(`명령이 정상 종료 (코드 ${code})`)
+    return { verdict: 'pass', reasons: reasons.length ? reasons : ['정한 기준을 모두 만족'] }
   }
 
   // 기준 없음 — 실패만 감지, 아니면 정보(판정 안 함).
@@ -86,15 +94,20 @@ export function judgeOutput(
   if (hit) {
     // 어떤 단어가 어느 줄에서 걸렸는지까지 남긴다 — 이게 없으면 긴 출력을 직접 뒤져야 한다.
     const line = hit.line.length > 160 ? hit.line.slice(0, 160) + '…' : hit.line
-    return { verdict: 'fail', reasons: [`출력에 위험 키워드 "${hit.word}" — ${line}`] }
+    return { verdict: 'fail', reasons: [`출력에 오류 문구 "${hit.word}" — ${line}`] }
   }
   if (typeof code === 'number' && code !== 0) {
-    return { verdict: 'fail', reasons: [`종료 코드 ${code} (0 아님)`] }
+    return { verdict: 'fail', reasons: [`명령이 오류로 끝남 (종료 코드 ${code})`] }
   }
-  const checked: string[] = []
-  if (typeof code === 'number') checked.push(`종료 코드 ${code}`)
-  checked.push('출력에 위험 키워드 없음')
-  return { verdict: 'info', reasons: checked }
+  /**
+   * **판정하지 않았다는 사실을 맨 앞에 말한다.**
+   *
+   * 예전 문구는 `종료 코드 0 · 출력에 위험 키워드 없음` 이었다. 뭔가 검사해서 통과한 것처럼
+   * 읽히는데, 실제로는 **이 스텝에 정상 조건이 적혀 있지 않아 판정을 못 한 것**이다
+   * (사용자 지적). 사실을 먼저 적고, 그래서 무엇까지 확인했는지를 괄호에 둔다.
+   */
+  const why = typeof code === 'number' ? `정상 조건이 없어 판정하지 않음 (명령은 정상 종료, 코드 ${code})` : '정상 조건이 없어 판정하지 않음'
+  return { verdict: 'info', reasons: [why] }
 }
 
 /** 판정 결과 → 배지 표시용 메타(라벨/색 클래스). info 는 "명령은 정상 실행됐으나 판정 기준 없음". */
