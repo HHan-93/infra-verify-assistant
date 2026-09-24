@@ -1738,6 +1738,13 @@ async function rmrf(sftp: SFTPWrapper, p: string, isDir: boolean) {
     return
   }
   for (const it of await sftpReaddir(sftp, p)) {
+    // `.` 과 `..` 를 반드시 거른다.
+    //   `..` 를 그대로 따라가면 **부모 디렉토리를 지우러 올라간다** — 지우라고 한 폴더 하나가
+    //   그 위 전체를 날린다. `.` 은 같은 자리를 무한히 되돈다.
+    //   목록(sftp:list)과 검색(sftp:search)은 이미 거르고 있었는데, 정작 **지우는 쪽만**
+    //   빠져 있었다. ssh2 의 readdir 은 서버가 보낸 항목을 그대로 준다(그래서 저 두 곳에
+    //   필터가 있는 것이다).
+    if (it.filename === '.' || it.filename === '..') continue
     const child = rjoin(p, it.filename)
     await rmrf(sftp, child, it.longname?.[0] === 'd')
   }
@@ -1748,8 +1755,13 @@ async function rmrf(sftp: SFTPWrapper, p: string, isDir: boolean) {
 async function getDirRecursive(sftp: SFTPWrapper, remote: string, localDir: string) {
   await mkdir(localDir, { recursive: true })
   for (const it of await sftpReaddir(sftp, remote)) {
+    // 여기도 `.` · `..` 를 거른다 — `.` 은 무한 재귀, `..` 는 **저장하려던 폴더 바깥**에
+    // 파일을 쓰게 만든다(사용자가 고른 위치 밖이라 뭐가 어디에 떨어졌는지 알 수도 없다).
+    if (it.filename === '.' || it.filename === '..') continue
     const rc = rjoin(remote, it.filename)
-    const lc = path.join(localDir, it.filename)
+    // 원격이 보낸 이름을 로컬 경로에 그대로 쓰지 않는다 — 이름 자체에 구분자가 섞여 와도
+    // 이 디렉토리를 벗어나지 못하게 basename 으로 한 겹 자른다.
+    const lc = path.join(localDir, path.basename(it.filename))
     if (it.longname?.[0] === 'd') await getDirRecursive(sftp, rc, lc)
     else if (it.longname?.[0] === '-')
       await new Promise<void>((res, rej) => sftp.fastGet(rc, lc, (e) => (e ? rej(e) : res())))
@@ -2055,7 +2067,8 @@ ipcMain.handle(
       const toSftp = await getSftp(toS)
       const transferred: string[] = []
       for (const it of items) {
-        const tmpLocal = path.join(tmpRoot, it.name)
+        // 이름은 렌더러(=원격 목록)에서 온다. 임시 폴더를 벗어나지 못하게 basename 으로 자른다.
+        const tmpLocal = path.join(tmpRoot, path.basename(it.name))
         if (it.isDir) {
           await getDirRecursive(fromSftp, it.path, tmpLocal)
           await putDirRecursive(toSftp, tmpLocal, rjoin(toDir, it.name), toSessionId)
