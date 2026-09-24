@@ -636,8 +636,8 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               <p className="px-1 pb-1 text-[10px] text-gray-500">
                 {searchResults.length}개 일치
               </p>
-              {searchResults.map((c) =>
-                renderCommand(c, `${c.solution}-${c.subgroup}-${c.command}`, true)
+              {searchResults.map((c, i) =>
+                renderCommand(c, `${i}-${c.solution}-${c.subgroup}-${c.command || c.label}`, true)
               )}
             </div>
           )}
@@ -722,7 +722,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                 </p>
               ) : (
                 <div className="space-y-1.5">
-                  {favoriteCommands.map((c) => renderCommand(c, `fav-${c.solution}-${c.subgroup}-${c.command}`, true))}
+                  {favoriteCommands.map((c, i) => renderCommand(c, `fav-${i}-${c.solution}-${c.subgroup}-${c.command || c.label}`, true))}
                 </div>
               )}
 
@@ -752,7 +752,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                   </div>
                   {recentsOpen && (
                     <div className="mt-1.5 space-y-1.5">
-                      {recentCommands.map((c) => renderCommand(c, `rec-${c.solution}-${c.subgroup}-${c.command}`, true))}
+                      {recentCommands.map((c, i) => renderCommand(c, `rec-${i}-${c.solution}-${c.subgroup}-${c.command || c.label}`, true))}
                     </div>
                   )}
                 </div>
@@ -806,8 +806,17 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               {/* 별(즐겨찾기) 식별자는 `솔루션|하위분류|명령어` 다. 지금 보고 있는 위치를 그대로
                   넘긴다 — 상태(solution/subName)는 하위분류가 사라져 목록이 첫 하위분류로 되돌아간
                   뒤에도 옛 이름을 들고 있어, 그대로 쓰면 즐겨찾기 목록과 다른 id 가 만들어진다 */}
-              {sub.commands.map((c) =>
-                renderCommand({ ...c, solution: group.solution, subgroup: sub.name }, c.command),
+              {/*
+                key 에 **순번**을 함께 넣는다. 예전에는 명령어 문자열만 썼는데, 안내 항목은
+                command 가 빈 문자열이라 한 하위분류에 안내가 둘 이상이면 key 가 전부 `''` 로
+                겹쳤다. React 는 겹친 key 를 짝지어 주지 못해, 다른 하위분류로 옮긴 뒤에도
+                그 안내 상자가 화면에 남아 있었다(Kubernetes 를 보는데 OpenStack 안내가 떠 있음).
+              */}
+              {sub.commands.map((c, i) =>
+                renderCommand(
+                  { ...c, solution: group.solution, subgroup: sub.name },
+                  `${i}-${c.command || c.label}`,
+                ),
               )}
             </div>
           </div>
