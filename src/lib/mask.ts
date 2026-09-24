@@ -29,7 +29,7 @@ const SECRET_KEYS = [
   'authorization', 'credential', 'credentials',
   'private_key', 'privatekey',
   'admin_password', 'admin_pass', 'os_password', 'db_password', 'database_password',
-  'rabbit_password', 'transport_url',
+  'rabbit_password', 'transport_url', 'password_hash',
   'memcache_secret_key', 'metadata_proxy_shared_secret', 'telemetry_secret',
 ]
 
@@ -41,8 +41,15 @@ const SECRET_KEYS = [
 //  값: 따옴표로 감싼 경우 공백 포함 따옴표 안 전체, 아니면 공백/콤마/세미콜론 전까지.
 //  (따옴표 값의 첫 토큰만 가리면 `password: "p@ss w0rd"` 에서 `w0rd` 가 새어나간다.)
 const keyPattern = SECRET_KEYS.map((k) => k.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|')
+//  키 **앞에 붙는 접두사**(`[a-z0-9_]*`)까지 한 덩어리로 본다.
+//  (예전 `\b(password|...)` 는 `INIT_PASSWORD=...` 를 놓쳤다 — `_` 가 단어 문자라
+//   `INIT_` 와 `PASSWORD` 사이에 단어 경계가 없다. 그래서 docker compose 의
+//   `INIT_PASSWORD` · `MYSQL_ROOT_PASSWORD` 같은 환경변수가 리포트에 **평문으로** 남았다.
+//   WireGuard 시나리오를 만들다 발견했다.)
+//  접미사는 일부러 넣지 않았다 — `token_count=5` 같은 멀쩡한 값까지 가려 로그가 훼손된다.
+//  꼭 필요한 것(`password_hash`)만 SECRET_KEYS 에 직접 적는다.
 const KV_RE = new RegExp(
-  `\\b(${keyPattern})(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
+  `\\b([a-z0-9_]*(?:${keyPattern}))(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
   'gi',
 )
 

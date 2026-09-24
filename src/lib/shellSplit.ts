@@ -54,6 +54,28 @@ export function splitShell(cmd: string): ShellSegment[] {
       if (c === quote) quote = null
       continue
     }
+    // heredoc 본문은 통째로 한 덩어리다.
+    //   cat > f << 'EOF'
+    //   a; b          ← 이 `;` 는 셸 구분자가 아니라 파일 내용이다
+    //   EOF
+    // 따옴표·괄호만 추적하던 때는 여기서 잘라 "cat > f << 'EOF'\na" 와 "b\nEOF" 라는
+    // 엉뚱한 두 단계를 만들었다. 구분자 줄을 찾아 그때까지를 한 번에 삼킨다.
+    // 끝 구분자를 못 찾으면 heredoc 이 아니라고 보고 그냥 흘린다 — `$((a << b))` 같은
+    // 시프트 연산을 heredoc 으로 오인해 나머지를 통째로 먹어 버리지 않기 위해서다.
+    if (c === '<' && next === '<') {
+      const head = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(cmd.slice(i))
+      const delim = head ? (head[1] ?? head[2] ?? head[3]) : ''
+      if (delim) {
+        const esc = delim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const end = new RegExp(`\\n[ \\t]*${esc}[ \\t]*(?:\\n|$)`).exec(cmd.slice(i + head![0].length))
+        if (end) {
+          const take = head![0].length + end.index + end[0].length
+          buf += cmd.slice(i, i + take)
+          i += take - 1
+          continue
+        }
+      }
+    }
     if (c === "'" || c === '"' || c === '`') {
       buf += c
       quote = c
