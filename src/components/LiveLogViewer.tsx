@@ -80,7 +80,15 @@ function sameLogTarget(a: LogTailTarget | null, b: LogTailTarget): boolean {
   if (a.kind === 'file' && b.kind === 'file') return a.path === b.path
   if (a.kind === 'k8s' && b.kind === 'k8s')
     return a.namespace === b.namespace && a.pod === b.pod && a.container === b.container
+  if (a.kind === 'docker' && b.kind === 'docker') return a.container === b.container
   return false
+}
+
+/** 화면에 띄울 대상 이름 — 세 종류가 한 자리에 나오므로 한 곳에서 만든다 */
+function targetLabel(t: LogTailTarget): string {
+  if (t.kind === 'file') return t.path
+  if (t.kind === 'docker') return `docker: ${t.container}`
+  return `${t.namespace}/${t.pod}${t.container ? ':' + t.container : ''}`
 }
 
 function loadRecent(): string[] {
@@ -134,6 +142,7 @@ const SETS_KEY = 'livelog_sets'
 type SavedPaneTarget =
   | { kind: 'file'; path: string; sessionHint?: string }
   | { kind: 'k8s'; namespace: string; pod: string; container?: string; sessionHint?: string }
+  | { kind: 'docker'; container: string; sessionHint?: string }
 interface LogSet {
   name: string
   panes: SavedPaneTarget[] // 1~2개
@@ -156,13 +165,33 @@ function saveSets(list: LogSet[]) {
 }
 /** SavedPaneTarget → 실제 tail 대상(LogTailTarget) */
 function toTailTarget(p: SavedPaneTarget): LogTailTarget {
-  return p.kind === 'file'
-    ? { kind: 'file', path: p.path }
-    : { kind: 'k8s', namespace: p.namespace, pod: p.pod, container: p.container }
+  if (p.kind === 'file') return { kind: 'file', path: p.path }
+  if (p.kind === 'docker') return { kind: 'docker', container: p.container }
+  return { kind: 'k8s', namespace: p.namespace, pod: p.pod, container: p.container }
 }
 /** 세트 칩에 보여줄 짧은 라벨 */
 function paneSummary(p: SavedPaneTarget): string {
-  return p.kind === 'file' ? p.path : `${p.namespace}/${p.pod}${p.container ? ':' + p.container : ''}`
+  return targetLabel(toTailTarget(p))
+}
+
+// ── 도커 컨테이너 '최근 사용' — 이름만 있으면 되므로 문자열 목록이다 ──
+const DOCKER_RECENT_KEY = 'livelog_docker_recent'
+function loadDockerRecent(): string[] {
+  try {
+    const raw = localStorage.getItem(DOCKER_RECENT_KEY)
+    const arr = raw ? JSON.parse(raw) : []
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+function saveDockerRecent(name: string) {
+  const next = [name, ...loadDockerRecent().filter((n) => n !== name)].slice(0, MAX_RECENT)
+  try {
+    localStorage.setItem(DOCKER_RECENT_KEY, JSON.stringify(next))
+  } catch {
+    /* 무시 */
+  }
 }
 
 interface K8sRecentEntry {
@@ -202,7 +231,10 @@ function removeK8sRecent(entry: K8sRecentEntry) {
 
 /**
  * 실시간 로그(tail -f / kubectl logs -f) 뷰어 — 패널 하나.
- *  - 소스: [파일 경로] 또는 [Kubernetes 파드] 중 선택
+ *  - 소스 셋: [파일 경로] · [Kubernetes 파드] · [도커 컨테이너]
+ *    같은 서비스라도 어디에 떠 있느냐에 따라 보는 곳이 다르다 — k8s 파드로 돌리는 것을
+ *    경량 구성에서는 도커 컨테이너로 똑같이 올린다(포털 매니저·DB 등). 그때는 파드 목록에
+ *    없으므로 도커 탭에서 본다.
  *  - 파일: 자동완성 + "찾아보기"(트리) + 자주 쓰는 로그 프리셋 칩 + 최근 경로
  *  - 파드: 네임스페이스 → 파드 → (다중 컨테이너면) 컨테이너 순으로 선택 + 최근 사용 조합
  *  - 시작 후에는 계속 흘러들어오는 줄을 자동 스크롤로 표시, 키워드 강조, 일시정지 지원
@@ -237,7 +269,14 @@ function LogTailPane({
 }) {
   const [targetSessionId, setTargetSessionId] = useState(initialSessionId ?? sessionId)
   const [stage, setStage] = useState<'entry' | 'tail'>('entry')
-  const [sourceKind, setSourceKind] = useState<'file' | 'k8s'>('file')
+  const [sourceKind, setSourceKind] = useState<'file' | 'k8s' | 'docker'>('file')
+  /** 도커 컨테이너 목록 — 멈춘 것까지 받는다(왜 죽었는지 보려는 것이므로) */
+  const [dockerList, setDockerList] = useState<{ name: string; status: string; image: string }[]>([])
+  const [dockerLoading, setDockerLoading] = useState(false)
+  const [dockerError, setDockerError] = useState('')
+  const [dockerPick, setDockerPick] = useState('')
+  const [dockerFilter, setDockerFilter] = useState('')
+  const [dockerRecent, setDockerRecent] = useState<string[]>(() => loadDockerRecent())
 
   // ── 파일 모드 ──
   const [pathInput, setPathInput] = useState(initialPath ?? '')
@@ -263,6 +302,13 @@ function LogTailPane({
   const [podInput, setPodInput] = useState('')
   const [podAcOpen, setPodAcOpen] = useState(false)
   const [containers, setContainers] = useState<string[]>([])
+  /**
+   * init 컨테이너 — 본 컨테이너와 따로 둔다.
+   *
+   * `Init:Error` 로 막힌 파드는 본 컨테이너가 시작도 안 해서 그쪽 로그가 비어 있다.
+   * 봐야 할 것은 실패한 init 쪽인데, 목록이 하나로 섞여 있으면 어느 것이 init 인지 모른다.
+   */
+  const [initContainers, setInitContainers] = useState<string[]>([])
   const [container, setContainer] = useState('')
   const [k8sRecent, setK8sRecent] = useState<K8sRecentEntry[]>(() => loadK8sRecent())
 
@@ -419,7 +465,7 @@ function LogTailPane({
     if (r.ok) {
       tailIdRef.current = r.tailId ?? null
       sudoPwRef.current = sudoPassword // '이전 로그 더 보기' 재시작 시 sudo 재사용
-      setTailLabel(target.kind === 'file' ? target.path : `${target.namespace}/${target.pod}${target.container ? ':' + target.container : ''}`)
+      setTailLabel(targetLabel(target))
       setLines([])
       pendingRef.current = ''
       pausedQueueRef.current = []
@@ -434,6 +480,9 @@ function LogTailPane({
       if (target.kind === 'file') {
         saveRecent(target.path)
         setRecent(loadRecent())
+      } else if (target.kind === 'docker') {
+        saveDockerRecent(target.container)
+        setDockerRecent(loadDockerRecent())
       } else {
         saveK8sRecent({ namespace: target.namespace, pod: target.pod, container: target.container })
         setK8sRecent(loadK8sRecent())
@@ -458,11 +507,7 @@ function LogTailPane({
       // tail 중 실패(대상 파일/파드 없음 등) — 이전 로그가 남지 않게 비우고 배너로 안내
       if (stage === 'tail') {
         setLines([])
-        setTailLabel(
-          target.kind === 'file'
-            ? target.path
-            : `${target.namespace}/${target.pod}${target.container ? ':' + target.container : ''}`,
-        )
+        setTailLabel(targetLabel(target))
         setClosedNotice(`이 세션에서 로그를 열 수 없습니다: ${msg}`)
       }
     }
@@ -472,6 +517,22 @@ function LogTailPane({
     const p = pathInput.trim()
     if (!p) return
     startTail({ kind: 'file', path: p }, sudoPassword)
+  }
+  const loadDockerList = async () => {
+    setDockerLoading(true)
+    setDockerError('')
+    const r = await window.electronAPI.dockerListContainers(targetSessionId)
+    setDockerLoading(false)
+    if (r.ok) setDockerList(r.containers ?? [])
+    else {
+      setDockerList([])
+      setDockerError(r.error || '컨테이너 목록을 읽지 못했습니다.')
+    }
+  }
+  const startDockerTail = (name?: string, sudoPassword?: string) => {
+    const c = (name ?? dockerPick).trim()
+    if (!c) return
+    startTail({ kind: 'docker', container: c }, sudoPassword)
   }
   const startK8sTail = () => {
     const ns = namespace.trim()
@@ -510,7 +571,7 @@ function LogTailPane({
           return
         }
       } else if (autoStart === false) {
-        setPathInput(initialTarget.path)
+        if (initialTarget.kind === 'file') setPathInput(initialTarget.path)
         return
       }
       startTail(initialTarget)
@@ -709,9 +770,13 @@ function LogTailPane({
     if (r.ok) {
       const list = r.containers ?? []
       setContainers(list)
+      setInitContainers(r.initContainers ?? [])
+      // 자동 선택은 **본 컨테이너 하나뿐일 때만** 한다. init 컨테이너가 있다고 해서
+      // 그쪽을 기본으로 잡으면, 정상인 파드에서 "이미 끝난 init 로그"를 보게 된다.
       setContainer(list.length === 1 ? list[0] : '')
     } else {
       setContainers([])
+      setInitContainers([])
       setContainer('')
     }
   }
@@ -720,6 +785,12 @@ function LogTailPane({
     setPodAcOpen(false)
     if (namespace && pod) loadContainers(namespace, pod)
   }
+
+  /** 거르기를 적용한 도커 목록 — 이름과 이미지 둘 다에서 찾는다 */
+  const dockerVisible = dockerList.filter((c) => {
+    const q = dockerFilter.trim().toLowerCase()
+    return !q || c.name.toLowerCase().includes(q) || c.image.toLowerCase().includes(q)
+  })
 
   const podSuggestions = pods
     .filter((p) => p.toLowerCase().includes(podInput.toLowerCase()))
@@ -857,6 +928,18 @@ function LogTailPane({
               }
             >
               Kubernetes 파드
+            </button>
+            <button
+              onClick={() => {
+                setSourceKind('docker')
+                if (!dockerList.length) loadDockerList()
+              }}
+              className={
+                'flex-1 rounded px-2 py-1 font-medium transition ' +
+                (sourceKind === 'docker' ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/5')
+              }
+            >
+              도커 컨테이너
             </button>
           </div>
 
@@ -1034,6 +1117,132 @@ function LogTailPane({
                 </div>
               )}
             </>
+          ) : sourceKind === 'docker' ? (
+            <>
+              <div>
+                <div className="mb-1 flex items-center gap-1.5 text-[11px] text-gray-400">
+                  컨테이너
+                  <button
+                    onClick={loadDockerList}
+                    title="목록 새로고침"
+                    className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                  >
+                    <RefreshCw size={11} className={dockerLoading ? 'animate-spin' : ''} />
+                  </button>
+                  <span className="text-gray-600">docker ps -a — 멈춘 컨테이너도 보여줍니다</span>
+                </div>
+                <input
+                  value={dockerFilter}
+                  onChange={(e) => setDockerFilter(e.target.value)}
+                  placeholder="이름 · 이미지로 거르기"
+                  className="mb-1.5 w-full rounded-md border border-white/10 bg-panel-light px-2 py-1.5 text-[12px] text-gray-100 placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+                <div className="max-h-56 overflow-y-auto rounded-md border border-white/10">
+                  {dockerVisible.length === 0 ? (
+                    <p className="px-2.5 py-2 text-[11px] text-gray-600">
+                      {dockerLoading
+                        ? '읽는 중...'
+                        : dockerList.length === 0
+                          ? '목록이 비어 있습니다. 새로고침을 눌러 보세요.'
+                          : '거르기에 맞는 컨테이너가 없습니다.'}
+                    </p>
+                  ) : (
+                    dockerVisible.map((c) => {
+                      /* 멈춘 컨테이너는 한눈에 갈라 보여준다 — 로그는 남아 있으니 고를 수는 있다 */
+                      const up = /^up/i.test(c.status)
+                      return (
+                        <button
+                          key={c.name}
+                          onClick={() => {
+                            setDockerPick(c.name)
+                            startDockerTail(c.name)
+                          }}
+                          className="flex w-full items-center gap-2 border-b border-white/[0.06] px-2.5 py-1.5 text-left text-[11.5px] last:border-b-0 hover:bg-white/5"
+                        >
+                          <span className={'shrink-0 ' + (up ? 'text-emerald-400' : 'text-gray-600')}>●</span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-gray-200">{c.name}</span>
+                          <span className="shrink-0 truncate text-[10.5px] text-gray-500" title={c.image}>
+                            {c.image}
+                          </span>
+                          <span className={'shrink-0 text-[10.5px] ' + (up ? 'text-gray-400' : 'text-amber-300/80')}>
+                            {c.status}
+                          </span>
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+              {dockerError && (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
+                  {dockerError}
+                  {/* docker 가 아예 없는 호스트에서 무엇을 해야 하는지까지 적는다 */}
+                  {/command not found/i.test(dockerError) && (
+                    <p className="mt-1 text-red-300/80">
+                      이 서버에는 docker 가 없습니다. 위 세션 선택에서 컨테이너가 도는 서버로 바꾸세요.
+                    </p>
+                  )}
+                  {/permission denied/i.test(dockerError) && (
+                    <p className="mt-1 text-red-300/80">
+                      도커 소켓에 붙을 권한이 없습니다. 목록은 못 읽지만, 아래 '최근 사용'에서 이름을 눌러
+                      sudo 비밀번호로 여는 것은 됩니다.
+                    </p>
+                  )}
+                </div>
+              )}
+              {startError && <p className="text-[11px] text-red-400">{startError}</p>}
+              {needSudo && (
+                <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2">
+                  <span className="shrink-0 text-[11px] text-amber-200">root 권한 필요 — sudo 비밀번호</span>
+                  <div className="relative flex-1">
+                    <input
+                      type={showSudoPw ? 'text' : 'password'}
+                      autoFocus
+                      value={sudoPw}
+                      onChange={(e) => setSudoPw(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') startDockerTail(dockerPick, sudoPw)
+                      }}
+                      className="w-full rounded border border-white/10 bg-panel px-2 py-1 pr-7 text-[12px] text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      onClick={() => setShowSudoPw((v) => !v)}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200"
+                    >
+                      {showSudoPw ? <Eye size={13} /> : <EyeOff size={13} />}
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => startDockerTail(dockerPick, sudoPw)}
+                    className="shrink-0 rounded bg-amber-500/80 px-2.5 py-1 text-[11px] font-medium text-black hover:bg-amber-400"
+                  >
+                    확인
+                  </button>
+                </div>
+              )}
+              {dockerRecent.length > 0 && (
+                <div>
+                  <p className="mb-1 text-[11px] text-gray-500">최근 사용한 컨테이너</p>
+                  <div className="space-y-0.5">
+                    {dockerRecent.map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => {
+                          setDockerPick(n)
+                          startDockerTail(n)
+                        }}
+                        className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left font-mono text-[11.5px] text-gray-300 hover:bg-white/5"
+                      >
+                        <Box size={11} className="shrink-0 text-gray-500" />
+                        <span className="truncate">{n}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-2">
@@ -1065,24 +1274,52 @@ function LogTailPane({
                 </div>
                 <div>
                   <label className="mb-1 block text-[11px] text-gray-400">
-                    컨테이너 {containers.length > 1 ? '' : '(단일이면 자동)'}
+                    컨테이너 {containers.length + initContainers.length > 1 ? '' : '(단일이면 자동)'}
                   </label>
                   <select
                     value={container}
                     onChange={(e) => setContainer(e.target.value)}
-                    disabled={containers.length <= 1}
+                    disabled={containers.length + initContainers.length <= 1}
                     className="w-full rounded-md border border-white/10 bg-panel-light px-2 py-1.5 text-[12px] text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
                   >
-                    {containers.length === 0 && <option value="">-</option>}
+                    {containers.length + initContainers.length === 0 && <option value="">-</option>}
                     {containers.map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
                     ))}
+                    {/* init 은 따로 묶어 보여준다 — 이름만 나열하면 어느 것이 init 인지 알 수 없다 */}
+                    {initContainers.length > 0 && (
+                      <optgroup label="init 컨테이너 (파드가 Init 단계에서 막혔을 때)">
+                        {initContainers.map((c) => (
+                          <option key={`init-${c}`} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                 </div>
               </div>
-              {nsError && <p className="text-[11px] text-red-400">{nsError}</p>}
+              {nsError && (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
+                  {nsError}
+                  {/* 빨간 한 줄만 띄워 두면 그다음에 무엇을 해야 할지가 없다.
+                      이 창에서 제일 흔한 두 막힘에는 다음 수를 적어 준다. */}
+                  {/command not found|not found/i.test(nsError) && (
+                    <p className="mt-1 text-red-300/80">
+                      이 서버에는 kubectl 이 없습니다. 위 세션 선택에서 kubectl 이 있는 서버(마스터·배스천)로
+                      바꾸거나, 이 서비스가 도커로 떠 있다면 <b>도커 컨테이너</b> 탭에서 보세요.
+                    </p>
+                  )}
+                  {/(connection refused|unable to connect|forbidden|unauthorized|no configuration)/i.test(nsError) && (
+                    <p className="mt-1 text-red-300/80">
+                      kubectl 은 있지만 클러스터에 닿지 못했습니다. 이 계정의 KUBECONFIG 가 맞는지, 또는
+                      sudo 로 실행해야 하는 구성인지 확인하세요.
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label className="mb-1 block text-[11px] text-gray-400">파드</label>
@@ -1405,11 +1642,9 @@ export default function LiveLogViewer({ sessionId, initialPath, otherSessions = 
     const add = (t: LogTailTarget | null, sid: string | null) => {
       if (!t) return
       const sessionHint = sid ? labelOf(sid) : undefined
-      panes.push(
-        t.kind === 'file'
-          ? { kind: 'file', path: t.path, sessionHint }
-          : { kind: 'k8s', namespace: t.namespace, pod: t.pod, container: t.container, sessionHint },
-      )
+      if (t.kind === 'file') panes.push({ kind: 'file', path: t.path, sessionHint })
+      else if (t.kind === 'docker') panes.push({ kind: 'docker', container: t.container, sessionHint })
+      else panes.push({ kind: 'k8s', namespace: t.namespace, pod: t.pod, container: t.container, sessionHint })
     }
     add(paneTargets[0], paneSessions[0])
     if (showSecondPane) add(paneTargets[1], paneSessions[1])

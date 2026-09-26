@@ -3752,6 +3752,12 @@ function buildTailCommand(target: LogTailTarget, usePty: boolean, tailLines = 20
     const q = shQuote(target.path)
     return usePty ? `sudo -S -p '' tail -f -n ${n} ${q}` : `tail -f -n ${n} ${q}`
   }
+  if (target.kind === 'docker') {
+    // 도커 소켓은 보통 root 만 붙을 수 있어 sudo 경로가 파일 tail 보다 오히려 흔하다.
+    // (docker 그룹에 넣는 것은 사실상 root 권한을 주는 것이라 아무에게나 하지 않는다)
+    const q = shQuote(target.container)
+    return usePty ? `sudo -S -p '' docker logs -f --tail ${n} ${q}` : `docker logs -f --tail ${n} ${q}`
+  }
   const podQ = shQuote(target.pod)
   const nsQ = shQuote(target.namespace)
   const containerFlag = target.container ? ` -c ${shQuote(target.container)}` : ''
@@ -3773,8 +3779,9 @@ ipcMain.handle(
     const client = s.client
     if (!client) return { ok: false, error: '연결되어 있지 않습니다.' }
     const tailId = randomUUID()
-    // sudo(PTY) 는 파일 tail 에서 권한 문제가 있을 때만 쓴다 — kubectl logs 는 대상이 아님
-    const usePty = target.kind === 'file' && !!sudoPassword
+    // sudo(PTY) 는 파일 tail 과 docker logs 에서 권한 문제가 있을 때만 쓴다.
+    // kubectl 은 대상이 아니다 — 권한은 kubeconfig 가 정하지 sudo 로 풀리지 않는다.
+    const usePty = (target.kind === 'file' || target.kind === 'docker') && !!sudoPassword
     const cmd = buildTailCommand(target, usePty, tailLines)
 
     return new Promise<{ ok: boolean; tailId?: string; needSudoPassword?: boolean; error?: string }>((resolve) => {
@@ -3925,17 +3932,74 @@ ipcMain.handle(
     const client = sessions.get(sessionId)?.client
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
     try {
+      /**
+       * **init 컨테이너까지 같이 읽는다.**
+       *
+       * 예전에는 `.spec.containers[*].name` 만 봤다. 그런데 파드가 `Init:Error` ·
+       * `Init:CrashLoopBackOff` 로 막히면 본 컨테이너는 **아직 시작도 안 한 상태**라
+       * 그쪽 로그에는 아무것도 없다. 봐야 할 것은 실패한 init 컨테이너의 로그인데,
+       * 목록에 없으니 이 창에서는 볼 방법이 자체가 없었다 — 로그가 제일 급한 때에.
+       *
+       * jsonpath 는 없는 필드를 조용히 건너뛴다(init 컨테이너가 없는 파드가 대부분이다).
+       * 종류를 접두사로 붙여 한 줄씩 받는다 — 화면에서 갈라 보여주기 위해서다.
+       */
       const r = await execCapture(
         client,
-        `kubectl get pod ${shQuote(pod)} -n ${shQuote(namespace)} -o jsonpath='{.spec.containers[*].name}' 2>&1`,
+        `kubectl get pod ${shQuote(pod)} -n ${shQuote(namespace)} -o jsonpath='` +
+          `{range .spec.initContainers[*]}init/{.name}{"\\n"}{end}` +
+          `{range .spec.containers[*]}app/{.name}{"\\n"}{end}' 2>&1`,
       )
       if (r.code !== 0) return { ok: false, error: r.out.trim() || '컨테이너 조회 실패' }
-      return { ok: true, containers: r.out.trim().split(/\s+/).filter(Boolean) }
+      const containers: string[] = []
+      const initContainers: string[] = []
+      for (const line of r.out.split('\n')) {
+        const t = line.trim()
+        if (t.startsWith('app/')) containers.push(t.slice(4))
+        else if (t.startsWith('init/')) initContainers.push(t.slice(5))
+      }
+      return { ok: true, containers, initContainers }
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }
     }
   },
 )
+
+/**
+ * 도커 컨테이너 목록 — 실시간 로그의 세 번째 소스.
+ *
+ * **멈춘 컨테이너(-a)까지 준다.** 로그를 보려는 이유가 대개 "왜 죽었나" 라서, 돌고 있는
+ * 것만 보여주면 정작 필요한 것이 목록에서 빠진다. 대신 상태를 함께 줘서 화면에서 가른다.
+ *
+ * 권한은 두 번 시도한다 — 도커 소켓은 보통 root 전용이라 그냥 `docker ps` 는 자주 막힌다.
+ * 막히면 `sudo -n`(비밀번호 없이 되는 경우)으로 한 번 더 해 본다. 그것도 막히면 원래
+ * 오류를 그대로 돌려준다. 여기서 비밀번호를 묻지는 않는다 — 목록 조회일 뿐이다.
+ */
+ipcMain.handle('docker:listContainers', async (_evt, { sessionId }: { sessionId: string }) => {
+  const client = sessions.get(sessionId)?.client
+  if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+  const FMT = `--format '{{.Names}}\\t{{.Status}}\\t{{.Image}}'`
+  const parse = (out: string) =>
+    out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => {
+        const [name, status, image] = l.split('\t')
+        return { name, status: status ?? '', image: image ?? '' }
+      })
+      .filter((c) => c.name)
+  try {
+    let r = await execCapture(client, `docker ps -a ${FMT} 2>&1`)
+    if (r.code !== 0 && /permission denied/i.test(r.out)) {
+      const s = await execCapture(client, `sudo -n docker ps -a ${FMT} 2>&1`)
+      if (s.code === 0) r = s
+    }
+    if (r.code !== 0) return { ok: false, error: r.out.trim() || '컨테이너 조회 실패' }
+    return { ok: true, containers: parse(r.out) }
+  } catch (e) {
+    return { ok: false, error: cleanErrorMessage(e) }
+  }
+})
 
 // 설정파일 백업을 모으는 고정 베이스 경로 (원본 디렉토리를 더럽히지 않도록 분리).
 // 이 아래에 원본 경로 구조를 그대로 미러링해 저장한다. (변경하려면 이 값만 수정)

@@ -336,6 +336,14 @@ export interface ScenarioRunRetention {
 export type LogTailTarget =
   | { kind: 'file'; path: string }
   | { kind: 'k8s'; namespace: string; pod: string; container?: string }
+  /**
+   * 도커 컨테이너 로그(`docker logs -f`).
+   *
+   * k8s 파드로 돌리는 서비스를 **경량 구성에서는 도커 컨테이너로 똑같이** 올린다
+   * (포털 매니저 · DB 등). 그때는 파드 목록에 없으므로 이쪽으로 본다.
+   * 이름은 `docker ps` 의 NAMES — id 가 아니라 이름을 쓴다(재생성돼도 같은 이름이다).
+   */
+  | { kind: 'docker'; container: string }
 
 /**
  * 명령 결과 자동 판정 기준. 미지정(또는 빈 값)이면 위험 키워드 유무로 "정보/실패"만 가리고

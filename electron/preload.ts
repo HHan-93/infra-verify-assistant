@@ -579,12 +579,22 @@ const electronAPI = {
   ): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('k8s:cmBackupExport', { dir, file, name }),
 
+  /** 파드의 컨테이너 — init 컨테이너를 따로 돌려준다(Init 단계에서 막힌 파드의 로그를 봐야 한다) */
   k8sListContainers: (
     sessionId: string,
     namespace: string,
     pod: string,
-  ): Promise<{ ok: boolean; containers?: string[]; error?: string }> =>
+  ): Promise<{ ok: boolean; containers?: string[]; initContainers?: string[]; error?: string }> =>
     ipcRenderer.invoke('k8s:listContainers', { sessionId, namespace, pod }),
+
+  /** 도커 컨테이너 목록 (실시간 로그의 세 번째 소스). 멈춘 것까지 준다 — 왜 죽었는지 보려는 것이므로 */
+  dockerListContainers: (
+    sessionId: string,
+  ): Promise<{
+    ok: boolean
+    containers?: { name: string; status: string; image: string }[]
+    error?: string
+  }> => ipcRenderer.invoke('docker:listContainers', { sessionId }),
 
   // ── 서버 모니터링(상시 데몬, 세션별) ─────────────────────────
   // 수집 시작: 에이전트 배포(필요시) + 데몬 기동 + 증분 리더 시작
