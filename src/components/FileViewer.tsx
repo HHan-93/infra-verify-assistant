@@ -369,6 +369,20 @@ export default function FileViewer({
     setContent(replaceEnvValue(content, row, next))
     setDirty(true)
   }
+  /**
+   * 키-값 화면에서 위 검색어가 걸린 줄만 남긴다.
+   *
+   * 가이드가 바꾼 값을 확인하라며 시키는 `grep -E '^(MFA_USE|...)='` 가 이걸로 대체된다.
+   * 원문 보기의 검색은 본문을 훑어 그 자리로 보내는 것이고, 여기서는 목록을 좁히는 것이
+   * 맞다 — 고칠 값 몇 개만 남겨 놓고 보는 화면이다.
+   */
+  const kvRows = useMemo(
+    () =>
+      needle
+        ? envRows.filter((r) => r.key.toLowerCase().includes(needle) || r.value.toLowerCase().includes(needle))
+        : envRows,
+    [envRows, needle],
+  )
 
   /**
    * Lite(도커) 설정 찾기 — 창을 열 때 한 번, 세션이 바뀌면 다시.
@@ -572,6 +586,14 @@ export default function FileViewer({
       setLoaded(true)
       setDirty(false)
       setEditing(false) // 새로 불러오면 읽기 전용으로 시작
+      /**
+       * `KEY=VALUE` 만 늘어선 파일은 **키-값 화면으로 연다.**
+       *
+       * 이런 파일을 여는 이유는 거의 언제나 "어떤 값이 뭐로 돼 있나" 를 보려는 것이다.
+       * 원문으로 먼저 띄우면 볼 때마다 버튼을 한 번 더 누르게 된다.
+       * 파일을 불러올 때만 정한다 — 그 뒤 사람이 '원문 보기' 로 바꿨으면 그 선택을 유지한다.
+       */
+      setKvMode(isEnvLike(res.content ?? ''))
       setMsg(`${res.viaSudo ? '불러옴 (sudo)' : '불러옴'}: ${p.trim()}`)
     } else if (res.needSudoPassword) {
       // root 권한 필요 → sudo 비밀번호 입력 요청
@@ -807,7 +829,7 @@ export default function FileViewer({
             파일을 불러오기 전에만 띄운다(불러온 뒤에는 아래 도구막대가 그 자리를 쓴다). */}
         {!loaded && liteConfigs.length > 0 && (
           <div className="border-b border-white/10 bg-blue-500/[0.07] px-4 py-1.5 text-[11.5px] text-blue-200/90">
-            이 서버에서 <b>Lite 환경(docker) 설정 {liteConfigs.length}개</b>를 찾았습니다 — 위 &nbsp;
+            이 서버에서 <b>Lite 환경(docker) 설정 {liteConfigs.length}개</b>를 찾았습니다 —{' '}
             <span className="rounded bg-white/10 px-1 py-0.5">빠른 선택…</span> 맨 위 묶음에 있습니다.
             <span className="ml-1 text-blue-200/60">
               ({liteConfigs
@@ -832,7 +854,13 @@ export default function FileViewer({
               placeholder="키·값 검색 (Enter 다음 · Shift+Enter 이전)"
               className="min-w-0 flex-1 bg-transparent text-[12px] text-gray-200 outline-none placeholder:text-gray-600"
             />
-            {needle && (
+            {/* 키-값 화면에서는 검색이 '목록 좁히기' 라 매치 번호·이동 화살표가 가리킬 곳이 없다 */}
+            {needle && kvMode && (
+              <span className="shrink-0 text-[11px] text-gray-500">
+                {kvRows.length === 0 ? '없음' : `${kvRows.length}개`}
+              </span>
+            )}
+            {needle && !kvMode && (
               <>
                 <span className="shrink-0 text-[11px] text-gray-500">
                   {matches.length === 0
@@ -920,10 +948,14 @@ export default function FileViewer({
             <div className="h-full overflow-auto rounded-md bg-[#11111b] p-2">
               {envRows.length === 0 ? (
                 <p className="p-3 text-[12px] text-gray-500">KEY=VALUE 형태의 줄이 없습니다.</p>
+              ) : kvRows.length === 0 ? (
+                <p className="p-3 text-[12px] text-gray-500">
+                  &quot;{query.trim()}&quot; 에 맞는 설정이 없습니다.
+                </p>
               ) : (
                 <table className="w-full table-fixed border-collapse text-[12px]">
                   <tbody>
-                    {envRows.map((r) => {
+                    {kvRows.map((r) => {
                       const bool = /^(true|false)$/i.test(r.value)
                       return (
                         <tr key={`${r.line}-${r.key}`} className="border-b border-white/[0.06]">
