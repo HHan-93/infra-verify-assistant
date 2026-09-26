@@ -6,29 +6,53 @@ import { getRules, RULE_COLOR_CLASS, type RuleColor } from './highlightRules'
 // 줄 전체를 물들이지 않고 "심각도 키워드 단어"에만 색/볼드를 입힌다(tailspin·journalctl 벤치마킹).
 //
 // 4개 버킷 · 도메인(pacemaker/galera/ceph/masakari/k8s) 토큰 포함:
-//   🔴 위험(red)   : error 계열 + syslog emerg/alert/crit + ceph HEALTH_ERR, k8s NotReady 등
-//   🟠 경고(amber) : warning 계열 + ceph HEALTH_WARN, rabbitmq partition, k8s pending 등
+//   🔴 위험(red)   : error 계열 + syslog emerg/alert/crit + ceph HEALTH_ERR
+//                    + 파드 ImagePullBackOff·OOMKilled·Evicted·FailedMount 등
+//   🟠 경고(amber) : warning 계열 + ceph HEALTH_WARN, rabbitmq partition
+//                    + 파드 pending·Unhealthy·Restarting·DiskPressure 등
 //   🟢 완료/정상(green): success/done/ready/healthy + ceph HEALTH_OK, galera Synced, pcs Started 등
 //   🔵 진행/정보(blue) : masakari evacuate/recovery — 실패가 아닌 "복구 진행 중" 상태
 //
 // up/down/ok/active 같은 초빈출 단어는 매 줄 칠해져 노이즈가 되므로 일부러 제외했다(tailspin도 미포함).
 
 // 각 버킷의 키워드(정규식 조각). 대소문자 무시(i). 여러 단어형은 (?:...)로 묶는다.
+// ⚠ DANGER_WORDS 는 **색깔만 정하는 목록이 아니다.** 판정 기준이 없는 시나리오 스텝은
+//   이 목록에 걸리면 곧바로 '실패' 로 판정된다(verdict.ts 의 dangerKeywordHit).
+//   그래서 "나오면 거의 항상 진짜 문제" 인 낱말만 여기 둔다. 애매한 것은 WARNING 으로 —
+//   경고는 화면 표시와 필터에만 쓰이고 판정을 바꾸지 않는다.
 const DANGER_WORDS = [
   'error(?:s)?', 'err', 'fail(?:ed|ures?|s)?', 'critical', 'crit', 'fatal', 'panic', 'exception',
   'denied', 'refused', 'unreachable', 'unavailable', 'unable', 'cannot', 'could not',
   'emergency', 'emerg', 'alert', 'traceback', 'segfault', 'oom',
   'HEALTH_ERR', 'CrashLoopBackOff', 'NotReady',
+  // ── 파드 로그·kubelet 이벤트에서만 보이는 것들 ─────────────────────────
+  // 낙타표기라 위의 일반 낱말에 안 걸린다 — `fail(?:ed)?` 는 단어 경계를 요구하므로
+  // "FailedMount" 의 Failed 는 매칭되지 않는다. 그래서 통째로 적는다.
+  'ImagePullBackOff', 'ErrImagePull', 'ErrImageNeverPull', 'InvalidImageName',
+  'CreateContainerConfigError', 'CreateContainerError', 'RunContainerError',
+  'FailedScheduling', 'FailedMount', 'FailedAttachVolume', 'FailedCreatePodSandBox',
+  'OOMKilled', 'Evicted', 'Unschedulable', 'NodeNotReady',
+  // 컨테이너·API 통신이 끊겼을 때 파드 로그에 그대로 찍히는 문구들
+  'deadline exceeded', 'no such host', 'connection reset', 'x509',
+  'Forbidden', 'Unauthorized',
 ]
 const WARNING_WORDS = [
   'warn(?:ings?)?', 'deprecated', 'degraded', 'disconnect(?:ed)?', 'timeout', 'timed out',
   'retry(?:ing)?', 'throttl(?:e|ed|ing)?', 'unmanaged', 'partition(?:ed|s)?', 'pending', 'backoff',
   'HEALTH_WARN',
+  // ── 파드 쪽 — 한 번 나온다고 장애는 아니지만 눈에 띄어야 하는 것들 ─────
+  //   Unhealthy : 프로브가 한 번 실패했을 때의 이벤트 이름 (계속 나오면 그때가 문제다)
+  //   back-off  : 하이픈이 있어 위의 'backoff' 에 걸리지 않는다
+  //   Restarting: 재기동 중일 뿐일 수도, 죽고 다시 뜨기를 반복하는 것일 수도 있다
+  'Unhealthy', 'back-off', 'Restarting', 'SandboxChanged', 'Preempt(?:ed|ing)?',
+  'DiskPressure', 'MemoryPressure', 'PIDPressure', 'Insufficient',
 ]
 const DONE_WORDS = [
   'success', 'succeed(?:ed)?', 'done', 'complete(?:d)?', 'finish(?:ed|ing)?', 'ready', 'healthy',
   'synced', 'started', 'running', 'bound', 'passed',
   'HEALTH_OK',
+  // 파드가 제대로 올라올 때의 이벤트 이름 — 위험/경고만 물들면 "잘 된 줄" 이 안 보인다
+  'Scheduled', 'Pulled', 'SuccessfulCreate', 'SuccessfulAttachVolume',
 ]
 const PROGRESS_WORDS = ['evacuat(?:e|ed|ing|ion)', 'recover(?:y|ing|ed)?']
 
