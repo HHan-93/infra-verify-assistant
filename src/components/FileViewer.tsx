@@ -1293,7 +1293,8 @@ export default function FileViewer({
         {/* apply 필요 안내 */}
         {applyNotice && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-6">
-            <div className="w-full max-w-md rounded-lg border border-amber-500/30 bg-panel p-4 shadow-2xl">
+            {/* 좁으면 명령이 낱말 중간에서 접히고(`okect / l.sh`) 안내도 줄 수만 늘어난다 */}
+            <div className="w-full max-w-2xl rounded-lg border border-amber-500/30 bg-panel p-4 shadow-2xl">
               <div className="mb-3 flex items-center gap-2">
                 <AlertCircle size={16} className="shrink-0 text-amber-400" />
                 <span className="text-sm font-semibold text-amber-200">저장 완료 — 추가 적용 필요</span>
@@ -1302,7 +1303,8 @@ export default function FileViewer({
               <p className="mb-3 whitespace-pre-line text-[12px] leading-relaxed text-amber-300/80">
                 {applyNotice.desc}
               </p>
-              <code className="block break-all rounded bg-black/40 px-3 py-2 font-mono text-[12px] text-amber-100">
+              {/* break-all 이면 `./okectl.sh` 가 `okect / l.sh` 로 갈린다 — 명령은 띄어쓰기에서만 접는다 */}
+              <code className="block whitespace-pre-wrap break-words rounded bg-black/40 px-3 py-2 font-mono text-[12px] leading-relaxed text-amber-100">
                 {applyNotice.command}
               </code>
               {/* **저장과 재기동을 붙이지 않는다.**
