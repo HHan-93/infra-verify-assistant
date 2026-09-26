@@ -659,7 +659,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "특정 네임스페이스 파드 감시(watch)",
             "command": "watch kubectl get pod -n <NAMESPACE> -o wide",
-            "desc": "watch 명령으로 지정 네임스페이스의 파드 상태·배치 노드를 주기적으로 갱신하며 관찰"
+            "desc": "지정 네임스페이스의 파드 상태·배치 노드를 주기적으로 갱신하며 관찰 (스스로 끝나지 않습니다 — Ctrl+C 로 중단)"
           },
           {
             "label": "라벨 기준 파드 조회",
@@ -835,6 +835,152 @@ export const PRESETS: PresetGroup[] = [
             "label": "containerd 로그",
             "command": "sudo journalctl -u containerd -n 100 --no-pager",
             "desc": "컨테이너 런타임의 이미지 풀링 실패나 구동 에러 로그 100줄"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "solution": "Docker",
+    "subgroups": [
+      {
+        "name": "컨테이너 상태",
+        "commands": [
+          {
+            "label": "먼저 읽을 것",
+            "command": "",
+            "desc": "도커 소켓은 보통 root 전용이라 명령에 sudo 를 붙여 두었습니다. docker 그룹에 들어가 있으면 빼고 쓰세요.\n`-a` 를 붙여야 **멈춘 컨테이너까지** 보입니다 — 왜 죽었는지 보려면 그쪽이 필요합니다.",
+            "info": true
+          },
+          {
+            "label": "컨테이너 목록(멈춘 것 포함)",
+            "command": "sudo docker ps -a --format '{{.Names}} | {{.Status}} | {{.Image}}'",
+            "desc": "이름 · 상태 · 이미지를 한 줄씩. Exited 나 Restarting 이 있으면 그것부터 봅니다"
+          },
+          {
+            "label": "지금 돌고 있는 것만",
+            "command": "sudo docker ps",
+            "desc": "포트 매핑까지 포함한 기본 목록"
+          },
+          {
+            "label": "자원 사용량(1회)",
+            "command": "sudo docker stats --no-stream",
+            "desc": "컨테이너별 CPU·메모리·네트워크. --no-stream 을 빼면 화면이 계속 갱신되어 끝나지 않습니다"
+          },
+          {
+            "label": "상태·재시작 횟수·정책",
+            "command": "sudo docker inspect -f '{{.State.Status}} | 재시작 {{.RestartCount}}회 | 정책 {{.HostConfig.RestartPolicy.Name}} | 시작 {{.State.StartedAt}}' <CONTAINER>",
+            "desc": "재시작 횟수가 계속 늘면 죽고 다시 뜨기를 반복하는 것입니다. 정책이 no 면 죽어도 안 올라옵니다"
+          },
+          {
+            "label": "마운트 확인(설정 파일 위치)",
+            "command": "sudo docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}} ({{.Mode}}){{println}}{{end}}' <CONTAINER>",
+            "desc": "컨테이너가 읽는 설정이 호스트의 어느 파일인지 알려줍니다. 그 파일을 고쳐야 바뀝니다"
+          },
+          {
+            "label": "포트 매핑",
+            "command": "sudo docker port <CONTAINER>",
+            "desc": "호스트 포트 → 컨테이너 포트. 접속이 안 될 때 여기부터 확인합니다"
+          },
+          {
+            "label": "컨테이너 안 프로세스",
+            "command": "sudo docker top <CONTAINER>",
+            "desc": "주 프로세스가 무엇이고 살아 있는지 확인"
+          }
+        ]
+      },
+      {
+        "name": "로그",
+        "commands": [
+          {
+            "label": "최근 로그 200줄",
+            "command": "sudo docker logs --tail 200 <CONTAINER>",
+            "desc": "끝부분만 봅니다. 전부 보면 터미널이 쏟아집니다"
+          },
+          {
+            "label": "로그 실시간 추적",
+            "command": "sudo docker logs -f --tail 50 <CONTAINER>",
+            "desc": "새 줄이 나오는 대로 따라갑니다 (Ctrl+C 로 중단)"
+          },
+          {
+            "label": "최근 10분 로그",
+            "command": "sudo docker logs --since 10m <CONTAINER>",
+            "desc": "방금 재기동했거나 조금 전에 난 문제를 볼 때"
+          },
+          {
+            "label": "오류 줄만 추려 보기",
+            "command": "sudo docker logs --tail 500 <CONTAINER> 2>&1 | grep -iE 'error|exception|fail|refused' | tail -30",
+            "desc": "최근 500줄에서 오류로 보이는 줄만. 도커는 컨테이너의 stderr 를 따로 내보내므로 2>&1 로 합칩니다"
+          }
+        ]
+      },
+      {
+        "name": "운영 · 재기동",
+        "commands": [
+          {
+            "label": "컨테이너 재기동",
+            "command": "sudo docker restart <CONTAINER>",
+            "desc": "설정 파일을 고친 뒤 반영하려면 이것이 필요합니다"
+          },
+          {
+            "label": "컨테이너 안으로 들어가기",
+            "command": "sudo docker exec -it <CONTAINER> sh",
+            "desc": "셸이 열립니다. exit 로 나옵니다. sh 가 없으면 bash 로 바꿔 보세요"
+          },
+          {
+            "label": "환경변수 확인",
+            "command": "sudo docker exec <CONTAINER> env",
+            "desc": "지금 컨테이너가 들고 있는 값입니다. 비밀번호가 그대로 보일 수 있으니 화면 공유 중에는 주의하세요"
+          },
+          {
+            "label": "자동 복구 시험(주 프로세스 종료)",
+            "command": "sudo docker exec <CONTAINER> sh -c 'kill -TERM 1'",
+            "desc": "밖에서 docker kill 로 죽이면 '사람이 내린 것' 으로 보고 restart 정책이 발동하지 않습니다. 안에서 죽여야 실제 장애처럼 됩니다"
+          }
+        ]
+      },
+      {
+        "name": "이미지 · 디스크",
+        "commands": [
+          {
+            "label": "이미지 목록",
+            "command": "sudo docker images",
+            "desc": "태그와 크기 확인"
+          },
+          {
+            "label": "디스크 사용 현황",
+            "command": "sudo docker system df",
+            "desc": "이미지·컨테이너·볼륨·빌드캐시가 각각 얼마나 쓰는지. 루트가 찰 때 여기부터 봅니다"
+          },
+          {
+            "label": "태그 없는 이미지 정리",
+            "command": "sudo docker image prune -f",
+            "desc": "어디서도 안 쓰는 dangling 이미지만 지웁니다. 컨테이너와 태그 붙은 이미지는 건드리지 않습니다"
+          }
+        ]
+      },
+      {
+        "name": "Compose",
+        "commands": [
+          {
+            "label": "compose 컨테이너 상태",
+            "command": "sudo docker compose -f <COMPOSE_FILE> ps",
+            "desc": "그 compose 파일로 띄운 것들만. -f 로 지정하므로 디렉토리를 옮기지 않아도 됩니다"
+          },
+          {
+            "label": "compose 전체 로그",
+            "command": "sudo docker compose -f <COMPOSE_FILE> logs --tail 100",
+            "desc": "서비스가 여럿일 때 한 번에 봅니다"
+          },
+          {
+            "label": "compose 재기동",
+            "command": "sudo docker compose -f <COMPOSE_FILE> restart",
+            "desc": "컨테이너를 지우지 않고 다시 시작합니다"
+          },
+          {
+            "label": "compose 올리기(변경 반영)",
+            "command": "sudo docker compose -f <COMPOSE_FILE> up -d",
+            "desc": "설정이 바뀌었으면 해당 컨테이너를 다시 만들어 올립니다"
           }
         ]
       }
@@ -1385,7 +1531,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "실시간 로그 뷰어 활용 안내",
             "command": "",
-            "desc": "아래 각 경로를 실시간 로그 뷰어의 [파일 경로] 탭에 입력하면 tail -f 로 바로 확인할 수 있습니다.",
+            "desc": "아래 각 경로를 실시간 로그 뷰어의 [파일 경로] 탭에 입력하면 tail -f 로 바로 확인할 수 있습니다.\n여기서 바로 실행하면 tail -f 가 터미널을 계속 붙들고 있습니다 — Ctrl+C 로 중단하세요.",
             "info": true
           },
           {
@@ -1421,7 +1567,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "Ceph 클러스터 상태(실시간)",
             "command": "sudo watch ceph -s",
-            "desc": "controller 또는 mixed 노드에서 확인할 수 있습니다.\n노드를 올린 직후에는 health가 HEALTH_OK로 돌아온 뒤에 다음 작업을 진행할 것.\nHEALTH_WARN 상태에서 clock skew 경고가 뜨거나, pgs: N/M objects misplaced (X%) 처럼 PG가 재배치(rebalance) 중이라면 아직 완료된 게 아니므로, OK가 될 때까지 기다렸다가 넘어갈 것."
+            "desc": "controller 또는 mixed 노드에서 확인할 수 있습니다. 스스로 끝나지 않으니 Ctrl+C 로 중단합니다.\n노드를 올린 직후에는 health가 HEALTH_OK로 돌아온 뒤에 다음 작업을 진행할 것.\nHEALTH_WARN 상태에서 clock skew 경고가 뜨거나, pgs: N/M objects misplaced (X%) 처럼 PG가 재배치(rebalance) 중이라면 아직 완료된 게 아니므로, OK가 될 때까지 기다렸다가 넘어갈 것."
           }
         ]
       },
