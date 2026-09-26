@@ -743,10 +743,51 @@ function LogTailPane({
     if (r.ok) setNamespaces(r.namespaces ?? [])
     else setNsError(r.error || '네임스페이스를 불러오지 못했습니다.')
   }
+  /**
+   * 어느 (세션, 탭) 조합으로 목록을 읽었는지. 같은 조합을 또 읽지 않기 위한 표식이다.
+   *
+   * 예전에는 "목록이 비어 있고 오류도 없을 때만" 읽었다. 그래서 **세션을 바꿔도 다시 읽지
+   * 않았다** — 앞 세션에서 채워진 목록이 남아 있으니 조건이 안 맞았다(사용자 지적).
+   * 탭을 한 번 왔다 갔다 해야 그제서야 읽히는 것처럼 보였던 이유다.
+   */
+  const listLoadedKeyRef = useRef('')
+  /**
+   * 마지막으로 비워 낸 세션. **마운트 때는 비우지 않기 위해** 처음 값을 들고 시작한다 —
+   * 창을 열 때 initialTarget(파일탐색기의 '실시간 보기' · 세트 불러오기)으로 채워 둔
+   * 네임스페이스·파드를 이 정리가 곧바로 지워 버리면 안 된다.
+   */
+  const lastResetSessionRef = useRef(targetSessionId)
+  // ① 세션이 바뀌면 앞 세션에서 읽은 목록은 버린다.
+  //    남겨 두면 **다른 클러스터의 네임스페이스**를 그대로 보여주게 된다 — 고르고 나서야
+  //    빈 파드 목록이 나오므로, 화면이 거짓말을 하고 있는 동안 사람은 원인을 딴 데서 찾는다.
   useEffect(() => {
-    if (sourceKind === 'k8s' && namespaces.length === 0 && !nsLoading && !nsError) loadNamespaces()
+    if (lastResetSessionRef.current === targetSessionId) return
+    lastResetSessionRef.current = targetSessionId
+    setNamespaces([])
+    setNamespace('')
+    setPods([])
+    setPodInput('')
+    setContainers([])
+    setInitContainers([])
+    setContainer('')
+    setNsError('')
+    setPodError('')
+    setDockerList([])
+    setDockerError('')
+    setDockerPick('')
+    listLoadedKeyRef.current = ''
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceKind, targetSessionId])
+  }, [targetSessionId])
+  // ② 지금 보고 있는 탭에 목록이 필요하면 읽는다 — 세션을 바꾼 직후에도 바로 채워진다.
+  useEffect(() => {
+    if (stage !== 'entry' || sourceKind === 'file') return
+    const key = `${targetSessionId}|${sourceKind}`
+    if (listLoadedKeyRef.current === key) return
+    listLoadedKeyRef.current = key
+    if (sourceKind === 'k8s') loadNamespaces()
+    else loadDockerList()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKind, targetSessionId, stage])
 
   const loadPods = async (ns: string) => {
     setPodLoading(true)
@@ -930,10 +971,8 @@ function LogTailPane({
               Kubernetes 파드
             </button>
             <button
-              onClick={() => {
-                setSourceKind('docker')
-                if (!dockerList.length) loadDockerList()
-              }}
+              // 목록 읽기는 위 effect 가 (세션, 탭) 조합을 보고 알아서 한다
+              onClick={() => setSourceKind('docker')}
               className={
                 'flex-1 rounded px-2 py-1 font-medium transition ' +
                 (sourceKind === 'docker' ? 'bg-blue-600/30 text-blue-100' : 'text-gray-400 hover:bg-white/5')
