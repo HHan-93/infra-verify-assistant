@@ -65,6 +65,11 @@ export interface RunnerScenario {
    * 역할을 나눠 세션을 지정해 놓고 그 주소를 또 손으로 넣게 하면 앞뒤가 안 맞는다.
    */
   roleValues?: Record<string, string>
+  /**
+   * 진단형 — 통과 기준이 **없는 것이 맞는** 시나리오(scenarios.ts 의 주석).
+   * 판정을 바꾸지는 않는다. 다만 이 표시가 없으면 결과의 '판정 없음' 이 결함처럼 읽힌다.
+   */
+  diagnostic?: boolean
 }
 interface RunTarget {
   id: string
@@ -1830,6 +1835,15 @@ ${primary?.err ?? ''}`)
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <ListChecks size={16} className="text-blue-400" />
           <span className="truncate text-sm font-semibold text-gray-100">시나리오 검증 · {scenario.title}</span>
+          {/* 시나리오 화면과 같은 표시 — 결과가 '판정 없음' 으로 끝나는 것이 정상임을 미리 밝힌다 */}
+          {scenario.diagnostic && (
+            <span
+              title="원인을 좁히는 시나리오입니다. 무엇이 정상인지는 사람이 출력을 읽고 판단하므로 자동 판정하지 않습니다."
+              className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300"
+            >
+              진단형 · 자동 판정 없음
+            </span>
+          )}
           <button onClick={onClose} className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
             <X size={16} />
           </button>

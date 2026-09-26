@@ -46,6 +46,8 @@ interface ScenarioPanelProps {
     steps: ScenarioStep[]
     /** 입력값 ← 역할 주소 자동 채움 규칙 (러너가 역할 매핑에서 값을 끌어온다) */
     roleValues?: Record<string, string>
+    /** 진단형 — 검증 창에서도 같은 표시를 띄운다 (scenarios.ts 의 주석 참고) */
+    diagnostic?: boolean
   }) => void
 }
 
@@ -160,6 +162,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
         info: st.info,
         warn: st.warn,
         code: st.code,
+        needsInput: st.needsInput,
         check: st.check,
         target: st.target,
         capture: st.capture,
@@ -532,6 +535,16 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                     사용자 정의
                   </span>
                 )}
+                {/* 판정 기준이 비어 있는 것이 **빠뜨린 것이 아니라 원래 그런 것**임을 밝힌다.
+                    이 표시가 없으면 검증 회차의 '판정 없음' 이 결함처럼 읽힌다. */}
+                {scenario.diagnostic && (
+                  <span
+                    title="원인을 좁히는 시나리오입니다. 무엇이 정상인지는 사람이 출력을 읽고 판단하므로 자동 판정하지 않습니다."
+                    className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300"
+                  >
+                    진단형 · 자동 판정 없음
+                  </span>
+                )}
               </div>
               {/* 줄바꿈을 살린다 — 요약은 '무엇을 하는 시나리오인가' + '어떤 순서인가' 두 줄로 적는다.
                   한 덩어리로 흘려 쓰면 화면 폭에서 세 줄로 접히며 어디서 끊어 읽어야 할지 사라진다. */}
@@ -548,6 +561,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                     summary: scenario.summary,
                     steps: scenario.steps,
                     roleValues: scenario.roleValues,
+                    diagnostic: scenario.diagnostic,
                   })
                 }
                 disabled={!connected}
@@ -933,6 +947,8 @@ function ScenarioEditorModal({
         info: s.info?.trim() || undefined,
         warn: s.warn?.trim() || undefined,
         code: s.code?.trim() || undefined,
+        // 편집 화면에 토글은 없지만 값은 지킨다 — 복제본을 한 번 열었다 저장했다고 표시가 사라지면 안 된다
+        needsInput: s.needsInput || undefined,
         check: cleanCheck(s.check),
         // 고급 설정 — 빈 행은 저장하지 않는다
         target: s.target?.trim() || undefined,

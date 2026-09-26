@@ -423,6 +423,14 @@ export interface CustomScenarioStep {
   info?: string
   warn?: string
   code?: string
+  /**
+   * 실행한 뒤 **터미널에서 사람이 직접 입력**해야 끝나는 스텝(vi · su · 포트 점유 등).
+   * 목록의 버튼이 '실행·입력' 으로 바뀐다 — 내장 시나리오(ScenarioStep)와 같은 뜻이다.
+   *
+   * 여기에 없으면 **내장 시나리오를 복제하는 순간 그 표시가 조용히 사라진다** — 복사본에서만
+   * 버튼이 '실행' 으로 돌아가고, 왜 그 스텝이 제한 시간까지 멈춰 있는지 알 수 없게 된다.
+   */
+  needsInput?: boolean
   /** 실행 결과 자동 판정 기준 (선택) */
   check?: CommandCheck
   /**

@@ -65,6 +65,18 @@ export interface Scenario {
    * 역할별 대상에서 고른 세션의 주소가 그대로 들어간다(직접 입력하면 그쪽이 우선).
    */
   roleValues?: Record<string, string>
+  /**
+   * **진단형** — 정상/실패를 자동으로 가리지 않는 시나리오.
+   *
+   * '부팅 실패 진단' 처럼 *이미 무언가 잘못된 뒤에* 원인을 좁히는 시나리오는 통과 기준이
+   * 없는 것이 맞다. `openstack server show` 의 출력에 무엇이 나와야 정상인지는 사람이 읽고
+   * 판단할 일이지, 문구로 못 박을 수 있는 것이 아니다.
+   *
+   * 그런데 기준이 없으면 회차 판정이 늘 '판정 없음' 으로 남는다. 그것이 사실이긴 하지만,
+   * **빠뜨린 것과 원래 그런 것이 화면에서 구분되지 않는다.** 그래서 시나리오 쪽에서 미리
+   * 밝힌다 — 판정을 초록으로 바꾸지는 않는다(기준 없이 통과를 띄우지 않는다는 원칙 그대로).
+   */
+  diagnostic?: boolean
 }
 
 /**
@@ -121,6 +133,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "설정 드라이브 장치 확인",
+        "check": {"passContains":["config-2"]},
         "command": "lsblk -f",
         "desc": "LABEL 컬럼에 config-2 가 표시된 장치를 확인합니다. 보통 sr0(CD-ROM 형태)로 연결됩니다.",
         "note": "config-2 라벨이 보이지 않으면 인스턴스 생성 시 설정 드라이브 옵션이 활성화되지 않은 것입니다."
@@ -155,17 +168,20 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "파일 구조 확인",
+        "check": {"passContains":["openstack"],"requireExitZero":true},
         "command": "ls -R /mnt/config",
         "desc": "설정 드라이브 안의 파일·디렉토리 목록을 봅니다.\nopenstack/latest/ 아래에 meta_data.json · network_data.json · user_data 가 있어야 합니다."
       },
       {
         "title": "메타데이터 조회",
+        "check": {"passContains":["uuid"],"requireExitZero":true},
         "command": "cat /mnt/config/openstack/latest/meta_data.json | python3 -m json.tool",
         "desc": "인스턴스 ID(uuid), 호스트 네임, 키 페어 이름 등 인스턴스 기본 정보를 확인합니다. python3 -m json.tool 로 들여쓰기 정렬해 출력합니다.",
         "note": "jq 가 설치된 경우: jq . /mnt/config/openstack/latest/meta_data.json"
       },
       {
         "title": "네트워크 데이터 조회",
+        "check": {"passRegex":"\"(links|networks)\"","requireExitZero":true},
         "command": "cat /mnt/config/openstack/latest/network_data.json | python3 -m json.tool",
         "desc": "인터페이스별 IP 주소, 서브넷 마스크, 게이트웨이, DNS 등 네트워크 구성 정보를 확인합니다. python3 -m json.tool 로 정렬해 출력합니다.",
         "note": "jq 가 설치된 경우: jq . /mnt/config/openstack/latest/network_data.json"
@@ -212,6 +228,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
+        "check": {"passContains":["iotune"],"passRegex":"(read|write)_(iops|bytes)_sec"},
         "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 iotune",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<iotune> 블록에 read_iops_sec · write_iops_sec 등이 설정값대로 나와야 합니다.",
@@ -309,6 +326,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
+        "check": {"passContains":["bandwidth"],"passRegex":"inbound|outbound"},
         "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
         "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<interface> 안의 <bandwidth> 블록에 inbound/outbound 의 average · peak · burst 값이 나와야 합니다.",
@@ -439,6 +457,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "[클라이언트 인스턴스] 작업 디렉토리 생성",
+        "check": {"requireExitZero":true},
         "command": "mkdir -p ssl-certs && cd ssl-certs",
         "undo": "cd ~ && rm -rf ~/ssl-certs",
         "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)",
@@ -453,11 +472,13 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Root CA 키 생성",
+        "check": {"requireExitZero":true},
         "command": "openssl genrsa -out ca.key 2048",
         "desc": "Root CA 서명에 사용할 RSA 2048비트 개인 키를 생성합니다."
       },
       {
         "title": "CA 키 권한 제한",
+        "check": {"requireExitZero":true},
         "command": "chmod 600 ca.key",
         "desc": "CA 개인 키를 소유자만 읽을 수 있도록 권한을 제한합니다."
       },
@@ -469,27 +490,32 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "ca.conf 파일 작성",
+        "check": {"requireExitZero":true},
         "command": "cat > ca.conf << 'EOF'\n[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_ca\nreq_extensions          = v3_ca\n\n[ v3_ca ]\nbasicConstraints        = critical, CA:TRUE, pathlen:0\nsubjectKeyIdentifier    = hash\nkeyUsage                = keyCertSign, cRLSign\nnsCertType              = sslCA, emailCA, objCA\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = Example Root CA\ncommonName_max          = 64\nEOF",
         "desc": "Root CA 인증서 생성에 필요한 설정 파일을 heredoc으로 바로 작성합니다. vi 진입 없이 '실행' 버튼으로 파일이 즉시 생성됩니다.",
         "code": "[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_ca\nreq_extensions          = v3_ca\n\n[ v3_ca ]\nbasicConstraints        = critical, CA:TRUE, pathlen:0\nsubjectKeyIdentifier    = hash\nkeyUsage                = keyCertSign, cRLSign\nnsCertType              = sslCA, emailCA, objCA\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = Example Root CA\ncommonName_max          = 64"
       },
       {
         "title": "Root CA CSR 생성",
+        "check": {"requireExitZero":true},
         "command": "openssl req -new -sha256 -key ca.key -config ca.conf -out ca.csr -batch",
         "desc": "-batch 옵션으로 ca.conf의 기본값을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
       },
       {
         "title": "Root CA 인증서 생성",
+        "check": {"requireExitZero":true},
         "command": "openssl x509 -req -sha256 -days 3650 -extensions v3_ca -set_serial 1 -in ca.csr -signkey ca.key -extfile ca.conf -out ca.crt",
         "desc": "CSR을 자가 서명하여 유효기간 10년의 Root CA 인증서(ca.crt)를 생성합니다."
       },
       {
         "title": "서비스 키 생성",
+        "check": {"requireExitZero":true},
         "command": "openssl genrsa -out service.key 2048",
         "desc": "로드밸런서 SSL에 사용할 서비스 인증서의 개인 키를 생성합니다."
       },
       {
         "title": "서비스 키 권한 제한",
+        "check": {"requireExitZero":true},
         "command": "chmod 600 service.key",
         "desc": "서비스 개인 키를 소유자만 읽을 수 있도록 권한을 제한합니다."
       },
@@ -501,28 +527,33 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "service.conf 파일 작성",
+        "check": {"requireExitZero":true},
         "command": "cat > service.conf << 'EOF'\n[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_user\n\n[ v3_user ]\nbasicConstraints        = CA:FALSE\nauthorityKeyIdentifier  = keyid,issuer\nsubjectKeyIdentifier    = hash\nkeyUsage                = nonRepudiation, digitalSignature, keyEncipherment\nextendedKeyUsage        = serverAuth,clientAuth\nsubjectAltName          = @alt_names\n\n[ alt_names ]\nIP.1 = <로드밸런서 VIP>\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\norganizationalUnitName  = Organizational Unit Name (eg, section)\norganizationalUnitName_default = Example Project\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = <로드밸런서 VIP>\ncommonName_max          = 64\nEOF",
         "desc": "서비스 인증서 생성에 필요한 설정 파일을 만듭니다.\n'입력' 버튼을 누르면 VIP 를 한 번 받아 IP.1 과 commonName_default 두 곳에 채워 넣고 실행합니다.",
         "code": "[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_user\n\n[ v3_user ]\nbasicConstraints        = CA:FALSE\nauthorityKeyIdentifier  = keyid,issuer\nsubjectKeyIdentifier    = hash\nkeyUsage                = nonRepudiation, digitalSignature, keyEncipherment\nextendedKeyUsage        = serverAuth,clientAuth\nsubjectAltName          = @alt_names\n\n[ alt_names ]\nIP.1 = <로드밸런서 VIP>\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\norganizationalUnitName  = Organizational Unit Name (eg, section)\norganizationalUnitName_default = Example Project\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = <로드밸런서 VIP>\ncommonName_max          = 64"
       },
       {
         "title": "서비스 CSR 생성",
+        "check": {"requireExitZero":true},
         "command": "openssl req -new -sha256 -key service.key -config service.conf -out service.csr -batch",
         "desc": "-batch 옵션으로 service.conf의 기본값(VIP 포함)을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
       },
       {
         "title": "서비스 인증서 서명 (Root CA로 서명)",
+        "check": {"requireExitZero":true},
         "command": "openssl x509 -req -sha256 -days 1825 -extensions v3_user -in service.csr -CA ca.crt -CAcreateserial -CAkey ca.key -extfile service.conf -out service.crt",
         "desc": "Root CA로 서비스 CSR에 서명하여 유효기간 5년의 서비스 인증서(service.crt)를 생성합니다."
       },
       {
         "title": "PKCS#12 형식으로 변환",
+        "check": {"requireExitZero":true},
         "command": "openssl pkcs12 -export -passout pass: -out service.p12 -inkey service.key -in service.crt -certfile ca.crt",
         "desc": "서비스 키 + 서비스 인증서 + CA 인증서를 하나의 PKCS#12(.p12) 파일로 묶습니다.\n-passout pass: 로 export 비밀번호를 빈 값으로 두어 Enter 입력 없이 끝납니다.",
         "note": "OpenStack LB는 PKCS#12를 Base64로 인코딩한 값을 요구합니다."
       },
       {
         "title": "Base64 인코딩",
+        "check": {"requireExitZero":true},
         "command": "base64 service.p12 > service.p12.base64",
         "desc": "PKCS#12 바이너리 파일을 Base64 텍스트로 인코딩합니다."
       },
@@ -537,6 +568,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Base64 파일 내용 출력 및 복사",
+        "check": {"requireExitZero":true},
         "command": "cat service.p12.base64",
         "desc": "출력된 Base64 문자열 전체를 복사합니다. 다음 단계에서 대시보드에 붙여넣기합니다."
       },
@@ -559,6 +591,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "CA 인증서 시스템에 복사",
+        "check": {"requireExitZero":true},
         "command": "sudo cp ca.crt /usr/local/share/ca-certificates/",
         "undo": "sudo rm -f /usr/local/share/ca-certificates/ca.crt && sudo update-ca-certificates --fresh",
         "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다. (ca.crt 가 있는 디렉토리에서 실행 — 시스템 경로 쓰기라 sudo 필요)"
@@ -642,6 +675,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "지속 통신 루프 시작",
+        "check": {"passContains":["관찰 종료"],"failContains":["refused","Connection timed out"]},
         "target": "인스턴스 B",
         "command": "for i in $(seq 1 120); do printf '%s ' \"$(date +%H:%M:%S)\"; nc -zv -w 1 <인스턴스A_IP> <포트번호> 2>&1 | tail -1; sleep 1; done; echo '--- 120초 관찰 종료'",
         "desc": "1초 간격으로 120초 동안 포트 연결을 반복 시도합니다. 각 줄에 시각이 찍히므로, 마이그레이션 중 통신이 끊긴 구간과 길이를 리포트에서 셀 수 있습니다.",
@@ -697,6 +731,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인터페이스 비활성화",
+        "check": {"requireExitZero":true},
         "command": "sudo ip link set <IFACE> down",
         "undo": "sudo ip link set <IFACE> up",
         "warn": "SSH 접속에 쓰는 인터페이스를 내리면 즉시 연결이 끊기고 콘솔로만 복구할 수 있습니다. 대상 인터페이스가 접속 경로가 아닌지 반드시 확인하세요.",
@@ -705,6 +740,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "인터페이스 활성화",
+        "check": {"requireExitZero":true},
         "command": "sudo ip link set <IFACE> up",
         "desc": "내렸던 인터페이스를 다시 올립니다."
       },
@@ -719,6 +755,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Netplan 적용",
+        "check": {"requireExitZero":true},
         "command": "sudo netplan apply",
         "warn": "설정이 잘못되면 네트워크가 끊겨 SSH로 되돌릴 수 없습니다. 콘솔 접근 수단을 확보한 뒤 진행하세요.",
         "desc": "변경한 Netplan 설정을 적용합니다.",
@@ -910,17 +947,20 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "파일 쓰기 테스트",
+        "check": {"passContains":["Test"],"requireExitZero":true},
         "command": "echo \"Test\" | sudo tee /mnt/data/test.txt",
         "desc": "read-write 규칙이면 정상 쓰기됩니다. read-only 규칙이면 'Read-only file system' 오류가 출력되어 RO 정책이 정상 동작함을 확인할 수 있습니다.",
         "note": "자동 판정하지 않습니다 — 이 시나리오는 RW·RO 두 규칙을 모두 다루므로, 쓰기 성공과 쓰기 거부가 **둘 다 정상**일 수 있습니다. 어느 규칙으로 걸었는지 보고 사람이 판정하세요."
       },
       {
         "title": "파일 읽기 테스트",
+        "check": {"passContains":["Test"],"requireExitZero":true},
         "command": "cat /mnt/data/test.txt",
         "desc": "파일 내용(Test)이 출력되면 읽기 동작이 정상입니다."
       },
       {
         "title": "마운트 해제",
+        "check": {"requireExitZero":true},
         "command": "sudo umount /mnt/data",
         "desc": "테스트 완료 후 마운트를 해제합니다."
       },
@@ -969,6 +1009,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "디스크 마운트",
+        "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
         "undo": "sudo umount /mnt/data",
         "desc": "파티션을 마운트 포인트에 연결합니다. <DISK>에는 파티션 장치명을 입력하세요. (예: vdb1)"
@@ -988,6 +1029,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "테스트 데이터 쓰기 (dd)",
+        "check": {"passContains":["records out"],"requireExitZero":true},
         "command": "sudo dd if=/dev/zero of=/mnt/data/testfile bs=10k count=1000",
         "undo": "sudo rm -f /mnt/data/testfile",
         "desc": "마운트된 경로에 10MB(10k × 1000)의 빈 데이터 파일을 생성합니다. 용량을 늘리려면 count 값을 조정하세요. (count=10000 → 100MB)"
@@ -1004,6 +1046,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "UUID 확인",
+        "check": {"passContains":["UUID="]},
         "command": "sudo blkid /dev/<DISK>",
         "capture": [{ "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" }],
         "desc": "fstab 등록에 사용할 파티션의 UUID를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>에 자동으로 들어갑니다.",
@@ -1011,6 +1054,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "fstab 자동 마운트 등록",
+        "check": {"passContains":["/mnt/data"],"requireExitZero":true},
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
         "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
@@ -1097,6 +1141,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "디스크 마운트",
+        "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
         "undo": "sudo umount /mnt/data",
         "desc": "볼륨을 마운트 포인트에 연결합니다."
@@ -1116,6 +1161,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "테스트 데이터 쓰기 (dd)",
+        "check": {"passContains":["records out"],"requireExitZero":true},
         "command": "sudo dd if=/dev/zero of=/mnt/data/testfile bs=10k count=1000",
         "undo": "sudo rm -f /mnt/data/testfile",
         "desc": "마운트된 경로에 10MB(10k × 1000)의 빈 데이터 파일을 생성합니다. 용량을 늘리려면 count 값을 조정하세요. (count=10000 → 100MB)"
@@ -1132,6 +1178,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "UUID 확인",
+        "check": {"passContains":["UUID="]},
         "command": "sudo blkid /dev/<DISK>",
         "capture": [{ "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" }],
         "desc": "fstab 등록에 사용할 볼륨의 UUID를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>에 자동으로 들어갑니다.",
@@ -1139,6 +1186,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "fstab 자동 마운트 등록",
+        "check": {"passContains":["/mnt/data"],"requireExitZero":true},
         "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
         "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
@@ -1186,12 +1234,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "마운트 해제",
+        "check": {"requireExitZero":true},
         "command": "sudo umount /mnt/data",
         "desc": "디스크 마운트를 해제합니다.",
         "note": "\"target is busy\" 오류 시 1단계로 돌아가 점유 프로세스를 정리하세요."
       },
       {
         "title": "해제 확인",
+        "check": {"failContains":["/mnt/data"]},
         "command": "lsblk -f",
         "desc": "/mnt/data 마운트 지점이 사라졌는지 확인합니다."
       },
@@ -1397,6 +1447,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "QoS 적용 여부 확인 (인스턴스 배치 호스트)",
+        "check": {"passRegex":"(read|write)_(iops|bytes)_sec"},
         "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -E -A 5 \"bandwidth|iotune\"",
         "desc": "위에서 확인한 인스턴스 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.",
@@ -1475,6 +1526,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "GPU 인식 확인",
+        "check": {"passRegex":"NVIDIA"},
         "command": "lspci | grep -i nvidia",
         "desc": "PCI 버스에 NVIDIA GPU가 인식됐는지 확인합니다. 출력이 없으면 GPU 패스스루(PCI Passthrough) 설정을 확인하세요."
       },
@@ -1496,12 +1548,14 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "권장 드라이버 버전 확인",
+        "check": {"passContains":["recommended"]},
         "command": "ubuntu-drivers devices",
         "desc": "시스템 GPU에 맞는 권장 NVIDIA 드라이버 버전을 확인합니다.",
         "note": "ubuntu-drivers 명령이 없으면 sudo apt install -y ubuntu-drivers-common 먼저 실행하세요."
       },
       {
         "title": "드라이버 설치",
+        "check": {"requireExitZero":true},
         "command": "sudo ubuntu-drivers install",
         "desc": "권장 드라이버를 자동으로 설치합니다. 특정 버전을 지정하려면 sudo apt install -y nvidia-driver-<버전> 형식으로 사용하세요."
       },
@@ -1513,11 +1567,13 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "드라이버 동작 확인",
+        "check": {"passContains":["Driver Version"]},
         "command": "nvidia-smi",
         "desc": "GPU 상태, 드라이버 버전, CUDA 버전, 메모리 사용량을 확인합니다. 출력이 정상이면 드라이버 설치가 완료된 것입니다."
       },
       {
         "title": "GPU 상세 정보 조회",
+        "check": {"passContains":["driver_version"]},
         "command": "nvidia-smi --query-gpu=name,driver_version,memory.total,temperature.gpu,compute_mode --format=csv",
         "desc": "GPU 이름, 드라이버 버전, 전체 메모리, 온도, 컴퓨트 모드를 CSV 형식으로 조회합니다."
       }
@@ -1550,6 +1606,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "MIG 활성화 확인",
+        "check": {"passContains":["Enabled"]},
         "command": "nvidia-smi -q | grep -i \"mig mode\"",
         "desc": "'MIG Mode: Enabled' 출력이 확인되면 MIG 모드가 정상 활성화된 것입니다."
       },
@@ -1561,6 +1618,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "GPU 인스턴스(GI) 생성",
+        "check": {"passContains":["Successfully created"]},
         "command": "sudo nvidia-smi mig -cgi <PROFILE_ID> -C",
         "desc": "지정한 프로파일 ID로 GPU 인스턴스를 생성하고 -C 옵션으로 컴퓨트 인스턴스(CI)도 함께 생성합니다. 쉼표로 구분해 여러 개 생성 가능합니다. (예: -cgi 9,9 → 2개 생성)",
         "note": "프로파일 조합은 GPU 전체 슬라이스(7g)를 초과할 수 없습니다."
@@ -1582,6 +1640,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "MIG 인스턴스 삭제 (초기화)",
+        "check": {"passContains":["Successfully destroyed"]},
         "command": "sudo nvidia-smi mig -dci && sudo nvidia-smi mig -dgi",
         "desc": "컴퓨트 인스턴스(CI)를 먼저 삭제한 뒤 GPU 인스턴스(GI)를 삭제합니다. 삭제 순서를 반드시 지켜야 합니다."
       },
@@ -1895,6 +1954,7 @@ export const SCENARIOS: Scenario[] = [
 
   {
     "id": "scn5",
+    "diagnostic": true,
     "solution": "Ceph",
     "title": "[관리] OSD Down 트러블 슈팅 체크 요소 확인",
     "summary": "HEALTH_WARN/ERR 와 함께 OSD 가 down 되었을 때, 원인 파악부터 재기동·복구 확인까지 진행합니다.",
@@ -1927,6 +1987,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "OSD 데몬 재시작",
+        "check": {"requireExitZero":true},
         "command": "sudo systemctl restart ceph-osd@<OSD_ID>",
         "desc": "해당 OSD 데몬을 재기동합니다.",
         "note": "⚠️ 디스크 하드웨어 장애가 의심되면 재시작 전에 디스크 상태(SMART 등)를 먼저 점검하세요."
@@ -1956,6 +2017,7 @@ export const SCENARIOS: Scenario[] = [
 
   {
     "id": "scn6",
+    "diagnostic": true,
     "solution": "Kubernetes",
     "title": "[워크로드] 파드 CrashLoopBackOff 진단",
     "summary": "파드가 계속 재시작(CrashLoopBackOff)될 때, 이벤트와 로그로 원인을 찾아냅니다.",
@@ -1987,6 +2049,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "설정 수정 후 재배포",
+        "check": {"passContains":["restarted"],"requireExitZero":true},
         "command": "kubectl rollout restart deployment/<NAME> -n <NAMESPACE>",
         "desc": "원인을 수정(이미지/리소스/설정)한 뒤 무중단으로 파드를 재생성합니다."
       }
@@ -2003,6 +2066,7 @@ export const SCENARIOS: Scenario[] = [
     "steps": [
       {
         "title": "사용자 생성",
+        "check": {"requireExitZero":true},
         "command": "sudo adduser --gecos \"\" <사용자명>",
         "expect": [
           { "match": "Retype new password", "send": "<비밀번호>", "secret": true },
@@ -2020,6 +2084,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "sudo 권한 부여",
+        "check": {"requireExitZero":true},
         "command": "sudo usermod -aG sudo <사용자명>",
         "undo": "sudo deluser <사용자명> sudo",
         "desc": "사용자를 sudo 그룹에 추가해 관리자 명령을 쓸 수 있게 합니다.",
@@ -2027,6 +2092,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "그룹 확인",
+        "check": {"passContains":["sudo"],"requireExitZero":true},
         "command": "id <사용자명>",
         "desc": "해당 계정이 sudo(또는 wheel) 그룹에 포함됐는지 확인합니다."
       },
@@ -2305,6 +2371,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "자원 사용 확인",
+        "check": {"passContains":["qterm-app"]},
         "command": "sudo docker stats --no-stream --format '{{.Name}} | CPU {{.CPUPerc}} | MEM {{.MemUsage}} | NET {{.NetIO}}'",
         "desc": "컨테이너가 쓰는 CPU·메모리를 한 번만 찍어 봅니다. 배포 직후 기준값으로 남겨 두면 나중에 비교하기 좋습니다.",
         "info": "--no-stream 을 빼면 화면이 계속 갱신되어 단계가 끝나지 않습니다.\n시나리오에서는 반드시 붙여야 합니다."
@@ -2357,6 +2424,7 @@ export const SCENARIOS: Scenario[] = [
 
   {
     "id": "scn4",
+    "diagnostic": true,
     "solution": "etc",
     "title": "[공통] 인스턴스 부팅 실패 진단",
     "summary": "VM 이 ERROR 상태이거나 부팅되지 않을 때, 원인을 단계적으로 좁혀 나갑니다.",
@@ -2415,6 +2483,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "즉시 적용",
+        "check": {"requireExitZero":true},
         "command": "sudo sysctl -p",
         "desc": "sysctl.conf 의 변경분을 즉시 커널에 적용합니다.",
         "note": "원복 대상이 아닙니다 — 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다.\n되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
@@ -2439,6 +2508,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "강제 종료",
+        "check": {"requireExitZero":true},
         "command": "sudo kill -9 <PID>",
         "warn": "프로세스를 강제 종료합니다. 운영 중인 서비스의 PID 를 넣으면 실제 장애가 발생하니 테스트 대상인지 확인하세요.",
         "desc": "프로세스를 강제 종료해 장애 상황을 유발합니다.",
@@ -2501,6 +2571,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "저장용 디스크 포맷",
+        "check": {"requireExitZero":true},
         "command": "sudo mkfs.ext4 /dev/vdb",
         "expect": [{ "match": "Proceed anyway", "send": "y" }],
         "warn": "/dev/vdb 의 데이터가 모두 지워집니다. 새로 붙인 빈 디스크가 맞는지 앞 단계 lsblk 로 확인하세요.",
@@ -2542,6 +2613,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "vda 디스크를 qcow2 이미지로 변환",
+        "check": {"requireExitZero":true},
         "command": "sudo qemu-img convert -O qcow2 /dev/vda /mnt/backup/ubuntu_image.qcow2",
         "undo": "sudo rm -f /mnt/backup/ubuntu_image.qcow2",
         "desc": "OS 디스크(vda) 전체를 qcow2 포맷 이미지 파일로 변환합니다. 디스크 용량에 따라 수 분~수십 분 소요됩니다.",
@@ -2554,6 +2626,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "이미지 압축 변환 (선택)",
+        "check": {"requireExitZero":true},
         "command": "sudo qemu-img convert -c -O qcow2 /mnt/backup/ubuntu_image.qcow2 /mnt/backup/ubuntu_image_compressed.qcow2",
         "undo": "sudo rm -f /mnt/backup/ubuntu_image_compressed.qcow2",
         "desc": "생성된 이미지에 압축을 적용해 파일 크기를 줄입니다. 다운로드 시간을 단축하려면 이 단계를 먼저 진행하세요.",
@@ -2568,6 +2641,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "이미지 파일 확인",
+        "check": {"passContains":["file format: qcow2"]},
         "command": "qemu-img info /mnt/backup/ubuntu_image.qcow2",
         "desc": "생성된 이미지 파일의 포맷·가상 크기·실제 디스크 크기를 확인합니다."
       },
