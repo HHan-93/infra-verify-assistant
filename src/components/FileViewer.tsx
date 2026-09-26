@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ConfigMapView from './ConfigMapView'
-import { parseEnvRows, isEnvLike, replaceEnvValue, type EnvRow } from '../lib/envFile'
+import { parseEnvRows, isEnvLike, replaceEnvValue, diffEnv, diffLines, type EnvRow } from '../lib/envFile'
+import { isSecretKey, maskedValue } from '../lib/cmSecret'
 import {
   FileCode,
   Download,
@@ -376,6 +377,18 @@ export default function FileViewer({
    * 원문 보기의 검색은 본문을 훑어 그 자리로 보내는 것이고, 여기서는 목록을 좁히는 것이
    * 맞다 — 고칠 값 몇 개만 남겨 놓고 보는 화면이다.
    */
+  /**
+   * 저장 확인창에 보여줄 '무엇이 바뀌는가'.
+   *
+   * 확인창을 열 때만 계산하면 될 것 같지만, 편집 중에도 값이 필요하다(아래 도구막대의 건수).
+   * 두 내용 비교라 비싸지 않다.
+   */
+  const envChanges = useMemo(() => (envLike ? diffEnv(original, content) : []), [envLike, original, content])
+  const lineChanges = useMemo(
+    () => (envLike ? [] : diffLines(original, content)),
+    [envLike, original, content],
+  )
+  const changeCount = envChanges.length || lineChanges.length
   const kvRows = useMemo(
     () =>
       needle
@@ -1106,7 +1119,8 @@ export default function FileViewer({
                   className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
                 >
                   <Save size={13} />
-                  저장
+                  {/* 고치는 동안에도 몇 건인지 보인다 — 확인창을 열어야 알 수 있으면 늦다 */}
+                  저장{changeCount > 0 ? ` (${changeCount}건)` : ''}
                 </button>
               </>
             )}
@@ -1152,8 +1166,63 @@ export default function FileViewer({
         {/* 저장 확인 (앱 내부 다이얼로그 — 네이티브 confirm 미사용) */}
         {confirmOpen && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-6">
-            <div className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl">
-              <div className="mb-2 text-sm font-semibold text-gray-100">저장 확인</div>
+            <div className="flex max-h-[80vh] w-full max-w-xl flex-col overflow-y-auto rounded-lg border border-white/10 bg-panel p-4 shadow-2xl">
+              <div className="mb-2 text-sm font-semibold text-gray-100">
+                저장 확인
+                {changeCount > 0 && (
+                  <span className="ml-1.5 text-[12px] font-normal text-gray-400">
+                    · 바뀌는 것 {changeCount}건
+                  </span>
+                )}
+              </div>
+              {/* **무엇이 바뀌는지 먼저 보여준다.**
+                  파일 저장은 통째로 덮어쓰는 것이라, 이게 없으면 40개 중 셋을 고친 사람도
+                  자기가 고친 게 그 셋뿐인지 확인할 길이 없다. ConfigMap 탭은 적용 전에
+                  `키 · 옛값 → 새값` 을 보여주는데 파일 쪽만 빠져 있었다 — 같은 모양으로 맞춘다. */}
+              {envChanges.length > 0 ? (
+                <div className="mb-2.5 max-h-48 space-y-0.5 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11.5px]">
+                  {envChanges.map((c) => (
+                    <div key={`${c.kind}-${c.key}`} className="flex items-center gap-2">
+                      <span className="w-[200px] shrink-0 truncate text-emerald-200/90">{c.key}</span>
+                      {c.kind === 'added' ? (
+                        <span className="shrink-0 text-[10.5px] text-emerald-400">새 항목 →</span>
+                      ) : (
+                        <span className="shrink-0 truncate text-gray-500 line-through">
+                          {isSecretKey(c.key) ? maskedValue() : c.from || '(빈 값)'}
+                        </span>
+                      )}
+                      {c.kind !== 'added' && <span className="shrink-0 text-emerald-400">→</span>}
+                      <span className="min-w-0 flex-1 truncate text-emerald-200">
+                        {c.kind === 'removed'
+                          ? '(줄 삭제)'
+                          : isSecretKey(c.key)
+                            ? maskedValue()
+                            : c.to || '(빈 값)'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : lineChanges.length > 0 ? (
+                <div className="mb-2.5 max-h-48 space-y-0.5 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11px]">
+                  {lineChanges.slice(0, 40).map((c, i) => (
+                    <div
+                      key={i}
+                      className={'truncate ' + (c.kind === 'added' ? 'text-emerald-300' : 'text-red-300/80')}
+                      title={c.text}
+                    >
+                      {c.kind === 'added' ? '+ ' : '- '}
+                      {c.text}
+                    </div>
+                  ))}
+                  {lineChanges.length > 40 && (
+                    <div className="text-gray-500">… 그 밖에 {lineChanges.length - 40}줄</div>
+                  )}
+                </div>
+              ) : (
+                <p className="mb-2.5 rounded bg-black/30 px-2 py-1.5 text-[11.5px] text-gray-500">
+                  내용이 바뀌지 않았습니다 (줄바꿈·공백만 달라졌을 수 있습니다).
+                </p>
+              )}
               {isRisky(path.trim()) && (
                 <p className="mb-2 rounded bg-red-500/15 px-2 py-1.5 text-[12px] leading-relaxed text-red-300">
                   ⚠️ 위험: 이 파일을 잘못 저장하면 부팅 / 네트워크 / SSH 접속이 끊길 수 있습니다.
