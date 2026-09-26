@@ -21,6 +21,21 @@ export interface ScenarioStep {
    * '실행·입력' 이 붙었다. 받지도 않을 입력을 예고하는 것은 이 앱이 피해야 할 거짓 신호다.
    */
   needsInput?: boolean
+  /**
+   * **'전체 실행' 에서 돌리지 않는다.** 개별 '실행' 버튼으로는 그대로 돌아간다.
+   *
+   * 대화형이라서가 아니라, **사람이 조건을 보고 결정해야 하는 단계**라서 뺀다.
+   * 지금 붙어 있는 곳은 두 종류다.
+   *   · 검증 뒤 정리 — `rm -rf /var/lib/docker` 처럼 **이 시나리오가 만들지 않은 것까지**
+   *     지운다. 스텝 설명 자체가 "다른 컨테이너가 돌고 있다면 실행하지 마세요" 라는
+   *     조건을 달고 있는데, 러너는 그 조건을 판단할 수 없다. 조건을 못 보는 쪽이
+   *     파괴적 명령을 자동으로 돌리면 안 된다(저장소 규칙: 파괴적 동작에는 대상 확인).
+   *   · 내 PC 에서 하는 일 — `scp 원격:파일 ./` 처럼 **원격 셸에서 돌리면 뜻이 없는** 명령.
+   *
+   * needsInput 과는 다르다. 그쪽은 "돌리면 터미널에서 사람이 입력해야 끝난다" 는 사실이고,
+   * 이쪽은 "돌릴지 말지를 사람이 정해야 한다" 는 판단이다. 둘을 한 이름으로 묶지 않는다.
+   */
+  manualOnly?: boolean
   /** 아코디언 코드 예시 (conf 파일 등 긴 입력 내용) */
   code?: string
   /** 실행 결과 자동 판정 기준 (선택) */
@@ -849,7 +864,8 @@ export const SCENARIOS: Scenario[] = [
         "title": "[클라이언트] HTTP 응답 확인",
         "command": "curl -Iv --max-time 10 http://<Target_IP>:18080/",
         "target": "클라이언트",
-        "check": { "passContains": ["200"] },
+        // '200' 만 찾으면 Content-Length: 1200 같은 숫자에도 통과한다 — 응답 줄에서 본다
+        "check": { "passRegex": "HTTP/[0-9.]+ 200" },
         "desc": "결과에서 볼 것 — 'HTTP/1.0 200 OK' 응답 코드입니다. 포트가 열린 것을 넘어 실제로 서비스가 응답하는지까지 확인하는 단계입니다."
       },
       {
@@ -1048,17 +1064,23 @@ export const SCENARIOS: Scenario[] = [
         "title": "UUID 확인",
         "check": {"passContains":["UUID="]},
         "command": "sudo blkid /dev/<DISK>",
-        "capture": [{ "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" }],
-        "desc": "fstab 등록에 사용할 파티션의 UUID를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>에 자동으로 들어갑니다.",
+        "capture": [
+          { "name": "UUID", "regex": "\\bUUID=\"([^\"]+)\"" },
+          // PTTYPE(파티션 테이블 종류)이 아니라 파일시스템 종류다 — 낱말 경계 덕에 PTTYPE= 에는 안 걸린다
+          { "name": "FSTYPE", "regex": "\\bTYPE=\"([^\"]+)\"" }
+        ],
+        "desc": "fstab 등록에 사용할 파티션의 UUID와 파일시스템 종류를 확인합니다. 여기서 뽑은 값이 다음 단계의 <UUID>·<FSTYPE>에 자동으로 들어갑니다.",
         "note": "정규식이 PARTUUID가 아니라 파일시스템 UUID를 잡습니다. 둘을 바꿔 쓰면 다음 부팅에서 emergency mode로 빠집니다."
       },
       {
         "title": "fstab 자동 마운트 등록",
         "check": {"passContains":["/mnt/data"],"requireExitZero":true},
-        "command": "echo 'UUID=<UUID> /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab",
+        // 이미 있던 파티션이라 ext4 라는 보장이 없다 — xfs 인데 ext4 로 적으면 다음 단계
+        // mount -a 가 'wrong fs type' 으로 막히고, 왜인지는 fstab 을 열어 봐야 안다
+        "command": "echo 'UUID=<UUID> /mnt/data <FSTYPE> defaults 0 2' | sudo tee -a /etc/fstab",
         "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
-        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
+        "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>와 <FSTYPE>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
         "note": "원복하면 이 UUID 가 들어간 줄을 /etc/fstab 에서 지웁니다.\n지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로,\n같은 UUID 를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
       },
       {
@@ -2262,6 +2284,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "manualOnly": true,
         "command": `if [ -d /opt/wg-easy ]; then (cd /opt/wg-easy && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/wg-easy /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
         "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 컨테이너를 내리고 Docker 패키지·데이터·저장소 등록까지 한 번에 걷어냅니다.",
@@ -2413,6 +2436,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "manualOnly": true,
         "command": `if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/qterm-app /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; sudo gpasswd -d $USER docker 2>/dev/null || true; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
         "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 앞 단계가 컨테이너만 내렸다면, 여기서 Docker 패키지·데이터·저장소 등록까지 걷어냅니다.",
@@ -2648,7 +2672,8 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "로컬로 다운로드",
         "command": "scp <username>@<원격_IP>:/mnt/backup/ubuntu_image.qcow2 ./",
-        "desc": "scp 명령어로 로컬에 직접 다운로드하거나, 이 앱의 파일 탐색기에서 /mnt/backup 경로로 이동 후 파일을 다운로드할 수 있습니다.",
+        "manualOnly": true,
+        "desc": "이 명령은 **내 PC 의 터미널**에서 실행하는 것입니다. 검증 실행이 쓰는 원격 셸에서 돌리면 그 서버가 자기 자신에게 접속하려 들어 아무 소용이 없습니다.\n더 쉬운 방법은 이 앱의 파일 탐색기로 /mnt/backup 에 들어가 파일을 내려받는 것입니다.",
         "info": "파일 크기가 클 경우 다운로드 시간이 상당히 소요됩니다. 파일 탐색기를 이용하면 진행률 표시줄로 상태를 확인할 수 있습니다."
       }
     ]

@@ -439,6 +439,12 @@ export interface CustomScenarioStep {
    * 버튼이 '실행' 으로 돌아가고, 왜 그 스텝이 제한 시간까지 멈춰 있는지 알 수 없게 된다.
    */
   needsInput?: boolean
+  /**
+   * '전체 실행' 에서 빼는 단계 — 돌릴지 말지를 **사람이 조건을 보고 정해야** 하는 것
+   * (검증 뒤 정리처럼 시나리오 밖의 것까지 지우는 명령, 내 PC 에서 할 일 등).
+   * 내장 시나리오(ScenarioStep)와 같은 뜻이며, 복제해도 표시가 사라지지 않게 여기에도 둔다.
+   */
+  manualOnly?: boolean
   /** 실행 결과 자동 판정 기준 (선택) */
   check?: CommandCheck
   /**

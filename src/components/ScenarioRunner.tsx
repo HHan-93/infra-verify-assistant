@@ -28,6 +28,13 @@ import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/pl
 import { maskForExport } from '../lib/mask'
 import type { ScenarioRunDetail, ScenarioRunStep } from '../../electron/shared-types'
 import { splitShell, opLabel } from '../lib/shellSplit'
+import {
+  DEFAULT_TIMEOUT_SEC,
+  TIMEOUT_CHOICES,
+  TIMEOUT_KEY,
+  interactiveReason,
+  timeoutForCmd,
+} from '../lib/runPolicy'
 
 export interface RunnerStep {
   title: string
@@ -35,6 +42,11 @@ export interface RunnerStep {
   desc?: string
   warn?: string
   check?: CommandCheck
+  /**
+   * '전체 실행' 에서 빼는 스텝 — 돌릴지 말지를 **사람이 조건을 보고 정해야** 하는 것.
+   * (scenarios.ts 의 manualOnly 주석에 왜 대화형 제외와 따로 두는지 적어 두었다)
+   */
+  manualOnly?: boolean
   /** 이 스텝을 실행할 '역할' 이름 (실행 창에서 역할 → 세션 매핑). 비우면 기본 대상 */
   target?: string
   /** 출력에서 값을 뽑아 이후 스텝의 <이름> 플레이스홀더로 넘김 */
@@ -216,44 +228,7 @@ const EFFECTIVE_META: Record<Effective, { label: string; cls: string }> = {
 // 규칙은 프리셋/시나리오 편집기와 공유한다 (src/lib/placeholder.ts)
 const hasUnfilled = hasPlaceholder
 
-/**
- * 사람이 화면 앞에 앉아 있어야 하는 명령 — '전체 실행'에서 자동으로 돌리지 않는다.
- *
- * 왜: htop 을 러너가 돌리면 45초를 붙잡고 있다가 Ctrl+C 로 끊기고, 남는 건 전체화면 UI
- * 한 프레임이 뭉개진 출력뿐이다. 그런데 판정은 '실행됨' 이 붙는다 — 아무것도 검증하지
- * 않았는데 검증한 것처럼 리포트에 남는 게 이 도구에서 가장 나쁜 결과다.
- *
- * 개별 '실행' 버튼으로는 그대로 돌릴 수 있다. 그건 사용자가 보고 누른 것이므로 막지 않는다.
- */
-const INTERACTIVE_RULES: { re: RegExp; why: string }[] = [
-  { re: /(^|[|;&]\s*)(sudo\s+)?(htop|iotop|iftop|nmon|atop|glances)\b/i, why: '전체화면 모니터 — q 를 눌러야 끝납니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?top\b(?![^|;&]*\s-b)/i, why: '전체화면 모니터 — 배치 모드(-b)가 아니면 끝나지 않습니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?watch\b/i, why: '주기 반복 실행 — Ctrl+C 를 눌러야 끝납니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?(vi|vim|nano|emacs)\b/i, why: '편집기가 열립니다 — 저장·종료를 사람이 해야 합니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?(less|more)\b/i, why: '페이저가 열립니다 — q 를 눌러야 끝납니다' },
-  { re: /\btail\b[^|;&]*(\s-[a-zA-Z]*[fF]\b|\s--follow\b)/i, why: '로그를 계속 따라갑니다 — 스스로 끝나지 않습니다' },
-  { re: /journalctl[^|;&]*\s-f\b/i, why: '로그를 계속 따라갑니다 — 스스로 끝나지 않습니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?nc\s+(-\S+\s+)*-l/i, why: '포트 수신 대기 — 터미널을 점유합니다' },
-  {
-    re: /kubectl\s+(edit|attach|port-forward)\b|kubectl\s+exec\s+(-\S+\s+)*-\S*it\b/i,
-    why: '대화형 kubectl — 사람이 조작해야 합니다',
-  },
-  { re: /(^|[|;&]\s*)(sudo\s+)?ping\s+(?![^|;&]*-c\s)/i, why: '횟수 제한(-c)이 없어 끝나지 않습니다' },
-  // while true; do … done 처럼 사람이 Ctrl+C 로 끊어야 하는 감시 루프
-  { re: /\bwhile\s+(true|:)\b|\buntil\s+false\b|\bfor\s*\(\(\s*;;/i, why: '무한 반복 — Ctrl+C 를 눌러야 끝납니다' },
-  // 사용자 전환 — 새 셸이 열려서 이후 스텝이 그 셸 안에서 돌아버린다
-  { re: /(^|[|;&]\s*)(sudo\s+)?su\s+(-|--login|\S)/i, why: '다른 계정 셸로 진입 — 이후 스텝이 그 셸에서 돌게 됩니다' },
-  // adduser/passwd 는 이름·비밀번호를 되묻는다 (--disabled-password --gecos "" 를 준 경우는 제외)
-  {
-    re: /(^|[|;&]\s*)(sudo\s+)?adduser\b(?![^|;&]*--disabled-password)|(^|[|;&]\s*)(sudo\s+)?passwd\b/i,
-    why: '이름·비밀번호를 되묻습니다 — 터미널에서 직접 입력해야 합니다',
-  },
-]
-/** 대화형이면 그 이유, 아니면 null */
-function interactiveReason(cmd: string): string | null {
-  for (const r of INTERACTIVE_RULES) if (r.re.test(cmd)) return r.why
-  return null
-}
+// 자동 실행 대상·제한 시간 규칙은 src/lib/runPolicy.ts 에 있다 (UI 밖에서 검사할 수 있게)
 
 /**
  * [호환 모드 전용] 영속 셸을 못 열었을 때만 쓰는 cd 추적.
@@ -305,47 +280,6 @@ function applyCaptures(rules: CaptureRule[] | undefined, text: string): { values
   return { values, misses }
 }
 
-// ── 스텝 제한 시간 ────────────────────────────────────────────
-/**
- * 예전엔 45초 고정이었는데, 그게 검증을 조용히 망가뜨리고 있었다.
- *   · `stress-ng --cpu 4 --timeout 60s` → 45초에 Ctrl+C. stress-ng 는 SIGINT 를 받아
- *     "successful run completed in 44.61 secs" 를 찍고 **0 으로** 끝난다 → '정상' 으로 기록.
- *     60초 부하를 걸었다고 리포트에 남지만 실제로는 44.6초만 돌았다.
- *   · `apt-get update && apt-get install` 은 미러가 느리면 45초를 그냥 넘긴다.
- * 그래서 (1) 기본값을 사용자가 고르고, (2) 명령이 스스로 소요시간을 말하면 그만큼은 기다린다.
- */
-const TIMEOUT_KEY = 'scenario_runner_timeout_v1'
-const TIMEOUT_CHOICES = [60, 120, 300, 600, 1800] as const
-const DEFAULT_TIMEOUT_SEC = 120
-/** 패키지 설치·다운로드처럼 네트워크에 좌우되는 명령의 최소 제한 시간 */
-const SLOW_CMD_RE = /\b(apt|apt-get|aptitude|yum|dnf|zypper|pip3?|npm|wget|curl|docker\s+(pull|build)|git\s+clone)\b/i
-const SLOW_CMD_FLOOR_MS = 300_000
-
-const toMs = (n: string, unit?: string) => {
-  const v = parseInt(n, 10)
-  const u = (unit ?? 's').toLowerCase()
-  return v * (u === 'h' ? 3_600_000 : u === 'm' ? 60_000 : 1000)
-}
-/** 명령이 명시한 소요 시간(stress-ng --timeout 60s, fio --runtime, sleep 30 …) */
-function declaredDurationMs(cmd: string): number {
-  let max = 0
-  const seen = (ms: number) => {
-    if (ms > max) max = ms
-  }
-  for (const m of cmd.matchAll(/--(?:timeout|runtime|time)[=\s]+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
-  for (const m of cmd.matchAll(/\bsleep\s+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
-  for (const m of cmd.matchAll(/\s-t\s+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
-  return max
-}
-/**
- * 이 명령에 실제로 적용할 제한 시간.
- * 명령이 "60초 돌리겠다"고 말했으면 60초 + 여유를 준다 — 자기가 끝나기 전에 우리가 끊으면 안 된다.
- */
-function timeoutForCmd(cmd: string, baseMs: number): number {
-  const declared = declaredDurationMs(cmd)
-  const floor = SLOW_CMD_RE.test(cmd) ? SLOW_CMD_FLOOR_MS : 0
-  return Math.max(baseMs, declared ? declared + 30_000 : 0, floor)
-}
 const fmtDur = (ms: number) => (ms >= 60_000 ? `${Math.round(ms / 60_000)}분` : `${Math.round(ms / 1000)}초`)
 
 /**
@@ -1063,6 +997,8 @@ ${primary?.err ?? ''}`)
     const extras: string[] = []
     /** 대화형이라 자동 실행에서 뺀 스텝 번호 */
     const interactive: number[] = []
+    /** manualOnly 라 자동 실행에서 뺀 스텝 번호 */
+    const manualOnlySteps: number[] = []
     for (let i = 0; i < scenario.steps.length; i++) {
       if (abortRef.current) {
         stoppedAt = i
@@ -1086,9 +1022,21 @@ ${primary?.err ?? ''}`)
         manualSkipped++
         continue
       }
+      /**
+       * 돌릴지 말지를 **사람이 정해야 하는** 스텝 (scenarios.ts 의 manualOnly 주석 참고).
+       *
+       * 대화형 제외와 이유가 다르다 — 이쪽은 명령이 안 끝나서가 아니라, 러너가 판단할 수
+       * 없는 조건이 달려 있어서다. '검증 뒤 Docker 제거' 가 그 예인데, 전체 실행이 그것까지
+       * 돌리면 **방금 만든 것을 곧바로 지우고** /var/lib/docker 에 있던 남의 컨테이너까지
+       * 함께 날린다. 개별 '실행' 은 사람이 보고 누른 것이므로 그대로 둔다.
+       */
+      if (step.manualOnly) {
+        manualOnlySteps.push(i + 1)
+        continue
+      }
       // htop/watch/vi 처럼 사람이 끝내야 하는 명령은 자동으로 돌리지 않는다.
       // 돌려봐야 제한 시간을 다 쓰고 끊긴 화면 조각만 남는데 판정은 '실행됨'이 붙는다.
-      const why = interactiveReason(c)
+      const why = interactiveReason(c, step.expect)
       if (why) {
         interactive.push(i + 1)
         continue
@@ -1176,6 +1124,10 @@ ${primary?.err ?? ''}`)
     if (interactive.length)
       parts.push(
         `${interactive.join(', ')}번은 대화형 명령이라 자동 실행에서 제외 — 터미널에서 직접 확인한 뒤 수동으로 판정하세요`,
+      )
+    if (manualOnlySteps.length)
+      parts.push(
+        `${manualOnlySteps.join(', ')}번은 사람이 판단해야 하는 스텝이라 자동 실행에서 제외 — 필요하면 그 스텝의 '실행' 을 직접 누르세요`,
       )
     if (manualSkipped) parts.push(`수동 지정 ${manualSkipped}개는 그대로 유지`)
     if (skipped) parts.push(`입력값 미지정 ${skipped}개 건너뜀 — 상단 '검증 입력값'을 채우고 다시 실행`)
@@ -2284,9 +2236,20 @@ ${primary?.err ?? ''}`)
                         ) : null}
                         {/* 자동 실행에서 빠지는 스텝임을 '돌리기 전에' 알려야 한다 —
                             안 그러면 전체 실행 후 왜 이 스텝만 '대기'인지 알 수 없다. */}
-                        {isCmd &&
+                        {isCmd && step.manualOnly && (
+                          <span
+                            title={
+                              "돌릴지 말지를 사람이 정해야 하는 스텝입니다.\n" +
+                              "'전체 실행'에서는 건너뜁니다 — 조건을 확인한 뒤 오른쪽 '실행' 을 직접 누르세요."
+                            }
+                            className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-200"
+                          >
+                            수동 · 자동 실행 제외
+                          </span>
+                        )}
+                        {isCmd && !step.manualOnly &&
                           (() => {
-                            const why = interactiveReason(commandOf(idx))
+                            const why = interactiveReason(commandOf(idx), step.expect)
                             return why ? (
                               <span
                                 title={`${why}\n'전체 실행'에서는 건너뜁니다. 터미널에서 직접 확인한 뒤 수동으로 판정하세요.\n(오른쪽 '실행' 버튼을 누르면 그래도 실행합니다)`}

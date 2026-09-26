@@ -163,6 +163,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
         warn: st.warn,
         code: st.code,
         needsInput: st.needsInput,
+        manualOnly: st.manualOnly,
         check: st.check,
         target: st.target,
         capture: st.capture,
@@ -949,6 +950,7 @@ function ScenarioEditorModal({
         code: s.code?.trim() || undefined,
         // 편집 화면에 토글은 없지만 값은 지킨다 — 복제본을 한 번 열었다 저장했다고 표시가 사라지면 안 된다
         needsInput: s.needsInput || undefined,
+        manualOnly: s.manualOnly || undefined,
         check: cleanCheck(s.check),
         // 고급 설정 — 빈 행은 저장하지 않는다
         target: s.target?.trim() || undefined,
