@@ -142,7 +142,7 @@ export default function Toolbar({
         </button>
         <button
           onClick={onAnalyzeSelection}
-          title="드래그로 선택한 텍스트를 AI 분석"
+          title="활성 세션의 출력을 AI 로 분석 — 드래그한 선택 영역, 또는 최근 출력 중에서 고릅니다"
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScanText size={14} className="text-blue-300" />

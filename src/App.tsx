@@ -210,9 +210,21 @@ export default function App() {
   const [showLiveLog, setShowLiveLog] = useState(false)
   const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
   const [showStatusBoard, setShowStatusBoard] = useState(false)
-  // 선택 세션 AI 분석 — 질문 입력 모달 (공용)
-  const [analysisPending, setAnalysisPending] = useState<string | null>(null)
-  const [analysisLabel, setAnalysisLabel] = useState('선택 세션 AI 분석')
+  /**
+   * AI 분석에 보낼 거리 — 창을 여는 **그 순간의** 터미널을 떠 둔다.
+   *
+   * 열어 두는 동안에도 원격은 계속 출력을 뱉는다. 보낼 때 다시 읽으면 미리보기에 보인 것과
+   * 실제로 나간 것이 달라진다 — 무엇을 보냈는지 모르게 되는 것이 이 창에서 가장 나쁘다.
+   */
+  const [analysisCtx, setAnalysisCtx] = useState<{
+    selection: string
+    recent200: string
+    recent500: string
+    sessionLabel: string
+  } | null>(null)
+  /** 무엇을 보낼 것인가 — 드래그한 선택 영역 / 최근 출력 N줄 */
+  const [analysisSource, setAnalysisSource] = useState<'selection' | 'recent200' | 'recent500'>('selection')
+  const [analysisPreviewOpen, setAnalysisPreviewOpen] = useState(false)
   const [analysisQuestion, setAnalysisQuestion] = useState('')
   // AI 패널이 이미 스트리밍 중이라 analyze() 가 무시됐을 때만 채워지는 안내 문구
   const [analysisBusyNotice, setAnalysisBusyNotice] = useState('')
@@ -1477,27 +1489,60 @@ export default function App() {
     })
   }
 
-  // 터미널 출력 → AI 분석 (공용 — 활성 세션 기준). 패널이 닫혀 있으면 자동으로 연다.
+  /**
+   * 터미널 출력 → AI 분석 (활성 세션 기준). 패널이 닫혀 있으면 자동으로 연다.
+   *
+   * 예전에는 **드래그한 선택 영역만** 보냈다. 그런데 버튼도 창 제목도 그렇게 읽히지 않아서
+   * (사용자 지적) 드래그 없이 눌렀을 때 빈 내용이 그대로 요청으로 나갔다.
+   * 지금은 창에서 보낼 것을 고르게 하고, 드래그가 없으면 최근 출력을 기본으로 잡는다.
+   * `getRecentOutput` 은 예전부터 이 용도로 만들어져 있었는데 아무도 부르지 않았다.
+   */
   const analyzeSelection = () => {
-    const text = activeTerm()?.getSelection() ?? ''
-    setAnalysisPending(text)
-    setAnalysisLabel('선택 세션 AI 분석')
+    const t = activeTerm()
+    const tab = tabs.find((x) => x.id === activeId)
+    const selection = t?.getSelection() ?? ''
+    setAnalysisCtx({
+      selection,
+      recent200: t?.getRecentOutput(200) ?? '',
+      recent500: t?.getRecentOutput(500) ?? '',
+      sessionLabel: gridCellLabel(tab ?? { id: activeId, title: '' }),
+    })
+    // 드래그한 것이 있으면 그것이 뜻한 바다. 없으면 최근 출력.
+    setAnalysisSource(selection.trim() ? 'selection' : 'recent200')
+    setAnalysisPreviewOpen(false)
     setAnalysisQuestion('')
     setAnalysisBusyNotice('')
   }
+  /** 지금 고른 대상의 본문 */
+  const analysisText = (): string => {
+    if (!analysisCtx) return ''
+    if (analysisSource === 'selection') return analysisCtx.selection
+    return analysisSource === 'recent500' ? analysisCtx.recent500 : analysisCtx.recent200
+  }
+  const lineCount = (s: string) => (s.trim() ? s.trim().split('\n').length : 0)
 
   const submitAnalysis = () => {
-    if (analysisPending === null) return
+    if (!analysisCtx) return
+    const text = analysisText()
+    // 빈 내용을 보내지 않는다 — 예전에는 그대로 나가서 API 호출 한 번과 쓸모없는 답을 받았다.
+    if (!text.trim()) {
+      setAnalysisBusyNotice(
+        analysisSource === 'selection'
+          ? '드래그한 선택 영역이 없습니다. 아래에서 최근 출력을 고르거나, 터미널에서 분석할 부분을 선택하세요.'
+          : '이 세션에 보낼 출력이 없습니다. 명령을 실행한 뒤 다시 시도하세요.',
+      )
+      return
+    }
     setShowAI(true)
     // analyze() 는 AI 패널이 이미 스트리밍 중이면 조용히 무시하고 false 를 반환한다 — 이 경우
     // 모달을 닫으면 사용자는 요청이 처리된 줄 알지만 실제로는 유실되므로, 열어둔 채 안내만 표시.
-    const started = aiPanelRef.current?.analyze(analysisPending, analysisQuestion.trim() || undefined)
+    const started = aiPanelRef.current?.analyze(text, analysisQuestion.trim() || undefined)
     if (started === false) {
       setAnalysisBusyNotice('AI가 이미 다른 응답을 생성하는 중입니다. 잠시 후 다시 시도하세요.')
       return
     }
     setAnalysisBusyNotice('')
-    setAnalysisPending(null)
+    setAnalysisCtx(null)
     setAnalysisQuestion('')
   }
 
@@ -2418,41 +2463,122 @@ export default function App() {
         />
       )}
 
-      {/* 선택 AI 분석 — 질문 입력 모달 */}
-      {analysisPending !== null && (
+      {/* AI 분석 — 무엇을 보낼지 고르고, 질문을 적는 창 */}
+      {analysisCtx !== null && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
         >
           <div
-            className="w-full max-w-md rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+            // 미리보기를 펼치면 내용이 길어진다 — 창이 낮을 때 잘려 나가지 않게 창 자체가 스크롤된다
+            className="flex max-h-[86vh] w-full max-w-lg flex-col overflow-y-auto rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') { setAnalysisPending(null); setAnalysisBusyNotice('') }
+              if (e.key === 'Escape') { setAnalysisCtx(null); setAnalysisBusyNotice('') }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAnalysis() }
             }}
           >
-            <div className="mb-3 text-sm font-semibold text-gray-100">{analysisLabel}</div>
+            {/* 제목이 대상을 말한다 — '선택 세션 AI 분석' 은 세션 전체를 보내는 것처럼 읽혔다 */}
+            <div className="mb-0.5 text-sm font-semibold text-gray-100">AI 분석</div>
+            <div className="mb-2.5 text-[11px] text-gray-500">
+              {analysisCtx.sessionLabel || '활성 세션'} 의 출력을 AI 에게 보냅니다
+            </div>
+
+            {/* 보낼 것 고르기 — 창을 연 순간의 터미널에서 떠 둔 것이다 */}
+            <div className="space-y-1">
+              {([
+                { key: 'selection' as const, text: analysisCtx.selection, label: '드래그한 선택 영역' },
+                { key: 'recent200' as const, text: analysisCtx.recent200, label: '최근 출력 200줄' },
+                { key: 'recent500' as const, text: analysisCtx.recent500, label: '최근 출력 500줄' },
+              ]).map((o) => {
+                const n = lineCount(o.text)
+                const empty = n === 0
+                return (
+                  <label
+                    key={o.key}
+                    className={
+                      'flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs ' +
+                      (analysisSource === o.key
+                        ? 'border-blue-500/50 bg-blue-500/10 text-gray-100'
+                        : 'border-white/10 text-gray-300 hover:bg-white/5') +
+                      (empty ? ' opacity-50' : '')
+                    }
+                  >
+                    <input
+                      type="radio"
+                      name="analysis-source"
+                      checked={analysisSource === o.key}
+                      disabled={empty}
+                      onChange={() => { setAnalysisSource(o.key); setAnalysisBusyNotice('') }}
+                      className="accent-blue-500"
+                    />
+                    <span className="flex-1">{o.label}</span>
+                    <span className="text-[11px] text-gray-500">
+                      {empty ? '없음' : `${n}줄 · ${o.text.length.toLocaleString()}자`}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+
+            {/* 보내기 전에 무엇이 나가는지 직접 본다 — 앞뒤만 떼어 보여준다 */}
+            {analysisText().trim() && (
+              <div className="mt-2 overflow-hidden rounded-md border border-white/10 bg-black/30">
+                <button
+                  onClick={() => setAnalysisPreviewOpen((v) => !v)}
+                  className="flex w-full items-center gap-1.5 px-2 py-1 text-[11px] text-blue-300/90 hover:bg-white/5"
+                >
+                  {analysisPreviewOpen ? '▾ 보낼 내용 접기' : '▸ 보낼 내용 미리보기'}
+                </button>
+                {analysisPreviewOpen && (
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-white/10 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-gray-400">
+                    {(() => {
+                      const lines = analysisText().trim().split('\n')
+                      if (lines.length <= 14) return lines.join('\n')
+                      return [
+                        ...lines.slice(0, 7),
+                        `… 가운데 ${lines.length - 14}줄 생략 (실제로는 전부 보냅니다) …`,
+                        ...lines.slice(-7),
+                      ].join('\n')
+                    })()}
+                  </pre>
+                )}
+              </div>
+            )}
+
             <textarea
               autoFocus
               rows={3}
               value={analysisQuestion}
               onChange={(e) => setAnalysisQuestion(e.target.value)}
               placeholder="질문을 입력하세요... (비우면 기본 분석 스타일 적용)"
-              className="w-full resize-none rounded-md border border-white/10 bg-panel-light px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
+              className="mt-2 w-full resize-none rounded-md border border-white/10 bg-panel-light px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
             />
+            {/* 목적지가 남의 서버다 — 무엇이 가려져 나가는지 보내기 전에 밝힌다.
+                가리기 스위치가 꺼져 있으면 **원문 그대로** 나가므로 그 사실을 그대로 적는다.
+                (maskForAI 는 그 스위치가 꺼져 있으면 아무것도 가리지 않는다 — mask.ts) */}
+            {maskReport ? (
+              <p className="mt-1.5 text-[11px] text-gray-500">
+                비밀번호 · 토큰 · 개인키는 가린 뒤 보냅니다{maskIp ? ' (IP 도 가림)' : ''}.
+              </p>
+            ) : (
+              <p className="mt-1.5 text-[11px] text-amber-300">
+                가리기가 꺼져 있어 <b>원문 그대로</b> 외부 AI 로 나갑니다. 설정 → 보안에서 켤 수 있습니다.
+              </p>
+            )}
             {analysisBusyNotice && (
               <p className="mt-1.5 text-[11px] text-amber-300">{analysisBusyNotice}</p>
             )}
             <div className="mt-3 flex justify-end gap-2">
               <button
-                onClick={() => { setAnalysisPending(null); setAnalysisBusyNotice('') }}
+                onClick={() => { setAnalysisCtx(null); setAnalysisBusyNotice('') }}
                 className="rounded px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
               >
                 취소
               </button>
               <button
                 onClick={submitAnalysis}
-                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+                disabled={!analysisText().trim()}
+                className="rounded bg-blue-600/80 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
               >
                 분석
               </button>

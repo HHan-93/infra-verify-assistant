@@ -344,8 +344,16 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
       // 탭이 켜진 채로 호출되면 탭 표시와 실제 응답 형식이 어긋나 보이므로 탭도 맞춰준다.
       setChatMode('chat')
       const ctx = context.trim()
+      /**
+       * 빈 내용으로는 **요청을 보내지 않는다.**
+       *
+       * 예전에는 "터미널 출력이 비어 있습니다" 라는 문장을 그대로 AI 에게 보냈다. 호출 한 번과
+       * 토큰을 쓰고 돌아오는 것은 아무 쓸모 없는 답이다. 보낼 것이 없다는 사실은 이쪽에서 안다.
+       * (App 의 분석 창은 애초에 여기까지 오지 않게 막지만, 다른 호출부도 있어 방어로 남긴다)
+       */
       if (!ctx) {
-        submit('터미널 출력이 비어 있습니다. (선택 영역이 없거나 출력이 없음)')
+        setSaveMsg('보낼 내용이 없어 요청하지 않았습니다.')
+        setTimeout(() => setSaveMsg((m) => (m === '보낼 내용이 없어 요청하지 않았습니다.' ? '' : m)), 4000)
         return true
       }
       if (question) {
