@@ -918,9 +918,19 @@ export const PRESETS: PresetGroup[] = [
         "name": "운영 · 재기동",
         "commands": [
           {
+            "label": "컨테이너 시작",
+            "command": "sudo docker start <CONTAINER>",
+            "desc": "멈춰 있던(Exited) 컨테이너를 올립니다. 사람이 내린 것은 restart 정책으로 저절로 올라오지 않으므로 이렇게 직접 올려야 합니다"
+          },
+          {
+            "label": "컨테이너 중지",
+            "command": "sudo docker stop <CONTAINER>",
+            "desc": "정상 종료 신호를 보내고 10초 기다린 뒤 강제 종료합니다. 컨테이너는 남아 있으므로 로그도 그대로고, 시작으로 다시 올립니다"
+          },
+          {
             "label": "컨테이너 재기동",
             "command": "sudo docker restart <CONTAINER>",
-            "desc": "설정 파일을 고친 뒤 반영하려면 이것이 필요합니다"
+            "desc": "중지와 시작을 한 번에. 설정 파일을 고친 뒤 반영하려면 이것이 필요합니다"
           },
           {
             "label": "컨테이너 안으로 들어가기",
@@ -978,9 +988,19 @@ export const PRESETS: PresetGroup[] = [
             "desc": "컨테이너를 지우지 않고 다시 시작합니다"
           },
           {
+            "label": "compose 전체 중지",
+            "command": "sudo docker compose -f <COMPOSE_FILE> stop",
+            "desc": "그 파일로 띄운 컨테이너를 모두 내립니다. 지우지는 않으므로 시작으로 되돌립니다"
+          },
+          {
+            "label": "compose 전체 시작",
+            "command": "sudo docker compose -f <COMPOSE_FILE> start",
+            "desc": "중지해 둔 컨테이너를 다시 올립니다"
+          },
+          {
             "label": "compose 올리기(변경 반영)",
             "command": "sudo docker compose -f <COMPOSE_FILE> up -d",
-            "desc": "설정이 바뀌었으면 해당 컨테이너를 다시 만들어 올립니다"
+            "desc": "설정이 바뀌었으면 해당 컨테이너를 다시 만들어 올립니다. 없던 컨테이너는 새로 만듭니다"
           }
         ]
       }
