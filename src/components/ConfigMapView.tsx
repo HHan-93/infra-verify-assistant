@@ -811,7 +811,9 @@ export default function ConfigMapView({
               {pendingKeys.map((k) => (
                 <div key={k} className="flex items-center gap-2">
                   <span className="w-[220px] shrink-0 truncate text-emerald-200/90">{k}</span>
-                  <span className="shrink-0 truncate text-gray-500 line-through">
+                  {/* shrink-0 이면 긴 값이 줄을 밀어내 **새 값이 화면 밖으로 나간다**.
+                      값 칸 둘이 남은 자리를 나눠 갖고 각자 잘리게 한다(전문은 title 에). */}
+                  <span className="min-w-0 flex-1 truncate text-gray-500 line-through">
                     {isSecretKey(k)
                       ? maskedValue()
                       : isMulti(detail.data[k] ?? '')

@@ -1180,27 +1180,63 @@ export default function FileViewer({
                   자기가 고친 게 그 셋뿐인지 확인할 길이 없다. ConfigMap 탭은 적용 전에
                   `키 · 옛값 → 새값` 을 보여주는데 파일 쪽만 빠져 있었다 — 같은 모양으로 맞춘다. */}
               {envChanges.length > 0 ? (
-                <div className="mb-2.5 max-h-48 space-y-0.5 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11.5px]">
-                  {envChanges.map((c) => (
-                    <div key={`${c.kind}-${c.key}`} className="flex items-center gap-2">
-                      <span className="w-[200px] shrink-0 truncate text-emerald-200/90">{c.key}</span>
-                      {c.kind === 'added' ? (
-                        <span className="shrink-0 text-[10.5px] text-emerald-400">새 항목 →</span>
-                      ) : (
-                        <span className="shrink-0 truncate text-gray-500 line-through">
-                          {isSecretKey(c.key) ? maskedValue() : c.from || '(빈 값)'}
+                <div className="mb-2.5 max-h-48 space-y-1 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11.5px]">
+                  {envChanges.map((c) => {
+                    const secret = isSecretKey(c.key)
+                    const from = secret ? maskedValue() : c.from
+                    const to = secret ? maskedValue() : c.to
+                    /**
+                     * 값이 길면 **위아래로** 놓는다.
+                     *
+                     * 한 줄에 `옛값 → 새값` 을 넣으면 URL 처럼 긴 값에서 둘 다 잘려 정작 어디가
+                     * 다른지 안 보인다(사용자 화면에서 새 값이 아예 밀려 나갔다). 나란히 두는 것은
+                     * 값이 짧을 때만 쓸모가 있다.
+                     */
+                    const long = from.length + to.length > 60
+                    return (
+                      <div
+                        key={`${c.kind}-${c.key}`}
+                        className={long ? 'border-b border-white/[0.06] pb-1 last:border-0' : 'flex items-center gap-2'}
+                      >
+                        <span
+                          className={
+                            'truncate text-emerald-200/90 ' + (long ? 'block' : 'w-[180px] shrink-0')
+                          }
+                          title={c.key}
+                        >
+                          {c.key}
                         </span>
-                      )}
-                      {c.kind !== 'added' && <span className="shrink-0 text-emerald-400">→</span>}
-                      <span className="min-w-0 flex-1 truncate text-emerald-200">
-                        {c.kind === 'removed'
-                          ? '(줄 삭제)'
-                          : isSecretKey(c.key)
-                            ? maskedValue()
-                            : c.to || '(빈 값)'}
-                      </span>
-                    </div>
-                  ))}
+                        {long ? (
+                          <>
+                            {c.kind !== 'added' && (
+                              <div className="truncate pl-3 text-red-300/70" title={from}>
+                                - {from || '(빈 값)'}
+                              </div>
+                            )}
+                            {c.kind !== 'removed' && (
+                              <div className="truncate pl-3 text-emerald-300" title={to}>
+                                + {to || '(빈 값)'}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {c.kind === 'added' ? (
+                              <span className="shrink-0 text-[10.5px] text-emerald-400">새 항목 →</span>
+                            ) : (
+                              <span className="min-w-0 flex-1 truncate text-gray-500 line-through" title={from}>
+                                {from || '(빈 값)'}
+                              </span>
+                            )}
+                            {c.kind !== 'added' && <span className="shrink-0 text-emerald-400">→</span>}
+                            <span className="min-w-0 flex-1 truncate text-emerald-200" title={to}>
+                              {c.kind === 'removed' ? '(줄 삭제)' : to || '(빈 값)'}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               ) : lineChanges.length > 0 ? (
                 <div className="mb-2.5 max-h-48 space-y-0.5 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11px]">
