@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, Clock, Download, FileText, Loader2, Minus, RefreshCw, Trash2, X } from 'lucide-react'
+import { Check, Clock, Copy, Download, FileText, Loader2, Minus, RefreshCw, Trash2, X } from 'lucide-react'
 import type { ScenarioRunDetail, ScenarioRunRetention, ScenarioRunSummary } from '../../electron/shared-types'
 import {
   buildBundleHtml,
@@ -121,6 +121,23 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
   const [busy, setBusy] = useState(false)
   /** 스텝 출력을 펼쳐 둔 번호 */
   const [openStep, setOpenStep] = useState<Set<number>>(new Set())
+  /**
+   * 방금 복사한 출력 칸 — `스텝번호:출력번호`.
+   *
+   * 한 스텝에 stdout·stderr 처럼 칸이 둘 이상일 수 있어 스텝 번호만으로는 어느 것을
+   * 복사했는지 가릴 수 없다. 알림 문구 대신 그 자리에서 잠깐 '복사됨' 으로 바꾼다 —
+   * 어느 칸을 담았는지가 버튼 위치로 드러나야 한다.
+   */
+  const [copiedOut, setCopiedOut] = useState<string | null>(null)
+  const copyOutput = async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedOut(key)
+      setTimeout(() => setCopiedOut((c) => (c === key ? null : c)), 1200)
+    } catch {
+      setNotice('클립보드 복사에 실패했습니다.')
+    }
+  }
   /** 고른 회차의 상세 — 격자를 그리려면 필요하다 */
   const [details, setDetails] = useState<ScenarioRunDetail[]>([])
   /**
@@ -737,16 +754,45 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                           </span>
                                         </div>
                                         {open &&
-                                          outs.map((o, oi) => (
-                                            <div key={oi} className="mt-1">
-                                              {outs.length > 1 && (
-                                                <div className="text-[10px] text-gray-500">{o.label}</div>
-                                              )}
-                                              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-white/10 bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-gray-300">
-                                                {o.text}
-                                              </pre>
-                                            </div>
-                                          ))}
+                                          outs.map((o, oi) => {
+                                            const ck = `${st.index}:${oi}`
+                                            return (
+                                              <div key={oi} className="relative mt-1">
+                                                {outs.length > 1 && (
+                                                  <div className="text-[10px] text-gray-500">{o.label}</div>
+                                                )}
+                                                {/* 복사 버튼은 pre 바깥에 둔다 — 안에 두면 출력을 스크롤할 때
+                                                    같이 밀려 올라가 보이지 않는다. 여는 순간부터 늘 같은 자리다.
+                                                    담는 것은 이 칸의 출력뿐이다. 명령·판정 근거까지 섞으면
+                                                    로그 도구에 그대로 붙여 넣을 수 없다 — 그러려고 여는 칸이다. */}
+                                                <button
+                                                  onClick={() => copyOutput(ck, o.text)}
+                                                  title="이 출력만 클립보드로"
+                                                  className={
+                                                    // 오른쪽을 조금 비운다 — 출력이 길면 pre 에 세로 스크롤막대가
+                                                    // 생기는데, 딱 붙여 두면 버튼이 그 위를 덮는다
+                                                    'absolute right-2.5 z-10 flex items-center gap-1 rounded border border-white/10 bg-panel/90 px-1.5 py-0.5 text-[9.5px] backdrop-blur-sm hover:bg-white/10 ' +
+                                                    (outs.length > 1 ? 'top-[18px] ' : 'top-1 ') +
+                                                    (copiedOut === ck ? 'text-emerald-300' : 'text-gray-400')
+                                                  }
+                                                >
+                                                  {copiedOut === ck ? (
+                                                    <>
+                                                      <Check size={10} /> 복사됨
+                                                    </>
+                                                  ) : (
+                                                    <>
+                                                      <Copy size={10} /> 복사
+                                                    </>
+                                                  )}
+                                                </button>
+                                                {/* 오른쪽 여백은 버튼 자리다 — 없으면 첫 줄이 버튼 밑으로 들어가 가려진다 */}
+                                                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-white/10 bg-black/30 py-1.5 pl-2 pr-16 font-mono text-[10px] leading-relaxed text-gray-300">
+                                                  {o.text}
+                                                </pre>
+                                              </div>
+                                            )
+                                          })}
                                       </>
                                     )
                                   })()}
