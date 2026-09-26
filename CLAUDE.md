@@ -50,6 +50,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 - [mask.ts](src/lib/mask.ts) — 비밀번호·토큰·키·IP 마스킹. **로그 표시 / 리포트 저장 / AI 외부 전송 세 경로에 공통 적용**된다. 값만 가리고 키 이름은 남긴다.
 - [placeholder.ts](src/lib/placeholder.ts) — 명령어 안 `<입력값>` 규칙. 문자 집합을 좁게 잡은 이유가 주석에 있다(셸 리다이렉션 `>` 오인 방지).
 - [shellSplit.ts](src/lib/shellSplit.ts) — 한 줄 명령을 최상위 `;` `&&` `||` 로 쪼개 단계로 보여주기 위한 분리기. 따옴표·`$( )` 안은 건드리지 않는다(`awk '{print $5; exit}'` 를 반토막 내지 않으려면 정규식 split 으로는 안 된다).
+- [runPolicy.ts](src/lib/runPolicy.ts) — 검증 러너가 **무엇을 자동으로 돌려도 되는가 · 얼마나 기다리는가**. 대화형(htop·vi)은 전체 실행에서 빼되 `timeout <시간>` 으로 묶였거나 expect 가 프롬프트에 답하는 것은 돌린다. `manualOnly` 스텝(검증 뒤 정리처럼 조건을 사람이 봐야 하는 것)도 뺀다. 제한 시간은 네트워크 의존 5분·디스크 이미지 30분이 바닥 — 느린 것이 '제한 시간 초과' 라는 **실패로** 기록되면 안 된다.
 - [orderedMerge.ts](src/lib/orderedMerge.ts) — 내장 항목(배열 인덱스) + 사용자 정의(소수 `order`) fractional indexing 병합.
 - [paneTree.ts](src/lib/paneTree.ts) — tmux 식 재귀 분할 이진 트리(고정 2/4분할이 아니다).
 - [logDisplay.tsx](src/lib/logDisplay.tsx) / [highlightRules.ts](src/lib/highlightRules.ts) — 심각도 4버킷 색상 + 사용자 하이라이트. 줄 전체가 아니라 키워드 단어만 물들인다.
