@@ -640,16 +640,21 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                     {ordered[0].steps.length === 0 ? (
                       <p className="text-[10.5px] text-gray-600">이 회차에는 스텝 기록이 없습니다.</p>
                     ) : (
-                      <table className="w-full border-collapse text-[10.5px]">
+                      /* table-fixed 다 — 칸 너비를 내용이 정하게 두면 안 된다.
+                         기본(auto) 표는 각 칸이 원하는 너비를 재서 나눠 갖는데, 출력 칸에는 수십 줄짜리
+                         터미널 출력이 들어 있어 "최대한 넓게" 를 요구한다. 그러면 남은 칸들이 최소 너비까지
+                         눌려, 스텝 제목이 한 글자씩 끊기고 판정 배지가 세로로 서 버렸다(사용자 지적).
+                         너비를 미리 못 박으면 출력을 펼치든 접든 앞 세 칸은 그대로 있는다. */
+                      <table className="w-full table-fixed border-collapse text-[10.5px]">
                         <thead>
                           <tr>
                             <th className="w-7 border-b border-white/10 py-1 pr-2 text-right font-medium text-gray-500">
                               #
                             </th>
-                            <th className="border-b border-white/10 py-1 pr-2 text-left font-medium text-gray-500">
+                            <th className="w-[150px] border-b border-white/10 py-1 pr-2 text-left font-medium text-gray-500">
                               스텝
                             </th>
-                            <th className="border-b border-white/10 py-1 pr-2 text-left font-medium text-gray-500">
+                            <th className="w-[62px] border-b border-white/10 py-1 pr-2 text-left font-medium text-gray-500">
                               판정
                             </th>
                             <th className="border-b border-white/10 py-1 text-left font-medium text-gray-500">
@@ -663,13 +668,19 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                             return (
                               <tr key={st.index} className="border-b border-white/[0.05]">
                                 <td className="py-1 pr-2 text-right text-gray-600">{st.index + 1}</td>
-                                <td className={'py-1 pr-2 ' + (bad ? 'text-red-200' : 'text-gray-300')}>
+                                {/* break-keep — 한국어는 낱말 중간에서 끊지 않는다.
+                                    '강제 종료 후 자동 복구 확인' 이 '강제 종' / '료 후 자동' 으로 갈리면 읽기 어렵다 */}
+                                <td
+                                  className={
+                                    'break-keep py-1 pr-2 align-top ' + (bad ? 'text-red-200' : 'text-gray-300')
+                                  }
+                                >
                                   {st.title}
                                 </td>
-                                <td className="py-1 pr-2">
+                                <td className="py-1 pr-2 align-top">
                                   <span
                                     className={
-                                      'rounded px-1.5 py-0.5 text-[9.5px] ' +
+                                      'inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-[9.5px] ' +
                                       (bad
                                         ? 'bg-red-500/25 text-red-300'
                                         : st.effective === 'pass'
@@ -684,7 +695,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                     {LABEL[st.effective] ?? st.effective}
                                   </span>
                                 </td>
-                                <td className="py-1">
+                                <td className="py-1 align-top">
                                   {(() => {
                                     const b = bodies.get(st.index)
                                     const open = openStep.has(st.index)
@@ -692,9 +703,11 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                     return (
                                       <>
                                         {b?.command ? (
+                                          /* 칸 너비가 고정됐으니 명령도 그 폭에 맞춰 한 줄로 자른다
+                                             (전문은 title 에 있다 — 마우스를 올리면 보인다) */
                                           <code
                                             title={b.command}
-                                            className="block max-w-[520px] truncate font-mono text-[10px] text-gray-300"
+                                            className="block w-full truncate font-mono text-[10px] text-gray-300"
                                           >
                                             $ {b.command}
                                           </code>
