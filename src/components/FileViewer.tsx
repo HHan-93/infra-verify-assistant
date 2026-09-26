@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ConfigMapView from './ConfigMapView'
+import { parseEnvRows, isEnvLike, replaceEnvValue, type EnvRow } from '../lib/envFile'
 import {
   FileCode,
   Download,
@@ -22,7 +23,29 @@ import {
   Boxes,
 } from 'lucide-react'
 
-const APPLY_REQUIRED: { pattern: RegExp; command: string; desc: string }[] = [
+/**
+ * 저장만으로는 반영되지 않는 설정들 — 무엇을 더 해야 하는지 저장 직후에 띄운다.
+ *
+ * `command` 는 경로에서 만들어 내야 하는 경우가 있어 함수도 받는다. Lite(도커) 설정이
+ * 그렇다 — 재기동 스크립트가 제품 폴더 **안에** 있고 그 폴더 이름에 버전이 박혀 있다
+ * (`~/contrabass_bf_306_lite/etc/scripts`). 고정 문자열로 적으면 버전이 오를 때마다 틀린다.
+ */
+const APPLY_REQUIRED: {
+  pattern: RegExp
+  command: string | ((match: RegExpMatchArray) => string)
+  desc: string
+}[] = [
+  {
+    // …/<제품폴더>/product-config/<서비스>/cm.env
+    pattern: /^(.*)\/product-config\/([^/]+)\/[^/]+\.env$/,
+    command: (m) =>
+      `cd ${m[1]}/etc/scripts && bash ./okectl.sh stop && bash ./okectl.sh start && docker ps -a`,
+    desc:
+      '저장만으로는 컨테이너에 반영되지 않습니다. 위 명령으로 재기동해야 적용됩니다.\n' +
+      '· 이 스크립트는 **이 제품의 컨테이너를 전부** 내렸다가 올립니다 (해당 서비스 하나만이 아닙니다)\n' +
+      '· 올라온 뒤 docker ps -a 의 STATUS 가 초 단위(Up n seconds)로 바뀌면 재기동된 것입니다\n' +
+      '· 저장 직전 원본은 자동으로 백업했습니다 — 따로 cm.env.bak 을 만들지 않아도 됩니다',
+  },
   { pattern: /\/etc\/netplan\//,     command: 'sudo netplan apply',                      desc: '저장만으로는 네트워크 설정이 반영되지 않습니다. 터미널에서 netplan apply를 실행해야 적용됩니다.' },
   { pattern: /\/etc\/sysctl\.conf$/, command: 'sudo sysctl -p',                          desc: '저장만으로는 커널 파라미터가 반영되지 않습니다. 터미널에서 sysctl -p를 실행해야 적용됩니다.' },
   { pattern: /\/etc\/fstab$/,        command: 'sudo mount -a',                           desc: '저장만으로는 마운트 설정이 반영되지 않습니다. 터미널에서 mount -a를 실행하거나 재부팅해야 적용됩니다.' },
@@ -239,6 +262,15 @@ export default function FileViewer({
   const [showPw, setShowPw] = useState(false) // 비밀번호 표시(눈금) 토글
   const [applyNotice, setApplyNotice] = useState<{ command: string; desc: string } | null>(null)
   /**
+   * 이 서버에서 찾은 Lite(도커) 설정 파일들.
+   *
+   * 경량 구성은 설정이 ConfigMap 이 아니라 **호스트의 평범한 파일**로 있다 —
+   * `~/contrabass_bf_306_lite/product-config/boot-factory-auth/cm.env` 같은 모양이다.
+   * 그런데 폴더 이름에 **제품 버전이 박혀 있어**(306 = 3.0.6) 목록에 적어 두면 금방 틀린다.
+   * 그래서 창을 열 때 한 번 훑어서 채운다.
+   */
+  const [liteConfigs, setLiteConfigs] = useState<{ path: string; service: string; file: string }[]>([])
+  /**
    * 보는 대상. 파일(SFTP)과 ConfigMap(k8s)은 **읽고 쓰는 방식이 다르다**(문서 vs 키-값 맵,
    * 백업 위치도 서버 vs 내 PC) — 그래서 한 화면에서 모드로 가르고, 로직은 섞지 않는다.
    */
@@ -312,6 +344,55 @@ export default function FileViewer({
    * 새 파일을 불러올 때의 초기화는 load() 가 직접 한다.
    */
   useEffect(() => setMatchIdx(-1), [needle])
+
+  // ── 키-값 보기 (.env) — 규칙은 src/lib/envFile.ts 에 있다(테스트 대상) ──
+  const envRows = useMemo(() => parseEnvRows(content), [content])
+  const envLike = useMemo(() => isEnvLike(content, envRows), [content, envRows])
+  const [kvMode, setKvMode] = useState(false)
+  // 다른 파일을 불러오면 원문 보기로 돌아간다 — 키-값이 아닌 파일에 그 화면이 남으면 안 된다
+  useEffect(() => {
+    if (!envLike) setKvMode(false)
+  }, [envLike])
+  const setEnvValue = (row: EnvRow, next: string) => {
+    setContent(replaceEnvValue(content, row, next))
+    setDirty(true)
+  }
+
+  /**
+   * Lite(도커) 설정 찾기 — 창을 열 때 한 번, 세션이 바뀌면 다시.
+   *
+   * `find` 는 깊이를 묶고 시간 제한을 건다. 홈이 큰 서버에서 창이 열리자마자 멈춰 있으면
+   * 설정 하나 보려던 사람이 뭘 기다리는지도 모른 채 기다리게 된다. 실패하면 조용히 넘어간다 —
+   * 못 찾았다고 해서 창이 못 쓰게 되는 것은 아니다(경로를 직접 칠 수 있다).
+   */
+  useEffect(() => {
+    if (!connected) return
+    let alive = true
+    const cmd =
+      "timeout 8 find ~ /opt -maxdepth 5 -type f -name '*.env' -path '*product-config*' 2>/dev/null | sort | head -100"
+    window.electronAPI
+      .sessionRun(sessionId, cmd)
+      .then((r) => {
+        if (!alive || !r.ok) return
+        const rows = (r.out ?? '')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.startsWith('/'))
+          .map((p) => {
+            const parts = p.split('/')
+            return { path: p, service: parts[parts.length - 2] ?? '', file: parts[parts.length - 1] ?? '' }
+          })
+        // 같은 파일이 두 경로로 걸리는 일이 있어 경로 기준으로 한 번 거른다
+        const seen = new Set<string>()
+        setLiteConfigs(rows.filter((r2) => (seen.has(r2.path) ? false : (seen.add(r2.path), true))))
+      })
+      .catch(() => {
+        /* 못 찾아도 창은 그대로 쓴다 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [sessionId, connected])
 
   /** offset 이 속한 섹션 이름 (섹션 밖이면 빈 문자열) */
   const sectionOf = (offset: number) => {
@@ -519,8 +600,13 @@ export default function FileViewer({
       setEditing(false) // 저장 후 읽기 전용으로 복귀
       const bak = res.backupPath ? ` · 백업: ${res.backupPath}` : ''
       setMsg(`${res.viaSudo ? '저장됨 (sudo)' : '저장됨'}: ${p}${bak}`)
-      const match = APPLY_REQUIRED.find(a => a.pattern.test(p))
-      if (match) setApplyNotice(match)
+      // 경로에서 명령을 만들어야 하는 규칙이 있어 match 결과를 그대로 넘긴다
+      for (const a of APPLY_REQUIRED) {
+        const m = p.match(a.pattern)
+        if (!m) continue
+        setApplyNotice({ command: typeof a.command === 'string' ? a.command : a.command(m), desc: a.desc })
+        break
+      }
     } else if (res.needSudoPassword) {
       setPwAction('write')
       setPwInput('')
@@ -672,6 +758,18 @@ export default function FileViewer({
             title="자주 보는 설정파일"
           >
             <option value="">빠른 선택…</option>
+            {/* 이 서버에서 **실제로 찾은** 설정이 맨 위에 온다.
+                드롭다운을 따로 하나 더 두면 "둘 중 어느 쪽에 있더라" 를 매번 고르게 된다 —
+                찾는 목적이 같으니 한 자리에 두고, 아래 내장 목록과 묶음 이름으로 가른다. */}
+            {liteConfigs.length > 0 && (
+              <optgroup label={`이 서버에서 찾은 Lite 설정 (${liteConfigs.length})`}>
+                {liteConfigs.map((c) => (
+                  <option key={c.path} value={c.path}>
+                    {c.service} — {c.file}
+                  </option>
+                ))}
+              </optgroup>
+            )}
             {PATH_GROUPS.map((g) => (
               <optgroup key={g.group} label={g.group}>
                 {g.paths.map((p) => (
@@ -741,6 +839,25 @@ export default function FileViewer({
                 )}
               </>
             )}
+            {/* KEY=VALUE 파일일 때만 — 값 칸을 따로 주면 '기존 값을 안 지우고 붙이는' 실수가 없다 */}
+            {envLike && (
+              <button
+                onClick={() => setKvMode((v) => !v)}
+                title={
+                  kvMode
+                    ? '파일 원문을 그대로 보여줍니다'
+                    : '값만 고치는 화면입니다 (주석·순서·따옴표는 그대로 둡니다)'
+                }
+                className={
+                  'shrink-0 rounded border px-1.5 py-0.5 text-[11px] ' +
+                  (kvMode
+                    ? 'border-blue-500/40 bg-blue-500/15 text-blue-200'
+                    : 'border-white/10 text-gray-300 hover:bg-white/10')
+                }
+              >
+                {kvMode ? '원문 보기' : `키-값 보기 (${envRows.length})`}
+              </button>
+            )}
             {sections.length > 0 && (
               <select
                 value=""
@@ -761,7 +878,71 @@ export default function FileViewer({
 
         {/* 내용 (기본 읽기 전용 → '편집' 눌러야 수정) */}
         <div className="min-h-0 flex-1 p-2">
-          {editing ? (
+          {kvMode ? (
+            /**
+             * 키-값 보기 — `.env` 처럼 `KEY=VALUE` 만 늘어선 파일에서 **값만** 고친다.
+             *
+             * 이렇게 두는 이유가 있다. 가이드 문서가 vi 대신 `sed` 를 권하는데, 그 이유가
+             * "vi 로 고치다 기존 값을 안 지우고 붙여 `truefalse` 가 된다" 는 실수다.
+             * 값 칸을 따로 주면 그 실수 자체가 생기지 않는다. true/false 는 아예 고르게 한다.
+             *
+             * 줄 전체를 다시 쓰지 않고 **그 줄만** 갈아 끼운다 — 주석·빈 줄·순서는 그대로 둔다.
+             */
+            <div className="h-full overflow-auto rounded-md bg-[#11111b] p-2">
+              {envRows.length === 0 ? (
+                <p className="p-3 text-[12px] text-gray-500">KEY=VALUE 형태의 줄이 없습니다.</p>
+              ) : (
+                <table className="w-full table-fixed border-collapse text-[12px]">
+                  <tbody>
+                    {envRows.map((r) => {
+                      const bool = /^(true|false)$/i.test(r.value)
+                      return (
+                        <tr key={`${r.line}-${r.key}`} className="border-b border-white/[0.06]">
+                          <td
+                            className="w-[46%] break-all py-1 pr-3 align-top font-mono text-gray-400"
+                            title={`${r.line + 1}번째 줄`}
+                          >
+                            {r.key}
+                          </td>
+                          <td className="py-1 align-top">
+                            {bool ? (
+                              <select
+                                value={r.value.toLowerCase()}
+                                disabled={!editing}
+                                onChange={(e) => setEnvValue(r, e.target.value)}
+                                className="w-full rounded border border-white/10 bg-panel-light px-1.5 py-0.5 font-mono text-[12px] text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+                              >
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                              </select>
+                            ) : (
+                              <input
+                                value={r.value}
+                                disabled={!editing}
+                                onChange={(e) => setEnvValue(r, e.target.value)}
+                                className="w-full rounded border border-white/10 bg-panel-light px-1.5 py-0.5 font-mono text-[12px] text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+                              />
+                            )}
+                            {/* 따옴표는 원문 그대로 유지한다는 사실을 밝힌다 — 가이드가 특히 당부하는 부분 */}
+                            {r.quote && (
+                              <span className="mt-0.5 block text-[10.5px] text-gray-600">
+                                저장할 때 {r.quote}따옴표{r.quote} 를 그대로 붙입니다
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+              {!editing && (
+                <p className="px-1 pt-2 text-[11px] text-gray-500">
+                  값을 고치려면 아래 <b>편집</b> 을 누르세요.
+                </p>
+              )}
+            </div>
+          ) : editing ? (
             <textarea
               ref={taRef}
               value={content}
@@ -951,8 +1132,11 @@ export default function FileViewer({
                 <AlertCircle size={16} className="shrink-0 text-amber-400" />
                 <span className="text-sm font-semibold text-amber-200">저장 완료 — 추가 적용 필요</span>
               </div>
-              <p className="mb-3 text-[12px] leading-relaxed text-amber-300/80">{applyNotice.desc}</p>
-              <code className="block rounded bg-black/40 px-3 py-2 font-mono text-[12px] text-amber-100">
+              {/* 줄바꿈을 살린다 — '전부 내렸다 올린다' 같은 단서를 한 덩어리에 묻으면 안 읽힌다 */}
+              <p className="mb-3 whitespace-pre-line text-[12px] leading-relaxed text-amber-300/80">
+                {applyNotice.desc}
+              </p>
+              <code className="block break-all rounded bg-black/40 px-3 py-2 font-mono text-[12px] text-amber-100">
                 {applyNotice.command}
               </code>
               <div className="mt-4 flex justify-end">
