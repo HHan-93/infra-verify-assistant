@@ -2361,7 +2361,7 @@ $ ${step.undo}`}
                       ) : (
                         /* 안내 스텝은 '무엇을 해야 하는지'가 곧 desc 다. 이걸 안 보여주면
                            검증자가 시나리오 화면으로 되돌아가야만 판정할 수 있다. */
-                        <div className="text-[10.5px] leading-relaxed text-sky-200/90">
+                        <div className="whitespace-pre-line text-[10.5px] leading-relaxed text-sky-200/90">
                           <span className="mr-1 rounded bg-sky-500/20 px-1 py-0.5 text-[9.5px] text-sky-300">수동</span>
                           {step.desc?.trim() || '안내 스텝 (수동 확인)'}
                         </div>
@@ -2371,7 +2371,8 @@ $ ${step.undo}`}
                       {step.warn?.trim() && (
                         <div className="mt-1 flex items-start gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-1 text-[10px] leading-relaxed text-amber-200">
                           <AlertTriangle size={10} className="mt-0.5 shrink-0" />
-                          <span className="min-w-0">{step.warn}</span>
+                          {/* 시나리오 화면과 같은 모양으로 — 주의 문구는 줄을 나눠 적는다 */}
+                          <span className="min-w-0 whitespace-pre-line">{step.warn}</span>
                         </div>
                       )}
                       {/* 스텝별 입력값 — TCP/UDP/HTTP 처럼 같은 <Port> 라도 스텝마다 값이 달라야 하는

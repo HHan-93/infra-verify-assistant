@@ -533,7 +533,11 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                   </span>
                 )}
               </div>
-              <div className="text-[11px] leading-relaxed text-gray-400">{scenario.summary}</div>
+              {/* 줄바꿈을 살린다 — 요약은 '무엇을 하는 시나리오인가' + '어떤 순서인가' 두 줄로 적는다.
+                  한 덩어리로 흘려 쓰면 화면 폭에서 세 줄로 접히며 어디서 끊어 읽어야 할지 사라진다. */}
+              <div className="whitespace-pre-line text-[11px] leading-relaxed text-gray-400">
+                {scenario.summary}
+              </div>
             </div>
             {onRunScenario && (
               <button
@@ -689,7 +693,10 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                         </>
                       )}
                     </div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                    {/* info·warn 과 같이 줄바꿈을 살린다 — 설명은 대개 '무엇을 하는가' 와
+                        '결과에서 무엇을 보는가' 두 가지라, 그 경계에서 끊어 주면 읽는 속도가 다르다.
+                        검증 창에서는 이 자리가 한 줄로 잘리므로(truncate) 첫 줄에 핵심을 둔다. */}
+                    <p className="mt-1 whitespace-pre-line text-[11px] leading-relaxed text-gray-400">
                       <Highlight text={step.desc} query={trimmed} />
                     </p>
                     {step.info && (
@@ -1008,11 +1015,14 @@ function ScenarioEditorModal({
           </div>
           <div>
             <label className="mb-1 block text-[11px] text-gray-400">요약</label>
-            <input
+            {/* 설명과 같은 이유로 textarea — 개행을 지우는 input 에 두면 복제한 시나리오의
+                두 줄짜리 요약이 한 줄로 붙는다 */}
+            <textarea
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
-              placeholder="이 시나리오가 검증하는 내용을 한 줄로"
-              className={inputCls + ' w-full'}
+              placeholder="무엇을 검증하는 시나리오인지 (줄바꿈 가능)"
+              rows={2}
+              className={inputCls + ' w-full resize-y'}
             />
           </div>
 
@@ -1054,11 +1064,15 @@ function ScenarioEditorModal({
                     placeholder="명령어 (선택 — 안내만 있는 단계는 비워둘 수 있음)"
                     className={inputCls + ' w-full mb-1.5 font-mono'}
                   />
-                  <input
+                  {/* input 이 아니라 textarea 다 — 설명은 줄을 나눠 적고, 화면도 그대로 보여준다.
+                      input 은 값에서 개행을 아예 지워 버려서, 내장 시나리오를 복제해 열기만 해도
+                      두 줄짜리 설명이 "…정상입니다.결과에서 볼 것…" 처럼 붙어 버린다. */}
+                  <textarea
                     value={s.desc}
                     onChange={(e) => patchStep(i, { desc: e.target.value })}
-                    placeholder="이 단계에 대한 설명"
-                    className={inputCls + ' w-full'}
+                    placeholder="이 단계에 대한 설명 (줄바꿈 가능)"
+                    rows={2}
+                    className={inputCls + ' w-full resize-y'}
                   />
 
                   <button

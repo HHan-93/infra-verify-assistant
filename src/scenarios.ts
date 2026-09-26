@@ -144,7 +144,7 @@ export const SCENARIOS: Scenario[] = [
         "check": { "passContains": ["마운트되었습니다"], "failContains": ["주의 —", "wrong fs type"] },
         "undo": "sudo umount /mnt/config",
         "desc": "config-2 라벨이 붙은 장치를 찾아 /mnt/config 에 마운트합니다. 장치명을 자동으로 찾으므로 sr0 가 아니어도 됩니다.",
-        "info": "예전에는 /dev/sr0 를 명령에 박아 두고 '다르면 해당 이름으로 교체하세요' 라고만 적어 두었는데, 정작 바꿀 입력칸이 없었습니다(사용자가 직접 명령을 고치는 수밖에). 라벨로 찾도록 바꿨습니다."
+        "info": "설정 드라이브의 장치 이름은 환경마다 다릅니다 (/dev/sr0 · /dev/sr1 …).\n그래서 이름을 박아 두지 않고 config-2 라벨로 찾습니다 — 손으로 고쳐 넣을 것이 없습니다."
       },
       {
         "title": "마운트 상태 확인",
@@ -156,7 +156,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "파일 구조 확인",
         "command": "ls -R /mnt/config",
-        "desc": "설정 드라이브 내부의 전체 파일·디렉토리 목록을 확인합니다. openstack/latest/ 하위에 meta_data.json, network_data.json, user_data 등이 있어야 합니다."
+        "desc": "설정 드라이브 안의 파일·디렉토리 목록을 봅니다.\nopenstack/latest/ 아래에 meta_data.json · network_data.json · user_data 가 있어야 합니다."
       },
       {
         "title": "메타데이터 조회",
@@ -195,7 +195,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "디스크 QoS 설정",
         "command": "",
         "desc": "인스턴스 유형 편집 > QoS 관리 > 디스크 그룹에서 제한할 항목의 키와 값을 입력합니다.",
-        "note": "포털 항목명 → 실제 메타데이터 키\n디스크 Read IOPS   → quota:disk_read_iops_sec\n디스크 Write IOPS  → quota:disk_write_iops_sec\n디스크 Read BYTES  → quota:disk_read_bytes_sec\n디스크 Write BYTES → quota:disk_write_bytes_sec\n\n예시: Read IOPS = 50, Write IOPS = 50, Read BYTES = 10485760(10MB/s), Write BYTES = 10485760(10MB/s)\n\n⚠ TOTAL IOPS / TOTAL BYTES는 개별 Read·Write 키와 동시에 설정하면 인스턴스 생성 오류가 발생합니다. TOTAL 항목은 Read·Write 키 없이 별도로 설정하세요.\n디스크 TOTAL IOPS  → quota:disk_total_iops_sec\n디스크 TOTAL BYTES → quota:disk_total_bytes_sec"
+        "note": "포털 항목명 → 실제 메타데이터 키\n디스크 Read IOPS   → quota:disk_read_iops_sec\n디스크 Write IOPS  → quota:disk_write_iops_sec\n디스크 Read BYTES  → quota:disk_read_bytes_sec\n디스크 Write BYTES → quota:disk_write_bytes_sec\n\n예시: Read IOPS = 50, Write IOPS = 50, Read BYTES = 10485760(10MB/s), Write BYTES = 10485760(10MB/s)\n\n⚠ TOTAL IOPS / TOTAL BYTES 는 개별 Read·Write 키와 함께 설정하면 인스턴스 생성 오류가 납니다.\n   TOTAL 항목은 Read·Write 키 없이 따로 설정하세요.\n디스크 TOTAL IOPS  → quota:disk_total_iops_sec\n디스크 TOTAL BYTES → quota:disk_total_bytes_sec"
       },
       {
         "title": "인스턴스 생성",
@@ -214,7 +214,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "하이퍼바이저 호스트에서 적용 확인",
         "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 iotune",
-        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <iotune> 블록에 read_iops_sec, write_iops_sec 등이 설정값대로 출력되어야 합니다.",
+        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<iotune> 블록에 read_iops_sec · write_iops_sec 등이 설정값대로 나와야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
       },
       {
@@ -247,26 +247,26 @@ export const SCENARIOS: Scenario[] = [
         "title": "IOPS 쓰기 테스트",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 쓰기로 IOPS를 측정합니다. write_iops_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다.",
+        "desc": "무작위 4K 쓰기로 IOPS 를 측정합니다. write_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
         "info": "--direct=1: 페이지 캐시를 우회하여 디스크 QoS가 직접 측정됩니다.\n--ioengine=libaio: 비동기 I/O 엔진으로 iodepth=32가 실제로 동작합니다."
       },
       {
         "title": "IOPS 읽기 테스트",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 읽기로 IOPS를 측정합니다. read_iops_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
+        "desc": "무작위 4K 읽기로 IOPS 를 측정합니다. read_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 합니다."
       },
       {
         "title": "대역폭 쓰기 테스트",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "대역폭 읽기 테스트",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하는지 확인합니다. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -311,7 +311,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "하이퍼바이저 호스트에서 적용 확인",
         "target": "하이퍼바이저",
         "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
-        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다. <interface> 내 <bandwidth> 블록에 inbound/outbound average, peak, burst 값이 출력되어야 합니다.",
+        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<interface> 안의 <bandwidth> 블록에 inbound/outbound 의 average · peak · burst 값이 나와야 합니다.",
         "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
       },
       {
@@ -352,14 +352,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
         "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
-        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래에 sender 와 receiver 두 줄이 나옵니다. 실제로 전달된 속도는 receiver 줄입니다(sender 는 보낸 쪽이 버퍼에 넣은 양이라 조금 더 크게 나올 수 있습니다).\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n구간별 Bitrate가 초반에 높다가 이후 수렴하는 것은 burst 소진 후 average 제한이 걸린 정상 동작입니다."
+        "info": "【결과 확인】\n출력 아래 '- - -' 선 밑에 sender 와 receiver 두 줄이 나옵니다.\n실제로 전달된 속도는 receiver 줄입니다 (sender 는 보낸 쪽이 버퍼에 넣은 양이라 조금 크게 나옵니다).\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS 는 KBps, iperf3 는 Mbps 라 × 8 로 환산합니다 (1 Byte = 8 bit).\n\n구간별 Bitrate 가 초반에 높다가 수렴하는 것은 burst 를 다 쓴 뒤 average 제한이 걸린 정상 동작입니다."
       },
       {
         "title": "인바운드(다운로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5 -R",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "-R 플래그로 트래픽 방향을 역전(서버 → 이 인스턴스)하여 인바운드 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
-        "info": "【결과 확인】 출력 하단 '- - -' 구분선 아래에 sender 와 receiver 두 줄이 나옵니다. -R 이라 보내는 쪽이 서버이고 받는 쪽이 이 인스턴스이므로, 인바운드 제한이 걸리는 것은 receiver 줄입니다.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS는 KBps(킬로바이트/초), iperf3는 Mbps(메가비트/초) 단위이므로 × 8로 환산합니다. (1 Byte = 8 bit)\n\n-R(Reverse): 서버 → 이 인스턴스 방향으로 전송하므로 인바운드 QoS 제한이 측정됩니다."
+        "desc": "-R 로 방향을 뒤집어(서버 → 이 인스턴스) 인바운드 대역폭을 측정합니다.\n결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다.",
+        "info": "【결과 확인】\n출력 아래 '- - -' 선 밑에 sender 와 receiver 두 줄이 나옵니다.\n-R 이라 보내는 쪽이 서버, 받는 쪽이 이 인스턴스입니다 — 인바운드 제한이 걸리는 것은 receiver 줄입니다.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS 는 KBps, iperf3 는 Mbps 라 × 8 로 환산합니다 (1 Byte = 8 bit)."
       }
     ]
   },
@@ -401,7 +401,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "hostname | sudo tee /var/www/html/index.html && curl -s --max-time 3 http://127.0.0.1/",
         "check": { "requireExitZero": true },
         "desc": "각 인스턴스가 자기 호스트명을 응답하도록 index.html 을 만듭니다. 인스턴스 2대 모두 수행하세요.",
-        "info": "이 단계가 없으면 두 대가 똑같은 nginx 기본 페이지를 돌려주어, VIP 로 요청했을 때 어느 쪽이 응답했는지 구분할 수 없습니다. 그러면 ROUND ROBIN 이 도는지 확인할 방법이 없습니다.",
+        "info": "이 단계가 없으면 두 대가 똑같은 nginx 기본 페이지를 돌려줍니다.\nVIP 로 요청했을 때 어느 쪽이 응답했는지 구분할 수 없어, ROUND ROBIN 이 도는지 확인할 방법이 없습니다.",
         "undo": "sudo rm -f /var/www/html/index.html"
       },
       {
@@ -442,7 +442,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "mkdir -p ssl-certs && cd ssl-certs",
         "undo": "cd ~ && rm -rf ~/ssl-certs",
         "desc": "인증서 파일을 한곳에 모아 관리하기 위해 작업 디렉토리를 생성하고 이동합니다. (-p 로 이미 존재해도 오류 없이 이동)",
-        "note": "원복하면 ~/ssl-certs 를 **통째로** 지웁니다(CA 개인키·서비스 키·p12 포함). 이름이 고정이라, 검증 전부터 같은 이름의 디렉토리를 쓰고 있었다면 그것도 함께 사라집니다 — 남겨야 할 것이 있으면 원복 창에서 이 항목의 체크를 해제하세요."
+        "note": "원복하면 ~/ssl-certs 를 통째로 지웁니다 (CA 개인키 · 서비스 키 · p12 포함).\n이름이 고정이라, 검증 전부터 같은 이름의 디렉토리를 쓰고 있었다면 그것도 함께 사라집니다.\n남겨야 할 것이 있으면 원복 창에서 이 항목의 체크를 해제하세요."
       },
       {
         "title": "작업 디렉토리 확인",
@@ -502,7 +502,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "service.conf 파일 작성",
         "command": "cat > service.conf << 'EOF'\n[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_user\n\n[ v3_user ]\nbasicConstraints        = CA:FALSE\nauthorityKeyIdentifier  = keyid,issuer\nsubjectKeyIdentifier    = hash\nkeyUsage                = nonRepudiation, digitalSignature, keyEncipherment\nextendedKeyUsage        = serverAuth,clientAuth\nsubjectAltName          = @alt_names\n\n[ alt_names ]\nIP.1 = <로드밸런서 VIP>\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\norganizationalUnitName  = Organizational Unit Name (eg, section)\norganizationalUnitName_default = Example Project\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = <로드밸런서 VIP>\ncommonName_max          = 64\nEOF",
-        "desc": "서비스 인증서 생성에 필요한 설정 파일을 heredoc으로 작성합니다. '입력' 버튼을 누르면 VIP 값을 한 번 입력받아 IP.1과 commonName_default 두 곳에 자동으로 채워 넣고 실행합니다.",
+        "desc": "서비스 인증서 생성에 필요한 설정 파일을 만듭니다.\n'입력' 버튼을 누르면 VIP 를 한 번 받아 IP.1 과 commonName_default 두 곳에 채워 넣고 실행합니다.",
         "code": "[ req ]\ndefault_bits            = 2048\ndefault_md              = sha1\ndefault_keyfile         = ca.key\ndistinguished_name      = req_distinguished_name\nextensions              = v3_user\n\n[ v3_user ]\nbasicConstraints        = CA:FALSE\nauthorityKeyIdentifier  = keyid,issuer\nsubjectKeyIdentifier    = hash\nkeyUsage                = nonRepudiation, digitalSignature, keyEncipherment\nextendedKeyUsage        = serverAuth,clientAuth\nsubjectAltName          = @alt_names\n\n[ alt_names ]\nIP.1 = <로드밸런서 VIP>\n\n[ req_distinguished_name ]\ncountryName             = Country Name (2 letter code)\ncountryName_default     = KR\ncountryName_min         = 2\ncountryName_max         = 2\n\norganizationName        = Organization Name (eg, company)\norganizationName_default = Example Inc.\n\norganizationalUnitName  = Organizational Unit Name (eg, section)\norganizationalUnitName_default = Example Project\n\ncommonName              = Common Name (eg, your name or your server's hostname)\ncommonName_default      = <로드밸런서 VIP>\ncommonName_max          = 64"
       },
       {
@@ -518,7 +518,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "PKCS#12 형식으로 변환",
         "command": "openssl pkcs12 -export -passout pass: -out service.p12 -inkey service.key -in service.crt -certfile ca.crt",
-        "desc": "서비스 키 + 서비스 인증서 + CA 인증서를 하나의 PKCS#12(.p12) 파일로 묶습니다. -passout pass: 로 export 비밀번호를 빈 값으로 지정해 비대화형으로 실행합니다. (Enter 입력 불필요)",
+        "desc": "서비스 키 + 서비스 인증서 + CA 인증서를 하나의 PKCS#12(.p12) 파일로 묶습니다.\n-passout pass: 로 export 비밀번호를 빈 값으로 두어 Enter 입력 없이 끝납니다.",
         "note": "OpenStack LB는 PKCS#12를 Base64로 인코딩한 값을 요구합니다."
       },
       {
@@ -598,7 +598,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 A, B 생성",
         "command": "",
-        "desc": "LNB 영역에서 컴퓨트 > 인스턴스로 이동해 인스턴스를 2대 생성합니다. 인스턴스 A는 nc 포트 수신 대기 역할, 인스턴스 B는 A로 포트 연결 테스트를 수행하는 역할입니다. 두 인스턴스는 동일 네트워크 대역에 위치해야 합니다."
+        "desc": "LNB 에서 컴퓨트 > 인스턴스로 가서 인스턴스를 2대 만듭니다.\n· A — nc 로 포트를 열고 기다리는 쪽\n· B — A 로 연결해 보는 쪽\n두 인스턴스는 같은 네트워크 대역에 있어야 합니다."
       },
       {
         "title": "인스턴스 A에 터미널 접속",
@@ -715,7 +715,7 @@ export const SCENARIOS: Scenario[] = [
         "warn": "실행 시 vi 편집기가 열립니다. i(입력 모드)로 수정 → ESC → :wq! 로 저장·종료한 뒤 다음 단계를 진행하세요.",
         "desc": "IP 주소, 게이트웨이, nameservers(DNS) 를 설정합니다. (Ubuntu 기준)",
         "info": "vi 편집기 사용법: i → 입력 모드 시작 → 수정 → ESC → :wq! Enter (저장 후 종료) | 저장 없이 나가려면 :q! Enter",
-        "note": "상단 [설정 파일 뷰어] 버튼으로 편집하는 것이 안전합니다. YAML 은 들여쓰기(공백 2칸)에 민감합니다. 50-cloud-init.yaml 파일은 다른 파일로 대체될 수 있습니다. 파일명을 확인하세요."
+        "note": "상단 [설정 파일 뷰어] 버튼으로 편집하는 것이 안전합니다.\nYAML 은 들여쓰기(공백 2칸)에 민감합니다.\n50-cloud-init.yaml 은 다른 이름의 파일로 대체돼 있을 수 있으니 파일명을 확인하세요."
       },
       {
         "title": "Netplan 적용",
@@ -774,14 +774,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo ss -tunlp 2>/dev/null | grep -E ':15001|:15002|:18080' || ss -tunlp | grep -E ':15001|:15002|:18080'",
         "target": "서버",
         "check": { "passContains": ["15001", "15002", "18080"] },
-        "desc": "결과에서 볼 것 — 세 줄이 모두 보여야 합니다. tcp LISTEN 15001 / udp UNCONN 15002 / tcp LISTEN 18080. 하나라도 없으면 앞 단계에서 리스너가 못 떴다는 뜻입니다.",
+        "desc": "결과에서 볼 것 — 세 줄이 모두 보여야 합니다.\ntcp LISTEN 15001 / udp UNCONN 15002 / tcp LISTEN 18080\n하나라도 없으면 앞 단계에서 리스너가 못 뜬 것입니다.",
         "note": "UDP 는 LISTEN 이 아니라 UNCONN 으로 표시되는 것이 정상입니다."
       },
       {
         "title": "[서버] 방화벽 상태 확인",
         "command": "sudo ufw status",
         "target": "서버",
-        "desc": "결과에서 볼 것 — Status 가 inactive 면 방화벽은 통과입니다. active 인데 15001/15002/18080 허용 규칙이 없으면 다음 단계가 실패하니, 그때는 sudo ufw allow 15001 처럼 열어주세요.",
+        "desc": "결과에서 볼 것 — Status 가 inactive 면 방화벽은 통과입니다.\nactive 인데 15001/15002/18080 허용 규칙이 없으면 다음 단계가 실패합니다 — sudo ufw allow 15001 처럼 열어 주세요.",
         "note": "iptables 기반 환경은 sudo iptables -L -n --line-numbers"
       },
       {
@@ -789,7 +789,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "nc -zv -w 5 <Target_IP> 15001",
         "target": "클라이언트",
         "check": { "passContains": ["succeeded"] },
-        "desc": "결과에서 볼 것 — 'Connection to ... succeeded!' 문구입니다. <Target_IP> 는 서버 스텝의 대상 주소를 그대로 쓰면 되니, 아래 입력칸의 서버 아이콘을 눌러 '2번 대상'을 선택하세요.",
+        "desc": "결과에서 볼 것 — 'Connection to ... succeeded!' 문구입니다.\n<Target_IP> 는 서버 스텝의 대상 주소와 같으니, 아래 입력칸의 서버 아이콘을 눌러 '2번 대상'을 고르세요.",
         "note": "Connection refused 면 리스너가 죽은 것이고, timed out 이면 방화벽/보안그룹이 막고 있는 것입니다."
       },
       {
@@ -1015,7 +1015,7 @@ export const SCENARIOS: Scenario[] = [
         "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
         "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
-        "note": "원복 시 이 UUID가 들어간 줄을 /etc/fstab에서 지웁니다. 지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로, 같은 UUID를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
+        "note": "원복하면 이 UUID 가 들어간 줄을 /etc/fstab 에서 지웁니다.\n지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로,\n같은 UUID 를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
@@ -1143,7 +1143,7 @@ export const SCENARIOS: Scenario[] = [
         "undo": "sudo cp -a /etc/fstab /etc/fstab.qterm.bak && sudo sed -i '/UUID=<UUID>/d' /etc/fstab && echo '--- 되돌린 뒤 /etc/fstab ---' && cat /etc/fstab",
         "warn": "fstab 을 잘못 쓰면 다음 부팅에서 emergency mode 로 빠집니다. 다음 단계의 findmnt --verify 로 반드시 검증한 뒤 재부팅하세요.",
         "desc": "재부팅 후에도 자동 마운트 되도록 /etc/fstab에 등록합니다. <UUID>는 앞 단계(blkid)의 출력에서 자동으로 채워집니다.",
-        "note": "원복 시 이 UUID가 들어간 줄을 /etc/fstab에서 지웁니다. 지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로, 같은 UUID를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
+        "note": "원복하면 이 UUID 가 들어간 줄을 /etc/fstab 에서 지웁니다.\n지우기 전 원본을 /etc/fstab.qterm.bak 으로 복사해 두므로,\n같은 UUID 를 쓰던 기존 줄이 있었다면 백업에서 되살리세요."
       },
       {
         "title": "fstab 문법 검사 및 재마운트",
@@ -1319,9 +1319,9 @@ export const SCENARIOS: Scenario[] = [
           { "match": "Wipe it", "send": "y" },
           { "match": "Really INITIALIZE", "send": "y" }
         ],
-        "note": "원복은 VG·LV·PV(첫 디스크)까지 되돌립니다. 확장용 디스크는 VG 제거 뒤에도 PV 표식이 남으니, 완전히 비우려면 'sudo pvremove -y /dev/<NEW_DISK>' 를 직접 실행하세요.",
+        "note": "원복은 VG · LV · PV(첫 디스크)까지 되돌립니다.\n확장용 디스크는 VG 제거 뒤에도 PV 표식이 남으니,\n완전히 비우려면 sudo pvremove -y /dev/<NEW_DISK> 를 직접 실행하세요.",
         "check": { "requireExitZero": true },
-        "desc": "용량이 부족해지면 새 디스크를 VG 에 추가합니다. <NEW_DISK>에는 아직 아무 데도 쓰지 않은 빈 디스크(예: vdc)를 적으세요 — 따로 pvcreate 할 필요 없이 vgextend 가 PV 초기화까지 함께 합니다.",
+        "desc": "용량이 부족해지면 새 디스크를 VG 에 추가합니다.\n<NEW_DISK> 에는 아직 아무 데도 쓰지 않은 빈 디스크(예: vdc)를 적으세요.\npvcreate 를 따로 할 필요 없이 vgextend 가 PV 초기화까지 함께 합니다.",
         "warn": "지정한 디스크의 기존 데이터는 지워집니다. 이전에 쓰던 흔적이 남아 있으면 3번과 같은 \"Wipe it? [y/n]\" 을 묻는데, 여기서도 자동으로 y 를 보냅니다."
       },
       {
@@ -1433,26 +1433,26 @@ export const SCENARIOS: Scenario[] = [
         "title": "쓰기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기 30초 수행. 결과의 IOPS 값이 QoS 설정치(50)에 근접하면 정상입니다. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다.",
-        "info": "--direct=1 로 OS 캐시를 건너뛰고, --ioengine=libaio --iodepth=32 로 충분한 I/O 요청을 동시에 발행해야 QoS 제한치(50 IOPS)까지 실제로 도달할 수 있습니다."
+        "desc": "4k 블록 랜덤 쓰기 30초. IOPS 가 QoS 설정치(50)에 근접하면 정상입니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
+        "info": "--direct=1 로 OS 캐시를 건너뜁니다.\n--ioengine=libaio --iodepth=32 로 I/O 를 동시에 충분히 보내야 QoS 제한치(50 IOPS)까지 실제로 닿습니다."
       },
       {
         "title": "읽기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기 30초 수행. 결과의 IOPS 값이 50 근처로 제한되면 read_iops_sec 적용 확인입니다. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
+        "desc": "4k 블록 랜덤 읽기 30초. IOPS 가 50 근처로 제한되면 read_iops_sec 이 걸린 것입니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "쓰기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 쓰기 30초 수행. 결과의 BW 값이 약 10 MiB/s(10485760 bytes/s)로 제한되면 write_bytes_sec 적용 확인입니다. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 쓰기 30초. BW 가 약 10 MiB/s 로 제한되면 write_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것 — write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "읽기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 읽기 30초 수행. 결과의 BW 값이 약 10 MiB/s로 제한되면 read_bytes_sec 적용 확인입니다. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 읽기 30초. BW 가 약 10 MiB/s 로 제한되면 read_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것 — read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1651,7 +1651,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo 'CPU 사용률 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ v=$13+0; n++; if(n==1) first=v; last=v; if(v>mx) mx=v; b=\"\"; for(i=0;i<int(v/5);i++) b=b \"#\"; printf(\"  %3d%%  %s\\n\", v, b) } END{ printf(\"\\n부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n판정: CPU %s\\n\", first, mx, last, (mx>=50 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: CPU 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 한 줄입니다. '부하 중 최고'가 50% 이상이면 부하가 실제로 걸린 것으로 자동 판정합니다. 위 막대는 시간에 따른 CPU 사용률이라 눈으로도 올랐다 내려온 모양이 보입니다.",
+        "desc": "결과에서 볼 것 — 맨 아래 한 줄입니다.\n'부하 중 최고'가 50% 이상이면 부하가 실제로 걸린 것으로 판정합니다.\n위 막대는 시간에 따른 CPU 사용률이라, 올랐다 내려온 모양이 눈으로도 보입니다.",
         "note": "부하 전과 부하 후가 비슷하게 낮고 가운데만 높으면 정상입니다."
       }
     ]
@@ -1697,7 +1697,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo '메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순 · 막대 1칸 = 0.1GB)'; echo; awk 'NR>3{ m=$4/1048576; n++; if(n==1) fm=m; lm=m; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(d*10);i++) b=b \"#\"; printf(\"  %+6.2f GB  %s\\n\", d, b) } END{ printf(\"\\n쓸 수 있는 메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: 메모리 %s\\n\", fm, mn, lm, fm-mn, (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: 메모리 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 '판정: 메모리' 한 줄입니다. 점유량이 1GB 이상이면 정상입니다. 위 막대는 부하 전 대비 얼마나 더 쓰고 있는지라, 부하 구간에서 길어졌다가 끝나면 사라져야 정상입니다.",
+        "desc": "결과에서 볼 것 — 맨 아래 '판정: 메모리' 한 줄입니다. 점유량이 1GB 이상이면 정상입니다.\n위 막대는 부하 전 대비 얼마나 더 쓰는지라, 부하 구간에서 길어졌다가 끝나면 사라져야 합니다.",
         "note": "'부하 후' 값이 '부하 전'과 비슷하게 돌아왔으면 메모리가 정상 회수된 것입니다. 안 돌아왔다면 누수를 의심할 수 있습니다."
       }
     ]
@@ -1743,7 +1743,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo 'CPU 사용률 / 메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ c=$13+0; m=$4/1048576; n++; if(n==1){ fc=c; fm=m } lc=c; lm=m; if(c>mx) mx=c; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(c/5);i++) b=b \"#\"; printf(\"  CPU %3d%%  %-20s  메모리 %+6.2f GB\\n\", c, b, d) } END{ printf(\"\\nCPU      부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: CPU %s / 메모리 %s\\n\", fc, mx, lc, fm, mn, lm, fm-mn, (mx>=50 ? \"정상\" : \"미달\"), (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: CPU 정상 / 메모리 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 '판정' 한 줄입니다. CPU 50% 이상, 메모리 1GB 이상 점유면 정상이고 둘 다 만족해야 통과합니다. 막대는 CPU, 오른쪽 숫자는 부하 전 대비 메모리 사용 증가량입니다.",
+        "desc": "결과에서 볼 것 — 맨 아래 '판정' 한 줄입니다.\nCPU 50% 이상 · 메모리 1GB 이상 점유, 둘 다 만족해야 통과입니다.\n막대는 CPU, 오른쪽 숫자는 부하 전 대비 메모리 증가량입니다.",
         "note": "부하 전과 부하 후가 비슷하게 돌아왔으면 자원이 정상 회수된 것입니다."
       }
     ]
@@ -1780,7 +1780,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "iperf3 -c <SERVER_IP> -t 60 -P 4",
         "target": "클라이언트",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "60초간 4개 병렬 스트림으로 TCP 최대 실효 대역폭 측정. 결과에서 볼 것 — 맨 아래 [SUM] ... receiver 줄의 Bitrate 값. 이게 실제로 나온 대역폭입니다. sender 줄이 아니라 receiver 줄을 보세요.",
+        "desc": "60초간 4개 병렬 스트림으로 TCP 실효 대역폭을 잽니다.\n결과에서 볼 것 — 맨 아래 [SUM] … receiver 줄의 Bitrate. sender 가 아니라 receiver 줄입니다.",
         "note": "<SERVER_IP> 는 '서버' 역할로 고른 세션의 주소가 자동으로 들어갑니다."
       },
       {
@@ -1818,21 +1818,21 @@ export const SCENARIOS: Scenario[] = [
           "failContains": ["별도 마운트가 아닙니다"]
         },
         "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생성됩니다.\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다. 볼륨 성능으로 적어 두면 숫자 자체가 틀린 것이라 멈춥니다 — 볼륨을 먼저 마운트하거나(디스크 마운트 시나리오), 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요."
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
       },
       {
         "title": "랜덤 쓰기 IOPS",
         "command": "sudo fio --name=randwrite --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/randwrite.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기 IOPS/지연 측정. 결과에서 볼 것 — write: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). 그 아래 lat 은 지연 시간이며 작을수록 좋습니다."
+        "desc": "4k 블록 랜덤 쓰기의 IOPS·지연을 잽니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다."
       },
       {
         "title": "랜덤 읽기 IOPS",
         "command": "sudo fio --name=randread --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/randread.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기 IOPS/지연 측정. 결과에서 볼 것 — read: 로 시작하는 줄의 IOPS= 값(초당 처리 횟수)과 BW= 값(대역폭). QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다."
+        "desc": "4k 블록 랜덤 읽기의 IOPS·지연을 잽니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1867,7 +1867,7 @@ export const SCENARIOS: Scenario[] = [
           "failContains": ["별도 마운트가 아닙니다"]
         },
         "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생성됩니다.\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다. 볼륨 성능으로 적어 두면 숫자 자체가 틀린 것이라 멈춥니다 — 볼륨을 먼저 마운트하거나(디스크 마운트 시나리오), 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요."
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
       },
       {
         "title": "순차 읽기 대역폭",
@@ -1947,7 +1947,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "복구 진행 감시",
         "command": "for i in $(seq 1 12); do date +%H:%M:%S; sudo ceph -s | sed -n '1,12p'; echo; sleep 5; done; echo '--- 60초 관찰 종료'",
         "desc": "OSD 가 up 으로 전환되고 복구(recovery/backfill)가 진행되는지 60초 동안 5초 간격으로 관찰합니다. 시각이 함께 찍히므로 복구가 줄어드는 추세인지 리포트에서도 확인됩니다.",
-        "info": "더 오래 지켜보려면 이 단계를 여러 번 실행하거나, 터미널에서 직접 watch -n 5 'sudo ceph -s' 를 쓰세요. 검증 실행에서는 끝나지 않는 명령을 쓸 수 없어 시간을 끊어 두었습니다."
+        "info": "검증 실행에서는 끝나지 않는 명령을 쓸 수 없어 시간을 끊어 두었습니다.\n더 오래 지켜보려면 이 단계를 여러 번 실행하거나, 터미널에서 watch -n 5 'sudo ceph -s' 를 쓰세요."
       }
     ]
   },
@@ -2053,20 +2053,20 @@ export const SCENARIOS: Scenario[] = [
     "id": "scn-wireguard-vpn",
     "solution": "구축 · 배포",
     "title": "[VPN] WireGuard 서버 구축 및 클라이언트 발급",
-    "summary": "사설망 안에 WireGuard VPN 서버를 세우고, 유동 IP 를 통해 밖에서 그 사설 대역으로 들어오게 합니다. 사용자 계정 발급 → 클라이언트 설치·등록·활성화 → 실제 접근까지 확인합니다. wg-easy 컨테이너를 씁니다.",
+    "summary": "밖에 있는 사람이 유동 IP 하나로 사설망 안의 VM 에 접속하게 만듭니다.\n서버 구축(wg-easy 컨테이너) → 계정 발급 → 클라이언트 설치·등록·활성화 → 접근 확인 순서입니다.",
     "steps": [
       {
         "title": "OS·커널 확인",
         "command": ". /etc/os-release && echo \"$PRETTY_NAME\" && uname -r && sudo modprobe wireguard 2>/dev/null; [ -d /sys/module/wireguard ] && echo '커널 모듈 적재됨' || echo '아직 적재 안 됨 (컨테이너가 기동하며 올립니다)'",
         "desc": "기준 환경은 Ubuntu 24.04 입니다. 커널 5.6 이상이면 WireGuard 가 커널에 들어 있어 따로 설치하지 않아도 됩니다.",
-        "info": "여기서 '아직 적재 안 됨' 이 나와도 문제가 아닙니다. wg-easy 컨테이너가 SYS_MODULE 권한과 /lib/modules 마운트로 직접 올립니다."
+        "info": "'아직 적재 안 됨' 이 나와도 문제가 아닙니다.\nwg-easy 컨테이너가 기동하면서 직접 올립니다 (SYS_MODULE 권한 + /lib/modules 마운트)."
       },
       {
         "title": "클라이언트가 접속할 주소 정하기",
         "command": "echo '[이 VM 에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[밖으로 나갈 때 보이는 주소 — 참고용, 그대로 쓰지 말 것]'; curl -s --max-time 5 ifconfig.me && echo || echo '   (조회 실패 — 폐쇄망이면 정상)'",
-        "desc": "다음 단계의 INIT_HOST(엔드포인트)에 넣을 값을 정합니다. 기준은 하나입니다 — 밖에 있는 클라이언트가 실제로 닿는 주소.",
-        "info": "표준 구성은 이렇습니다 — VM 은 사설 IP 를 갖고, 거기에 유동(floating) IP 를 붙입니다. 그러면 엔드포인트는 그 유동 IP 입니다.\n· 유동 IP 는 VM 안에서 보이지 않습니다. 위 [이 VM 에 붙은 주소] 에는 사설 IP 만 나오니, 유동 IP 는 포털이나 openstack server show 로 확인하세요.\n· 앞단 공유기·방화벽에서 포트포워딩한다면 그 장비의 주소입니다.\n· 클라이언트가 같은 사내망 안에만 있다면 VM 의 사설 IP 를 그대로 써도 됩니다. 다만 밖에서도 붙을 거라면 유동 IP 여야 합니다.\n\n[밖으로 나갈 때 보이는 주소] 는 이 VM 이 인터넷으로 나갈 때 쓰는 출발지 주소(SNAT)일 뿐, 이 VM 에 할당된 주소가 아닙니다. 들어오는 연결이 그 주소로 닿는다는 보장이 없으니 그대로 쓰지 마세요.\n\n이와 별개로, **접근하려는 VM 들이 있는 사설 대역**(예: 192.168.50.0/24)을 적어 두세요. 뒤에서 \"터널로 보낼 대역\" 으로 씁니다. 이 서버가 붙어 있는 대역과 같을 수도, 다를 수도 있습니다.",
-        "warn": "이 주소가 틀려도 설정 파일은 멀쩡히 만들어지고 컨테이너도 잘 뜹니다. 클라이언트에서 handshake 만 안 됩니다 — 뒤에서 원인을 찾기 어려우니 여기서 확실히 정하세요."
+        "desc": "다음 단계 INIT_HOST 에 넣을 주소를 정합니다. 기준은 하나 — 밖에 있는 클라이언트가 실제로 닿는 주소입니다.",
+        "info": "대부분 이런 구성입니다\n· VM 은 사설 IP 를 갖고, 거기에 유동(floating) IP 가 붙어 있습니다\n· 그러면 엔드포인트는 그 유동 IP 입니다\n· 유동 IP 는 VM 안에서 보이지 않습니다 — 포털이나 openstack server show 로 확인하세요\n\n그 밖의 경우\n· 앞단 공유기·방화벽에서 포트포워딩한다면 → 그 장비의 주소\n· 클라이언트가 같은 사내망 안에만 있다면 → VM 의 사설 IP 그대로\n\n[밖으로 나갈 때 보이는 주소] 는 쓰지 마세요\n이 VM 이 인터넷으로 나갈 때 쓰는 출발지 주소(SNAT)일 뿐입니다.\n들어오는 연결이 그 주소로 닿는다는 보장이 없습니다.\n\n같이 적어 둘 것 — 접근하려는 VM 들의 사설 대역 (예: 192.168.50.0/24)\n뒤에서 '터널로 보낼 대역' 으로 씁니다. 이 서버가 붙어 있는 대역과 달라도 됩니다.",
+        "warn": "주소가 틀려도 설정 파일은 멀쩡히 만들어지고 컨테이너도 잘 뜹니다.\n클라이언트에서 handshake 만 안 돼서 원인을 찾기 어렵습니다 — 여기서 확실히 정하세요."
       },
       {
         "title": "패키지 저장소 업데이트",
@@ -2111,9 +2111,9 @@ export const SCENARIOS: Scenario[] = [
         "title": "wg-easy 설정 파일 작성",
         "command": "sudo mkdir -p /opt/wg-easy && cd /opt/wg-easy && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  wg-easy:\n    image: ghcr.io/wg-easy/wg-easy:15\n    container_name: wg-easy\n    restart: unless-stopped\n    cap_add:\n      - NET_ADMIN\n      - SYS_MODULE\n    sysctls:\n      - net.ipv4.ip_forward=1\n      - net.ipv4.conf.all.src_valid_mark=1\n    environment:\n      - INIT_ENABLED=true\n      - INIT_USERNAME=<관리자ID>\n      - INIT_PASSWORD=<관리자비밀번호>\n      - INIT_HOST=<접속주소>\n      - INIT_PORT=51820\n      - INIT_DNS=1.1.1.1,8.8.8.8\n      - INIT_IPV4_CIDR=10.8.0.0/24\n      - PORT=51821\n      - HOST=0.0.0.0\n      - INSECURE=true\n    ports:\n      - \"51820:51820/udp\"\n      - \"51821:51821/tcp\"\n    volumes:\n      - ./wireguard-config:/etc/wireguard\n      - /lib/modules:/lib/modules:ro\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; sudo grep -n 'image:\\|INIT_HOST\\|INIT_USERNAME' docker-compose.yml; fi",
         "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
-        "desc": "wg-easy 15 버전 설정을 만듭니다. 원 문서는 저장소를 git clone 한 뒤 이 파일을 덮어쓰는데, 실제로 쓰이는 것은 이 파일 하나라 바로 만듭니다.",
-        "info": "입력값\n· 관리자ID / 관리자비밀번호 — WebUI 로그인 계정 (비밀번호는 12자 이상)\n· 접속주소 — 앞 단계에서 정한, 클라이언트가 접속할 주소\n원 문서에는 WG_ALLOWED_IPS 줄이 있으나 뺐습니다. 14 버전 환경변수라 15 버전에서는 적용되지 않습니다 — 값을 넣어도 관리 패널의 \"허용된 IP\" 는 기본값(0.0.0.0/0 · ::/0)  그대로이고, 기동 로그에 \"Firewall filtering disabled\" 가 찍힙니다(실측 확인).\n클라이언트가 VPN 으로 보낼 대역은 뒤의 \"사용자(클라이언트) 계정 발급\" 단계에서 관리 패널 → 구성 → 허용된 IP 로 정합니다.\n\nINIT_IPV4_CIDR(10.8.0.0/24)은 클라이언트에게 나눠 줄 VPN 전용 대역입니다. 접속할 사설 대역이나 클라이언트의 집·사무실 대역과 겹치면 경로가 꼬이니, 겹치면 다른 대역으로 바꾸세요.\n\n원 문서의 IPv6 설정은 뺐습니다 — 테넌트 네트워크에 IPv6 가 없으면 컨테이너가 기동하지 못합니다. 필요하면 문서대로 다시 넣으세요.",
-        "warn": "비밀번호는 이 설정 파일에 그대로 들어갑니다. 검증 리포트에서는 가려지지만 서버의 /opt/wg-easy/docker-compose.yml 에는 평문으로 남습니다.",
+        "desc": "wg-easy 15 버전 설정을 만듭니다. 원 문서는 저장소를 clone 한 뒤 이 파일을 덮어쓰지만, 실제로 쓰이는 것은 이 파일 하나입니다.",
+        "info": "채울 값\n· 관리자ID · 관리자비밀번호 — WebUI 로그인 계정 (비밀번호는 12자 이상)\n· 접속주소 — 앞 단계에서 정한, 클라이언트가 닿는 주소\n\nINIT_IPV4_CIDR (10.8.0.0/24) 은 클라이언트에게 나눠 줄 VPN 전용 대역입니다.\n접속할 사설 대역이나 클라이언트의 집·사무실 대역과 겹치면 경로가 꼬이니 다른 대역으로 바꾸세요.\n\n원 문서와 다른 점\n· WG_ALLOWED_IPS 줄을 뺐습니다 — 14 버전 변수라 15 에서는 무시됩니다(실측).\n  터널로 보낼 대역은 뒤의 '터널로 보낼 대역 정하기' 단계에서 정합니다.\n· IPv6 설정을 뺐습니다 — 테넌트 네트워크에 IPv6 가 없으면 컨테이너가 기동하지 못합니다.",
+        "warn": "비밀번호가 이 설정 파일에 평문으로 들어갑니다.\n검증 리포트에서는 가려지지만 서버의 /opt/wg-easy/docker-compose.yml 에는 그대로 남습니다.",
         "undo": "sudo rm -rf /opt/wg-easy"
       },
       {
@@ -2155,23 +2155,23 @@ export const SCENARIOS: Scenario[] = [
         "title": "서버가 목표 사설 대역에 닿는지 확인",
         "command": "echo '[이 서버에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[대상 VM 으로 가는 경로]'; ip route get <대상VM_IP> 2>&1 | head -2; echo; echo '[도달 확인]'; ping -c 2 -W 2 <대상VM_IP> > /dev/null 2>&1 && echo '   닿습니다' || echo '   주의 — 닿지 않습니다'",
         "check": { "passContains": ["닿습니다"], "failContains": ["주의 —"] },
-        "desc": "클라이언트가 접근할 사설 대역의 VM 하나를 골라, 이 서버에서 그리로 갈 수 있는지 봅니다. 터널을 뚫어도 서버가 그 대역에 닿지 못하면 아무것도 전달되지 않습니다.",
-        "info": "이 서버가 그 대역에 닿는 길은 둘입니다.\n· 그 네트워크의 포트를 이 VM 에 직접 붙이기 — OpenStack 에서 인터페이스를 추가합니다(openstack server add port). 위 [이 서버에 붙은 주소] 에 그 대역이 함께 보이면 된 것입니다.\n· 라우터를 통해 가기 — 그 대역으로 가는 경로가 있으면 됩니다. [대상 VM 으로 가는 경로] 출력의 via 주소가 그 라우터입니다.\n\n닿기만 하면 전달은 wg-easy 가 합니다. 클라이언트 트래픽을 이 서버 주소로 NAT 해서 내보내므로, 대상 VM 쪽에 10.8.0.0/24 로 돌아오는 경로를 따로 넣지 않아도 됩니다.",
-        "warn": "여기서 닿지 않는데 그대로 진행하면, 클라이언트는 핸드셰이크까지 잘 되고 나서 '연결은 됐는데 아무 데도 안 되는' 상태가 됩니다. 원인을 찾기 가장 어려운 모양이니 이 단계에서 해결하고 넘어가세요.",
-        "note": "ping 이 막힌 환경이면 닿아도 '주의' 로 나올 수 있습니다. 그때는 위 [대상 VM 으로 가는 경로] 에 경로가 잡히는지, 또는 nc -zv 대상IP 22 같은 포트 확인으로 판단하세요."
+        "desc": "접근할 사설 대역의 VM 을 하나 골라, 이 서버에서 거기로 갈 수 있는지 봅니다.",
+        "info": "닿는 길은 둘입니다.\n· 그 네트워크의 포트를 이 VM 에 직접 붙이기 (openstack server add port)\n  [이 서버에 붙은 주소] 에 그 대역이 함께 보이면 된 것입니다.\n· 라우터를 통해 가기\n  [대상 VM 으로 가는 경로] 출력의 via 주소가 그 라우터입니다.\n\n닿기만 하면 전달은 wg-easy 가 합니다.\n클라이언트 트래픽을 이 서버 주소로 NAT 해서 내보내므로,\n대상 VM 쪽에 10.8.0.0/24 로 돌아오는 경로를 따로 넣지 않아도 됩니다.",
+        "warn": "여기서 닿지 않는데 그냥 진행하면, 클라이언트는 핸드셰이크까지 잘 되고 나서\n'연결은 됐는데 아무 데도 안 되는' 상태가 됩니다.\n원인을 찾기 가장 어려운 모양이니 이 단계에서 해결하고 넘어가세요.",
+        "note": "ping 이 막힌 환경이면 닿아도 '주의' 로 나옵니다.\n그때는 [대상 VM 으로 가는 경로] 에 경로가 잡히는지,\n또는 nc -zv 대상IP 22 같은 포트 확인으로 판단하세요."
       },
       {
         "title": "터널로 보낼 대역 정하기 (관리 패널 → 구성)",
         "command": "",
-        "desc": "관리 패널 → 구성 에서 두 값을 확인합니다. 이 단계를 건너뛰면 기본값이 전체 터널이라, 클라이언트의 인터넷과 기존 VPN 이 통째로 끊깁니다.",
-        "info": "한국어 UI 기준입니다 (영문이면 Admin Panel → Config).\n\n· 호스트 — 앞에서 정한 엔드포인트(보통 유동 IP)가 들어가 있어야 합니다\n· 허용된 IP — 클라이언트가 이 터널로 보낼 대역입니다. 기본값은 0.0.0.0/0 과 ::/0 입니다.\n\n사설망에 들어가려고 만든 VPN 이라면 그 두 줄을 지우고 **접근하려는 VM 들이 있는 대역**만 넣으세요 (예: 192.168.50.0/24). 앞 단계에서 닿는 것을 확인한 그 대역입니다. 여러 대역이면 추가 버튼으로 줄을 늘립니다. 맨 아래 저장을 누릅니다.\n\n· 사설 대역만 적음(스플릿 터널) — 그 대역만 VPN 으로 가고, 인터넷과 회사 VPN 은 원래대로 유지됩니다. 사내 자원 접근이 목적이면 이쪽입니다.\n· 0.0.0.0/0(전체 터널) — 클라이언트의 모든 트래픽이 VPN 서버를 거칩니다. 출발지 IP 를 서버 것으로 바꾸려는 게 목적일 때만 쓰세요.\nIPv6 를 쓰지 않으면 ::/0 도 지우는 편이 안전합니다.",
-        "warn": "0.0.0.0/0 은 엔드포인트로 가는 경로까지 터널 안으로 넣습니다. 그 경로가 다른 VPN(예: FortiClient) 위에 얹혀 있었다면 그 VPN 이 끊기면서 서버에 닿을 길 자체가 사라져, 핸드셰이크가 영영 안 됩니다. 실제로 겪은 사고입니다."
+        "desc": "관리 패널 → 구성 에서 두 값을 확인합니다. 건너뛰면 기본값이 전체 터널이라 클라이언트의 인터넷과 기존 VPN 이 끊깁니다.",
+        "info": "한국어 UI 기준입니다 (영문이면 Admin Panel → Config).\n\n볼 값 두 개\n· 호스트 — 앞에서 정한 엔드포인트(보통 유동 IP)가 들어가 있어야 합니다\n· 허용된 IP — 클라이언트가 이 터널로 보낼 대역. 기본값은 0.0.0.0/0 과 ::/0 입니다\n\n사설망 접근이 목적이라면\n그 두 줄을 지우고 접근하려는 대역만 넣으세요 (예: 192.168.50.0/24).\n앞 단계에서 닿는 것을 확인한 그 대역입니다.\n여러 대역이면 추가 버튼으로 줄을 늘리고, 맨 아래 저장을 누릅니다.\n\n· 사설 대역만 적음(스플릿 터널) — 그 대역만 VPN 으로. 인터넷과 회사 VPN 은 그대로\n· 0.0.0.0/0(전체 터널) — 모든 트래픽이 VPN 서버를 거침. 출발지 IP 를 바꾸려는 경우만\nIPv6 를 쓰지 않으면 ::/0 도 지우는 편이 안전합니다.",
+        "warn": "0.0.0.0/0 은 엔드포인트로 가는 경로까지 터널 안에 넣습니다.\n그 경로가 다른 VPN(예: FortiClient) 위에 얹혀 있었다면 그 VPN 이 끊기면서\n서버에 닿을 길 자체가 사라져 핸드셰이크가 영영 안 됩니다. 실제로 겪은 사고입니다."
       },
       {
         "title": "사용자(클라이언트) 계정 발급",
         "command": "",
-        "desc": "클라이언트 화면에서 새로 만들기를 눌러 사용자를 추가합니다. 추가하면 10.8.0.x 주소가 하나 배정되고, 오른쪽 아이콘으로 QR 코드 보기 · 설정 파일(.conf) 내려받기 · 비활성화 · 삭제를 할 수 있습니다.",
-        "info": "사람마다 또는 기기마다 하나씩 만드는 것이 원칙입니다. 하나를 여러 기기에 나눠 쓰면 접속이 서로 밀어내고, 누가 무엇을 썼는지도 구분되지 않습니다.\n기기별 송수신 통계와 마지막 접속 시각도 이 목록에서 봅니다."
+        "desc": "클라이언트 화면에서 새로 만들기를 눌러 사용자를 추가합니다. 10.8.0.x 주소가 하나 배정됩니다.",
+        "info": "추가한 줄의 오른쪽 아이콘 — QR 코드 · 설정 파일(.conf) 내려받기 · 비활성화 · 삭제\n\n사람마다, 또는 기기마다 하나씩 만드는 것이 원칙입니다.\n하나를 여러 기기에 나눠 쓰면 접속이 서로 밀어내고, 누가 무엇을 썼는지도 구분되지 않습니다.\n기기별 송수신 통계와 마지막 접속 시각도 이 목록에서 봅니다."
       },
       {
         "title": "클라이언트 프로그램 설치·등록·활성화",
@@ -2184,22 +2184,22 @@ export const SCENARIOS: Scenario[] = [
         "title": "서버에서 연결 상태 확인",
         "command": "sudo docker exec wg-easy wg show",
         "check": { "passContains": ["interface"], "failContains": ["No such container"] },
-        "desc": "발급한 클라이언트가 peer 로 잡히는지 봅니다. 실제로 연결되면 latest handshake 에 시각이 찍히고 transfer 의 received 가 0 이 아니게 됩니다.",
-        "warn": "클라이언트 쪽이 '보내기'만 올라가고 '받기'가 0 이면 핸드셰이크가 안 된 것입니다. 순서대로 보세요 — ① 허용된 IP 가 0.0.0.0/0 이라 엔드포인트로 가는 경로까지 터널에 들어갔는지 ② 51820/UDP 가 열려 있는지(TCP 아님) ③ 엔드포인트 주소가 그 단말에서 실제로 닿는 주소인지."
+        "desc": "발급한 클라이언트가 peer 로 잡히는지 봅니다.",
+        "warn": "클라이언트에서 '보내기'만 올라가고 '받기'가 0 이면 핸드셰이크가 안 된 것입니다.\n순서대로 보세요.\n① 허용된 IP 가 0.0.0.0/0 이라 엔드포인트로 가는 경로까지 터널에 들어갔는지\n② 51820/UDP 가 열려 있는지 (TCP 아님)\n③ 엔드포인트 주소가 그 단말에서 실제로 닿는 주소인지"
       },
       {
         "title": "클라이언트에서 통신 확인",
         "command": "",
         "desc": "활성화한 단말에서 확인합니다. 여기까지 되면 구축이 끝난 것입니다.",
         "note": "1) 배정 주소 — 10.8.0.x 를 받았는지 (ipconfig / ip addr)\n2) 사설망 접근 — 목표였던 사설 대역의 VM 에 ping 또는 ssh 가 되는지. 이게 이 VPN 의 본래 목적입니다\n3) 기존 경로 유지 — 인터넷과 회사 VPN 이 그대로인지. 스플릿 터널이면 그대로여야 합니다\n4) 전체 터널로 만든 경우에만 — VPN 끄고 curl ifconfig.me, 켜고 다시 재어 값이 서버 쪽 주소로 바뀌는지",
-        "info": "\"외부 통신\" 은 방향에 따라 담당이 다릅니다. 헷갈리기 쉬운 부분입니다.\n· 클라이언트 → 사설 VM 접근 — 이 VPN 이 하는 일입니다\n· 사설 VM → 인터넷 — 이 VPN 과 무관합니다. OpenStack 라우터의 SNAT 이나 그 VM 에 붙인 유동 IP 가 해 줍니다. 터널을 뚫는다고 사설 VM 이 인터넷에 나갈 수 있게 되지는 않습니다.\n\n2) 가 안 될 때 볼 곳\n· 사설 대역이 허용된 IP 에 들어 있는지\n· 앞의 \"서버가 목표 사설 대역에 닿는지 확인\" 이 통과했는지\n· 대상 VM 의 보안그룹이 VPN 서버 주소에서 오는 접속을 허용하는지"
+        "info": "'외부 통신' 은 방향에 따라 담당이 다릅니다 — 헷갈리기 쉬운 부분입니다.\n· 클라이언트 → 사설 VM 접근 — 이 VPN 이 하는 일입니다\n· 사설 VM → 인터넷 — 이 VPN 과 무관합니다.\n  OpenStack 라우터의 SNAT 이나 그 VM 에 붙인 유동 IP 가 해 줍니다.\n  터널을 뚫는다고 사설 VM 이 인터넷에 나갈 수 있게 되지는 않습니다.\n\n2) 가 안 될 때 볼 곳\n· 사설 대역이 '허용된 IP' 에 들어 있는지\n· 앞의 '서버가 목표 사설 대역에 닿는지 확인' 이 통과했는지\n· 대상 VM 의 보안그룹이 VPN 서버 주소에서 오는 접속을 허용하는지"
       },
       {
         "title": "Docker 제거 (선택 — 검증 후 정리)",
         "command": `if [ -d /opt/wg-easy ]; then (cd /opt/wg-easy && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/wg-easy /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
         "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 컨테이너를 내리고 Docker 패키지·데이터·저장소 등록까지 한 번에 걷어냅니다.",
-        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다. 이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요. 당연히 VPN 도 끊깁니다.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요. VPN 도 끊깁니다.",
         "info": "하는 일 순서\n1) wg-easy 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/wg-easy · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제 후 apt 갱신\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\nVPN 만 내리고 Docker 는 남기려면 이 단계 대신 아래만 실행하세요.\ncd /opt/wg-easy && sudo docker compose down -v"
       }
     ]
@@ -2209,13 +2209,13 @@ export const SCENARIOS: Scenario[] = [
     "id": "scn-docker-app-deploy",
     "solution": "구축 · 배포",
     "title": "[컨테이너] Docker 설치 및 애플리케이션 배포·운영 확인",
-    "summary": "일반 VM 에 Docker 를 설치하고 애플리케이션 컨테이너를 올려, 서비스 응답·로그·재기동·자동 복구·새 버전 배포까지 한 번에 확인합니다.",
+    "summary": "일반 VM 에 Docker 를 설치하고 애플리케이션 컨테이너를 올립니다.\n서비스 응답 → 로그 → 재기동 → 자동 복구 → 새 버전 배포까지 차례로 확인합니다.",
     "steps": [
       {
         "title": "OS·자원 확인",
         "command": ". /etc/os-release && echo \"$PRETTY_NAME\"; uname -r; echo \"CPU: $(nproc) core\"; free -h | awk 'NR==2{print \"메모리: \" $2 \" (여유 \" $7 \")\"}'; df -h / | awk 'NR==2{print \"루트 여유: \" $4}'",
         "desc": "컨테이너를 올릴 VM 의 기본 자원을 봅니다.",
-        "info": "이미지와 레이어는 /var/lib/docker 아래에 쌓입니다. 루트 여유가 5GB 미만이면 이미지를 내려받다 막힐 수 있습니다."
+        "info": "이미지와 레이어는 /var/lib/docker 아래에 쌓입니다.\n루트 여유가 5GB 미만이면 이미지를 내려받다 막힐 수 있습니다."
       },
       {
         "title": "패키지 저장소 업데이트",
@@ -2255,7 +2255,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo systemctl is-active docker && sudo docker run --rm hello-world",
         "check": { "requireExitZero": true, "passContains": ["Hello from Docker"] },
         "desc": "데몬이 떠 있는지, 이미지를 내려받아 컨테이너를 돌릴 수 있는지까지 한 번에 확인합니다.",
-        "info": "여기서 막히면 대개 외부 레지스트리(registry-1.docker.io)로 못 나가는 것입니다. 폐쇄망이면 사내 레지스트리를 /etc/docker/daemon.json 에 등록해야 합니다.",
+        "info": "여기서 막히면 대개 외부 레지스트리(registry-1.docker.io)로 못 나가는 것입니다.\n폐쇄망이면 사내 레지스트리를 /etc/docker/daemon.json 에 등록해야 합니다.",
         "undo": "sudo docker image rm -f hello-world"
       },
       {
@@ -2263,16 +2263,16 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo usermod -aG docker $USER && echo \"$USER 를 docker 그룹에 넣었습니다\"",
         "check": { "requireExitZero": true, "passContains": ["docker 그룹에 넣었습니다"] },
         "desc": "sudo 없이 docker 를 쓰려면 docker 그룹에 들어가야 합니다.",
-        "info": "지금 접속에는 반영되지 않습니다 — 다시 로그인해야 적용됩니다. 그래서 이 시나리오의 나머지 단계는 계속 sudo 를 붙입니다.",
-        "warn": "docker 그룹은 사실상 root 권한입니다(호스트 파일시스템을 컨테이너로 마운트할 수 있음). 필요한 사람에게만 주세요.",
+        "info": "지금 접속에는 반영되지 않습니다 — 다시 로그인해야 적용됩니다.\n그래서 이 시나리오의 나머지 단계는 계속 sudo 를 붙입니다.",
+        "warn": "docker 그룹은 사실상 root 권한입니다 — 호스트 파일시스템을 컨테이너로 마운트할 수 있습니다.\n필요한 사람에게만 주세요.",
         "undo": "sudo gpasswd -d $USER docker"
       },
       {
         "title": "배포할 애플리케이션 준비",
         "command": "sudo mkdir -p /opt/qterm-app/html && cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v1' | sudo tee html/index.html > /dev/null && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  app:\n    image: nginx:1.27-alpine\n    container_name: qterm-app\n    restart: unless-stopped\n    ports:\n      - \"<서비스포트>:80\"\n    volumes:\n      - ./html:/usr/share/nginx/html:ro\n    healthcheck:\n      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost/\"]\n      interval: 10s\n      timeout: 3s\n      retries: 3\n      start_period: 5s\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; ls -l /opt/qterm-app /opt/qterm-app/html; fi",
         "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
-        "desc": "nginx 컨테이너와 그 안에 띄울 내용(index.html)을 만듭니다. 내용에 버전 문자열을 넣어 두어, 뒤에서 새 버전 배포가 실제로 반영됐는지 눈으로 확인합니다.",
-        "info": "서비스포트 — 호스트에서 쓸 포트(예: 8080). 이미 쓰는 포트를 넣으면 기동이 실패합니다.\nhealthcheck 를 붙여 두었기에 docker ps 의 Status 에 (healthy) 가 표시됩니다.",
+        "desc": "nginx 컨테이너와 그 안에 띄울 index.html 을 만듭니다. 내용에 버전 문자열을 넣어, 뒤에서 새 배포가 반영됐는지 눈으로 확인합니다.",
+        "info": "· 서비스포트 — 호스트에서 쓸 포트 (예: 8080). 이미 쓰는 포트를 넣으면 기동이 실패합니다\n· healthcheck 를 붙여 두어 docker ps 의 Status 에 (healthy) 가 표시됩니다",
         "undo": "sudo rm -rf /opt/qterm-app"
       },
       {
@@ -2287,14 +2287,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo docker ps -a --filter name=qterm-app --format '{{.Names}} | {{.Status}}'",
         "check": { "passContains": ["healthy"], "failContains": ["Exited", "Restarting"] },
         "desc": "Status 에 (healthy) 가 나와야 정상입니다.",
-        "info": "start_period(5초) 안이면 (health: starting) 으로 보입니다. 그럴 때는 10초쯤 뒤에 이 단계를 다시 실행하세요."
+        "info": "start_period(5초) 안이면 (health: starting) 으로 보입니다.\n그럴 때는 10초쯤 뒤에 이 단계를 다시 실행하세요."
       },
       {
         "title": "서비스 응답 확인",
         "command": "curl -s -o /dev/null -w '응답 코드: %{http_code} / 소요 %{time_total}s\\n' http://127.0.0.1:<서비스포트>/ && curl -s http://127.0.0.1:<서비스포트>/",
         "check": { "passContains": ["응답 코드: 200", "배포 버전: v1"] },
         "desc": "컨테이너가 떠 있는 것과 서비스가 응답하는 것은 다릅니다. 실제로 내용이 내려오는지까지 봅니다.",
-        "info": "외부에서도 확인하려면 보안그룹에 서비스포트를 열고, 다른 장비에서 curl http://공인IP:포트/ 로 확인하세요."
+        "info": "외부에서도 확인하려면 보안그룹에 서비스포트를 열고,\n다른 장비에서 curl http://접속주소:포트/ 로 확인하세요."
       },
       {
         "title": "로그 확인",
@@ -2307,7 +2307,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "자원 사용 확인",
         "command": "sudo docker stats --no-stream --format '{{.Name}} | CPU {{.CPUPerc}} | MEM {{.MemUsage}} | NET {{.NetIO}}'",
         "desc": "컨테이너가 쓰는 CPU·메모리를 한 번만 찍어 봅니다. 배포 직후 기준값으로 남겨 두면 나중에 비교하기 좋습니다.",
-        "info": "--no-stream 을 빼면 계속 갱신되며 단계가 끝나지 않습니다. 시나리오에서는 반드시 붙여야 합니다."
+        "info": "--no-stream 을 빼면 화면이 계속 갱신되어 단계가 끝나지 않습니다.\n시나리오에서는 반드시 붙여야 합니다."
       },
       {
         "title": "재기동 확인",
@@ -2319,15 +2319,15 @@ export const SCENARIOS: Scenario[] = [
         "title": "강제 종료 후 자동 복구 확인",
         "command": "echo '[컨테이너 안에서 주 프로세스 종료]'; sudo docker exec qterm-app sh -c 'kill -TERM 1' 2>&1 | head -2; sleep 15; echo '[상태]'; sudo docker ps -a --filter name=qterm-app --format '{{.Names}} | {{.Status}}'; echo '[서비스]'; curl -s -o /dev/null -w '복구 후 응답 코드: %{http_code}\\n' http://127.0.0.1:<서비스포트>/",
         "check": { "passContains": ["복구 후 응답 코드: 200"], "failContains": ["Exited"] },
-        "desc": "계획되지 않은 종료입니다. 컨테이너 안에서 주 프로세스를 죽여, restart: unless-stopped 정책이 스스로 다시 띄우는지 봅니다 — 실제 장애에서 서비스가 저절로 돌아오는지를 보는 단계입니다.",
+        "desc": "계획되지 않은 종료입니다. 컨테이너 안에서 주 프로세스를 죽여, 서비스가 저절로 돌아오는지 봅니다.",
         "warn": "운영 중인 컨테이너에는 하지 마세요. 이 단계는 시험용 qterm-app 만 대상으로 합니다.",
-        "info": "왜 docker kill 이 아닌가 — 밖에서 docker kill / docker stop 으로 죽이면 Docker 는 그것을 '사람이 일부러 내린 것' 으로 보고 restart 정책을 건너뜁니다(공식 문서: manually stop 하면 정책은 데몬 재시작이나 수동 재시작 전까지 무시됨). 그래서 컨테이너가 그대로 죽은 채 남고 응답 코드가 000 이 됩니다. 장애를 흉내 내려면 안에서 프로세스가 죽어야 합니다.\nPID 1 에 SIGKILL 을 보내면 커널이 무시합니다(네임스페이스 init 보호). nginx 가 처리하는 SIGTERM 을 씁니다.\n\n복구가 안 되면\n· 정책 확인 — sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' qterm-app 이 unless-stopped 인지\n· 되살리기 — sudo docker start qterm-app 또는 cd /opt/qterm-app && sudo docker compose up -d",
-        "note": "restart 정책은 컨테이너가 10초 이상 정상으로 떠 있어야 무장됩니다. 기동 직후 바로 이 단계를 돌리면 복구되지 않을 수 있으니, 앞 단계들을 순서대로 거친 뒤 실행하세요."
+        "info": "왜 docker kill 이 아닌가\n밖에서 docker kill · docker stop 으로 죽이면 Docker 는 '사람이 일부러 내린 것' 으로 보고\nrestart 정책을 건너뜁니다(공식 문서). 컨테이너는 죽은 채 남고 응답 코드가 000 이 됩니다.\n장애를 흉내 내려면 컨테이너 안에서 프로세스가 죽어야 합니다.\nPID 1 에 SIGKILL 은 커널이 무시하므로(네임스페이스 init 보호), nginx 가 처리하는 SIGTERM 을 씁니다.\n\n복구가 안 되면\n· 정책 확인 — sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' qterm-app\n· 되살리기 — sudo docker start qterm-app",
+        "note": "restart 정책은 컨테이너가 10초 이상 정상으로 떠 있어야 무장됩니다.\n기동 직후 바로 돌리면 복구되지 않을 수 있으니, 앞 단계를 순서대로 거친 뒤 실행하세요."
       },
       {
         "title": "호스트 재부팅 후 자동 기동",
         "command": "",
-        "desc": "호스트를 껐다 켜도 컨테이너가 스스로 올라오는지는 실제 재부팅으로만 확인됩니다. 재부팅하면 이 창의 연결이 끊기므로 시나리오 안에서 돌리지 않습니다.",
+        "desc": "껐다 켜도 컨테이너가 스스로 올라오는지는 실제 재부팅으로만 확인됩니다. 연결이 끊기므로 시나리오 안에서는 돌리지 않습니다.",
         "note": "재부팅        sudo reboot\n다시 접속한 뒤  sudo docker ps --filter name=qterm-app\n도커 자동 기동  systemctl is-enabled docker   (enabled 여야 함)"
       },
       {
@@ -2335,21 +2335,21 @@ export const SCENARIOS: Scenario[] = [
         "command": "cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v2' | sudo tee html/index.html > /dev/null && sudo docker compose pull && sudo docker compose up -d --force-recreate && sleep 8 && curl -s http://127.0.0.1:<서비스포트>/",
         "check": { "passContains": ["배포 버전: v2"] },
         "desc": "내용을 바꾸고 다시 배포해, 새 버전이 실제로 반영되는지 봅니다. 운영에서는 이미지 태그를 올린 뒤 같은 명령을 씁니다.",
-        "info": "v1 이 그대로 나오면 브라우저나 프록시 캐시가 아니라 컨테이너가 옛 내용을 들고 있는 것입니다. --force-recreate 없이 up -d 만 하면 바뀐 게 없다고 판단해 그대로 두는 경우가 있습니다."
+        "info": "v1 이 그대로 나오면 브라우저·프록시 캐시가 아니라 컨테이너가 옛 내용을 들고 있는 것입니다.\n--force-recreate 없이 up -d 만 하면 바뀐 게 없다고 보고 그대로 두는 경우가 있습니다."
       },
       {
         "title": "시험 컨테이너 정리",
         "command": "if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down); fi; echo '--- 남은 컨테이너 확인'; N=$(sudo docker ps -a --filter name=qterm-app --format '{{.Names}}' | wc -l); if [ \"$N\" = \"0\" ]; then echo '정리 완료 — 남은 컨테이너 없음'; else echo \"주의 — 아직 $N 개 남아 있습니다\"; sudo docker ps -a --filter name=qterm-app; fi",
         "check": { "passContains": ["정리 완료 — 남은 컨테이너 없음"], "failContains": ["주의 —"] },
         "desc": "시험 컨테이너를 내립니다. 목록에 qterm-app 이 남지 않아야 정상입니다.",
-        "info": "이미지까지 지우려면 sudo docker image rm nginx:1.27-alpine 를, 안 쓰는 것을 한 번에 치우려면 sudo docker system prune -a 를 씁니다(후자는 다른 이미지도 지우니 주의)."
+        "info": "· 이미지까지 지우기 — sudo docker image rm nginx:1.27-alpine\n· 안 쓰는 것을 한 번에 치우기 — sudo docker system prune -a (다른 이미지도 지우니 주의)"
       },
       {
         "title": "Docker 제거 (선택 — 검증 후 정리)",
         "command": `if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/qterm-app /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; sudo gpasswd -d $USER docker 2>/dev/null || true; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
         "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 앞 단계가 컨테이너만 내렸다면, 여기서 Docker 패키지·데이터·저장소 등록까지 걷어냅니다.",
-        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다. 이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요.",
         "info": "하는 일 순서\n1) qterm-app 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/qterm-app · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제, docker 그룹에서 현재 사용자 빼기\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\n컨테이너만 내리고 Docker 는 남기려면 이 단계 대신 앞의 '시험 컨테이너 정리' 까지만 하세요."
       }
     ]
@@ -2417,7 +2417,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "즉시 적용",
         "command": "sudo sysctl -p",
         "desc": "sysctl.conf 의 변경분을 즉시 커널에 적용합니다.",
-        "note": "원복 대상이 아닙니다 — 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다. 되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
+        "note": "원복 대상이 아닙니다 — 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다.\n되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
       },
       {
         "title": "반영 확인",
