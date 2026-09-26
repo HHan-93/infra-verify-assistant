@@ -21,6 +21,8 @@ import {
   Plus,
   FileText,
   Boxes,
+  Copy,
+  TerminalSquare,
 } from 'lucide-react'
 
 /**
@@ -41,8 +43,9 @@ const APPLY_REQUIRED: {
     command: (m) =>
       `cd ${m[1]}/etc/scripts && bash ./okectl.sh stop && bash ./okectl.sh start && docker ps -a`,
     desc:
-      '저장만으로는 컨테이너에 반영되지 않습니다. 위 명령으로 재기동해야 적용됩니다.\n' +
-      '· 이 스크립트는 **이 제품의 컨테이너를 전부** 내렸다가 올립니다 (해당 서비스 하나만이 아닙니다)\n' +
+      '저장만으로는 컨테이너에 반영되지 않습니다. 아래 명령으로 재기동해야 적용됩니다.\n' +
+      '· 이 스크립트는 이 제품의 컨테이너를 전부 내렸다가 올립니다 (해당 서비스 하나만이 아닙니다)\n' +
+      '· 고칠 값이 더 있으면 다 고친 뒤 한 번만 재기동하세요 — 저장할 때마다 내릴 필요는 없습니다\n' +
       '· 올라온 뒤 docker ps -a 의 STATUS 가 초 단위(Up n seconds)로 바뀌면 재기동된 것입니다\n' +
       '· 저장 직전 원본은 자동으로 백업했습니다 — 따로 cm.env.bak 을 만들지 않아도 됩니다',
   },
@@ -106,6 +109,14 @@ interface FileViewerProps {
   onClose: () => void
   /** 파일 내용을 AI 분석으로 전달. AI 패널이 이미 스트리밍 중이면 무시되고 false 를 반환한다. */
   onAnalyze: (text: string) => boolean
+  /**
+   * 적용 명령을 **이 서버 터미널에 넣어** 준다 (실행은 사람이 Enter 로).
+   *
+   * 복사해서 붙이게 두면 **다른 탭에 붙일 수 있다** — 재기동 명령이 엉뚱한 서버에서 돌면
+   * 고친 적도 없는 제품이 내려간다. 넣는 곳을 코드가 정해 주는 편이 안전하다.
+   * 실행까지 하지는 않는다 — 이 명령은 제품 컨테이너를 전부 내렸다 올린다(프리셋의 '입력' 과 같은 규칙).
+   */
+  onInsertCommand?: (cmd: string) => void
 }
 
 /** 자주 보는 환경설정 파일 빠른 선택 (카테고리별) */
@@ -244,6 +255,7 @@ export default function FileViewer({
   initialPath,
   onClose,
   onAnalyze,
+  onInsertCommand,
 }: FileViewerProps) {
   const [path, setPath] = useState(initialPath ?? '')
   const [content, setContent] = useState('')
@@ -762,7 +774,7 @@ export default function FileViewer({
                 드롭다운을 따로 하나 더 두면 "둘 중 어느 쪽에 있더라" 를 매번 고르게 된다 —
                 찾는 목적이 같으니 한 자리에 두고, 아래 내장 목록과 묶음 이름으로 가른다. */}
             {liteConfigs.length > 0 && (
-              <optgroup label={`이 서버에서 찾은 Lite 설정 (${liteConfigs.length})`}>
+              <optgroup label={`조회된 Lite 환경(docker env) 설정 (${liteConfigs.length})`}>
                 {liteConfigs.map((c) => (
                   <option key={c.path} value={c.path}>
                     {c.service} — {c.file}
@@ -789,6 +801,23 @@ export default function FileViewer({
             불러오기
           </button>
         </div>
+
+        {/* 찾은 것이 있다는 사실을 **모르는 사람에게** 알린다.
+            드롭다운 안에만 있으면 열어 본 사람만 안다 — 정작 경로를 모르는 사람이 안 열어 본다.
+            파일을 불러오기 전에만 띄운다(불러온 뒤에는 아래 도구막대가 그 자리를 쓴다). */}
+        {!loaded && liteConfigs.length > 0 && (
+          <div className="border-b border-white/10 bg-blue-500/[0.07] px-4 py-1.5 text-[11.5px] text-blue-200/90">
+            이 서버에서 <b>Lite 환경(docker) 설정 {liteConfigs.length}개</b>를 찾았습니다 — 위 &nbsp;
+            <span className="rounded bg-white/10 px-1 py-0.5">빠른 선택…</span> 맨 위 묶음에 있습니다.
+            <span className="ml-1 text-blue-200/60">
+              ({liteConfigs
+                .slice(0, 3)
+                .map((c) => c.service)
+                .join(' · ')}
+              {liteConfigs.length > 3 ? ' …' : ''})
+            </span>
+          </div>
+        )}
 
         {/* 검색 · 섹션 이동 · 글꼴 크기 — 불러온 뒤에만 보인다 */}
         {loaded && (
@@ -1139,7 +1168,30 @@ export default function FileViewer({
               <code className="block break-all rounded bg-black/40 px-3 py-2 font-mono text-[12px] text-amber-100">
                 {applyNotice.command}
               </code>
-              <div className="mt-4 flex justify-end">
+              {/* **저장과 재기동을 붙이지 않는다.**
+                  재기동은 제품 컨테이너를 전부 내린다 — 저장 버튼이 그것까지 하면 값 하나
+                  고치려다 서비스를 내리게 된다. 값을 여럿 고칠 때도 매번 내렸다 올리게 된다.
+                  대신 **올바른 세션의 터미널에 넣어** 주고, 실행은 사람이 Enter 로 한다. */}
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => navigator.clipboard.writeText(applyNotice.command).catch(() => {})}
+                  title="명령을 클립보드로"
+                  className="flex items-center gap-1 rounded-md border border-white/10 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-white/10"
+                >
+                  <Copy size={12} /> 복사
+                </button>
+                {onInsertCommand && (
+                  <button
+                    onClick={() => {
+                      onInsertCommand(applyNotice.command)
+                      setApplyNotice(null)
+                    }}
+                    title="이 서버 터미널에 명령만 넣습니다 — 실행은 직접 Enter 를 누르세요"
+                    className="flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs text-amber-100 hover:bg-amber-500/25"
+                  >
+                    <TerminalSquare size={12} /> 이 서버 터미널에 넣기
+                  </button>
+                )}
                 <button
                   onClick={() => setApplyNotice(null)}
                   className="rounded-md bg-amber-500/20 px-4 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-500/30"

@@ -3034,6 +3034,14 @@ export default function App() {
             setTimeout(() => activeTerm()?.focus(), 0)
           }}
           onAnalyze={analyzeText}
+          /* 이 창이 보고 있는 그 세션의 터미널에만 넣는다 — runOnActive 를 쓰면 브로드캐스트가
+             켜져 있을 때 여러 서버에 같이 들어간다. 재기동 명령이 그렇게 퍼지면 안 된다.
+             실행하지 않고 입력만 한 뒤 창을 닫아 터미널로 보낸다(Enter 는 사람이). */
+          onInsertCommand={(cmd) => {
+            terminalRefs.current[activeId]?.insertCommand(cmd)
+            setShowFiles(false)
+            setTimeout(() => activeTerm()?.focus(), 0)
+          }}
         />
       )}
     </div>
