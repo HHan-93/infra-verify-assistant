@@ -42,6 +42,20 @@ const SLOW_CMD_FLOOR_MS = 300_000
 export const IMAGE_CMD_RE = /\bqemu-img\s+(convert|dd)\b/i
 const IMAGE_CMD_FLOOR_MS = 1_800_000
 
+/**
+ * **fio 는 시험 파일을 먼저 깔고 나서** --runtime 을 센다 ("Laying out IO file").
+ *
+ * 그래서 선언(`--runtime=30`)만 보면 넉넉해 보이지만, `--size=500M` 짜리를 **대역폭을
+ * 묶어 둔 볼륨** 위에 까는 데만 몇 분이 걸린다 — 하필 그 제한이 잘 걸렸는지 보려고 돌리는
+ * 시나리오다(scn-flavor-disk-qos · scn-volume-qos). 제한 시간을 넘기면 러너가 끊고
+ * '제한 시간 초과' 라는 **실패로** 남긴다: QoS 가 잘 걸릴수록 빨개지는 판정이라,
+ * 여기서 막지 않으면 "제한이 잘 걸린 것" 과 "검증이 실패한 것" 이 같은 모양으로 남는다.
+ *
+ * 명령 맨 앞의 fio 만 본다 — `rm -f /tmp/fio-test` 같은 정리 스텝까지 10분을 줄 이유는 없다.
+ */
+export const FIO_CMD_RE = /(^|[|;&]\s*)(sudo\s+)?fio\b/i
+const FIO_FLOOR_MS = 600_000
+
 const toMs = (n: string, unit?: string) => {
   const v = parseInt(n, 10)
   const u = (unit ?? 's').toLowerCase()
@@ -103,6 +117,7 @@ export function timeoutForCmd(cmd: string, baseMs: number): number {
   const declared = declaredDurationMs(cmd)
   const floor = Math.max(
     SLOW_CMD_RE.test(cmd) ? SLOW_CMD_FLOOR_MS : 0,
+    FIO_CMD_RE.test(cmd) ? FIO_FLOOR_MS : 0,
     IMAGE_CMD_RE.test(cmd) ? IMAGE_CMD_FLOOR_MS : 0,
   )
   return Math.max(baseMs, declared ? declared + 30_000 : 0, floor)

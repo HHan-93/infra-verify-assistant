@@ -1557,27 +1557,27 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "masakari-engine 로그",
             "command": "sudo tail -f -n 200 /var/log/masakari/masakari-engine.log",
-            "desc": "마사카리 동작(인스턴스 복구/evacuate 처리) 로그.\ncontroller 또는 mixed 노드에서 확인할 수 있습니다."
+            "desc": "마사카리 동작(인스턴스 복구/evacuate 처리) 로그.\ncontroller 또는 mixed 노드에서 확인할 수 있습니다. 실시간 추적이라 Ctrl+C 로 중단해야 끝납니다."
           },
           {
             "label": "masakari-host-monitor 로그",
             "command": "sudo tail -f -n 200 /var/log/masakarimonitors/masakari-host-monitor.log",
-            "desc": "마사카리 notification(호스트 장애 감지) 로그.\ncompute 또는 mixed 노드에서 확인할 수 있습니다."
+            "desc": "마사카리 notification(호스트 장애 감지) 로그.\ncompute 또는 mixed 노드에서 확인할 수 있습니다. 실시간 추적이라 Ctrl+C 로 중단해야 끝납니다."
           },
           {
             "label": "nova-compute 로그",
             "command": "sudo tail -f -n 200 /var/log/nova/nova-compute.log",
-            "desc": "컴퓨트 노드의 인스턴스 복구/재배치 처리 로그"
+            "desc": "컴퓨트 노드의 인스턴스 복구/재배치 처리 로그. 실시간 추적이라 Ctrl+C 로 중단해야 끝납니다."
           },
           {
             "label": "nova-conductor 로그",
             "command": "sudo tail -f -n 200 /var/log/nova/nova-conductor.log",
-            "desc": "DB 중계 및 복구 조정 로그"
+            "desc": "DB 중계 및 복구 조정 로그. 실시간 추적이라 Ctrl+C 로 중단해야 끝납니다."
           },
           {
             "label": "nova-scheduler 로그",
             "command": "sudo tail -f -n 200 /var/log/nova/nova-scheduler.log",
-            "desc": "재배치 대상 호스트 스케줄링 로그"
+            "desc": "재배치 대상 호스트 스케줄링 로그. 실시간 추적이라 Ctrl+C 로 중단해야 끝납니다."
           }
         ]
       },
