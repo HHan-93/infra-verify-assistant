@@ -32,6 +32,7 @@ import ScenarioHistoryModal from './ScenarioHistoryModal'
 import { splitShell } from '../lib/shellSplit'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
+import { formatShell } from '../lib/shellFormat'
 
 interface ScenarioPanelProps {
   connected: boolean
@@ -639,7 +640,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                       {step.command && (
                         <>
                           <code
-                            title={step.command}
+                            title={formatShell(step.command)}
                             className="min-w-0 flex-1 truncate rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-pink-200"
                           >
                             <Highlight text={commandPreview(step.command)} query={trimmed} />

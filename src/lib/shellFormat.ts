@@ -78,6 +78,18 @@ const IND = '  '
  * **글자를 잃지 않는다** — 마지막에 공백과 `;` 를 뺀 문자열이 원문과 같은지 확인하고,
  * 다르면 원문을 그대로 돌려준다. 모양을 못 잡는 명령이 있더라도 내용이 바뀌는 일은 없다.
  */
+/**
+ * 제어문(`if` `for` `while` `case`)이 들어 있는 명령인가.
+ *
+ * 이런 명령을 `splitShell` 로 쪼개 "N단계로 실행합니다" 라고 하면 안 된다 —
+ * `if … else … fi` 한 덩어리가 "16단계" 로 나온다(실제로 그렇게 나오고 있었다).
+ * 그건 단계가 아니라 **한 판단**이다. 이런 것은 번호 대신 들여쓴 원문을 보여준다.
+ */
+export function hasShellBlock(cmd: string): boolean {
+  // 앞 글자는 줄바꿈일 수도 있다 — heredoc(`<< EOF … EOF`) 다음 줄에서 시작하는 if 를 놓쳤다
+  return /(^|[\n;&|(])\s*(if|for|while|case|until)\s/.test(cmd)
+}
+
 export function formatShell(cmd: string): string {
   const src = cmd.trim()
   if (!src) return src

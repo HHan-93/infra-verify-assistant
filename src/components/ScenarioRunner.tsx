@@ -35,7 +35,7 @@ import {
   interactiveReason,
   timeoutForCmd,
 } from '../lib/runPolicy'
-import { formatShell } from '../lib/shellFormat'
+import { formatShell, hasShellBlock } from '../lib/shellFormat'
 
 export interface RunnerStep {
   title: string
@@ -2038,7 +2038,7 @@ ${primary?.err ?? ''}`)
                   정작 읽어야 할 '어떤 스텝이 무엇을 바꾸는가' 가 묻힌다. 요약만 보이고 필요할 때 편다. */}
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-amber-200/85">
                 {mutatingSteps.map((m) => (
-                  <span key={`${m.i}-${m.kind}`} title={m.cmd}>
+                  <span key={`${m.i}-${m.kind}`} title={formatShell(m.cmd)}>
                     <span className="text-amber-300">{m.i + 1}번</span> {m.kind}
                   </span>
                 ))}
@@ -2058,7 +2058,9 @@ ${primary?.err ?? ''}`)
                      * 조각이 하나뿐이면(대개 원복 명령: `sudo rmdir /mnt/backup`) 번호를 붙이지 않는다 —
                      * '1단계'만 달린 목록은 읽는 사람에게 아무것도 더 알려주지 않는다.
                      */
-                    const segs = splitShell(m.cmd)
+                    // 제어문이 든 명령은 쪼개지 않는다 — `if … else … fi` 한 덩어리가
+                    // "16단계" 로 나왔다. 그건 단계가 아니라 한 판단이다(shellFormat.ts 주석).
+                    const segs = hasShellBlock(m.cmd) ? [] : splitShell(m.cmd)
                     const head = (
                       <span className="text-amber-300">
                         {m.i + 1}번 {m.kind}
@@ -2068,8 +2070,10 @@ ${primary?.err ?? ''}`)
                       return (
                         <div key={`${m.i}-${m.kind}`}>
                           {head}
-                          <span className="mx-1 text-amber-300/60">:</span>
-                          <code className="break-all font-mono text-[10.5px] text-amber-100/90">{m.cmd}</code>
+                          <span className="mx-1 text-amber-300/60"> —</span>
+                          <pre className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-black/20 px-2 py-1 font-mono text-[10.5px] leading-relaxed text-amber-100/90">
+                            {formatShell(m.cmd)}
+                          </pre>
                         </div>
                       )
                     return (
@@ -2344,7 +2348,7 @@ ${primary?.err ?? ''}`)
                         {step.undo?.trim() && !undoResults[idx] && (
                           <span
                             title={`검증 후 '원복 실행' 시 되돌립니다
-$ ${step.undo}`}
+$ ${formatShell(step.undo ?? "")}`}
                             className="flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-200/90"
                           >
                             <RotateCcw size={9} /> 원복 있음
@@ -2768,9 +2772,9 @@ $ ${step.undo}`}
                               <span className="rounded bg-red-500/20 px-1.5 text-red-300">일부 실패</span>
                             )}
                           </div>
-                          <code className="block break-all font-mono text-[10px] text-amber-100/90">
-                            $ {undoResults[idx].command}
-                          </code>
+                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-amber-100/90">
+                            $ {formatShell(undoResults[idx].command)}
+                          </pre>
                           {undoResults[idx].runs.map((x, k) => (
                             <div key={k} className="mt-1">
                               <div className="text-[10px]">
@@ -2794,7 +2798,9 @@ $ ${step.undo}`}
                             실패 대응 명령 실행됨
                             {typeof r.failureRun.code === 'number' ? ` · 종료 코드 ${r.failureRun.code}` : ''}
                           </div>
-                          <code className="block truncate font-mono text-[10px] text-pink-200/80">$ {r.failureRun.command}</code>
+                          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-pink-200/80">
+                            $ {formatShell(r.failureRun.command)}
+                          </pre>
                           {r.failureRun.out.trim() && (
                             <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 px-2 py-1 font-mono text-[10px] text-gray-300">
                               {r.failureRun.out}

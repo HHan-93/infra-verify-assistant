@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, Clock, Copy, Download, FileText, Loader2, Minus, RefreshCw, Trash2, X } from 'lucide-react'
+import { formatShell } from '../lib/shellFormat'
 import type { ScenarioRunDetail, ScenarioRunRetention, ScenarioRunSummary } from '../../electron/shared-types'
 import {
   buildBundleHtml,
@@ -723,7 +724,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                           /* 칸 너비가 고정됐으니 명령도 그 폭에 맞춰 한 줄로 자른다
                                              (전문은 title 에 있다 — 마우스를 올리면 보인다) */
                                           <code
-                                            title={b.command}
+                                            title={formatShell(b.command)}
                                             className="block w-full truncate font-mono text-[10px] text-gray-300"
                                           >
                                             $ {b.command}
