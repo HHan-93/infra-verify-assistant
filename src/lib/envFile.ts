@@ -10,12 +10,52 @@
 
 export interface EnvRow {
   key: string
-  /** 따옴표를 뗀 값 */
+  /** 따옴표와 **줄 끝 주석**을 뗀 값 */
   value: string
   /** 원문에 붙어 있던 따옴표(`"` `'`) — 저장할 때 그대로 다시 붙인다 */
   quote: string
+  /**
+   * 값 뒤에 붙어 있던 것 — `MFA_USE=false # 2단계 인증` 의 ` # 2단계 인증` 부분.
+   * 앞 공백까지 **원문 그대로** 들고 있다가 저장할 때 다시 붙인다.
+   *
+   * 떼어 두지 않으면 값이 `false # 2단계 인증` 이 된다. 그러면 (1) true/false 드롭다운이
+   * 안 뜨고 — 가이드가 특히 조심하라던 값이 자유 입력칸이 된다 — (2) 값만 고치려다
+   * **주석이 통째로 사라지고** (3) `URL="a" # b` 처럼 뒤에 뭐가 붙으면 따옴표 판정까지
+   * 어긋난다. 이 파일 머리말의 "주석·따옴표는 건드리지 않는다" 를 스스로 어기던 자리다.
+   */
+  comment: string
   /** 0-기반 줄 번호 */
   line: number
+}
+
+/**
+ * `KEY=` 뒤의 원문을 값 · 따옴표 · 줄 끝 주석으로 가른다.
+ *
+ * 가르는 기준은 **공백 뒤의 `#`** 이다(dotenv · docker compose 가 쓰는 규칙).
+ * `PASS=a#b` 처럼 공백 없이 붙은 `#` 은 값의 일부다 — 실제로 그렇게 읽히므로 그 편이 맞다.
+ * 따옴표로 시작하면 **닫는 따옴표를 먼저 찾고** 그 뒤를 주석 자리로 본다.
+ *
+ * 뒤에 붙은 것이 주석 모양이 아니면(`KEY="a" b`) 가르지 않고 통째로 값으로 둔다 —
+ * 모르는 것을 아는 척 쪼개면 저장할 때 원문과 달라진다.
+ *
+ * **어느 쪽으로 갈라도 저장할 때 그대로 다시 붙이므로 글자가 없어지지는 않는다.**
+ */
+function splitValue(raw: string): { value: string; quote: string; comment: string } {
+  const plain = { value: raw, quote: '', comment: '' }
+  const isTrailer = (t: string) => t === '' || /^\s*$/.test(t) || /^\s+#/.test(t)
+
+  const q = raw[0]
+  if (q === '"' || q === "'") {
+    const end = raw.indexOf(q, 1)
+    if (end > 0) {
+      const rest = raw.slice(end + 1)
+      if (isTrailer(rest)) return { value: raw.slice(1, end), quote: q, comment: rest }
+    }
+    return plain // 닫는 따옴표가 없거나 뒤에 엉뚱한 게 붙었다 — 손대지 않는다
+  }
+
+  const m = /^(.*?)(\s+#.*)$/.exec(raw)
+  return m ? { value: m[1], quote: '', comment: m[2] } : plain
 }
 
 /**
@@ -29,10 +69,7 @@ export function parseEnvRows(content: string): EnvRow[] {
   content.split('\n').forEach((l, i) => {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(l)
     if (!m) return
-    const raw = m[2]
-    const q =
-      raw.length >= 2 && (raw[0] === '"' || raw[0] === "'") && raw[raw.length - 1] === raw[0] ? raw[0] : ''
-    rows.push({ key: m[1], value: q ? raw.slice(1, -1) : raw, quote: q, line: i })
+    rows.push({ key: m[1], ...splitValue(m[2]), line: i })
   })
   return rows
 }
@@ -53,7 +90,8 @@ export function isEnvLike(content: string, rows: EnvRow[] = parseEnvRows(content
 export function replaceEnvValue(content: string, row: EnvRow, next: string): string {
   const lines = content.split('\n')
   if (lines[row.line] === undefined) return content
-  lines[row.line] = `${row.key}=${row.quote}${next}${row.quote}`
+  // 주석은 원문 그대로 다시 붙인다 — 값만 고치러 온 사람이 주석을 지우게 두지 않는다
+  lines[row.line] = `${row.key}=${row.quote}${next}${row.quote}${row.comment}`
   return lines.join('\n')
 }
 
@@ -73,9 +111,15 @@ export interface EnvChange {
 
 /** 두 내용의 **키 단위** 차이. 같은 키가 여러 번 나오면 마지막 것을 기준으로 본다 */
 export function diffEnv(before: string, after: string): EnvChange[] {
+  /**
+   * 비교도 표시도 **주석까지 포함한 값**으로 한다.
+   *
+   * 값만 비교하면 원문 보기에서 주석만 고친 것이 "바뀌는 것 0건" 으로 나온다 — 파일은
+   * 바뀌는데 확인창은 안 바뀐다고 말하는 셈이다. 주석이 없는 파일에서는 예전과 같다.
+   */
   const map = (s: string) => {
     const m = new Map<string, string>()
-    for (const r of parseEnvRows(s)) m.set(r.key, r.value)
+    for (const r of parseEnvRows(s)) m.set(r.key, r.value + r.comment)
     return m
   }
   const a = map(before)

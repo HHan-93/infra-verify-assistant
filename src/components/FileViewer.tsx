@@ -997,10 +997,18 @@ export default function FileViewer({
                                 className="w-full rounded border border-white/10 bg-panel-light px-1.5 py-0.5 font-mono text-[12px] text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
                               />
                             )}
-                            {/* 따옴표는 원문 그대로 유지한다는 사실을 밝힌다 — 가이드가 특히 당부하는 부분 */}
-                            {r.quote && (
+                            {/* 따옴표·줄 끝 주석은 원문 그대로 유지한다는 사실을 밝힌다.
+                                주석은 값 칸에서 안 보이므로, 말해 주지 않으면 "내가 지웠나" 싶다. */}
+                            {(r.quote || r.comment.trim()) && (
                               <span className="mt-0.5 block text-[10.5px] text-gray-600">
-                                저장할 때 {r.quote}따옴표{r.quote} 를 그대로 붙입니다
+                                {r.quote && `저장할 때 ${r.quote}따옴표${r.quote} 를 그대로 붙입니다`}
+                                {r.quote && r.comment.trim() && ' · '}
+                                {r.comment.trim() && (
+                                  <>
+                                    뒤의 주석은 그대로 둡니다{' '}
+                                    <span className="text-gray-500">{r.comment.trim()}</span>
+                                  </>
+                                )}
                               </span>
                             )}
                           </td>
