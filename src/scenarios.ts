@@ -1097,22 +1097,26 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "fstab 항목 검증 및 마운트 확인",
-        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data",
+        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data; echo \"부팅시각 $(uptime -s)\"",
+        "capture": [{ "name": "BOOT_BEFORE", "regex": "부팅시각 (.+)" }],
         "check": { "passContains": ["/mnt/data"], "failContains": ["unreachable", "not exist"], "requireExitZero": true },
         "desc": "재부팅 전에 fstab 항목이 실제로 유효한지 확인합니다. findmnt --verify 는 존재하지 않는 장치/경로를 미리 잡아줍니다.",
         "warn": "⚠ 여기서 오류가 나면 재부팅 시 부팅이 emergency mode 로 빠질 수 있습니다. 반드시 수정한 뒤 다음 단계(재부팅)로 넘어가세요."
       },
       {
         "title": "재부팅",
+        "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나 자동 재연결되면 다음 단계를 실행합니다.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
         "title": "마운트 유지 확인",
-        "command": "df -h",
-        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
-        "desc": "/mnt/data 항목이 표시되면 재부팅 후에도 자동 마운트가 정상적으로 동작하는 것입니다."
+        "manualOnly": true,
+        "command": "B='<BOOT_BEFORE>'; N=$(uptime -s); echo \"부팅 시각 — 재부팅 전 $B / 지금 $N\"; if [ \"$B\" = \"$N\" ]; then echo '주의 — 재부팅되지 않았습니다 (앞의 재부팅 단계를 먼저 실행하고, 올라온 뒤 이 단계를 실행하세요)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
+        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의 —"] },
+        "desc": "재부팅 뒤 자동 마운트가 살아 있는지 봅니다. 부팅 시각을 앞 단계와 비교하므로, 재부팅을 건너뛰면 통과하지 않습니다.",
+        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라와 자동 재연결된 뒤 오른쪽 실행을 누르세요.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다 — 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
       }
     ]
   },
@@ -1229,22 +1233,26 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "fstab 항목 검증 및 마운트 확인",
-        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data",
+        "command": "sudo findmnt --verify --verbose; findmnt /mnt/data; df -h /mnt/data; echo \"부팅시각 $(uptime -s)\"",
+        "capture": [{ "name": "BOOT_BEFORE", "regex": "부팅시각 (.+)" }],
         "check": { "passContains": ["/mnt/data"], "failContains": ["unreachable", "not exist"], "requireExitZero": true },
         "desc": "재부팅 전에 fstab 항목이 실제로 유효한지 확인합니다. findmnt --verify 는 존재하지 않는 장치/경로를 미리 잡아줍니다.",
         "warn": "⚠ 여기서 오류가 나면 재부팅 시 부팅이 emergency mode 로 빠질 수 있습니다. 반드시 수정한 뒤 다음 단계(재부팅)로 넘어가세요."
       },
       {
         "title": "재부팅",
+        "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나 자동 재연결되면 다음 단계를 실행합니다.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
         "title": "마운트 유지 확인",
-        "command": "df -h",
-        "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
-        "desc": "/mnt/data 항목이 표시되면 재부팅 후에도 자동 마운트가 정상적으로 동작하는 것입니다."
+        "manualOnly": true,
+        "command": "B='<BOOT_BEFORE>'; N=$(uptime -s); echo \"부팅 시각 — 재부팅 전 $B / 지금 $N\"; if [ \"$B\" = \"$N\" ]; then echo '주의 — 재부팅되지 않았습니다 (앞의 재부팅 단계를 먼저 실행하고, 올라온 뒤 이 단계를 실행하세요)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
+        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의 —"] },
+        "desc": "재부팅 뒤 자동 마운트가 살아 있는지 봅니다. 부팅 시각을 앞 단계와 비교하므로, 재부팅을 건너뛰면 통과하지 않습니다.",
+        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라와 자동 재연결된 뒤 오른쪽 실행을 누르세요.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다 — 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
       }
     ]
   },
@@ -1590,8 +1598,9 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
+        "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나 자동 재연결되면 다음 단계를 실행합니다.",
         "desc": "드라이버 로드를 위해 재부팅합니다."
       },
       {
@@ -1629,8 +1638,9 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
+        "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다. 검증 실행은 여기서 '실행 오류 — 연결 끊김'으로 멈추며, 부팅이 끝나 자동 재연결된 뒤 다음 단계를 개별 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나 자동 재연결되면 다음 단계를 실행합니다.",
         "desc": "MIG 모드 변경 사항을 적용하기 위해 재부팅합니다."
       },
       {
