@@ -1305,10 +1305,19 @@ ${primary?.err ?? ''}`)
     setUndoBusy(false)
     // 지난 회차를 되돌렸으면 그 목록은 더 이상 유효하지 않다 (결과는 아래 스텝에 남는다)
     if (fromPrev) setPrevUndo(null)
-    const failed = Object.values(done).filter((d) => d.runs.some((r) => !r.ok)).length
+    /**
+     * **어느 스텝이 실패했는지 이름으로 말한다.**
+     *
+     * 예전에는 '4건 중 1건 실패' 까지만 알려 주고 '각 스텝을 펼쳐 확인하세요' 로 끝났다.
+     * 스텝이 열일곱 개면 그 하나를 사람이 찾아 내려가야 한다 — 정리가 덜 된 서버를 앞에 두고
+     * 할 일이 아니다(사용자가 이것 때문에 물어 왔다). 번호와 제목을 그대로 적어 준다.
+     */
+    const failedSteps = Object.entries(done)
+      .filter(([, d]) => d.runs.some((r) => !r.ok))
+      .map(([k]) => `${Number(k) + 1}번 ${scenario.steps[Number(k)]?.title ?? ""}`)
     setNotice(
-      failed
-        ? `원복 ${list.length}건 중 ${failed}건 실패 — 각 스텝을 펼쳐 확인하고 남은 것은 직접 정리하세요.`
+      failedSteps.length
+        ? `원복 ${list.length}건 중 ${failedSteps.length}건 실패 — ${failedSteps.join(" · ")}. 아래에서 그 스텝이 펼쳐져 있습니다. 남은 것은 직접 정리하세요.`
         : `원복 ${list.length}건 완료 — 검증 시작 전 상태로 되돌렸습니다.`,
     )
   }
