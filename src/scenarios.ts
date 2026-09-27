@@ -1359,6 +1359,10 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "볼륨 그룹(VG) 생성",
         "command": "sudo vgcreate data_vg /dev/<DISK>",
+        "expect": [
+          { "match": "Wipe it", "send": "y" },
+          { "match": "Really INITIALIZE", "send": "y" }
+        ],
         "undo": "PVS=$(sudo pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2==\"data_vg\"{print $1}'); sudo vgremove -y data_vg && echo 'data_vg 를 지웠습니다'; for d in $PVS; do sudo pvremove -y \"$d\" && echo \"$d 를 빈 볼륨으로 되돌렸습니다\"; done; echo '--- 남은 LVM'; sudo pvs 2>/dev/null || echo '  PV 없음'; sudo vgs 2>/dev/null || echo '  VG 없음'",
         "check": { "requireExitZero": true },
         "desc": "PV 들을 묶는 볼륨 그룹 data_vg 를 만듭니다."
@@ -1372,6 +1376,11 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "논리 볼륨(LV) 생성",
         "command": "sudo lvcreate -l 100%FREE -n data_lv data_vg",
+        "note": "두 번째 실행부터 \"xfs signature detected … Wipe it? [y/n]\" 을 되묻습니다.\nlvremove·pvremove 는 LVM 표식만 지우고 그 안에 있던 파일시스템 서명은 남기기 때문입니다.\n그 물음에는 자동으로 y 를 보냅니다 — 방금 만든 논리 볼륨이므로 지워도 되는 자리입니다.",
+        "expect": [
+          { "match": "Wipe it", "send": "y" },
+          { "match": "Really INITIALIZE", "send": "y" }
+        ],
         "undo": "for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data 2>/dev/null || break; done; sudo lvremove -y data_vg/data_lv",
         "check": { "requireExitZero": true },
         "desc": "VG 의 남은 공간 전부로 논리 볼륨 data_lv 를 만듭니다."
@@ -1385,6 +1394,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "파일시스템 생성",
         "command": "sudo mkfs.xfs /dev/data_vg/data_lv",
+        "note": "mkfs.xfs 는 되묻지 않고 오류로 끝납니다 — \"appears to contain an existing filesystem\".\n앞 단계(7번 lvcreate)가 옛 서명을 지우므로 순서대로 오면 걸리지 않습니다.\n이 단계만 따로 돌리다 그 오류를 만나면, 정말 지워도 되는 LV 인지 확인한 뒤 -f 를 붙이세요.\n시나리오에 -f 를 박아 두지 않은 이유가 그것입니다 — 남의 데이터를 말없이 덮는 마지막 문턱입니다.",
         "warn": "방금 만든 논리 볼륨을 포맷합니다. 기존 데이터가 있는 LV 를 지정하지 않았는지 확인하세요.",
         "check": { "requireExitZero": true },
         "desc": "LV 에 xfs 파일시스템을 만듭니다. (ext4 를 쓰려면 mkfs.ext4)"
