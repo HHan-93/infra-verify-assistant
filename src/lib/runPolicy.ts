@@ -47,7 +47,39 @@ const toMs = (n: string, unit?: string) => {
   const u = (unit ?? 's').toLowerCase()
   return v * (u === 'h' ? 3_600_000 : u === 'm' ? 60_000 : 1000)
 }
-/** 명령이 명시한 소요 시간(stress-ng --timeout 60s, fio --runtime, sleep 30 …) */
+/**
+ * 반복 루프가 **몇 번 도는가** — `for i in $(seq 1 120)` 의 120.
+ *
+ * 이걸 안 보면 감시 루프가 제 시간을 못 받는다. seq 1 120 + sleep 1 짜리 스텝은 실제로
+ * 120초를 넘게 도는데, 선언으로 잡히는 것은 sleep 1 하나뿐이라 제한이 기본값 120초 그대로였다.
+ * **끝나기 직전에 잘려 마지막 '관찰 종료' 문구를 못 찍고, 하필 그 문구가 판정 기준이라
+ * 언제나 실패**했다(scn-nc-port-check 7번 — 마이그레이션 무중단 확인, 사용자 확인).
+ */
+function loopCount(cmd: string): number {
+  let n = 0
+  for (const m of cmd.matchAll(/\bseq\s+(?:(\d+)\s+)?(\d+)\b/g)) {
+    const c = m[1] ? Number(m[2]) - Number(m[1]) + 1 : Number(m[2])
+    if (c > n) n = c
+  }
+  return n
+}
+/**
+ * 한 바퀴에 **명령 자체가 붙잡는 시간** — nc -w 1 · curl --max-time 3 · ping -W 2.
+ *
+ * 잘 붙을 때는 0 에 가깝지만 끊긴 구간에서는 이 시간을 꽉 채운다. 끊김을 보려고 돌리는
+ * 루프이므로 **끊겼을 때를 기준으로** 잡는다 — 잘 될 때만 계산하면 정작 장애가 난
+ * 회차에서 시간이 모자라 잘린다.
+ */
+function perTryMs(cmd: string): number {
+  let max = 0
+  for (const m of cmd.matchAll(/(?:--max-time|--connect-timeout)[=\s]+(\d+)|\s-[wW]\s+(\d+)\b/g)) {
+    const v = Number(m[1] ?? m[2]) * 1000
+    if (v > max) max = v
+  }
+  return max
+}
+
+/** 명령이 명시한 소요 시간(stress-ng --timeout 60s, fio --runtime, sleep 30, 반복 루프 …) */
 export function declaredDurationMs(cmd: string): number {
   let max = 0
   const seen = (ms: number) => {
@@ -56,6 +88,11 @@ export function declaredDurationMs(cmd: string): number {
   for (const m of cmd.matchAll(/--(?:timeout|runtime|time)[=\s]+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
   for (const m of cmd.matchAll(/\bsleep\s+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
   for (const m of cmd.matchAll(/\s-t\s+(\d+)([smh]?)\b/gi)) seen(toMs(m[1], m[2]))
+  // 반복 루프 — (한 바퀴의 sleep + 명령이 붙잡는 시간) × 도는 횟수.
+  // 루프 밖 sleep 까지 한 바퀴로 세어 넉넉해질 수는 있으나, 넉넉한 쪽이 안전하다.
+  // 모자라면 멀쩡한 스텝이 '제한 시간 초과' 로 남고, 남으면 사람이 '중단' 을 누르면 된다.
+  const loops = loopCount(cmd)
+  if (loops > 1) seen(loops * (max + perTryMs(cmd)))
   return max
 }
 /**
