@@ -37,6 +37,15 @@ const APPLY_REQUIRED: {
   pattern: RegExp
   command: string | ((match: RegExpMatchArray) => string)
   desc: string
+  /**
+   * **고치기 전에** 한 줄로 알려 줄 말 (없으면 desc 의 첫 문장을 쓴다).
+   *
+   * desc 는 저장한 뒤에 읽는 글이라 "이제 이렇게 적용하세요" 로 쓰여 있다. 그런데 적용에
+   * 서비스 중단이 따르는 설정은, 그 사실을 **고치기 전에** 알아야 쓸모가 있다 — 업무시간에
+   * 값 하나 고치러 들어간 사람이 저장하고 나서야 "제품을 통째로 내려야 한다" 를 알면
+   * 거기서 멈춘다. 첫 문장만으로 그 무게가 전해지지 않는 규칙에만 따로 적는다.
+   */
+  hint?: string
 }[] = [
   {
     // …/<제품폴더>/product-config/<서비스>/cm.env
@@ -49,6 +58,7 @@ const APPLY_REQUIRED: {
       '· 고칠 값이 더 있으면 다 고친 뒤 한 번만 재기동하세요 — 저장할 때마다 내릴 필요는 없습니다\n' +
       '· 올라온 뒤 docker ps -a 의 STATUS 가 초 단위(Up n seconds)로 바뀌면 재기동된 것입니다\n' +
       '· 저장 직전 원본은 자동으로 백업했습니다 — 따로 cm.env.bak 을 만들지 않아도 됩니다',
+    hint: '저장만으로는 반영되지 않습니다 — 적용하려면 이 제품의 컨테이너를 전부 내렸다 올려야 합니다.',
   },
   { pattern: /\/etc\/netplan\//,     command: 'sudo netplan apply',                      desc: '저장만으로는 네트워크 설정이 반영되지 않습니다. 터미널에서 netplan apply를 실행해야 적용됩니다.' },
   { pattern: /\/etc\/sysctl\.conf$/, command: 'sudo sysctl -p',                          desc: '저장만으로는 커널 파라미터가 반영되지 않습니다. 터미널에서 sysctl -p를 실행해야 적용됩니다.' },
@@ -61,15 +71,32 @@ const APPLY_REQUIRED: {
   { pattern: /\/etc\/neutron\//,    command: 'sudo systemctl restart neutron-*',     desc: 'neutron 설정은 저장만으로 반영되지 않습니다. 관련 neutron 에이전트/서비스를 재시작하세요.' },
   { pattern: /\/etc\/cinder\//,     command: 'sudo systemctl restart cinder-*',      desc: 'cinder 설정은 저장만으로 반영되지 않습니다. cinder 서비스를 재시작하세요.' },
   { pattern: /\/etc\/glance\//,     command: 'sudo systemctl restart glance-*',      desc: 'glance 설정은 저장만으로 반영되지 않습니다. glance 서비스를 재시작하세요.' },
-  { pattern: /\/etc\/keystone\//,   command: 'sudo systemctl restart apache2',       desc: 'keystone 은 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)' },
-  { pattern: /\/etc\/placement\//,  command: 'sudo systemctl restart apache2',       desc: 'placement 는 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)' },
+  { pattern: /\/etc\/keystone\//,   command: 'sudo systemctl restart apache2',       desc: 'keystone 은 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
+  { pattern: /\/etc\/placement\//,  command: 'sudo systemctl restart apache2',       desc: 'placement 는 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
   { pattern: /\/etc\/octavia\//,    command: 'sudo systemctl restart octavia-*',     desc: 'octavia(로드밸런서) 설정은 저장만으로 반영되지 않습니다. octavia 서비스를 재시작하세요.' },
   { pattern: /\/etc\/barbican\//,   command: 'sudo systemctl restart barbican-*',    desc: 'barbican 설정은 저장만으로 반영되지 않습니다. barbican 서비스를 재시작하세요.' },
   { pattern: /\/etc\/heat\//,       command: 'sudo systemctl restart heat-*',        desc: 'heat 설정은 저장만으로 반영되지 않습니다. heat 서비스를 재시작하세요.' },
-  { pattern: /\/etc\/rabbitmq\//,   command: 'sudo systemctl restart rabbitmq-server', desc: 'RabbitMQ 설정은 저장만으로 반영되지 않습니다. rabbitmq-server 를 재시작하세요. (클러스터는 재시작 순서 주의)' },
-  { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.' },
-  { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.' },
+  { pattern: /\/etc\/rabbitmq\//,   command: 'sudo systemctl restart rabbitmq-server', desc: 'RabbitMQ 설정은 저장만으로 반영되지 않습니다. rabbitmq-server 를 재시작하세요. (클러스터는 재시작 순서 주의)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 rabbitmq-server 를 재시작해야 합니다 (클러스터는 노드 순서 주의).' },
+  { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 DB 를 재시작해야 합니다 (Galera 는 순서·부트스트랩 주의).' },
+  { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 클러스터를 재시작해야 합니다. 영향이 크니 노드 순서를 지키세요.' },
 ]
+
+/** 이 경로에 걸리는 규칙과, 거기서 만들어 낸 적용 명령 (없으면 null) */
+function applyRuleFor(path: string): { command: string; desc: string; hint: string } | null {
+  for (const a of APPLY_REQUIRED) {
+    const m = path.match(a.pattern)
+    if (!m) continue
+    // hint 를 안 적어 둔 규칙은 desc 첫 문장을 쓴다 — 전부 "저장만으로는 …" 으로 시작한다
+    const first = a.desc.split('\n')[0]
+    const dot = first.indexOf('. ')
+    return {
+      command: typeof a.command === 'string' ? a.command : a.command(m),
+      desc: a.desc,
+      hint: a.hint ?? (dot > 0 ? first.slice(0, dot + 1) : first),
+    }
+  }
+  return null
+}
 
 /**
  * 설정파일 본문 글꼴 — 터미널(Consolas 우선)과 일부러 다르게 잡는다.
@@ -383,6 +410,14 @@ export default function FileViewer({
    * 확인창을 열 때만 계산하면 될 것 같지만, 편집 중에도 값이 필요하다(아래 도구막대의 건수).
    * 두 내용 비교라 비싸지 않다.
    */
+  /**
+   * 이 파일이 **저장만으로는 반영되지 않는** 것인지 — 불러온 직후부터 알려 준다.
+   *
+   * 이 사실은 저장 뒤에도 안내창으로 뜨지만, 그때는 이미 고친 뒤다. 적용에 서비스 중단이
+   * 따르는 설정(Lite cm.env 는 제품 컨테이너를 전부 내린다)은 **고치기 전에** 알아야
+   * "지금은 못 올리겠으니 나중에 하자" 를 고를 수 있다. 정보가 없던 게 아니라 늦게 왔다.
+   */
+  const applyRule = useMemo(() => (loaded ? applyRuleFor(path.trim()) : null), [loaded, path])
   const envChanges = useMemo(() => (envLike ? diffEnv(original, content) : []), [envLike, original, content])
   const lineChanges = useMemo(
     () => (envLike ? [] : diffLines(original, content)),
@@ -647,13 +682,8 @@ export default function FileViewer({
       setEditing(false) // 저장 후 읽기 전용으로 복귀
       const bak = res.backupPath ? ` · 백업: ${res.backupPath}` : ''
       setMsg(`${res.viaSudo ? '저장됨 (sudo)' : '저장됨'}: ${p}${bak}`)
-      // 경로에서 명령을 만들어야 하는 규칙이 있어 match 결과를 그대로 넘긴다
-      for (const a of APPLY_REQUIRED) {
-        const m = p.match(a.pattern)
-        if (!m) continue
-        setApplyNotice({ command: typeof a.command === 'string' ? a.command : a.command(m), desc: a.desc })
-        break
-      }
+      const rule = applyRuleFor(p)
+      if (rule) setApplyNotice({ command: rule.command, desc: rule.desc })
     } else if (res.needSudoPassword) {
       setPwAction('write')
       setPwInput('')
@@ -851,6 +881,19 @@ export default function FileViewer({
                 .join(' · ')}
               {liteConfigs.length > 3 ? ' …' : ''})
             </span>
+          </div>
+        )}
+
+        {/* 고치기 전에 알아야 할 것. 도구막대 **위**에 둔다 — 불러온 뒤 눈이 먼저 닿는 자리다.
+            한 줄로만 적고, 자세한 것(명령·주의)은 마우스를 올리면 나온다. 적용 명령 전문은
+            저장 뒤 안내창이 복사 버튼과 함께 보여주므로 여기서 또 늘어놓지 않는다. */}
+        {applyRule && (
+          <div
+            title={`${applyRule.desc}\n\n$ ${applyRule.command}`}
+            className="flex items-start gap-1.5 border-b border-white/10 bg-amber-500/[0.08] px-4 py-1.5 text-[11.5px] leading-relaxed text-amber-200/90"
+          >
+            <AlertCircle size={13} className="mt-[2px] shrink-0 text-amber-400" />
+            <span>{applyRule.hint}</span>
           </div>
         )}
 
