@@ -356,7 +356,18 @@ function cleanupConnection(s: Session) {
 }
 
 // ── SSH 연결 (재사용 가능 함수: 최초 접속 + 자동 재접속 공용) ──────
-const RECONNECT_MAX = 5
+/**
+ * 재접속 대기 간격 — 마지막 값 이후에는 포기한다.
+ *
+ * 예전에는 21초 만에(1.5+3+4.5+6+6) 다섯 번을 다 쓰고 끝났다. 짧은 네트워크 끊김에는
+ * 맞지만 **재부팅에는 맞지 않는다** — 이 앱은 시나리오에서 스스로 서버를 내렸다 올린다.
+ * VM 부팅은 보통 30초~2분이라, 예전 예산으로는 앱이 시킨 재부팅조차 못 따라잡았다.
+ *
+ * 대신 정말 죽은 서버도 2분 남짓 노란불로 재시도한다. 그 편을 택한다 —
+ * 살아 돌아올 것을 포기하는 쪽이, 죽은 것을 조금 늦게 포기하는 쪽보다 나쁘다.
+ */
+const RECONNECT_BACKOFF_MS = [1500,3000,6000,12000,20000,30000,30000,30000]
+const RECONNECT_MAX = RECONNECT_BACKOFF_MS.length
 // 렌더러의 "작업 중 끊기면 자동 재연결" 설정과 동기화 — 꺼져 있으면 백엔드도 재접속하지 않고 로컬 셸로 폴백한다.
 let autoReconnectEnabled = true
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -586,7 +597,7 @@ async function attemptReconnect(sessionId: string) {
       status: 'connecting',
       message: `연결이 끊겼습니다 — 자동 재접속 ${i}/${RECONNECT_MAX}...`,
     })
-    await delay(Math.min(1500 * i, 6000))
+    await delay(RECONNECT_BACKOFF_MS[i - 1])
     // 대기 중에 사용자가 이 칸에 다른 서버를 붙였을 수 있다 → 그 연결을 건드리지 않고 종료
     if (s.userClosed || superseded()) break
     const r = await connectSession(sessionId, cfg)
