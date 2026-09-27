@@ -237,17 +237,19 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "sudo virsh list --all",
-        "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
-        "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의 —"] },
+        "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
-        "check": {"passContains":["iotune"],"passRegex":"(read|write)_(iops|bytes)_sec"},
         "target": "하이퍼바이저",
-        "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 iotune",
-        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<iotune> 블록에 read_iops_sec · write_iops_sec 등이 설정값대로 나와야 합니다.",
-        "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크] file 이면 Ephemeral, network 나 block 이면 볼륨입니다'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X | grep -E '<disk |<source |<target dev' | head -8; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의 — iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면 — 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; echo '  · 위 디스크가 file 이 아니면 볼륨 기반입니다 — 그때는 [스토리지] 볼륨 타입 디스크 QoS 시나리오로 확인하세요'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X",
+        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의 —"] },
+        "onFailure": "continue",
+        "desc": "앞 단계에서 확인한 별칭으로 실행합니다. <iotune> 블록에 read_iops_sec · write_iops_sec 등이 설정값대로 나와야 합니다.\n못 찾으면 왜 못 찾았는지(도메인 없음 · 볼륨 기반 · QoS 미적용)를 함께 알려 줍니다.",
+        "info": "이 명령은 인스턴스 안이 아니라 그 인스턴스가 떠 있는 컴퓨트 노드에서 돌려야 합니다.\n\n여기서 실패해도 검증은 멈추지 않습니다.\n제한이 안 걸린 fio 숫자도 증거라서, 뒤 단계까지 재 보고 나서 판단하는 편이 낫습니다."
       },
       {
         "title": "인스턴스 터미널 접속",
@@ -335,17 +337,19 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "sudo virsh list --all",
-        "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias 형태의 별칭을 확인합니다.",
-        "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의 —"] },
+        "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
-        "check": {"passContains":["bandwidth"],"passRegex":"inbound|outbound"},
         "target": "하이퍼바이저",
-        "command": "sudo virsh dumpxml <instance_alias> | grep -A 10 bandwidth",
-        "desc": "위에서 확인한 인스턴스 별칭(instance_alias)으로 실행합니다.\n<interface> 안의 <bandwidth> 블록에 inbound/outbound 의 average · peak · burst 값이 나와야 합니다.",
-        "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 노드(하이퍼바이저 호스트)에서 실행해야 합니다."
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[인터페이스]'; awk 'index($0,\"<interface \")>0{b=1} b{print} index($0,\"</interface>\")>0{b=0}' $X | grep -E '<interface |<mac |<target dev' | head -8; echo '[bandwidth]'; if grep -q bandwidth $X; then grep -A 8 bandwidth $X | grep -E 'bandwidth|inbound|outbound'; else echo '주의 — bandwidth 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면 — 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; echo '  · 포트나 네트워크 쪽 QoS 정책으로 걸었다면 여기가 아니라 neutron QoS 정책에서 확인하세요'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X",
+        "check": { "passContains": ["bandwidth"], "passRegex": "inbound|outbound", "failContains": ["주의 —"] },
+        "onFailure": "continue",
+        "desc": "앞 단계에서 확인한 별칭으로 실행합니다. <interface> 안의 <bandwidth> 블록에 inbound/outbound 의 average · peak · burst 값이 나와야 합니다.\n못 찾으면 왜 못 찾았는지(도메인 없음 · QoS 미적용 · neutron 쪽 정책)를 함께 알려 줍니다.",
+        "info": "이 명령은 인스턴스 안이 아니라 그 인스턴스가 떠 있는 컴퓨트 노드에서 돌려야 합니다.\n\n여기서 실패해도 검증은 멈추지 않습니다.\n제한이 안 걸린 iperf3 숫자도 증거라서, 뒤 단계까지 재 보고 나서 판단하는 편이 낫습니다."
       },
       {
         "title": "iperf3 서버 구성 (별도 인스턴스)",
@@ -1463,17 +1467,19 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "sudo virsh list --all",
-        "desc": "하이퍼바이저 호스트에서 실행합니다. Name 컬럼에 표시되는 instance_alias를 확인합니다.",
-        "info": "virsh는 OpenStack 인스턴스 UUID가 아닌 libvirt 도메인 별칭(instance_alias)으로 조회해야 합니다.\n포털의 인스턴스 이름과 다르므로 반드시 virsh list --all 로 별칭을 먼저 확인하세요."
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의 —"] },
+        "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "QoS 적용 여부 확인 (인스턴스 배치 호스트)",
-        "check": {"passRegex":"(read|write)_(iops|bytes)_sec"},
         "target": "하이퍼바이저",
-        "command": "sudo virsh dumpxml <instance_alias> | grep -E -A 5 \"bandwidth|iotune\"",
-        "desc": "위에서 확인한 인스턴스 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.",
-        "info": "이 명령어는 인스턴스 터미널이 아닌, 해당 인스턴스가 배치된 컴퓨트 호스트(하이퍼바이저)에 접속해서 실행해야 합니다.\n정상 적용 시 아래와 같이 iotune 블록에 설정값이 출력됩니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>"
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크] file 이면 Ephemeral, network 나 block 이면 볼륨입니다'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X | grep -E '<disk |<source |<target dev' | head -8; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의 — iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · QoS 를 볼륨 타입에 연결(Associate)했는지 확인하세요'; echo '  · 연결하기 전에 만든 볼륨에는 적용되지 않습니다 — 볼륨을 다시 만들어 인스턴스를 생성하세요'; echo '  · QoS Specs 의 consumer 가 front-end(또는 both)여야 여기 iotune 으로 보입니다. back-end 면 스토리지가 직접 거는 것이라 도메인 XML 에는 안 나옵니다'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X",
+        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의 —"] },
+        "onFailure": "continue",
+        "desc": "앞 단계에서 확인한 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.\n못 찾으면 왜 못 찾았는지(볼륨 타입 미연결 · consumer 가 back-end · 연결 전에 만든 볼륨)를 함께 알려 줍니다.",
+        "info": "정상 적용 시 iotune 블록에 설정값이 나옵니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>\n\n여기서 실패해도 검증은 멈추지 않습니다 — 제한이 안 걸린 fio 숫자도 증거입니다."
       },
       {
         "title": "인스턴스 터미널 접속",
@@ -2481,8 +2487,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "컴퓨트 노드에서 직접 확인",
-        "command": "sudo virsh list --all",
-        "desc": "컴퓨트 노드에 접속해 KVM/QEMU 레벨에서 도메인(VM) 상태를 직접 확인합니다."
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의 —"] },
+        "desc": "컴퓨트 노드에 접속해 KVM/QEMU 레벨에서 도메인(VM) 상태를 직접 확인합니다. 별칭 옆에 포털의 인스턴스 이름을 함께 보여줍니다.",
+        "info": "포털에서는 ACTIVE 인데 여기서 shut off 면 하이퍼바이저 쪽에서 죽은 것입니다.\n아예 목록에 없으면 이 노드에 스케줄링되지 않았거나 다른 노드로 옮겨간 것입니다."
       }
     ]
   },
