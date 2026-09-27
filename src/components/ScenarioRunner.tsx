@@ -35,6 +35,7 @@ import {
   interactiveReason,
   timeoutForCmd,
 } from '../lib/runPolicy'
+import { formatShell } from '../lib/shellFormat'
 
 export interface RunnerStep {
   title: string
@@ -1709,9 +1710,12 @@ ${primary?.err ?? ''}`)
                             {sessionsForStep(t.step, t.i).map(nameOfSession).map(svcShort).join(', ')}
                           </span>
                         </span>
-                        <code className="mt-0.5 block break-all font-mono text-[11px] text-amber-100/90">
-                          $ {fillPlaceholders(t.undo, valuesForStep(t.i, t.step.title))}
-                        </code>
+                        {/* 지우기 전에 "무엇을 지우는가" 를 읽으라고 띄우는 창이다 —
+                            한 덩어리로 흘려 놓으면 읽을 수가 없다. 표시만 줄을 잡는다
+                            (실행은 위 fillPlaceholders 결과 원문 그대로 나간다). */}
+                        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-amber-100/90">
+                          {formatShell(fillPlaceholders(t.undo, valuesForStep(t.i, t.step.title)))}
+                        </pre>
                       </span>
                     </button>
                   )
