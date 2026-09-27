@@ -1984,8 +1984,9 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "클러스터 상태 확인",
         "command": "sudo ceph -s",
-        "desc": "HEALTH 상태와 down/out 된 OSD 수, PG 상태를 한눈에 확인합니다.",
-        "check": { "passContains": ["HEALTH_OK"], "failContains": ["HEALTH_ERR"] }
+        "desc": "지금 클러스터가 어떤 상태인지 한눈에 봅니다. 이 시나리오를 여는 상황이면 대개 HEALTH_WARN 이고, 그것이 여기서 확인할 내용입니다.",
+        "info": "결과에서 볼 것 — 위에서 아래로 세 가지입니다.\n· health — HEALTH_OK / WARN / ERR 과 그 아래 딸린 사유 줄\n· osd: N osds: M up — up 숫자가 전체보다 적으면 그 차이가 down 된 개수입니다\n· pgs — degraded · misplaced 가 보이면 데이터 복제가 아직 안 끝난 것입니다\n\nHEALTH_OK 로 돌아왔는데 pgs 에 degraded/misplaced 가 남아 있으면 아직 복구 중입니다.\n마지막 단계에서 그 숫자가 줄어드는지 봅니다.",
+        "note": "여기에 '정상 조건' 을 붙이지 않는다.\n예전에는 passContains: HEALTH_OK 였는데, OSD 가 down 이라서 여는 시나리오에 대고 \"HEALTH_OK 가 아니면 실패\" 라고 한 셈이었다.\n그 실패가 전체 실행을 1번에서 끊어, 정작 봐야 할 2~5번 증거를 한 번도 못 모으게 했다.\n지금 상태를 보여 주는 것이 이 스텝의 일이고, 정상인지는 아래 6~8번(조치와 그 결과)에서 가린다."
       },
       {
         "title": "헬스 상세 확인",

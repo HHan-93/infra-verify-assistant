@@ -1059,7 +1059,23 @@ ${primary?.err ?? ''}`)
       }
 
       if (verdict === 'fail' || verdict === 'error') {
-        const action: OnFailureAction = step.onFailure ?? 'stop'
+        /**
+         * **진단형은 실패해도 멈추지 않는다.**
+         *
+         * 기본값이 'stop' 이라 진단 시나리오가 거꾸로 돌고 있었다 — scn4 1번은 ERROR 인
+         * 인스턴스를 찾자마자, scn6 1번은 CrashLoopBackOff 를 찾자마자, scn5 1번은
+         * HEALTH_OK 가 아니라는 이유로 실패로 찍히고 거기서 전체 실행이 끝났다.
+         * **진단하려는 문제가 실제로 있으면 아무것도 진단하지 못하고, 아무 문제 없을 때만
+         * 끝까지 도는 시나리오**였다. 정확히 거꾸로다.
+         *
+         * 이 시나리오들의 스텝은 '통과해야 할 관문' 이 아니라 **한 번에 모아야 할 증거**다.
+         * 2번 헬스 상세·3번 OSD 트리·5번 로그가 바로 그 증거인데, 1번에서 끊기면
+         * 사람이 스텝을 하나씩 눌러 가며 다시 모아야 한다 — 장애 중에.
+         *
+         * 스텝이 onFailure 를 **직접 적어 두었으면 그것을 따른다.** 여기서 바꾸는 것은
+         * '아무것도 안 적었을 때의 기본값' 뿐이다.
+         */
+        const action: OnFailureAction = step.onFailure ?? (scenario.diagnostic ? 'continue' : 'stop')
         const fix = step.onFailureCommand?.trim()
 
         if ((action === 'run' || action === 'retry') && fix) {
@@ -1790,7 +1806,10 @@ ${primary?.err ?? ''}`)
           {/* 시나리오 화면과 같은 표시 — 결과가 '판정 없음' 으로 끝나는 것이 정상임을 미리 밝힌다 */}
           {scenario.diagnostic && (
             <span
-              title="원인을 좁히는 시나리오입니다. 무엇이 정상인지는 사람이 출력을 읽고 판단하므로 자동 판정하지 않습니다."
+              title={
+                '원인을 좁히는 시나리오입니다. 무엇이 정상인지는 사람이 출력을 읽고 판단하므로 자동 판정하지 않습니다.\n' +
+                "스텝이 '실패'로 찍혀도 전체 실행은 멈추지 않습니다 — 그 실패가 바로 찾으려던 것이고, 남은 스텝이 그 증거이기 때문입니다."
+              }
               className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300"
             >
               진단형 · 자동 판정 없음
