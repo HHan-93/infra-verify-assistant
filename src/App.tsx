@@ -321,9 +321,18 @@ export default function App() {
   const [restoreOnLaunch, setRestoreOnLaunch] = useState(
     () => localStorage.getItem('restore_sessions') === '1',
   )
-  // 작업 중 예기치 않게 끊긴 세션을 자동으로 다시 연결 (기본 OFF — 사용자가 켬)
+  /**
+   * 작업 중 예기치 않게 끊긴 세션을 자동으로 다시 연결. **기본 켜짐.**
+   *
+   * 처음에는 새 기능이라 꺼 두고 시작했는데(관행), 이 앱에는 맞지 않는 기본값이었다 —
+   * 시나리오가 **스스로 서버를 재부팅시키는 스텝을 네 개나 갖고 있다.** 재부팅 뒤 세션이
+   * 돌아오는 것은 예외가 아니라 정상 흐름인데, 그때마다 사람이 설정을 먼저 켜야 했다.
+   *
+   * `!== '0'` 으로 읽는다 — 직접 끈 사람('0')의 선택은 그대로 두고,
+   * 한 번도 건드린 적 없는 사람만 새 기본값을 받는다.
+   */
   const [autoReconnect, setAutoReconnect] = useState(
-    () => localStorage.getItem('auto_reconnect') === '1',
+    () => localStorage.getItem('auto_reconnect') !== '0',
   )
   // 민감정보 마스킹 — 리포트 저장/AI 전송 시(기본 ON) / 로그 화면 표시(기본 OFF) / IP까지(기본 OFF)
   const [notifyOn, setNotifyOn] = useState(() => notifyEnabled())
