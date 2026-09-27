@@ -48,8 +48,15 @@ const keyPattern = SECRET_KEYS.map((k) => k.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\
 //   WireGuard 시나리오를 만들다 발견했다.)
 //  접미사는 일부러 넣지 않았다 — `token_count=5` 같은 멀쩡한 값까지 가려 로그가 훼손된다.
 //  꼭 필요한 것(`password_hash`)만 SECRET_KEYS 에 직접 적는다.
+//  구분자 주변 공백은 **같은 줄 안으로** 묶는다(`[ \t]` — `\s` 가 아니다).
+//  `\s` 는 줄바꿈까지 먹어서, YAML 의
+//      secret:
+//        secretName: my-tls
+//  처럼 키만 있고 값이 다음 줄에 오는 자리에서 **다음 줄의 키 이름을 값으로 알고 가렸다.**
+//  결과가 `•••••• my-tls` 였다 — 가려야 할 것(값)은 드러나고 남겨야 할 것(키)이 사라져,
+//  이 파일이 세운 원칙과 정확히 반대로 동작했다. key=value 가 줄을 넘는 일은 없다.
 const KV_RE = new RegExp(
-  `\\b([a-z0-9_]*(?:${keyPattern}))(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
+  `\\b([a-z0-9_]*(?:${keyPattern}))([ \\t]*[:=][ \\t]*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
   'gi',
 )
 
@@ -59,8 +66,16 @@ const URL_CRED_RE = /(\b[a-z][a-z0-9+.\-]*:\/\/[^:/\s]+:)([^@/\s]+)(@)/gi
 // PEM 개인키 블록 전체
 const PEM_RE = /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g
 
-// Authorization: Bearer <token>
-const BEARER_RE = /\b(Bearer\s+)([A-Za-z0-9._\-]+)/gi
+/**
+ * `Authorization: Bearer <토큰>` 의 토큰.
+ *
+ * Basic·Digest 도 같이 본다 — Basic 은 user:pass 를 base64 로 담고 있어 그대로 풀린다.
+ * base64 문자(+ / =)까지 값으로 센다.
+ */
+const AUTH_SCHEME_WORDS = ['Bearer', 'Basic', 'Digest']
+const AUTH_SCHEME_RE = /\b(Bearer|Basic|Digest)(\s+)([A-Za-z0-9._\-+/=]+)/gi
+/** KV 가 이 낱말을 '값' 으로 알고 가리지 않게 — 진짜 값은 바로 위에서 이미 가렸다 */
+const AUTH_SCHEME_ONLY_RE = new RegExp(`^(${AUTH_SCHEME_WORDS.join('|')})$`, 'i')
 
 // IPv4 (옵션)
 const IPV4_RE = /\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g
@@ -76,17 +91,27 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
   // 2) URL 내 자격증명 (password 부분만)
   out = out.replace(URL_CRED_RE, (_m, pre, _pw, at) => `${pre}${MASK}${at}`)
 
-  // 3) key=value / key: value (따옴표로 감싼 값은 따옴표를 남기고 안쪽 전체를 가림)
+  /**
+   * 3) 인증 헤더의 토큰 — **KV 보다 먼저** 가린다.
+   *
+   * 순서가 거꾸로였다. KV 가 `authorization` 을 먼저 잡아 값으로 `Bearer` 한 낱말만
+   * 가리고 끝났고(`Authorization: •••••• eyJhbGciOi…`), 그러면 뒤에 오는 **진짜 토큰이
+   * 그대로 남았다.** 게다가 `Bearer` 가 사라져 이 규칙도 더는 걸리지 않았다 —
+   * 가장 흔한 형태의 토큰이 세 경로(화면·리포트·AI) 모두로 그대로 나가고 있었다.
+   */
+  out = out.replace(AUTH_SCHEME_RE, (_m, scheme, sp) => `${scheme}${sp}${MASK}`)
+
+  // 4) key=value / key: value (따옴표로 감싼 값은 따옴표를 남기고 안쪽 전체를 가림)
   out = out.replace(KV_RE, (_m, key, sep, val) => {
+    // `Authorization: Bearer ••••••` 의 `Bearer` — 인증 방식 이름이지 비밀이 아니다.
+    // 키 이름을 남기는 것과 같은 이유로 남긴다(무엇이 가려졌는지 읽을 수 있어야 한다).
+    if (AUTH_SCHEME_ONLY_RE.test(val)) return `${key}${sep}${val}`
     const q = val[0]
     if ((q === '"' || q === "'") && val.length >= 2 && val[val.length - 1] === q) {
       return `${key}${sep}${q}${MASK}${q}`
     }
     return `${key}${sep}${MASK}`
   })
-
-  // 4) Bearer 토큰
-  out = out.replace(BEARER_RE, (_m, pre) => `${pre}${MASK}`)
 
   // 5) IP (옵션) — 마지막 옥텟만 남기고 앞 3옥텟 마스킹 (형태는 유지)
   if (opts.ip) {
@@ -177,7 +202,7 @@ export function hasSecrets(text: string): boolean {
   // 전역(/g) 정규식은 .test() 가 lastIndex 를 전진시키므로 매 호출 초기화 (PEM 포함)
   KV_RE.lastIndex = 0
   URL_CRED_RE.lastIndex = 0
-  BEARER_RE.lastIndex = 0
+  AUTH_SCHEME_RE.lastIndex = 0
   PEM_RE.lastIndex = 0
-  return KV_RE.test(text) || URL_CRED_RE.test(text) || BEARER_RE.test(text) || PEM_RE.test(text)
+  return KV_RE.test(text) || URL_CRED_RE.test(text) || AUTH_SCHEME_RE.test(text) || PEM_RE.test(text)
 }
