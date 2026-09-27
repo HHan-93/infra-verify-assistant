@@ -1320,7 +1320,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "물리 볼륨(PV) 생성",
         "command": "sudo pvcreate /dev/<DISK>",
-        "undo": "sudo pvremove -y /dev/<DISK>",
+        "undo": "D=/dev/<DISK>; if sudo pvs \"$D\" > /dev/null 2>&1; then sudo pvremove -y \"$D\" && echo \"$D 를 빈 볼륨으로 되돌렸습니다\"; else echo \"$D 는 이미 LVM 볼륨이 아닙니다\"; fi",
         "expect": [
           { "match": "Wipe it", "send": "y" },
           { "match": "Really INITIALIZE", "send": "y" }
@@ -1339,7 +1339,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "볼륨 그룹(VG) 생성",
         "command": "sudo vgcreate data_vg /dev/<DISK>",
-        "undo": "sudo vgremove -y data_vg",
+        "undo": "PVS=$(sudo pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2==\"data_vg\"{print $1}'); sudo vgremove -y data_vg && echo 'data_vg 를 지웠습니다'; for d in $PVS; do sudo pvremove -y \"$d\" && echo \"$d 를 빈 볼륨으로 되돌렸습니다\"; done; echo '--- 남은 LVM'; sudo pvs 2>/dev/null || echo '  PV 없음'; sudo vgs 2>/dev/null || echo '  VG 없음'",
         "check": { "requireExitZero": true },
         "desc": "PV 들을 묶는 볼륨 그룹 data_vg 를 만듭니다."
       },
@@ -1391,12 +1391,12 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "(확장) VG 에 디스크 추가",
+        "note": "이 디스크의 원복은 여기가 아니라 5번(VG 생성)의 원복이 함께 합니다.\n원복은 역순이라 이 스텝이 5·7번보다 먼저 도는데, 그때는 LV 가 아직 이 디스크에 걸쳐 있어 뺄 수가 없습니다.\n5번 원복이 data_vg 에 딸린 PV 를 전부 되돌리므로 확장 디스크도 같이 정리됩니다.",
         "command": "sudo vgextend data_vg /dev/<NEW_DISK>",
         "expect": [
           { "match": "Wipe it", "send": "y" },
           { "match": "Really INITIALIZE", "send": "y" }
         ],
-        "note": "원복은 VG · LV · PV(첫 디스크)까지 되돌립니다.\n확장용 디스크는 VG 제거 뒤에도 PV 표식이 남으니,\n완전히 비우려면 sudo pvremove -y /dev/<NEW_DISK> 를 직접 실행하세요.",
         "check": { "requireExitZero": true },
         "desc": "용량이 부족해지면 새 디스크를 VG 에 추가합니다.\n<NEW_DISK> 에는 아직 아무 데도 쓰지 않은 빈 디스크(예: vdc)를 적으세요.\npvcreate 를 따로 할 필요 없이 vgextend 가 PV 초기화까지 함께 합니다.",
         "warn": "지정한 디스크의 기존 데이터는 지워집니다. 이전에 쓰던 흔적이 남아 있으면 3번과 같은 \"Wipe it? [y/n]\" 을 묻는데, 여기서도 자동으로 y 를 보냅니다."
