@@ -157,7 +157,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/config",
         "check": { "requireExitZero": true },
-        "undo": "sudo rmdir /mnt/config",
+        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; elif mountpoint -q /mnt/config; then echo '주의 — /mnt/config 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/config '; false; elif [ -n \"$(sudo ls -A /mnt/config 2>/dev/null)\" ]; then echo '주의 — /mnt/config 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/config | head -6; false; else sudo rmdir /mnt/config && echo '/mnt/config 를 지웠습니다'; fi",
         "desc": "설정 드라이브를 연결할 디렉토리를 생성합니다."
       },
       {
@@ -170,7 +170,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "설정 드라이브 마운트",
         "command": "DEV=$(lsblk -o NAME,LABEL -nr | awk '$2==\"config-2\"{print \"/dev/\"$1; exit}'); echo \"장치: ${DEV:-못 찾음}\"; if [ -n \"$DEV\" ]; then sudo mount \"$DEV\" /mnt/config && echo '마운트되었습니다'; else echo '주의 — config-2 라벨을 가진 장치를 찾지 못했습니다'; fi",
         "check": { "passContains": ["마운트되었습니다"], "failContains": ["주의 —", "wrong fs type"] },
-        "undo": "sudo umount /mnt/config",
+        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/config || break; sudo umount /mnt/config || break; done; if mountpoint -q /mnt/config; then echo '주의 — /mnt/config 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/config '; sudo fuser -vm /mnt/config 2>&1 | head -5; false; else echo '/mnt/config 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "config-2 라벨이 붙은 장치를 찾아 /mnt/config 에 마운트합니다. 장치명을 자동으로 찾으므로 sr0 가 아니어도 됩니다.",
         "info": "설정 드라이브의 장치 이름은 환경마다 다릅니다 (/dev/sr0 · /dev/sr1 …).\n그래서 이름을 박아 두지 않고 config-2 라벨로 찾습니다 — 손으로 고쳐 넣을 것이 없습니다."
       },
@@ -944,7 +944,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "sudo rmdir /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "CephFS를 마운트할 디렉토리를 생성합니다."
       },
       {
@@ -957,7 +957,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "CephFS 마운트",
         "command": "sudo mount -t ceph <추출위치> /mnt/data -o name=<액세스 경로>,secret=<액세스 키>,mds_namespace=cephfs && mountpoint -q /mnt/data && echo '마운트되었습니다' && df -h /mnt/data",
         "check": { "requireExitZero": true, "passContains": ["마운트되었습니다"] },
-        "undo": "sudo umount /mnt/data || echo '/mnt/data 가 이미 해제되어 있습니다'",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "공유파일 상세에서 확인한 추출위치를 입력해 CephFS를 마운트합니다. name은 액세스 경로(예: meta), secret은 액세스 키 값을 입력하세요."
       },
       {
@@ -1019,7 +1019,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "sudo rmdir /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -1032,7 +1032,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "디스크 마운트",
         "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
-        "undo": "sudo umount /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "파티션을 마운트 포인트에 연결합니다. <DISK>에는 파티션 장치명을 입력하세요. (예: vdb1)"
       },
       {
@@ -1157,7 +1157,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "sudo rmdir /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -1170,7 +1170,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "디스크 마운트",
         "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
-        "undo": "sudo umount /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "볼륨을 마운트 포인트에 연결합니다."
       },
       {
@@ -1352,7 +1352,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "논리 볼륨(LV) 생성",
         "command": "sudo lvcreate -l 100%FREE -n data_lv data_vg",
-        "undo": "sudo umount /mnt/data 2>/dev/null; sudo lvremove -y data_vg/data_lv",
+        "undo": "for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data 2>/dev/null || break; done; sudo lvremove -y data_vg/data_lv",
         "check": { "requireExitZero": true },
         "desc": "VG 의 남은 공간 전부로 논리 볼륨 data_lv 를 만듭니다."
       },
@@ -1379,7 +1379,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트",
         "command": "sudo mkdir -p /mnt/data && sudo mount /dev/data_vg/data_lv /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "sudo umount /mnt/data 2>/dev/null; sudo rmdir /mnt/data",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi; if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "마운트 디렉토리를 만들고 LV 를 마운트합니다."
       },
       {
@@ -2622,7 +2622,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/backup",
         "check": { "requireExitZero": true },
-        "undo": "sudo rmdir /mnt/backup",
+        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; elif mountpoint -q /mnt/backup; then echo '주의 — /mnt/backup 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/backup '; false; elif [ -n \"$(sudo ls -A /mnt/backup 2>/dev/null)\" ]; then echo '주의 — /mnt/backup 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/backup | head -6; false; else sudo rmdir /mnt/backup && echo '/mnt/backup 를 지웠습니다'; fi",
         "desc": "저장용 디스크를 마운트할 디렉토리를 생성합니다."
       },
       {
@@ -2635,7 +2635,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "저장용 디스크 마운트",
         "command": "sudo mount /dev/vdb /mnt/backup",
         "check": { "requireExitZero": true, "failContains": ["wrong fs type", "does not exist"] },
-        "undo": "sudo umount /mnt/backup",
+        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/backup || break; sudo umount /mnt/backup || break; done; if mountpoint -q /mnt/backup; then echo '주의 — /mnt/backup 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/backup '; sudo fuser -vm /mnt/backup 2>&1 | head -5; false; else echo '/mnt/backup 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "/mnt/backup에 저장용 디스크를 마운트합니다. 이후 생성되는 이미지 파일이 이 경로에 저장됩니다."
       },
       {
