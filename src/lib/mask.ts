@@ -55,8 +55,13 @@ const keyPattern = SECRET_KEYS.map((k) => k.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\
 //  처럼 키만 있고 값이 다음 줄에 오는 자리에서 **다음 줄의 키 이름을 값으로 알고 가렸다.**
 //  결과가 `•••••• my-tls` 였다 — 가려야 할 것(값)은 드러나고 남겨야 할 것(키)이 사라져,
 //  이 파일이 세운 원칙과 정확히 반대로 동작했다. key=value 가 줄을 넘는 일은 없다.
+//  키 **뒤의 닫는 따옴표**도 키에 붙여 본다 — JSON·파이썬 dict 의 `"password": "hunter2"`.
+//  예전에는 키 바로 뒤에 `:` 가 와야 해서, 닫는 따옴표가 끼는 이 형태를 **하나도 못 잡았다.**
+//  포털 API 응답·`openstack … -f json`·`kubectl -o json`·JSON 설정파일이 전부 이 모양이라,
+//  입력창이 '가려서 보냅니다' 라고 말하는 동안 비밀번호가 AI 로 평문 전송되고 있었다.
+//  따옴표는 키 쪽에 넣어 두어 치환 뒤에도 그대로 남는다(`"password": "••••••"`).
 const KV_RE = new RegExp(
-  `\\b([a-z0-9_]*(?:${keyPattern}))([ \\t]*[:=][ \\t]*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
+  `\\b([a-z0-9_]*(?:${keyPattern})["']?)([ \\t]*[:=][ \\t]*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
   'gi',
 )
 
@@ -71,9 +76,21 @@ const PEM_RE = /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KE
  *
  * Basic·Digest 도 같이 본다 — Basic 은 user:pass 를 base64 로 담고 있어 그대로 풀린다.
  * base64 문자(+ / =)까지 값으로 센다.
+ *
+ * 규칙이 둘이다. 2.10.0 에서는 하나(`/\b(Bearer|Basic|Digest)\s+토큰/gi`)였는데, 문맥 없이
+ * 대소문자를 무시해 **일반 문장의 다음 낱말을 가렸다** — `Running basic health checks` →
+ * `basic •••••• checks`, `image digest sha256:…` → `digest ••••••:…`. 리포트와 AI 로 가는
+ * 글이 훼손되고 '가림 N건' 도 부풀었다.
+ *  - AUTH_HEADER_RE: `Authorization:` / `Proxy-Authorization:` 뒤라면 토큰 모양을 따지지 않고 가린다.
+ *    헤더 문맥이 확실하므로 짧은 Basic 값(`dXNlcjpwYXNz` — 숫자가 없다)도 놓치면 안 된다.
+ *  - AUTH_BARE_RE: 헤더 이름 없이 `Bearer <토큰>` 만 있는 자리(로그 줄·curl 조각). 이때는 **토큰처럼
+ *    생긴 것만** — 16자 이상이고 숫자나 `. _ - + / =` 가 하나는 있어야 한다. JWT·Keystone 토큰은
+ *    늘 이 조건을 넘고, `health`·`mismatch`·`token` 같은 낱말은 넘지 못한다. Digest 는 여기서 뺐다 —
+ *    Digest 인증값은 `username="…"` 형태라 이 규칙으로는 어차피 못 가리고, 'image digest' 만 걸린다.
  */
 const AUTH_SCHEME_WORDS = ['Bearer', 'Basic', 'Digest']
-const AUTH_SCHEME_RE = /\b(Bearer|Basic|Digest)(\s+)([A-Za-z0-9._\-+/=]+)/gi
+const AUTH_HEADER_RE = /\b((?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?)(Bearer|Basic|Digest)([ \t]+)([A-Za-z0-9._\-+/=]+)/gi
+const AUTH_BARE_RE = /\b(Bearer|Basic)(\s+)((?=[A-Za-z0-9._\-+/=]*[0-9._\-+/=])[A-Za-z0-9._\-+/=]{16,})/gi
 /** KV 가 이 낱말을 '값' 으로 알고 가리지 않게 — 진짜 값은 바로 위에서 이미 가렸다 */
 const AUTH_SCHEME_ONLY_RE = new RegExp(`^(${AUTH_SCHEME_WORDS.join('|')})$`, 'i')
 
@@ -99,7 +116,8 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
    * 그대로 남았다.** 게다가 `Bearer` 가 사라져 이 규칙도 더는 걸리지 않았다 —
    * 가장 흔한 형태의 토큰이 세 경로(화면·리포트·AI) 모두로 그대로 나가고 있었다.
    */
-  out = out.replace(AUTH_SCHEME_RE, (_m, scheme, sp) => `${scheme}${sp}${MASK}`)
+  out = out.replace(AUTH_HEADER_RE, (_m, head, scheme, sp) => `${head}${scheme}${sp}${MASK}`)
+  out = out.replace(AUTH_BARE_RE, (_m, scheme, sp) => `${scheme}${sp}${MASK}`)
 
   // 4) key=value / key: value (따옴표로 감싼 값은 따옴표를 남기고 안쪽 전체를 가림)
   out = out.replace(KV_RE, (_m, key, sep, val) => {
@@ -202,7 +220,8 @@ export function hasSecrets(text: string): boolean {
   // 전역(/g) 정규식은 .test() 가 lastIndex 를 전진시키므로 매 호출 초기화 (PEM 포함)
   KV_RE.lastIndex = 0
   URL_CRED_RE.lastIndex = 0
-  AUTH_SCHEME_RE.lastIndex = 0
+  AUTH_HEADER_RE.lastIndex = 0
+  AUTH_BARE_RE.lastIndex = 0
   PEM_RE.lastIndex = 0
-  return KV_RE.test(text) || URL_CRED_RE.test(text) || AUTH_SCHEME_RE.test(text) || PEM_RE.test(text)
+  return KV_RE.test(text) || URL_CRED_RE.test(text) || AUTH_HEADER_RE.test(text) || AUTH_BARE_RE.test(text) || PEM_RE.test(text)
 }
