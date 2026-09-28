@@ -286,6 +286,25 @@ export default function FileViewer({
   onInsertCommand,
 }: FileViewerProps) {
   const [path, setPath] = useState(initialPath ?? '')
+  /**
+   * **지금 화면에 떠 있는 내용을 실제로 읽어 온 경로.** 저장·sudo 재시도·적용 안내·AI 분석은 이것을 쓴다.
+   *
+   * 예전에는 전부 경로 입력칸(path)을 썼다. 입력칸은 편집 중에도 고칠 수 있어서, nova.conf 를
+   * 고치다가 다음에 볼 nova-compute.conf 를 쳐 두고(Enter 없이) 저장하면 **nova-compute.conf 가
+   * nova.conf 전문으로 통째로 교체됐다.** 확인창의 diff 는 불러온 내용 기준이라 대상이 어긋난 것을
+   * 드러내지도 못했다. 불러오기가 성공한 순간에만 채우고, 새로 불러오기 시작하면 비운다.
+   */
+  const [loadedPath, setLoadedPath] = useState('')
+  /**
+   * 불러오기 요청 번호 — **늦게 도착한 옛 응답을 버린다.**
+   *
+   * sudo 로 느리게 읽히는 키링을 불러오다가 곧바로 ceph.conf 를 고르면, ceph.conf 가 먼저 뜨고
+   * 늦게 온 키링 응답이 내용을 덮었다. 입력칸은 ceph.conf 그대로라, 그 상태로 저장하면
+   * **ceph.conf 에 키링 내용이 기록됐다.** 마지막 요청의 응답만 화면에 반영한다.
+   */
+  const loadSeqRef = useRef(0)
+  /** sudo 비밀번호를 받은 뒤 다시 읽을 경로 — 비밀번호 창이 떠 있는 동안 입력칸이 바뀌어도 원래 요청을 잇는다 */
+  const pwReadPathRef = useRef('')
   const [content, setContent] = useState('')
   const [original, setOriginal] = useState('') // 편집 취소 시 되돌릴 원본
   const [loaded, setLoaded] = useState(false)
@@ -417,7 +436,7 @@ export default function FileViewer({
    * 따르는 설정(Lite cm.env 는 제품 컨테이너를 전부 내린다)은 **고치기 전에** 알아야
    * "지금은 못 올리겠으니 나중에 하자" 를 고를 수 있다. 정보가 없던 게 아니라 늦게 왔다.
    */
-  const applyRule = useMemo(() => (loaded ? applyRuleFor(path.trim()) : null), [loaded, path])
+  const applyRule = useMemo(() => (loaded ? applyRuleFor(loadedPath) : null), [loaded, loadedPath])
   const envChanges = useMemo(() => (envLike ? diffEnv(original, content) : []), [envLike, original, content])
   const lineChanges = useMemo(
     () => (envLike ? [] : diffLines(original, content)),
@@ -614,12 +633,14 @@ export default function FileViewer({
       setMsg('SSH 연결이 필요합니다.')
       return
     }
+    const seq = ++loadSeqRef.current
     setLoading(true)
     setMsg('')
     // 이전 파일 내용이 남아 다른 파일처럼 보이는 것 방지 (실패/팝업 시 화면 비움)
     setContent('')
     setOriginal('')
     setLoaded(false)
+    setLoadedPath('')
     setDirty(false)
     setMatchIdx(-1) // 다른 파일의 매치 위치가 남지 않게
     const res = await window.electronAPI.sftpRead(
@@ -627,8 +648,10 @@ export default function FileViewer({
       p.trim(),
       (pw ?? sudoPw) || undefined,
     )
+    if (seq !== loadSeqRef.current) return // 그 사이 다른 파일을 불러오기 시작했다 — 이 응답은 버린다
     setLoading(false)
     if (res.ok) {
+      setLoadedPath(p.trim())
       setContent(res.content ?? '')
       setOriginal(res.content ?? '')
       setLoaded(true)
@@ -645,6 +668,7 @@ export default function FileViewer({
       setMsg(`${res.viaSudo ? '불러옴 (sudo)' : '불러옴'}: ${p.trim()}`)
     } else if (res.needSudoPassword) {
       // root 권한 필요 → sudo 비밀번호 입력 요청
+      pwReadPathRef.current = p.trim()
       setPwAction('read')
       setPwInput('')
       setShowPw(false)
@@ -663,13 +687,20 @@ export default function FileViewer({
 
   // 저장 버튼 → 앱 내부 확인창 열기 (네이티브 confirm 은 Electron 포커스 버그가 있어 사용하지 않음)
   const requestSave = () => {
-    if (!loaded || !dirty) return
+    if (!loaded || !dirty || !loadedPath) return
+    // 입력칸이 불러온 파일과 다르면 저장하지 않는다 — 어느 파일에 쓰려는지 사람이 헷갈린 상태다.
+    // 저장 대상은 어차피 불러온 파일(loadedPath)이지만, 다른 경로를 보면서 '저장' 을 누르게 두지 않는다.
+    if (path.trim() !== loadedPath) {
+      setMsg(`경로 칸(${path.trim() || '비어 있음'})이 편집 중인 파일(${loadedPath})과 다릅니다 — 경로를 되돌린 뒤 저장하세요.`)
+      return
+    }
     setConfirmOpen(true)
   }
 
   const doSave = async (pw?: string) => {
     setConfirmOpen(false)
-    const p = path.trim()
+    const p = loadedPath
+    if (!p) return
     const res = await window.electronAPI.sftpWrite(
       sessionId,
       p,
@@ -700,7 +731,7 @@ export default function FileViewer({
     const pw = pwInput
     setSudoPw(pw)
     setPwOpen(false)
-    if (pwAction === 'read') load(path, pw)
+    if (pwAction === 'read') load(pwReadPathRef.current || path, pw)
     else if (pwAction === 'write') doSave(pw)
     setPwAction(null)
   }
@@ -714,7 +745,7 @@ export default function FileViewer({
 
   const analyze = () => {
     if (!content) return
-    const started = onAnalyze(`설정파일 ${path.trim()} 의 내용을 분석해 주세요:\n\n${content}`)
+    const started = onAnalyze(`설정파일 ${loadedPath || path.trim()} 의 내용을 분석해 주세요:\n\n${content}`)
     // AI 패널이 이미 스트리밍 중이면 요청이 조용히 무시되므로, 그 경우 뷰어를 닫지 않고
     // 안내만 남겨 사용자가 요청이 유실된 줄 모르고 넘어가지 않게 한다.
     if (!started) {
@@ -1188,7 +1219,7 @@ export default function FileViewer({
               <div className="mb-2 text-sm font-semibold text-gray-100">저장하지 않은 변경이 있습니다</div>
               <p className="mb-3 whitespace-pre-line text-[12.5px] leading-relaxed text-gray-300">
                 {[
-                  dirty && loaded ? `· 서버 설정파일 ${path.trim() || ''} 편집 중` : '',
+                  dirty && loaded ? `· 서버 설정파일 ${loadedPath} 편집 중` : '',
                   cmPending > 0 ? `· 파드 ConfigMap 대기 중인 변경 ${cmPending}건 (아직 클러스터에 보내지 않았습니다)` : '',
                 ]
                   .filter(Boolean)
@@ -1310,7 +1341,7 @@ export default function FileViewer({
                   내용이 바뀌지 않았습니다 (줄바꿈·공백만 달라졌을 수 있습니다).
                 </p>
               )}
-              {isRisky(path.trim()) && (
+              {isRisky(loadedPath) && (
                 <p className="mb-2 rounded bg-red-500/15 px-2 py-1.5 text-[12px] leading-relaxed text-red-300">
                   ⚠️ 위험: 이 파일을 잘못 저장하면 부팅 / 네트워크 / SSH 접속이 끊길 수 있습니다.
                 </p>
@@ -1320,8 +1351,8 @@ export default function FileViewer({
                 경로로 자동 백업합니다. (원본 디렉토리 구조를 그대로 미러링)
               </p>
               <div className="mt-1.5 break-all font-mono text-[11px] leading-relaxed">
-                <div className="text-gray-400">원본: {path.trim()}</div>
-                <div className="text-blue-300/90">백업: {backupPreview(path.trim())}</div>
+                <div className="text-gray-400">원본: {loadedPath}</div>
+                <div className="text-blue-300/90">백업: {backupPreview(loadedPath)}</div>
               </div>
               <div className="mt-3 flex justify-end gap-2">
                 <button
