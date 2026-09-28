@@ -148,6 +148,19 @@ export function runVerdict(r: {
    */
   if (r.stopped) return { key: 'incomplete', label: '중단' }
   /**
+   * **명령과 기준이 있는데 돌지 않은 스텝(미실행)이 남았으면 정상으로 치지 않는다.**
+   *
+   * 예전에는 이 수를 보지 않아, 전체 실행이 manualOnly 로 비켜 간 재부팅 → '재부팅 후 마운트
+   * 유지 확인' 을 **한 번도 돌리지 않은 회차가 '정상 · 모두 기준을 만족' 으로 남았다.** 그 시나리오의
+   * 요점이 바로 그 확인인데, 확인한 적 없는 것이 확인된 것으로 기록된 셈이다. 대화형이라 뺀 스텝,
+   * 입력값이 없어 건너뛴 스텝도 같다.
+   *
+   * 위의 수동대기(명령이 없는 안내 스텝 — counts.waiting)와는 다르다. 그쪽은 러너가 돌릴 것이
+   * 애초에 없고, 이쪽은 돌릴 것이 있는데 안 돌았다. 사람이 일부러 뺀 것이면 '건너뜀' 을 눌러
+   * 그 결정을 기록하면 된다(skip 은 여기 세지 않는다).
+   */
+  if (r.counts.pending > 0) return { key: 'incomplete', label: '미실행 남음' }
+  /**
    * **판정된 스텝이 하나도 없으면 초록을 띄우지 않는다.**
    *
    * `info`(실행됨)는 '돌긴 했는데 정상 조건이 없어 판정하지 않았다' 는 뜻이다(verdict.ts 의
@@ -356,7 +369,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
         : nIncomplete > 0
           ? {
               key: 'incomplete',
-              text: `실패는 없지만 ${nIncomplete}개 회차는 정상으로 볼 수 없습니다 (중단 · 판정 기준 없음)`,
+              text: `실패는 없지만 ${nIncomplete}개 회차는 정상으로 볼 수 없습니다 (중단 · 미실행 스텝 남음 · 판정 기준 없음)`,
             }
           : { key: 'pass', text: `회차 ${runs.length}개 모두 기준을 만족했습니다` }
 
