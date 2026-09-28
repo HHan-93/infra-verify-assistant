@@ -174,6 +174,18 @@ interface StepRun {
   timedOut?: boolean
   replied?: string[]
 }
+/**
+ * 이 스텝의 명령이 **실제로 원격에 나갔는가** — 원복 목록과 회차 기록(ran)이 함께 쓰는 단 하나의 기준.
+ *
+ * '아닌 것' 을 빼는 방식(pending 도 아니고 입력 오류도 아니면 실행됨)이었는데, 수동 판정이 구멍이었다.
+ * 결과가 없던 스텝에 '건너뜀'·'통과' 만 눌러도 `{ manual }` 객체가 생겨 status 가 비어 있고, 그게
+ * '실행됨' 으로 읽혀 **돌린 적 없는 스텝의 원복**(`deluser --remove-home <사용자>` 등)이 목록에 들고
+ * 회차에도 ran 으로 남았다 — 원래 있던 계정을 지우는 길이었다. 그래서 '나갔다' 는 증거가 있을 때만 참이다.
+ * running 도 넣는다 — 명령은 이미 나갔고, 도중에 창이 닫혀 저장되는 회차도 그 사실을 잃으면 안 된다.
+ */
+const stepRan = (r: StepResult | undefined): boolean =>
+  !!r && (r.status === 'ran' || r.status === 'running' || (r.status === 'error' && !!r.runs?.length))
+
 interface StepResult {
   status: StepStatus
   out?: string
@@ -860,8 +872,26 @@ export default function ScenarioRunner({
       if (abortRef.current) break
       const nm = nameOfSession(sid)
       const r = await execOn(sid, cmd, expect)
+      /**
+       * 도는 동안 사람이 '중단' 을 눌렀는가. (루프 첫머리에서 걸러지므로 여기서 true 면 이 명령 도중이다.)
+       *
+       * 중단은 영속 셸에 Ctrl+C 를 보내는 것이라 명령은 **끝까지 돌지 않았다.** 그런데 stress-ng 처럼
+       * SIGINT 를 받고 0 으로 곱게 끝나는 명령은 센티넬이 정상 회수돼, 예전에는 judgeOutput 이
+       * 'successful run completed' 를 보고 **PASS 를 붙여 회차에 저장했다.** 제한 시간 초과를
+       * timedOut 으로 따로 표시하는 것과 같은 이유로, 이것도 판정하지 않고 '중단됨' 으로 남긴다.
+       * 호환 모드(exec)는 중단이 원격 명령을 끊지 못해 명령이 제대로 끝났으므로 그대로 판정한다.
+       */
+      const userAborted = abortRef.current && r.ok && shellOkRef.current[sid] === true
       if (!r.ok) {
         runs.push({ sessionName: nm, error: r.error })
+      } else if (userAborted) {
+        runs.push({
+          sessionName: nm,
+          out: r.out,
+          error:
+            '사용자가 중단했습니다 — 원격 프로세스에 Ctrl+C 를 보냈습니다. ' +
+            '명령이 끝까지 돌지 않았으므로 이 결과로 판정하지 않습니다.',
+        })
       } else if (r.timedOut) {
         // 출력이 하나도 없이 멈춘 경우는 '명령이 오래 걸린 것'과 원인이 다르다.
         // 대개 명령이 시작조차 못 하고 무언가를 기다리는 상황이라, 그쪽을 짚어준다.
@@ -1053,6 +1083,17 @@ ${primary?.err ?? ''}`)
         continue
       }
       let verdict = await runStep(i)
+      /**
+       * 이 스텝 도중에 '중단' 이 눌렸으면 **실패 대응으로 넘어가지 않고** 여기서 끝낸다.
+       *
+       * 중단된 스텝은 위에서 '실행 오류' 가 되므로, 예전에는 그대로 아래 실패 처리로 들어가
+       * onFailure 가 run/retry 인 스텝의 대응 명령(대개 변경 작업)을 **중단을 누른 뒤에**
+       * 모든 대상에서 실행했다. 멈추라고 한 사람의 뜻과 정반대다.
+       */
+      if (abortRef.current) {
+        stoppedAt = i
+        break
+      }
       // '다음 스텝만' 으로 들어온 경우 한 스텝을 마쳤으니 다시 멈춘다
       if (stepOnceRef.current) {
         stepOnceRef.current = false
@@ -1088,6 +1129,7 @@ ${primary?.err ?? ''}`)
           let lastCode: number | undefined
           setRecovering({ idx: i, phase: 'fix' })
           for (const sid of targets) {
+            if (abortRef.current) break // 대응 명령 도중의 중단도 남은 대상에 퍼뜨리지 않는다
             const fr = await execOn(sid, fc, undefined)
             const body = fr.ok ? `${fr.out ?? ''}${fr.err ? `\n[stderr]\n${fr.err}` : ''}` : (fr.error ?? '')
             outs.push(targets.length > 1 ? `── ${nameOfSession(sid)} ──\n${body}` : body)
@@ -1097,6 +1139,13 @@ ${primary?.err ?? ''}`)
           setRes(i, { failureRun: fixRecord })
           setExpanded((s) => new Set(s).add(i))
 
+          // 대응 명령 도중에 중단됐으면 재시도하지 않는다 — runStep 이 한 대상도 못 돌리고
+          // 이 스텝을 '미실행' 으로 덮어써, 방금의 실패 기록까지 사라진다.
+          if (abortRef.current) {
+            setRecovering(null)
+            stoppedAt = i
+            break
+          }
           if (action === 'retry') {
             // 원인을 고쳤다는 전제로 이 스텝을 **한 번만** 다시 돌린다.
             // 무한 재시도는 하지 않는다 — 고쳐지지 않는 원인이면 영영 돌게 된다.
@@ -1209,7 +1258,7 @@ ${primary?.err ?? ''}`)
         // 되돌린다며 명령이 나간다(예: 만든 적 없는 디렉토리에 umount/rmdir).
         .map((st, i) => {
           const r = results[i]
-          const ran = !!r && r.status !== 'pending' && (r.status !== 'error' || !!r.runs?.length)
+          const ran = stepRan(r)
           return { i, step: st, undo: st.undo?.trim() ?? '', ran }
         })
         .filter((x) => x.undo && x.ran)
@@ -1501,7 +1550,7 @@ ${primary?.err ?? ''}`)
       const steps: ScenarioRunStep[] = scenario.steps.map((st, i) => {
         const r = results[i]
         // 원복 목록과 **같은 기준**으로 판단한다 (위 undoTargets 주석)
-        const ran = !!r && r.status !== 'pending' && (r.status !== 'error' || !!r.runs?.length)
+        const ran = stepRan(r)
         const undoRaw = st.undo?.trim() ?? ''
         const undoCmd = undoRaw ? fillPlaceholders(undoRaw, valuesForStep(i, st.title)) : ''
         const keepUndo =
