@@ -2607,6 +2607,12 @@ function cleanScenario(v: unknown): CustomScenario | null {
       ...(cleanStr(s.warn) ? { warn: cleanStr(s.warn) } : {}),
       ...(cleanStr(s.code) ? { code: cleanStr(s.code) } : {}),
       ...(cleanStr(s.target) ? { target: cleanStr(s.target) } : {}),
+      // 두 표시는 실행 여부를 정하는 안전장치라 **반드시 옮긴다.** 예전에는 여기서 빠져,
+      // 복제·편집 저장은 지키는데 내보냈다 가져온 시나리오만 표시를 잃었다. 그러면 전체 실행이
+      // manualOnly 였던 `sudo reboot`·정리 스텝을 말없이 돌리고(scenarios.ts 가 경고한 그대로),
+      // needsInput 이었던 vi·su 스텝은 제한 시간까지 멈춘다. 저장 형식과 같이 true 일 때만 싣는다.
+      ...(s.manualOnly === true ? { manualOnly: true } : {}),
+      ...(s.needsInput === true ? { needsInput: true } : {}),
       ...(check ? { check } : {}),
       ...(capture ? { capture } : {}),
       ...(expect ? { expect } : {}),
@@ -3428,7 +3434,17 @@ ipcMain.handle(
     _evt,
     { runnerId, cmd, expect, timeoutMs }: { runnerId: string; cmd: string; expect?: ExpectRule[]; timeoutMs?: number },
   ) => {
-    const r = await runnerExec(runnerId, cmd, expect ?? [], Math.min(Math.max(timeoutMs ?? 45000, 1000), 600000))
+    /**
+     * 제한 시간은 렌더러가 runPolicy.timeoutForCmd 로 정한 값을 **그대로 따른다.**
+     *
+     * 예전 상한은 10분이었다. 그 사이 runPolicy 는 디스크 이미지 30분 바닥 · 기본값 1800초 선택 ·
+     * `timeout 1h` 처럼 명령이 스스로 밝힌 시간을 따르게 됐는데, 여기서 10분으로 자르니 셋 다
+     * 효력이 없었다 — qemu-img convert 가 10분에 Ctrl+C 로 끊겨 '제한 시간(30분) 초과' 라는
+     * 틀린 문구의 **실패로** 기록됐다(느린 것을 실패로 남기지 않는다는 원칙과 반대).
+     * 남긴 상한 6시간은 잘못 계산된 값(NaN·수십 일)이 셸을 영영 붙잡지 않게 하는 안전망일 뿐이다.
+     */
+    const ms = Number.isFinite(timeoutMs) ? (timeoutMs as number) : 45000
+    const r = await runnerExec(runnerId, cmd, expect ?? [], Math.min(Math.max(ms, 1000), 6 * 3600_000))
     // 셸 자체가 없거나 죽은 경우는 '실행 실패' 로 올린다 — 명령의 종료코드로 위장하면 안 된다
     if (r.dead) return { ok: false, error: r.dead }
     return { ok: true, ...r }
