@@ -19,6 +19,7 @@ import type {
   ConfigMapPatchResult,
   ConfigMapBackup,
   CmBackupOrigin,
+  PodInfo,
   LogIndexEntry,
   LogEntryDetail,
   PerfDoneEvent,
@@ -578,6 +579,20 @@ const electronAPI = {
     name: string,
   ): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('k8s:cmBackupExport', { dir, file, name }),
+
+  /** 네임스페이스의 파드 상세 목록(상태·재시작횟수·age 등) — 설정 관리의 '파드 상태' 탭에서 쓴다 */
+  k8sListPodsDetail: (
+    sessionId: string,
+    namespace: string,
+  ): Promise<{ ok: boolean; pods?: PodInfo[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:listPodsDetail', { sessionId, namespace }),
+  /** 파드 하나만 재시작(= 삭제 — 컨트롤러가 있으면 자동으로 다시 생긴다) */
+  k8sRestartPod: (
+    sessionId: string,
+    namespace: string,
+    pod: string,
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('k8s:restartPod', { sessionId, namespace, pod }),
 
   /** 파드의 컨테이너 — init 컨테이너를 따로 돌려준다(Init 단계에서 막힌 파드의 로그를 봐야 한다) */
   k8sListContainers: (

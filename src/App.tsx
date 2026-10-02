@@ -40,7 +40,7 @@ import TabBar, { type TabInfo, type LayoutMode, type GridGroupInfo } from './com
 import SessionSidebar, { profileKey } from './components/SessionSidebar'
 import Mascot from './components/Mascot'
 import ConfirmDialog from './components/ConfirmDialog'
-import type { SavedProfile, ProfileImportResult } from '../electron/shared-types'
+import type { SavedProfile, ProfileImportResult, LogTailTarget } from '../electron/shared-types'
 import {
   type PaneNode,
   collectLeafTabIds,
@@ -209,6 +209,8 @@ export default function App() {
   // 실시간 로그(tail -f) 뷰어 — 파일탐색기의 "실시간 보기"로 열면 prefillPath 가 채워짐
   const [showLiveLog, setShowLiveLog] = useState(false)
   const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
+  /** 설정 관리의 '파드 상태' 탭에서 로그 버튼으로 넘어올 때의 네임스페이스/파드 지정 */
+  const [liveLogPrefillTarget, setLiveLogPrefillTarget] = useState<LogTailTarget | undefined>(undefined)
   const [showStatusBoard, setShowStatusBoard] = useState(false)
   /**
    * AI 분석에 보낼 거리 — 창을 여는 **그 순간의** 터미널을 떠 둔다.
@@ -1819,6 +1821,7 @@ export default function App() {
           onOpenLogViewer={() => setShowLogViewer(true)}
           onOpenLiveLog={() => {
             setLiveLogPrefill(undefined)
+            setLiveLogPrefillTarget(undefined)
             setShowLiveLog(true)
           }}
           logging={loggingSessions.has(activeId)}
@@ -2315,9 +2318,14 @@ export default function App() {
       {/* 실시간 로그(tail -f) 뷰어 — 활성 세션 대상. key 로 세션/경로가 바뀌면 완전히 새로 시작 */}
       {showLiveLog && (
         <LiveLogViewer
-          key={`${activeId}-${liveLogPrefill ?? ''}`}
+          key={`${activeId}-${liveLogPrefill ?? ''}-${
+            liveLogPrefillTarget?.kind === 'k8s'
+              ? `${liveLogPrefillTarget.namespace}/${liveLogPrefillTarget.pod}`
+              : ''
+          }`}
           sessionId={activeId}
           initialPath={liveLogPrefill}
+          initialTarget={liveLogPrefillTarget}
           currentLabel={(() => {
             const t = tabs.find((t) => t.id === activeId)
             return t ? gridCellLabel(t) : undefined
@@ -2328,6 +2336,7 @@ export default function App() {
           onClose={() => {
             setShowLiveLog(false)
             setLiveLogPrefill(undefined)
+            setLiveLogPrefillTarget(undefined)
           }}
         />
       )}
@@ -3060,6 +3069,13 @@ export default function App() {
             terminalRefs.current[activeId]?.insertCommand(cmd)
             setShowFiles(false)
             setTimeout(() => activeTerm()?.focus(), 0)
+          }}
+          /* '파드 상태' 탭의 로그 버튼 — 설정 관리 창은 닫지 않고(파일 탐색기의 실시간 보기와
+             같은 방식) 그 위에 실시간 로그를 띄워 해당 네임스페이스/파드로 바로 연결한다. */
+          onOpenLiveLog={(namespace, pod) => {
+            setLiveLogPrefill(undefined)
+            setLiveLogPrefillTarget({ kind: 'k8s', namespace, pod })
+            setShowLiveLog(true)
           }}
         />
       )}

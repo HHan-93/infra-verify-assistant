@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ConfigMapView from './ConfigMapView'
+import PodManagerView from './PodManagerView'
 import { parseEnvRows, isEnvLike, replaceEnvValue, diffEnv, diffLines, type EnvRow } from '../lib/envFile'
 import { isSecretKey, maskedValue } from '../lib/cmSecret'
 import {
@@ -24,6 +25,7 @@ import {
   Boxes,
   Copy,
   TerminalSquare,
+  Server,
 } from 'lucide-react'
 
 /**
@@ -124,6 +126,12 @@ const MODES = [
     Icon: Boxes,
     hint: '클러스터의 ConfigMap 을 키-값으로 보고 고칩니다 — kubectl 이 설치된 서버에 접속해 있어야 합니다',
   },
+  {
+    key: 'pods' as const,
+    label: '파드 상태',
+    Icon: Server,
+    hint: '네임스페이스별 파드 목록과 상태를 보고, 파드 하나만 골라 재시작합니다',
+  },
 ]
 
 interface FileViewerProps {
@@ -145,6 +153,8 @@ interface FileViewerProps {
    * 실행까지 하지는 않는다 — 이 명령은 제품 컨테이너를 전부 내렸다 올린다(프리셋의 '입력' 과 같은 규칙).
    */
   onInsertCommand?: (cmd: string) => void
+  /** '파드 상태' 탭의 로그 버튼 — 그 네임스페이스/파드로 실시간 로그를 열어 달라는 요청을 올려보낸다 */
+  onOpenLiveLog?: (namespace: string, pod: string) => void
 }
 
 /** 자주 보는 환경설정 파일 빠른 선택 (카테고리별) */
@@ -284,6 +294,7 @@ export default function FileViewer({
   onClose,
   onAnalyze,
   onInsertCommand,
+  onOpenLiveLog,
 }: FileViewerProps) {
   const [path, setPath] = useState(initialPath ?? '')
   /**
@@ -333,7 +344,7 @@ export default function FileViewer({
    * 보는 대상. 파일(SFTP)과 ConfigMap(k8s)은 **읽고 쓰는 방식이 다르다**(문서 vs 키-값 맵,
    * 백업 위치도 서버 vs 내 PC) — 그래서 한 화면에서 모드로 가르고, 로직은 섞지 않는다.
    */
-  const [mode, setMode] = useState<'file' | 'cm'>('file')
+  const [mode, setMode] = useState<'file' | 'cm' | 'pods'>('file')
   /** ConfigMap 탭의 대기 중인 변경 개수 — 창을 닫으면 사라지므로 닫기 전에 물어본다 */
   const [cmPending, setCmPending] = useState(0)
   /** 닫기 확인창 — 저장하지 않은 것이 있을 때만 뜬다 */
@@ -843,7 +854,15 @@ export default function FileViewer({
             onPendingChange={setCmPending}
           />
         </div>
-        {mode === 'cm' ? null : (
+        <div className={(mode === 'pods' ? 'flex' : 'hidden') + ' min-h-0 flex-1 flex-col'}>
+          <PodManagerView
+            sessionId={sessionId}
+            connected={connected}
+            active={mode === 'pods'}
+            onOpenLiveLog={onOpenLiveLog}
+          />
+        </div>
+        {mode === 'cm' || mode === 'pods' ? null : (
           <>
         {/* 경로 입력 줄 */}
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">

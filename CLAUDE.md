@@ -33,7 +33,7 @@ npm run dist:dir   # 패키징 없이 폴더로만 (빠른 확인용)
 | [electron/preload.ts](electron/preload.ts) | contextBridge — 렌더러는 여기 노출된 API 로만 메인에 접근 |
 | [src/App.tsx](src/App.tsx) (~2.7k줄) | 세션(탭)·레이아웃·전역 상태의 단일 소유자. 모든 패널이 그 자식 |
 
-IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*`(파드 로그 탐색 + ConfigMap 조회·patch) `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
+IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*`(파드 로그 탐색 + ConfigMap 조회·patch + 파드 상세 조회·재시작) `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
 
 ### 명령 실행 경로가 셋이다 — 섞지 말 것
 

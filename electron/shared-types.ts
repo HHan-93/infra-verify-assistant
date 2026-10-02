@@ -585,6 +585,33 @@ export interface ConfigMapPatchResult {
 }
 
 /**
+ * 설정 관리 창의 '파드 상태' 모드 — `kubectl get pods -o json` 에서 뽑아낸 요약 한 줄.
+ *
+ * age 는 문자열로 받지 않는다. 이 앱은 시각을 절대 epoch ms 로 들고 있다가 표시할 때만
+ * "n분 전" 으로 바꾼다 — 조회 시점에 이미 문자열로 굳히면 화면을 오래 띄워 둘 때 멈춰 보인다.
+ */
+export interface PodInfo {
+  name: string
+  namespace: string
+  /** Pending · Running · Succeeded · Failed · Unknown (파드 phase) */
+  phase: string
+  readyCount: number
+  totalContainers: number
+  /** 컨테이너별 restartCount 합 */
+  restarts: number
+  /** 생성 시각 (epoch ms). 못 읽으면 비워 둔다 */
+  createdAtMs?: number
+  /**
+   * 소유 컨트롤러 종류(ReplicaSet·StatefulSet·DaemonSet·Job 등) — ownerReferences[0].kind.
+   * **없으면(null) 단독 파드**라 재시작(=삭제)해도 다시 생기지 않는다. 확인창 문구를 가르는 기준.
+   */
+  ownerKind: string | null
+  /** 이미 삭제 요청이 들어가 종료 중인가 (metadata.deletionTimestamp 존재) */
+  terminating: boolean
+  node?: string
+}
+
+/**
  * 백업 한 건. **내 PC(userData)에 남긴다** — 그 서버가 아니다.
  * ConfigMap 은 클러스터 객체라 '마침 kubectl 이 있던 호스트' 에 두면 이력이 호스트별로 흩어지고,
  * `/var/tmp` 는 systemd-tmpfiles 가 청소하는 곳이라 백업 장소로 부적합하다.

@@ -111,7 +111,7 @@ export default function Toolbar({
       <Divider />
 
       {/* 원격 도구 (아이콘) */}
-      <IconBtn onClick={onOpenFiles} title="설정 관리 — 서버 설정파일 · 파드 ConfigMap">
+      <IconBtn onClick={onOpenFiles} title="설정 관리 — 서버 설정파일 · 파드 ConfigMap · 파드 상태/재시작">
         <FileCode size={15} />
       </IconBtn>
       <IconBtn onClick={onOpenExplorer} title="원격 파일 탐색기 (SFTP)">

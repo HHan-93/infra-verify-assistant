@@ -46,6 +46,12 @@ interface LiveLogViewerProps {
   sessionId: string
   /** 파일탐색기에서 "실시간 보기"로 열었을 때 미리 채워지는 경로 — 있으면 바로 tail 시작 */
   initialPath?: string
+  /**
+   * 파드 상태 탭의 "로그" 버튼처럼, 파일 경로가 아니라 네임스페이스/파드를 미리 정해 열 때 쓴다.
+   * `initialPath` 와 같은 자리지만 k8s 전용이라 타입이 다르다 — 필요하면 docker 등 다른
+   * LogTailTarget 도 그대로 받을 수 있다.
+   */
+  initialTarget?: LogTailTarget
   /** 연결된 다른 세션들 — 패널별로 대상 세션을 바꿔볼 수 있게(다른 서버 로그와 나란히 비교) */
   otherSessions?: OtherSession[]
   /** 현재(기본) 세션의 표시 라벨 — 로그 세트의 세션 힌트 매칭에 사용 */
@@ -1639,16 +1645,29 @@ function LogTailPane({
  * 실시간 로그 뷰어 모달 — 기본 패널 1개, 필요하면 두 번째 패널을 열어 나란히 비교.
  * 각 패널은 독립적으로 세션/경로(또는 파드)를 고른다.
  */
-export default function LiveLogViewer({ sessionId, initialPath, otherSessions = [], currentLabel, onClose }: LiveLogViewerProps) {
+export default function LiveLogViewer({
+  sessionId,
+  initialPath,
+  initialTarget,
+  otherSessions = [],
+  currentLabel,
+  onClose,
+}: LiveLogViewerProps) {
   const [showSecondPane, setShowSecondPane] = useState(false)
   const [sets, setSets] = useState<LogSet[]>(() => loadSets())
   // 각 패널이 tail 시작할 때 보고하는 "현재 대상/세션" — '세트로 저장'의 재료
   const [paneTargets, setPaneTargets] = useState<(LogTailTarget | null)[]>([null, null])
   const [paneSessions, setPaneSessions] = useState<(string | null)[]>([null, null])
-  // 세트 불러오기로 주입할 초기 대상 + 강제 remount용 nonce
+  /**
+   * 세트 불러오기로 주입할 초기 대상 + 강제 remount용 nonce.
+   *
+   * `initialTarget`(파드 상태 탭의 로그 버튼)도 같은 자리를 쓴다 — 저장된 세트를 "방금 고른
+   * 파드 하나짜리 세트"로 보면 동작이 완전히 같다(패널 1에 넣고 자동 시작). 상위(App)가
+   * 이 창을 열 때마다 새로 마운트하므로 초기값으로 한 번만 계산하면 된다.
+   */
   const [loadedPanes, setLoadedPanes] = useState<
     { target: LogTailTarget; sessionId: string; autoStart: boolean }[] | null
-  >(null)
+  >(() => (initialTarget ? [{ target: initialTarget, sessionId, autoStart: true }] : null))
   const [loadNonce, setLoadNonce] = useState(0)
   const [setNotice, setSetNotice] = useState('')
   const [showSaveInput, setShowSaveInput] = useState(false)

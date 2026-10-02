@@ -27,7 +27,10 @@ export default function ConfirmDialog({
     // 아무 일도 안 일어난 것처럼 보였다. 무엇을 지울지 묻는 창이 가려지는 것은 그 자체로 위험하다.
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-6">
       <div
-        className="w-full max-w-sm rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
+        // max-w-sm(24rem) 이던 것을 넓혔다 — 파드 재시작 확인처럼 긴 리소스 이름이 메시지 첫 줄에
+        // 그대로 들어가면 중간에 줄바꿈되어 보기 나빴다. 짧은 메시지(삭제 등)는 여백이 더 생길
+        // 뿐이라 손해가 없다.
+        className="w-full max-w-lg rounded-lg border border-white/10 bg-panel p-4 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 text-sm font-semibold text-gray-100">{title}</div>

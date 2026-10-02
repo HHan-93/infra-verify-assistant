@@ -48,6 +48,7 @@ import {
   type ConfigMapPatchResult,
   type ConfigMapBackup,
   type CmBackupOrigin,
+  type PodInfo,
   type CommandCheck,
   type CaptureRule,
   type OnFailureAction,
@@ -3985,6 +3986,68 @@ ipcMain.handle(
         else if (t.startsWith('init/')) initContainers.push(t.slice(5))
       }
       return { ok: true, containers, initContainers }
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+  },
+)
+
+/**
+ * 네임스페이스의 파드 상세 목록 — 설정 관리 창의 '파드 상태' 탭에서 쓴다.
+ *
+ * `-o json` 으로 받는다. `-o wide` 텍스트를 정규식으로 쪼개면 컬럼 서식이 바뀔 때(이 저장소가
+ * 이미 pcs status 에서 겪은 문제) 조용히 틀어진다 — JSON 은 그 걱정이 없다.
+ */
+ipcMain.handle(
+  'k8s:listPodsDetail',
+  async (_evt, { sessionId, namespace }: { sessionId: string; namespace: string }) => {
+    const r = await kubectlJson(sessionId, `get pods -n ${shQuote(namespace)} -o json`)
+    if (!r.ok) return { ok: false, error: r.error }
+    const list = r.json as {
+      items?: {
+        metadata?: { name?: string; creationTimestamp?: string; deletionTimestamp?: string; ownerReferences?: { kind?: string }[] }
+        spec?: { nodeName?: string }
+        status?: { phase?: string; containerStatuses?: { ready?: boolean; restartCount?: number }[] }
+      }[]
+    }
+    const pods: PodInfo[] = (list.items ?? [])
+      .map((it) => {
+        const statuses = it.status?.containerStatuses ?? []
+        const createdAt = it.metadata?.creationTimestamp ? Date.parse(it.metadata.creationTimestamp) : NaN
+        return {
+          name: it.metadata?.name ?? '',
+          namespace,
+          phase: it.status?.phase ?? 'Unknown',
+          readyCount: statuses.filter((s) => s.ready).length,
+          totalContainers: statuses.length,
+          restarts: statuses.reduce((sum, s) => sum + (s.restartCount ?? 0), 0),
+          createdAtMs: Number.isFinite(createdAt) ? createdAt : undefined,
+          ownerKind: it.metadata?.ownerReferences?.[0]?.kind ?? null,
+          terminating: !!it.metadata?.deletionTimestamp,
+          node: it.spec?.nodeName,
+        }
+      })
+      .filter((p) => p.name)
+    return { ok: true, pods }
+  },
+)
+
+/**
+ * 파드 하나만 재시작 — 실제로는 **그 파드를 지우는 것**이다. ReplicaSet·StatefulSet·DaemonSet·
+ * Job 같은 컨트롤러가 있으면 즉시 새 파드로 재생성되지만, 컨트롤러 없는 단독 파드는 그냥
+ * 사라지고 끝난다. 그 구분은 화면(PodManagerView)에서 ownerKind 로 미리 경고하고 확인을
+ * 받는다 — 여기서는 받은 요청을 그대로 수행할 뿐, 다시 확인하지 않는다.
+ */
+ipcMain.handle(
+  'k8s:restartPod',
+  async (_evt, { sessionId, namespace, pod }: { sessionId: string; namespace: string; pod: string }) => {
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    try {
+      const r = await execCapture(client, `kubectl delete pod ${shQuote(pod)} -n ${shQuote(namespace)} 2>&1`)
+      const out = (r.out ?? '').trim()
+      if (r.code !== 0) return { ok: false, error: out || '파드 삭제 실패' }
+      return { ok: true }
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }
     }
