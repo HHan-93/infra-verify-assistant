@@ -595,7 +595,23 @@ export interface PodInfo {
   namespace: string
   /** Pending · Running · Succeeded · Failed · Unknown (파드 phase) */
   phase: string
+  /**
+   * phase 만으로는 상태를 말할 수 없어 함께 받는 원인들 — 화면 표시는 src/lib/podStatus.ts 가 정한다.
+   *
+   * 컨테이너가 CrashLoopBackOff 로 계속 죽어도 파드 phase 는 **Running 으로 남는다**. phase 만
+   * 보여주면 죽어 가는 파드가 초록 Running 으로 찍힌다(kubectl 의 STATUS 컬럼이 phase 가 아니라
+   * 이 원인들을 보여주는 이유다).
+   */
+  /** 첫 번째로 대기 중인 컨테이너의 state.waiting.reason (CrashLoopBackOff · ImagePullBackOff · ContainerCreating …) */
+  waitingReason?: string
+  /** 첫 번째로 종료된 컨테이너의 state.terminated.reason (Error · OOMKilled · Completed …) */
+  terminatedReason?: string
+  /** 파드 자체의 status.reason (Evicted 등) */
+  statusReason?: string
+  /** 끝나지 않은 init 컨테이너가 있으면 그 상태 — 원인 문구, 없으면 "끝난 수/전체" (kubectl 의 Init:… 자리) */
+  initStatus?: string
   readyCount: number
+  /** spec 의 컨테이너 수 — 아직 생성 전(Pending)이라 containerStatuses 가 비어도 0/0 이 되지 않게 */
   totalContainers: number
   /** 컨테이너별 restartCount 합 */
   restarts: number

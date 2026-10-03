@@ -4003,23 +4003,46 @@ ipcMain.handle(
   async (_evt, { sessionId, namespace }: { sessionId: string; namespace: string }) => {
     const r = await kubectlJson(sessionId, `get pods -n ${shQuote(namespace)} -o json`)
     if (!r.ok) return { ok: false, error: r.error }
+    type CState = {
+      waiting?: { reason?: string }
+      terminated?: { reason?: string; exitCode?: number }
+      running?: unknown
+    }
+    type CStatus = { ready?: boolean; restartCount?: number; state?: CState }
     const list = r.json as {
       items?: {
         metadata?: { name?: string; creationTimestamp?: string; deletionTimestamp?: string; ownerReferences?: { kind?: string }[] }
-        spec?: { nodeName?: string }
-        status?: { phase?: string; containerStatuses?: { ready?: boolean; restartCount?: number }[] }
+        spec?: { nodeName?: string; containers?: unknown[] }
+        status?: {
+          phase?: string
+          reason?: string
+          containerStatuses?: CStatus[]
+          initContainerStatuses?: CStatus[]
+        }
       }[]
     }
     const pods: PodInfo[] = (list.items ?? [])
       .map((it) => {
         const statuses = it.status?.containerStatuses ?? []
+        const inits = it.status?.initContainerStatuses ?? []
         const createdAt = it.metadata?.creationTimestamp ? Date.parse(it.metadata.creationTimestamp) : NaN
+        // init 은 '정상 종료(exitCode 0)' 가 아니면 아직 끝나지 않은 것이다
+        const initDone = inits.filter((s) => s.state?.terminated?.exitCode === 0).length
+        const initStuck = inits.find((s) => s.state?.terminated?.exitCode !== 0)
+        const initStatus = initStuck
+          ? initStuck.state?.waiting?.reason ||
+            (initStuck.state?.terminated ? initStuck.state.terminated.reason || 'Error' : `${initDone}/${inits.length}`)
+          : undefined
         return {
           name: it.metadata?.name ?? '',
           namespace,
           phase: it.status?.phase ?? 'Unknown',
+          waitingReason: statuses.find((s) => s.state?.waiting?.reason)?.state?.waiting?.reason,
+          terminatedReason: statuses.find((s) => s.state?.terminated)?.state?.terminated?.reason,
+          statusReason: it.status?.reason,
+          initStatus,
           readyCount: statuses.filter((s) => s.ready).length,
-          totalContainers: statuses.length,
+          totalContainers: it.spec?.containers?.length ?? statuses.length,
           restarts: statuses.reduce((sum, s) => sum + (s.restartCount ?? 0), 0),
           createdAtMs: Number.isFinite(createdAt) ? createdAt : undefined,
           ownerKind: it.metadata?.ownerReferences?.[0]?.kind ?? null,

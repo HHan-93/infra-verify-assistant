@@ -2307,6 +2307,7 @@ export default function App() {
           onClose={() => setShowExplorer(false)}
           onOpenLiveTail={(path) => {
             setLiveLogPrefill(path)
+            setLiveLogPrefillTarget(undefined)
             setShowLiveLog(true)
           }}
           otherSessions={tabs

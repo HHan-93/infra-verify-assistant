@@ -1781,7 +1781,11 @@ export default function LiveLogViewer({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
+    // z-[60] — 이 창은 **다른 창 위에서 열린다**(설정 관리의 파드 로그 버튼, 파일 탐색기의 실시간 보기).
+    // 둘 다 z-50 이면 순서가 App.tsx 의 렌더 순서로 정해지는데, 설정 관리 창이 그보다 뒤에 그려져
+    // 로그 창이 그 **아래에 깔렸다** — 버튼을 눌러도 아무 일도 안 일어난 것처럼 보인다.
+    // 확인 창(z-[70])보다는 아래여야 이 창 안의 확인 창이 가려지지 않는다.
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
       <div className="flex h-[88vh] w-[1840px] max-w-[98vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <Activity size={16} className="text-emerald-400" />
