@@ -4008,14 +4008,15 @@ ipcMain.handle(
       terminated?: { reason?: string; exitCode?: number }
       running?: unknown
     }
-    type CStatus = { ready?: boolean; restartCount?: number; state?: CState }
+    type CStatus = { name?: string; ready?: boolean; started?: boolean; restartCount?: number; state?: CState }
     const list = r.json as {
       items?: {
         metadata?: { name?: string; creationTimestamp?: string; deletionTimestamp?: string; ownerReferences?: { kind?: string }[] }
-        spec?: { nodeName?: string; containers?: unknown[] }
+        spec?: { nodeName?: string; containers?: unknown[]; initContainers?: { name?: string; restartPolicy?: string }[] }
         status?: {
           phase?: string
           reason?: string
+          conditions?: { type?: string; status?: string }[]
           containerStatuses?: CStatus[]
           initContainerStatuses?: CStatus[]
         }
@@ -4026,13 +4027,35 @@ ipcMain.handle(
         const statuses = it.status?.containerStatuses ?? []
         const inits = it.status?.initContainerStatuses ?? []
         const createdAt = it.metadata?.creationTimestamp ? Date.parse(it.metadata.creationTimestamp) : NaN
-        // init 은 '정상 종료(exitCode 0)' 가 아니면 아직 끝나지 않은 것이다
-        const initDone = inits.filter((s) => s.state?.terminated?.exitCode === 0).length
-        const initStuck = inits.find((s) => s.state?.terminated?.exitCode !== 0)
-        const initStatus = initStuck
-          ? initStuck.state?.waiting?.reason ||
-            (initStuck.state?.terminated ? initStuck.state.terminated.reason || 'Error' : `${initDone}/${inits.length}`)
-          : undefined
+        // init 판정은 kubectl(printPod)의 순서를 그대로 따른다.
+        // 처음엔 '정상 종료(exitCode 0)가 아니면 아직 안 끝난 것' 으로만 봤다가, 네이티브 사이드카
+        // (spec.initContainers 의 restartPolicy: Always — k8s 1.28+)가 **영원히 끝나지 않는 init** 이라
+        // 멀쩡히 Running 인 파드가 전부 `Init:1/2` 로 찍혔다(contrabass 네임스페이스 12개 전부).
+        // 사이드카는 started 면 끝난 것으로 치고, 파드의 Initialized 조건이 True 면 init 을 아예 보지 않는다.
+        const sidecars = new Set(
+          (it.spec?.initContainers ?? []).filter((c) => c.restartPolicy === 'Always').map((c) => c.name),
+        )
+        const initialized = (it.status?.conditions ?? []).some((c) => c.type === 'Initialized' && c.status === 'True')
+        let initStatus: string | undefined
+        if (!initialized) {
+          for (let i = 0; i < inits.length; i++) {
+            const s = inits[i]
+            if (s.state?.terminated?.exitCode === 0) continue
+            if (sidecars.has(s.name) && s.started) continue
+            const total = it.spec?.initContainers?.length ?? inits.length
+            const waiting = s.state?.waiting?.reason
+            // PodInitializing 은 '기다리는 중' 이라 이유가 아니라 진행률(i/n)로 보인다 — kubectl 과 같다
+            initStatus = s.state?.terminated
+              ? s.state.terminated.reason || 'Error'
+              : waiting && waiting !== 'PodInitializing'
+                ? waiting
+                : `${i}/${total}`
+            break
+          }
+        }
+        // 사이드카는 파드가 사는 동안 같이 도는 컨테이너라 준비·재시작 칸에도 센다(kubectl 1.29+ 와 같다)
+        const sidecarStatuses = inits.filter((s) => sidecars.has(s.name))
+        const runningSet = [...statuses, ...sidecarStatuses]
         return {
           name: it.metadata?.name ?? '',
           namespace,
@@ -4041,9 +4064,10 @@ ipcMain.handle(
           terminatedReason: statuses.find((s) => s.state?.terminated)?.state?.terminated?.reason,
           statusReason: it.status?.reason,
           initStatus,
-          readyCount: statuses.filter((s) => s.ready).length,
-          totalContainers: it.spec?.containers?.length ?? statuses.length,
-          restarts: statuses.reduce((sum, s) => sum + (s.restartCount ?? 0), 0),
+          readyCount: runningSet.filter((s) => s.ready).length,
+          totalContainers: (it.spec?.containers?.length ?? statuses.length) + sidecars.size,
+          // kubectl 은 init 컨테이너의 재시작도 합산한다 — 실패해 다시 도는 init 이 0 으로 보이지 않게
+          restarts: [...statuses, ...inits].reduce((sum, s) => sum + (s.restartCount ?? 0), 0),
           createdAtMs: Number.isFinite(createdAt) ? createdAt : undefined,
           ownerKind: it.metadata?.ownerReferences?.[0]?.kind ?? null,
           terminating: !!it.metadata?.deletionTimestamp,
