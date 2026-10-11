@@ -40,6 +40,8 @@ export function perfVerdict(
   th: PerfThresholds,
   opts: {
     canceled?: boolean
+    /** 앱 종료·사고로 끊긴 회차 (PerfRunMeta.interrupted) */
+    interrupted?: boolean
     exitCode?: number
     history?: PerfHistoryPoint[]
     failures?: PerfFailure[]
@@ -47,6 +49,16 @@ export function perfVerdict(
     targetUrl?: string
   } = {},
 ): PerfVerdict {
+  // 끊긴 회차도 중지와 같은 이유로 판정하지 않는다 — 중간까지 쌓인 CSV 는 멀쩡한 결과처럼 보인다
+  if (opts.interrupted) {
+    return {
+      tone: 'info',
+      label: '끊긴 회차 — 판정 안 함',
+      reasons: [
+        '앱이 닫혔거나 비정상 종료되어 예정한 시간을 다 돌지 못했습니다. 중간까지의 수치는 전체 결과로 볼 수 없습니다 — 다시 돌리세요.',
+      ],
+    }
+  }
   if (opts.canceled) {
     return {
       tone: 'info',
@@ -65,8 +77,26 @@ export function perfVerdict(
     }
   }
 
+  /**
+   * **요청이 0건이면 기준이 있어도 판정하지 않는다.** 예전에는 기준을 적어 두면 실패율 0%(0/0)로
+   * '기준 통과' 가 났다. 노드를 죽여 서버가 연결은 받고 응답을 안 주면 요청이 내내 걸려 있다가 끝날 때
+   * 버려져 0건이 된다 — 가용성 검증에서 딱 나오는 장면에 초록을 붙인 셈이었다.
+   */
+  if (summary.requests === 0) {
+    return {
+      tone: 'info',
+      label: '요청이 없었음 — 판정 안 함',
+      reasons: [
+        '끝난 요청이 한 건도 없습니다. 대상 주소·경로·인증을 확인하세요.',
+        '서버가 연결만 받고 응답하지 않으면(장애 중) 요청이 끝나지 않아 0건으로 남습니다.',
+      ],
+    }
+  }
+
   const reasons: string[] = []
   const checks: boolean[] = []
+  /** 기준을 적었는데 값이 없어 **확인하지 못한** 항목 — 하나라도 있으면 통과를 주지 않는다 */
+  let unverified = 0
 
   /**
    * **닿지도 못한 실패**가 대부분이면 그 사실을 맨 앞에 말한다.
@@ -123,7 +153,12 @@ export function perfVerdict(
   const p95Used = warmP95 ?? summary.p95Ms
   const p95Label = warmP95 !== undefined ? `워밍업 ${warmup}초 제외 구간 p95 최대` : 'p95'
   if (warmup > 0 && warmP95 === undefined) {
-    reasons.push(`워밍업 ${warmup}초를 빼려 했지만 초 단위 이력이 없어 전체 값으로 판정했습니다.`)
+    // 이력이 있는데 못 뺀 것은 '이력 없음' 이 아니라 워밍업 뒤 구간이 없는 것이다(워밍업 ≥ 실행 길이)
+    reasons.push(
+      opts.history?.length
+        ? `워밍업 ${warmup}초 뒤에 남은 구간이 없어 전체 값으로 판정했습니다 — 워밍업이 실행 시간보다 깁니다.`
+        : `워밍업 ${warmup}초를 빼려 했지만 초 단위 이력이 없어 전체 값으로 판정했습니다.`,
+    )
   }
 
   const pctChecks: [string, number | undefined, number | undefined][] = [
@@ -134,7 +169,8 @@ export function perfVerdict(
   for (const [label, value, limit] of pctChecks) {
     if (limit === undefined) continue
     if (value === undefined) {
-      reasons.push(`${label} 기준을 적었지만 통계에 그 값이 없습니다.`)
+      reasons.push(`${label} 기준을 적었지만 통계에 그 값이 없어 확인하지 못했습니다.`)
+      unverified++
       continue
     }
     const ok = value <= limit
@@ -178,6 +214,10 @@ export function perfVerdict(
   }
 
   const allOk = checks.every(Boolean)
+  // 넘은 것이 있으면 실패는 확실하다. 다 통과했어도 확인 못 한 기준이 있으면 통과라고 하지 않는다
+  if (allOk && unverified > 0) {
+    return { tone: 'info', label: '일부 기준을 확인하지 못함', reasons }
+  }
   return {
     tone: allOk ? 'pass' : 'fail',
     label: allOk ? '기준 통과' : '기준 초과',

@@ -31,6 +31,13 @@ const SECRET_KEYS = [
   'admin_password', 'admin_pass', 'os_password', 'db_password', 'database_password',
   'rabbit_password', 'transport_url', 'password_hash',
   'memcache_secret_key', 'metadata_proxy_shared_secret', 'telemetry_secret',
+  // 2026-10 점검에서 평문으로 나가던 것들:
+  //  - kubeconfig 의 client-key-data(base64 로 감싼 개인키 전체) · Secret 의 tls.key · ssh-privatekey
+  //  - aws_secret_access_key(`secret` 뒤에 `_access_key` 가 붙어 기존 규칙에 안 걸렸다) · passphrase · jwt
+  //  - OpenStack 설치 가이드의 변수 관례 RABBIT_PASS · DEMO_PASS · NOVA_DBPASS — `_pass`/`dbpass` 로 끝나는 것만.
+  //    `pass` 단독은 여전히 넣지 않는다(위 주석 — "pass: 45" 같은 정상 로그를 가린다)
+  'client-key-data', 'tls.key', 'ssh-privatekey', 'secret_access_key', 'passphrase', 'jwt',
+  '_pass', 'dbpass',
 ]
 
 // key <구분자> value 형태에서 value 부분만 가린다.
@@ -60,10 +67,73 @@ const keyPattern = SECRET_KEYS.map((k) => k.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\
 //  포털 API 응답·`openstack … -f json`·`kubectl -o json`·JSON 설정파일이 전부 이 모양이라,
 //  입력창이 '가려서 보냅니다' 라고 말하는 동안 비밀번호가 AI 로 평문 전송되고 있었다.
 //  따옴표는 키 쪽에 넣어 두어 치환 뒤에도 그대로 남는다(`"password": "••••••"`).
+//  구분자에 `=>` 도 넣는다 — puppet/ruby hash 의 `"admin_password" => "hunter2"` 가 `=` 만 잡혀
+//  `>` 를 값으로 가리고 진짜 값은 그대로 남겼다(`=•••••• "hunter2"`).
 const KV_RE = new RegExp(
-  `\\b([a-z0-9_]*(?:${keyPattern})["']?)([ \\t]*[:=][ \\t]*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
+  `\\b([a-z0-9_]*(?:${keyPattern})["']?)([ \\t]*(?:=>|[:=])[ \\t]*)("[^"]*"|'[^']*'|[^'"\\s,;]+)`,
   'gi',
 )
+
+/**
+ * OpenStack CLI 표 출력 `| password | hunter2 |` — 구분자가 `|` 라 KV 규칙에 안 걸렸다.
+ * `openstack token issue` · `application credential create` 결과가 통째로 AI 로 나가던 자리다.
+ * 첫 칸이 민감 키일 때 둘째 칸만 가린다(표 모양은 남긴다).
+ */
+const TABLE_ROW_RE = new RegExp(
+  `^([ \\t]*\\|[ \\t]*[a-z0-9_]*(?:${keyPattern})[ \\t]*\\|[ \\t]*)([^|\\n]*?)([ \\t]*\\|)`,
+  'gim',
+)
+
+/**
+ * 쿠버네티스 env 의 두 줄 형태 — 값이 키 이름 줄이 아니라 다음 `value:` 줄에 있다.
+ *   - name: DB_PASSWORD
+ *     value: hunter2
+ */
+const K8S_ENV_RE = new RegExp(
+  `(name:[ \\t]*["']?[a-z0-9_]*(?:${keyPattern})["']?[ \\t]*\\r?\\n[ \\t]*value:[ \\t]*)("[^"]*"|'[^']*'|\\S+)`,
+  'gi',
+)
+
+/**
+ * 키 이름 없이 값 모양만으로 알아보는 비밀.
+ *  - Ceph keyring 의 `key = AQB…==` — `key` 를 키 이름에 넣으면 온갖 정상 로그가 가려지므로(ssh key,
+ *    primary key …) 값 모양으로 잡는다. Ceph 비밀은 늘 `AQ` 로 시작하는 40자 base64 다.
+ *  - Keystone Fernet 토큰 `gAAAAAB…` — `openstack token issue` 표의 `| id |` 칸에 들어 있다.
+ */
+const CEPH_KEY_RE = /\bAQ[A-Za-z0-9+/]{36,38}==/g
+const FERNET_RE = /\bgAAAAAB[A-Za-z0-9_-]{40,}={0,2}/g
+
+/**
+ * 잘린 PEM 개인키 — BEGIN 과 END 가 둘 다 있어야 잡던 블록 규칙을 빠져나가는 경우.
+ * 최근 200줄 창이 블록 가운데서 시작하거나(END 만 남음), `head` 로 앞부분만 찍었을 때(BEGIN 만 남음).
+ */
+const PEM_BEGIN_ONLY_RE = /(-----BEGIN [^-]*PRIVATE KEY-----)((?:\r?\n[A-Za-z0-9+/=]{16,})+)/g
+const PEM_END_RE = /-----END [^-]*PRIVATE KEY-----/g
+const B64_LINE_RE = /^[A-Za-z0-9+/=]{40,}$/
+
+/**
+ * END 만 남은 개인키 — END 줄에서 **거꾸로** 올라가며 base64 줄을 가린다.
+ * 처음엔 정규식 `((?:^base64{40,}\n)+)END` 로 했는데, END 가 없는 긴 base64 덩어리(인증서 묶음
+ * `cat ca-bundle.crt` 3,500줄)에서 줄마다 처음부터 다시 훑어 **8,000줄에 20초** 가 걸렸다 — 리포트
+ * 저장·복사·AI 전송 때마다 화면이 멈췄다. END 줄이 있을 때만, 그 앞만 본다.
+ */
+function maskPemEndOnly(text: string): string {
+  if (!text.includes('PRIVATE KEY-----')) return text
+  const lines = text.split('\n')
+  let changed = false
+  for (let i = 0; i < lines.length; i++) {
+    PEM_END_RE.lastIndex = 0
+    if (!PEM_END_RE.test(lines[i])) continue
+    let j = i - 1
+    while (j >= 0 && B64_LINE_RE.test(lines[j].replace(/\r$/, ''))) j--
+    if (j < i - 1) {
+      lines.splice(j + 1, i - 1 - j, MASK)
+      i = j + 2
+      changed = true
+    }
+  }
+  return changed ? lines.join('\n') : text
+}
 
 // transport_url 등 URL 안의 자격증명: scheme://user:PASSWORD@host
 const URL_CRED_RE = /(\b[a-z][a-z0-9+.\-]*:\/\/[^:/\s]+:)([^@/\s]+)(@)/gi
@@ -104,6 +174,15 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
 
   // 1) PEM 개인키 블록 통째로
   out = out.replace(PEM_RE, '-----BEGIN PRIVATE KEY-----\n' + MASK + '\n-----END PRIVATE KEY-----')
+  out = out.replace(PEM_BEGIN_ONLY_RE, (_m, head) => `${head}\n${MASK}`)
+  out = maskPemEndOnly(out)
+  out = out.replace(CEPH_KEY_RE, MASK)
+  out = out.replace(FERNET_RE, MASK)
+  out = out.replace(TABLE_ROW_RE, (_m, head, _val, tail) => `${head}${MASK}${tail}`)
+  out = out.replace(K8S_ENV_RE, (_m, head, val) => {
+    const q = val[0]
+    return q === '"' || q === "'" ? `${head}${q}${MASK}${q}` : `${head}${MASK}`
+  })
 
   // 2) URL 내 자격증명 (password 부분만)
   out = out.replace(URL_CRED_RE, (_m, pre, _pw, at) => `${pre}${MASK}${at}`)
@@ -124,6 +203,17 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
     // `Authorization: Bearer ••••••` 의 `Bearer` — 인증 방식 이름이지 비밀이 아니다.
     // 키 이름을 남기는 것과 같은 이유로 남긴다(무엇이 가려졌는지 읽을 수 있어야 한다).
     if (AUTH_SCHEME_ONLY_RE.test(val)) return `${key}${sep}${val}`
+    // 값이 `{` `[` 로 시작하면 비밀 자체가 아니라 그 아래 구조다 — Keystone 인증 JSON 의
+    // `"password": {"user": …}` 를 가리면 구조가 깨지고(`"password": ••••••"user"`) 정작 안쪽 값은
+    // 안쪽 규칙이 따로 가린다
+    // 값 자리가 여는 괄호 **하나뿐**일 때만이다(값이 다음 칸에서 시작하는 구조). `password=[x]` 처럼
+    // 괄호로 시작하는 평범한 값까지 넘기면 그게 샌다
+    if (val === '{' || val === '[') return `${key}${sep}${val}`
+    // 참·거짓·없음 같은 설정값은 비밀이 아니다 — `use_jwt=true` 를 가리면 설정이 안 읽힌다
+    if (/^(true|false|yes|no|on|off|null|none)$/i.test(val)) return `${key}${sep}${val}`
+    // 소문자 `…_pass` 에 숫자만 오면 카운터다(`tests_pass: 45`). 비밀번호 변수는 관례상 대문자
+    // (RABBIT_PASS)이거나 숫자만으로 되어 있지 않다
+    if (/_pass["']?$/.test(key) && /^\d+$/.test(val)) return `${key}${sep}${val}`
     const q = val[0]
     if ((q === '"' || q === "'") && val.length >= 2 && val[val.length - 1] === q) {
       return `${key}${sep}${q}${MASK}${q}`

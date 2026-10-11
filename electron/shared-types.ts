@@ -25,6 +25,8 @@ export interface ConnectResult {
   message: string
   /** 저장된 호스트 키와 달라 거부됨 (사용자가 신뢰 후 재접속 필요) */
   hostKeyChanged?: boolean
+  /** known-hosts 를 못 읽어 처음 보는 키를 확인할 수 없음(변경이 아니라 '모름') — 확인 문구를 다르게 띄운다 */
+  hostKeyUnverified?: boolean
 }
 
 /** 연결 상태 변화 이벤트 (메인 → 렌더러) */
@@ -35,6 +37,8 @@ export interface SSHStatusEvent {
   sessionId: string
   status: SSHStatus
   message?: string
+  /** 사람이 '연결 해제' 를 눌러 닫았다 — 렌더러는 이 닫힘을 자동 재연결하지 않는다 */
+  userInitiated?: boolean
 }
 
 /** 터미널 출력 이벤트 (메인 → 렌더러) — sessionId 로 해당 탭 xterm 에 라우팅 */
@@ -625,6 +629,45 @@ export interface PodInfo {
   /** 이미 삭제 요청이 들어가 종료 중인가 (metadata.deletionTimestamp 존재) */
   terminating: boolean
   node?: string
+  /**
+   * 재시작 뒤 '새로 생긴 파드' 를 알아보는 열쇠 — src/lib/podRestart.ts 가 쓴다.
+   * StatefulSet 은 같은 이름으로 다시 생기므로 이름이 아니라 uid 로 옛 파드와 가른다.
+   * ReplicaSet·DaemonSet 파드는 이름이 바뀌므로 generateName(`deploy-hash-`)이 같은지로 짝을 찾는다.
+   */
+  uid?: string
+  generateName?: string
+  /** 컨테이너별 상세 — 행을 펼쳤을 때 '왜 비정상인가' 를 보여준다. 사이드카는 init 쪽에 kind 로 표시 */
+  containers?: PodContainerInfo[]
+}
+
+export interface PodContainerInfo {
+  name: string
+  kind: 'main' | 'init' | 'sidecar'
+  ready: boolean
+  restartCount: number
+  /** 지금 상태 — running · waiting:<원인> · terminated:<원인> */
+  state: string
+  /** 지금 상태의 부가 문구(waiting/terminated 의 message) — 이미지 이름 오타 등 원인이 여기 있다 */
+  stateMessage?: string
+  /**
+   * **직전에 죽은 이유** (lastState.terminated). CrashLoopBackOff 화면에서 정작 필요한 것은 지금
+   * 상태(대기 중)가 아니라 바로 전에 왜 죽었는가(OOMKilled · exit 1)다.
+   */
+  lastTerminated?: { reason?: string; exitCode?: number; finishedAtMs?: number; message?: string }
+}
+
+/** 파드 하나의 이벤트 — 행을 펼쳤을 때 최근 것부터 보여준다 */
+export interface PodEvent {
+  type: string
+  reason: string
+  message: string
+  count: number
+  /** 마지막 발생 시각(epoch ms, 서버 시계) — lastTimestamp → eventTime → firstTimestamp 순으로 고른다 */
+  atMs?: number
+  /** 처음 발생 시각 — 같은 초에 몰린 이벤트의 순서를 가르고, '몇 분째 반복' 을 잰다 */
+  firstAtMs?: number
+  /** 어느 컨테이너의 일인가(involvedObject.fieldPath 의 `spec.containers{이름}`) — 파드 전체의 일이면 비움 */
+  container?: string
 }
 
 /**
@@ -1099,6 +1142,16 @@ export interface PerfRunMeta {
   exitCode?: number
   /** 사용자가 중지시켰는가 — 중간에 끊긴 수치를 '결과' 로 읽지 않도록 남긴다 */
   canceled?: boolean
+  /**
+   * **사람이 멈춘 게 아니라 끊긴 회차** — 앱을 닫았거나, 앱이 죽었거나, PC 가 꺼졌다.
+   *
+   * 예전에는 이 경우 run.json 에 아무 표시도 남지 않아(앱을 닫을 때는 중지 표시를 메모리에만
+   * 하고 쓰기 전에 꺼졌다), 다음 실행에서 **중간까지 쌓인 CSV 로 PASS/FAIL 이 났고 비교 기준선으로도
+   * 뽑혔다.** 닫을 때는 이 표시를 쓰고 끝내며, 그러지 못한 회차는 목록을 읽을 때 '종료 시각이 없는데
+   * 지금 돌고 있지도 않음' 으로 알아보고 채운다. canceled 와 나눈 이유: 사람이 멈춘 것과 사고로
+   * 끊긴 것은 다음에 할 일이 다르다(앞은 의도, 뒤는 다시 돌려야 함).
+   */
+  interrupted?: boolean
   /** 돌고 있는 동안의 대시보드 주소 (종료 후에는 안 열린다) */
   webUrl?: string
   /** 종료 후 자체 HTML 리포트 */

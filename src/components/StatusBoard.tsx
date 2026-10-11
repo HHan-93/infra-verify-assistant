@@ -127,6 +127,9 @@ function loadCfg(): BoardConfig {
   return DEFAULT_CFG
 }
 
+/** 잡이 '직전 값을 유지만 했다' 고 알리는 표식 — guard 가 갱신 시각을 올리지 않는다 */
+const STALE_FRAME = Symbol('stale-frame')
+
 // ── 파싱 결과 타입 ─────────────────────────────────────────────
 interface HostStat {
   id: string
@@ -178,6 +181,8 @@ interface CephStat {
   etaSec: number | null
   reasons: string[] // HEALTH_WARN/ERR 사유 줄 (osd down, clock skew, pool full 등)
   note: string
+  /** 이번 프레임은 응답이 늦어 **직전 값**을 보여 주는 중 — 몇 초 전 값인지. 초록·진행률을 그리지 않는다 */
+  staleSec?: number
 }
 interface PodRow {
   name: string
@@ -197,6 +202,8 @@ interface PodStat {
   abnormalCount: number // 표시 범위와 무관하게 항상 비정상 개수
   rows: PodRow[] // 표시할 행 (scope 에 따라 비정상만 또는 전체)
   note: string
+  /** 출력은 있었는데 파드 줄로 읽힌 것이 없다(kubectl 오류·경고 문구뿐) — 조회 실패로 다룬다 */
+  unparsed?: boolean
   /**
    * 조회 자체를 못 했다(세션 끊김·kubectl 타임아웃·권한 오류).
    * '비정상 0개'와 반드시 구분해야 한다 — 조회 실패를 '이상 없음'으로 세면
@@ -333,6 +340,8 @@ const sudoOr = (cmd: string) => `sudo -n ${cmd} 2>/dev/null || ${cmd} 2>&1`
  * (초과해도 서버쪽 실행은 계속될 수 있다 — 클라이언트 대기만 끊는다)
  */
 const CMD_TIMEOUT_MS = 12000
+/** pcs 가 답하지 않을 때 직전 OFFLINE 을 유지하는 최대 시간 — SSH keepalive 한도(15초×6=90초)에 여유를 둔 값 */
+const PCS_HOLD_MAX_MS = 120_000
 type RunResult = { ok: boolean; code?: number; out?: string; err?: string; error?: string; timedOut?: boolean }
 async function run(id: string, cmd: string, timeoutMs = CMD_TIMEOUT_MS): Promise<RunResult> {
   let tid: ReturnType<typeof setTimeout> | undefined
@@ -612,6 +621,11 @@ function parsePods(
     .map((l) => l.trim())
     // kubectl 안내/에러 줄 제외 ("No resources found in <ns> namespace." 등)
     .filter((l) => l && !/^error|^the connection|^the server|no resources found|not found|unable to connect|forbidden/i.test(l))
+    // klog 형식의 오류·경고 줄(`E1008 10:00:00.123456 12345 memcache.go:265] …`) — apiserver 에 못 닿으면
+    // kubectl 이 이런 줄을 찍는데, 위 문구 필터를 빠져나가 `E1008` 이라는 **가짜 비정상 파드**가 됐다.
+    // 그러면 조회 실패가 '확인 불가' 가 아니라 비정상 파드로 보였고, 직전에 비정상이던 워크로드가 이번
+    // 목록에 없으니 그 시각에 '복구' 로 찍혔다(가짜 조기 복구).
+    .filter((l) => !/^[EWIF]\d{4} \d\d:\d\d:\d\d/.test(l))
   if (!lines.length) return { namespace, total: 0, abnormalCount: 0, rows: [], note: '파드 없음 또는 조회 실패' }
   const all: PodRow[] = []
   for (const l of lines) {
@@ -620,6 +634,9 @@ function parsePods(
     const name = cols[0]
     const ready = cols[1] ?? ''
     const status = cols[2]
+    // 파드 줄인지 교차 검증한다 — READY 는 늘 `숫자/숫자`, 이름은 DNS 이름 형태다. 아니면 kubectl 이 찍은
+    // 다른 문구이므로 파드로 세지 않는다(정규식 파싱은 서식 변화를 가정한다는 이 저장소의 규칙)
+    if (!/^\d+\/\d+$/.test(ready) || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(name)) continue
     // RESTARTS 가 "5 (23h ago)" 처럼 공백을 포함해 컬럼이 밀릴 수 있어, NODE 는 IP 바로 다음 토큰으로 찾는다.
     // (NAME/READY/STATUS 는 항상 앞 3개로 고정) IP 는 IPv4 / IPv6(':') / 미스케줄 '<none>' 형태.
     let node = '-'
@@ -645,6 +662,8 @@ function parsePods(
   const rows = (scope === 'all' ? [...all] : all.filter((p) => !p.healthy)).sort(
     (a, b) => Number(a.healthy) - Number(b.healthy),
   )
+  // 줄은 있었는데 파드로 읽힌 것이 하나도 없다 = kubectl 이 다른 것을 찍었다 — '없음' 이 아니라 '모름'
+  if (all.length === 0) return { namespace, total: 0, abnormalCount: 0, rows: [], note: '파드 목록을 읽지 못함', unparsed: true }
   return { namespace, total: all.length, abnormalCount, rows, note: '' }
 }
 // 유닛명 정규화(.service 등 접미사 제거) — Id= 값과 사용자가 입력한 이름을 같은 키로 맞춘다
@@ -987,6 +1006,12 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const hostnamesRef = useRef<Record<string, string>>({})
   // masakari 세션 id → 로그시각 보정값 { delta(ms), ok } (검증 시작 시 host date 로 1회 산출)
   const calibRef = useRef<Record<string, { delta: number; ok: boolean }>>({})
+  /** 마지막으로 **제대로 받은** Ceph 상태 — 응답이 늦은 프레임에 '몇 초 전 값' 으로 보여 준다 */
+  const lastCephRef = useRef<{ v: CephStat; at: number } | null>(null)
+  /** masakari 호스트별 마지막으로 **제대로 받은** 판정 — 조회 실패 프레임에 이것을 유지한다 */
+  /** pcs 가 OFFLINE 이라고 확정한 노드 — pcs 가 답하지 않는 프레임에도 그 판정을 유지한다 */
+  const pcsDownRef = useRef<Map<string, { at: number; sshDropped: boolean }>>(new Map())
+  const lastMasakariRef = useRef<Record<string, { p: ReturnType<typeof parseMasakari>; at: number }>>({})
 
   // 폴링 루프는 시작 시점의 클로저에 고정되므로, 최신 cfg/sessions 를 ref 로 노출해 항상 최신값을 읽게 한다.
   const cfgRef = useRef(cfg)
@@ -1113,8 +1138,9 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
      */
     const guard = (key: string, fn: () => Promise<unknown>) =>
       fn().then(
-        () => {
-          updatedAtRef.current[key] = Date.now()
+        (res) => {
+          // 직전 값을 유지만 한 프레임은 '갱신' 이 아니다 — 끝난 시각을 올리면 '갱신 멈춤' 경고가 영영 안 뜬다
+          if (res !== STALE_FRAME) updatedAtRef.current[key] = Date.now()
           delete jobErrorsRef.current[key]
           patch({})
         },
@@ -1142,12 +1168,22 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     await Promise.all(
       masaIds.map(async (id) => {
         if (!connectedOf(id) || calibRef.current[id]) return
+        /**
+         * delta 는 **호스트 로컬 표기 → 이 PC 의 시계** 로 바꾸는 값이다. 예전에는 `localMs - epoch*1000`
+         * 이었는데, 두 값이 모두 **호스트 시계**에서 나와 시간대 차이만 잡히고 호스트와 PC 의 시계 차이는
+         * 그대로 남았다(주석은 '상쇄된다' 고 잘못 적고 있었다). 호스트가 PC 보다 40초 늦으면 evacuation 완료가
+         * 40초 이르게 찍히고 t0 뒤 40초의 로그가 걸러졌다 — NTP 가 안 맞는 폐쇄망 랩에서 흔하다.
+         * 요청 직전·직후 PC 시각의 가운데를 '호스트가 date 를 찍은 순간' 으로 보고 그 PC 시각과 견준다
+         * (오차는 왕복 지연의 절반 이내).
+         */
+        const pcBefore = Date.now()
         const r = await run(id, `date '+%s %Y-%m-%dT%H:%M:%S'`)
+        const pcMid = (pcBefore + Date.now()) / 2
         const parts = (r.ok ? r.out ?? '' : '').trim().split(/\s+/)
         const epoch = parseInt(parts[0], 10)
         const localMs = parts[1] ? Date.parse(parts[1]) : NaN
         if (!Number.isNaN(epoch) && !Number.isNaN(localMs)) {
-          calibRef.current[id] = { delta: localMs - epoch * 1000, ok: true }
+          calibRef.current[id] = { delta: localMs - pcMid, ok: true }
         } else {
           calibRef.current[id] = { delta: 0, ok: false }
         }
@@ -1192,7 +1228,33 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         // pacemaker 가 아직 안 떴거나 pcs 조회가 실패한 순간의 OFFLINE 을 그대로 믿으면,
         // SSH 는 멀쩡히 붙어 있는데 DOWN 으로 잘못 표시된다.
         const trustedOffline = pcsOffline && pcsSeenOnlineRef.current.has(id)
-        const up = trustedOffline ? false : pcsOnline ? true : sshUp
+        /**
+         * pcs 가 **이번 프레임에 답하지 않았으면** 직전 pcs 판정을 유지한다(조회 실패 ≠ 상태 변화).
+         * 예전에는 pcs 조회가 타임아웃하면 SSH 연결 여부로 떨어졌다. 노드를 죽인 직후 keepalive 가 끊김을
+         * 알아채기 전(최대 90초)에는 SSH 가 아직 붙어 있다고 나오므로, OFFLINE 으로 확정됐던 노드가 그
+         * 프레임에 **초록 UP** 으로 그려지고 DOWN 시각이 지워졌다 — 다른 섹션이 만족된 경우 '복구 완료'
+         * 알림까지 한 번 나갈 수 있었다.
+         */
+        const pcsAnswered = pcs.online.length + pcs.offline.length > 0
+        if (pcsAnswered) {
+          if (trustedOffline) pcsDownRef.current.set(id, { at: now, sshDropped: !sshUp })
+          else if (pcsOnline) pcsDownRef.current.delete(id)
+        }
+        /**
+         * 단, 유지는 **SSH 가 끊김을 알아채기 전의 틈만** 덮는다. 처음엔 pcs 가 다시 답할 때까지 무조건
+         * 유지했는데, 컨트롤러를 여러 대 함께 내리고 pacemaker 가 부팅 때 자동으로 안 뜨는 환경에서는 pcs 가
+         * 끝내 답하지 않아 SSH 가 다시 붙은 노드가 검증 끝까지 DOWN 이었다(노드 복구 시각이 안 찍힘).
+         * 그래서 ① 유지 중 SSH 가 한 번 끊겼다가 다시 붙었으면 — 재부팅을 실제로 본 것이므로 — 풀고,
+         * ② 마지막 pcs OFFLINE 확인 뒤 keepalive 한도(15초×6)를 넉넉히 넘겼는데도 SSH 가 붙어 있으면 풀어
+         * SSH 판정으로 돌아간다.
+         */
+        const held = pcsDownRef.current.get(id)
+        if (!pcsAnswered && held) {
+          if (!sshUp) held.sshDropped = true
+          else if (held.sshDropped || now - held.at > PCS_HOLD_MAX_MS) pcsDownRef.current.delete(id)
+        }
+        const heldOffline = !pcsAnswered && pcsDownRef.current.has(id)
+        const up = trustedOffline || heldOffline ? false : pcsOnline ? true : sshUp
         if (up) {
           seenUpRef.current.add(id)
           delete downAtRef.current[id]
@@ -1268,7 +1330,18 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           const cmd = sudoOr(`sh -c 'tail -n 20000 ${c.logPath} | grep -iE "evacuat|finish|complet|notification" | tail -n 800'`)
           const r = await run(id, cmd)
           if (r.timedOut) delayed.add('Masakari')
-          const p = parseMasakari(r.ok ? (r.out ?? '') : '', t0Ref.current, calibRef.current[id]?.delta ?? 0)
+          /**
+           * **조회 실패는 '로그 없음' 이 아니다.** 예전에는 실패하면 빈 문자열로 판정해 idle(검증 시작 후
+           * evacuation 로그 없음)이 됐다 — 이미 finished 였던 카드가 '대기 중' 으로 돌아가고 종합 판정이
+           * 정상↔복구 진행 중으로 흔들렸다. 직전 결과를 그대로 두고 그 사실만 밝힌다(없으면 확인 불가).
+           */
+          if (!r.ok || r.timedOut) {
+            const prev = lastMasakariRef.current[id]
+            if (prev) return { id, ...prev.p, detail: `${prev.p.detail} (조회 실패 — ${Math.round((Date.now() - prev.at) / 1000)}초 전 값)` }
+            return { id, state: 'unknown' as MasakariState, detail: '조회 실패 — 확인 불가', evac: 0, at: undefined as number | undefined }
+          }
+          const p = parseMasakari(r.out ?? '', t0Ref.current, calibRef.current[id]?.delta ?? 0)
+          lastMasakariRef.current[id] = { p, at: Date.now() }
           return { id, ...p }
         }),
       )
@@ -1283,7 +1356,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       if (!msRef.current.masakari && done) {
         // 시각은 **로그가 말하는 시각**을 쓴다. Date.now() 를 쓰면 '폴링이 발견한 시각' 이 찍혀
         // 폴링 주기만큼 늦고, 호스트 시계가 PC 와 어긋나 있으면 그 오차까지 그대로 실린다.
-        // (delta 보정은 TZ 만 잡는다 — 같은 date 호출에서 epoch·로컬표기를 함께 받으므로 시계 오차는 상쇄된다)
+        // (delta 는 시간대와 호스트↔PC 시계 차이를 함께 잡는다 — 보정값 산출부 주석)
         msRef.current.masakari = { at: done.at ?? Date.now(), by: svcShortName(nameOf(done.id)), evac: done.evac }
       }
       patch({ masakari })
@@ -1300,7 +1373,18 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       const r = await run(c.ceph, sudoOr('ceph -s'))
       if (r.timedOut) {
         delayed.add('Ceph')
-        return // 직전 값을 유지 (빈 화면으로 깜빡이지 않게)
+        /**
+         * 직전 값을 유지하되(빈 화면으로 깜빡이지 않게) **몇 초 전 값인지 밝힌다.** 예전에는 그냥 돌아가
+         * 카드에 HEALTH_OK · 100% 초록 바가 그대로 남았고, 종합 판정(cephOk)도 그 낡은 값으로 초록을 줬다 —
+         * 끝난 시각까지 갱신돼 '갱신 멈춤' 경고도 안 떴다. mon 이 흔들리는 바로 그 순간이다.
+         */
+        const last = lastCephRef.current
+        patch({
+          ceph: last
+            ? { ...last.v, staleSec: Math.max(1, Math.round((Date.now() - last.at) / 1000)) }
+            : unknownCeph('응답 지연 — 확인 불가'),
+        })
+        return STALE_FRAME
       }
       const out = r.ok ? (r.out ?? '') : ''
       if (!out) return patch({ ceph: unknownCeph('조회 실패 (권한/명령 확인) — 확인 불가') })
@@ -1352,6 +1436,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       } else {
         cephOkHitsRef.current = 0
       }
+      lastCephRef.current = { v: ceph, at: Date.now() }
       patch({ ceph })
     }
 
@@ -1392,7 +1477,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           // 조회 자체가 실패했는지 — 세션 오류/타임아웃이거나, kubectl 이 에러 문구만 뱉은 경우.
           // (정상적으로 '파드가 하나도 없는' 네임스페이스와 구분해야 한다)
           const failed =
-            !r.ok || !!r.timedOut ||
+            !r.ok || !!r.timedOut || !!p.unparsed ||
             (p.total === 0 && /error|refused|unable to connect|forbidden|timed out|no such host|not found/i.test(raw))
           return failed ? { ...p, unknown: true, note: 'kubectl 조회 실패 — 확인 불가' } : p
         }),
@@ -1403,7 +1488,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       for (const p of pods) {
         // 조회 실패(노드 DOWN 직후 kubectl 타임아웃 등)면 결과가 빈 목록으로 온다.
         // 이걸 그대로 믿으면 비정상이던 워크로드가 전부 '복구됨'으로 잘못 기록되므로 건너뛴다.
-        if (p.total === 0) continue
+        if (p.total === 0 || p.unknown) continue
         /**
          * 타임라인 기록 기준은 **파드 자체의 증상**(Pending · Terminating · Ready 미충족)이다.
          * 노드가 NotReady 라서 비정상으로 센 것(nodeNotReady)은 여기서 제외한다.
@@ -1657,10 +1742,22 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   }
 
   // 감시 전용 루프 — 폴링(pollOnce)과 겹치지 않도록 별도 타이머로 돌린다
+  /**
+   * 진행 중인 폴링·재연결 감시 — 다시 시작할 때 이것들이 끝나기를 기다린다.
+   * 중지 → 시작을 앞 폴링이 끝나기 전에 누르면, 앞 루프가 끝나며 다음 주기를 **또 걸어** 회차 내내
+   * 루프가 둘이 됐다(SSH 실행 슬롯 부하 두 배 → 타임아웃 증가). 게다가 앞 폴링의 마일스톤이 막 비운
+   * 새 회차 기록에 써졌다. 앞 것이 끝난 뒤에 상태를 비우고 새로 시작한다.
+   */
+  const pollInflightRef = useRef<Promise<unknown> | null>(null)
+  const probeInflightRef = useRef<Promise<unknown> | null>(null)
+  const startingRef = useRef(false)
+
   const probeLoop = async () => {
     if (!runningRef.current) return
     try {
-      await probeReconnect()
+      const pr = probeReconnect()
+      probeInflightRef.current = pr
+      await pr
     } catch {
       /* 개별 실패는 무시하고 다음 주기에 재시도 — 감시는 절대 멈추면 안 된다 */
     }
@@ -1670,7 +1767,9 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const loop = async () => {
     if (!runningRef.current) return
     try {
-      await pollOnce()
+      const pr = pollOnce()
+      pollInflightRef.current = pr
+      await pr
     } catch {
       /* 폴링 오류는 무시하고 다음 주기 재시도 */
     }
@@ -1679,6 +1778,19 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
   const start = () => {
     if (!cfg.hosts.filter(Boolean).length) return
+    if (startingRef.current) return
+    startingRef.current = true
+    void (async () => {
+      // 앞 회차의 폴링이 아직 돌고 있으면 끝나기를 기다린다(위 pollInflightRef 주석).
+      // 재연결 감시(probe)는 기다리지 않는다 — SSH 재접속을 수십 초 붙잡고 있을 수 있어 시작 버튼이 죽은
+      // 것처럼 보였다. probe 는 마일스톤을 쓰지 않고, 아래에서 상태를 비운 뒤 다음 주기에 덮인다.
+      await Promise.allSettled([pollInflightRef.current])
+      startingRef.current = false
+      if (!mountedRef.current) return
+      beginRun()
+    })()
+  }
+  const beginRun = () => {
     t0Ref.current = Date.now()
     autoLabeledRef.current = false
     notifiedRef.current = { down: false, recovered: false }
@@ -1692,6 +1804,9 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     svcCacheRef.current = {}
     hostnamesRef.current = {}
     calibRef.current = {}
+    lastMasakariRef.current = {}
+    lastCephRef.current = null
+    pcsDownRef.current = new Map()
     downAtRef.current = {}
     wasDownRef.current = new Set()
     sshLostRef.current = new Set()
@@ -1742,12 +1857,22 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
   /**
    * 포털 감시 패널이 '복구 확정' 을 올려주면 이번 회차 마일스톤에 합친다.
-   * 같은 대상이 두 번 올라오는 일은 없지만(패널이 최초 확정 때만 보낸다), 이름 기준으로
-   * 한 번 더 막아 타임라인에 같은 줄이 겹쳐 찍히지 않게 한다.
+   * 대상당 한 줄이다 — **같은 대상이 다시 올라오면 새 시각으로 바꾼다.** 확정 뒤 다시 깨졌다 복구되면
+   * 패널이 새 시각을 다시 보낸다(portal.ts applyObservation 주석). 예전에는 이름이 같으면 버려서 최종
+   * 복구 시각이 사라지고 첫 시각(실제보다 이른)이 남았다.
    */
   const addPortalMilestones = useCallback((list: PortalMilestone[]) => {
     const cur = msRef.current.portal
-    for (const m of list) if (!cur.some((x) => x.name === m.name)) cur.push(m)
+    for (const m of list) {
+      const i = cur.findIndex((x) => x.name === m.name)
+      if (i < 0) cur.push(m)
+      else if (m.at > cur[i].at) cur[i] = m
+    }
+    forceTick((n) => n + 1)
+  }, [])
+  /** 다시 깨진 대상의 복구 줄을 거둔다 — 다시 복구되면 addPortalMilestones 가 새 시각으로 올린다 */
+  const revokePortalMilestone = useCallback((name: string) => {
+    msRef.current.portal = msRef.current.portal.filter((x) => x.name !== name)
     forceTick((n) => n + 1)
   }, [])
 
@@ -1792,7 +1917,10 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       state.masakari.length === 0 ||
       state.masakari.some((m) => m.state === 'finished') ||
       (!hadDown && state.masakari.every((m) => m.state === 'idle' || m.state === 'unknown'))
-    const cephOk = state.ceph === null || (state.ceph.health === 'OK' && state.ceph.degraded + state.ceph.misplaced === 0)
+    // 직전 값을 보여 주는 프레임(staleSec)은 확인한 것이 아니다 — 초록을 주지 않는다(조회 실패 ≠ 정상)
+    const cephOk =
+      state.ceph === null ||
+      (!state.ceph.staleSec && state.ceph.health === 'OK' && state.ceph.degraded + state.ceph.misplaced === 0)
     // unknown(조회 실패/세션 끊김)은 '이상 없음'이 아니다 — 확인을 못 한 것이다
     const podOk = state.pods.every((p) => !p.unknown && p.abnormalCount === 0)
     const downCount = state.hosts.filter((h) => !h.up).length
@@ -1997,6 +2125,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             // ref 라 곧바로 리렌더를 부르지 않지만, 검증 중에는 1초마다 forceTick 이 돌아 바로 따라온다.
             downAt={msRef.current.down?.at ?? null}
             onMilestones={addPortalMilestones}
+            onMilestoneRevoked={revokePortalMilestone}
           />
         </div>
 
@@ -2804,7 +2933,9 @@ function BoardView({
               <span
                 className={
                   'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-medium ' +
-                  (ceph.health === 'OK'
+                  (ceph.staleSec
+                    ? 'bg-white/10 text-gray-400'
+                    : ceph.health === 'OK'
                     ? 'bg-emerald-500/20 text-emerald-300'
                     : ceph.health === 'unknown'
                       ? 'bg-white/10 text-gray-400'
@@ -2813,6 +2944,7 @@ function BoardView({
               >
                 {ceph.health === 'OK' ? <CircleCheck size={13} /> : <AlertTriangle size={13} />}
                 HEALTH_{ceph.health === 'unknown' ? '?' : ceph.health}
+                {ceph.staleSec ? <span className="text-amber-300/90"> · 응답 지연, {ceph.staleSec}초 전 값</span> : null}
               </span>
               {ceph.etaSec != null && (
                 <span
@@ -2845,6 +2977,13 @@ function BoardView({
                * degraded·misplaced 가 0 으로 내려오므로 그대로 계산하면 remain=0 → 100% 초록이 되어,
                * 배지는 회색 `HEALTH_?` 인데 바로 아래 바는 '복구 완료' 로 보이는 모순이 생긴다.
                */
+              if (ceph.staleSec)
+                return (
+                  <div className="mt-2.5 rounded-md border border-white/5 bg-black/20 px-2.5 py-2 text-[11px] text-gray-500">
+                    복구 진행률 — <span className="text-gray-400">확인 불가</span> · ceph -s 가 응답하지 않아 위 수치는{' '}
+                    {ceph.staleSec}초 전 값입니다
+                  </div>
+                )
               if (ceph.health === 'unknown')
                 return (
                   <div className="mt-2.5 rounded-md border border-white/5 bg-black/20 px-2.5 py-2 text-[11px] text-gray-500">

@@ -20,6 +20,7 @@ import type {
   ConfigMapBackup,
   CmBackupOrigin,
   PodInfo,
+  PodEvent,
   LogIndexEntry,
   LogEntryDetail,
   PerfDoneEvent,
@@ -70,8 +71,8 @@ const electronAPI = {
   sshSetAutoReconnect: (enabled: boolean): void => ipcRenderer.send('ssh:setAutoReconnect', enabled),
 
   // 변경된 호스트 키 신뢰(덮어쓰기) 후 재접속용
-  sshTrustHost: (host: string, port: number): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('ssh:trustHost', { host, port }),
+  sshTrustHost: (host: string, port: number, jumpHost?: string, jumpPort?: number): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('ssh:trustHost', { host, port, jumpHost, jumpPort }),
 
   // 개인키 파일 선택 → 내용 반환
   sshPickKeyFile: (): Promise<{ ok: boolean; content?: string; name?: string; canceled?: boolean; error?: string }> =>
@@ -132,6 +133,8 @@ const electronAPI = {
   perfStart: (cfg: PerfRunConfig): Promise<{ ok: boolean; meta?: PerfRunMeta; error?: string }> =>
     ipcRenderer.invoke('perf:start', cfg),
   perfCancel: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:cancel'),
+  /** 지금 도는 회차와 최근 로그 — 성능 창을 다시 열 때 진행 화면을 되살린다 */
+  perfStatus: (): Promise<{ running: PerfRunMeta | null; log: string }> => ipcRenderer.invoke('perf:status'),
   perfList: (): Promise<PerfRunRecord[]> => ipcRenderer.invoke('perf:list'),
   perfDelete: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:delete', id),
   perfOpenReport: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('perf:openReport', id),
@@ -584,8 +587,16 @@ const electronAPI = {
   k8sListPodsDetail: (
     sessionId: string,
     namespace: string,
-  ): Promise<{ ok: boolean; pods?: PodInfo[]; error?: string }> =>
+  ): Promise<{ ok: boolean; pods?: PodInfo[]; error?: string; skewMs?: number }> =>
     ipcRenderer.invoke('k8s:listPodsDetail', { sessionId, namespace }),
+  /** 파드 하나의 이벤트(최근 것부터) — 행을 펼칠 때 한 번 부른다 */
+  k8sPodEvents: (
+    sessionId: string,
+    namespace: string,
+    pod: string,
+    uid?: string,
+  ): Promise<{ ok: boolean; events?: PodEvent[]; error?: string }> =>
+    ipcRenderer.invoke('k8s:podEvents', { sessionId, namespace, pod, uid }),
   /** 파드 하나만 재시작(= 삭제 — 컨트롤러가 있으면 자동으로 다시 생긴다) */
   k8sRestartPod: (
     sessionId: string,

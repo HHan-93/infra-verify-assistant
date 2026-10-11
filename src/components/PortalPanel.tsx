@@ -80,6 +80,11 @@ interface Props {
   downAt: number | null
   /** 복구가 확정된 대상을 상위(상태보드 타임라인)로 올린다 */
   onMilestones: (list: PortalMilestone[]) => void
+  /**
+   * 확정했던 복구가 **다시 깨졌다** — 상위 타임라인에서 그 대상의 줄을 거둔다. 거두지 않으면 끝내 다시
+   * 복구되지 않은 채 회차를 멈췄을 때, 실제로는 장애 중인 대상에 이른 '복구' 시각이 기록으로 남는다.
+   */
+  onMilestoneRevoked?: (name: string) => void
 }
 
 const fmtClock = (ms: number) => {
@@ -92,7 +97,7 @@ const fmtElapsed = (ms: number) => {
   return s < 60 ? `${s}초` : `${Math.floor(s / 60)}분 ${s % 60}초`
 }
 
-export default function PortalPanel({ running, t0, downAt, onMilestones }: Props) {
+export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked }: Props) {
   const [cfg, setCfg] = useState<PortalConfig | null>(null)
   const [view, setView] = useState<'board' | 'config'>('board')
   const [states, setStates] = useState<Record<string, TargetState>>({})
@@ -163,6 +168,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   downAtRef.current = downAt
   const onMilestonesRef = useRef(onMilestones)
   onMilestonesRef.current = onMilestones
+  const onRevokedRef = useRef(onMilestoneRevoked)
+  onRevokedRef.current = onMilestoneRevoked
 
   // ── 설정 로드/저장 ────────────────────────────────────────────
   useEffect(() => {
@@ -382,7 +389,19 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
     if (!loginRef.current) {
       const hadToken = tokenAtRef.current > 0
       const prevAt = tokenAtRef.current
-      loginRef.current = doLogin(c).then((t) => {
+      loginRef.current = doLogin(c).then((fresh) => {
+        /**
+         * 재발급이 실패했는데 **지금 토큰이 아직 살아 있으면 그대로 쓴다.** 예전에는 실패하면 빈 토큰으로
+         * 덮어, 수명 11분 중 6분에 미리 갈아끼우려던 로그인이 한 번 타임아웃한 것만으로 인증이 필요한
+         * 대상이 전부 401 → 연속 카운트 0 이 됐다(장애와 무관한 가짜 실패 구간). 다음 주기에 다시 시도한다.
+         */
+        const old = tokenRef.current
+        const oldExp = jwtExpMs(old)
+        if (!fresh && old && (oldExp == null || oldExp > Date.now())) {
+          loginRef.current = null
+          return old
+        }
+        const t = fresh
         tokenRef.current = t
         const now = t ? Date.now() : 0
         // 최초 로그인은 '갱신' 이 아니다. 두 번째부터 세야 "몇 번 갈아끼웠나" 가 맞는 말이 된다.
@@ -433,7 +452,13 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
   }
 
   // ── 폴링 루프 ────────────────────────────────────────────────
-  const pollOnce = async () => {
+  /**
+   * 회차 세대. 중지 → 다시 시작을 앞 폴링이 끝나기 전에 누르면, 앞 루프가 끝나며 setTimeout(loop) 를
+   * **또 걸어** 회차 내내 루프가 둘이 됐다 — 관측이 주기당 두 번이라 '연속 3회' 가 사실상 한 주기 반에
+   * 채워졌고(튄 성공을 거르는 방어가 약해짐), 앞 회차의 응답이 새 회차 상태에 써졌다. 세대가 다르면 버린다.
+   */
+  const genRef = useRef(0)
+  const pollOnce = async (gen: number) => {
     const c = cfgRef.current
     if (!c) return
     const targets = c.targets.filter((t) => t.enabled && (t.path ?? '').trim())
@@ -473,10 +498,11 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
         }
       }),
     )
-    if (!mountedRef.current || !runningRef.current) return
+    if (!mountedRef.current || !runningRef.current || gen !== genRef.current) return
 
     const next = { ...statesRef.current }
     const newlyRecovered: PortalMilestone[] = []
+    const revoked: string[] = []
     for (const { t, obs } of results) {
       const before = next[t.id] ?? emptyTargetState()
       const needed = streakNeeded(t, c)
@@ -493,21 +519,23 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       if (downAtRef.current !== null && before.recoveredAt === null && after.recoveredAt !== null) {
         newlyRecovered.push({ at: after.recoveredAt, name: t.name, group: t.group, streak: needed })
       }
+      if (downAtRef.current !== null && before.recoveredAt !== null && after.recoveredAt === null) revoked.push(t.name)
     }
     statesRef.current = next
     setStates(next)
     if (newlyRecovered.length) onMilestonesRef.current(newlyRecovered)
+    for (const n of revoked) onRevokedRef.current?.(n)
   }
 
-  const loop = async () => {
-    if (!runningRef.current) return
+  const loop = async (gen: number) => {
+    if (!runningRef.current || gen !== genRef.current) return
     try {
-      await pollOnce()
+      await pollOnce(gen)
     } catch {
       /* 한 주기 실패로 감시가 멈추면 안 된다 — 다음 주기에 재시도 */
     }
-    if (runningRef.current) {
-      timerRef.current = setTimeout(loop, Math.max(1, cfgRef.current?.intervalSec ?? 5) * 1000)
+    if (runningRef.current && gen === genRef.current) {
+      timerRef.current = setTimeout(() => loop(gen), Math.max(1, cfgRef.current?.intervalSec ?? 5) * 1000)
     }
   }
 
@@ -540,8 +568,10 @@ export default function PortalPanel({ running, t0, downAt, onMilestones }: Props
       setTokenStat({ count: 0, lastAt: 0, gapMs: null })
       setAuthNote('')
       runningRef.current = true
-      void loop()
+      genRef.current++
+      void loop(genRef.current)
     } else {
+      genRef.current++
       runningRef.current = false
       if (timerRef.current) clearTimeout(timerRef.current)
       timerRef.current = null

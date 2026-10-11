@@ -222,7 +222,10 @@ export function judgeResponse(target: PortalTarget, r: PortalHttpResult, expired
 export interface TargetState {
   /** 지금까지 연속 몇 번 정상이었는지 (실패하면 0으로) */
   streak: number
-  /** 연속 기준을 채워 '복구' 로 확정된 시각. 한 번 정해지면 바꾸지 않는다 */
+  /**
+   * 연속 기준을 채워 '복구' 로 확정된 시각. **확정 뒤에 다시 실패하면 비운다** — 그 복구는 진짜가
+   * 아니었다(한 번 튄 성공은 복구가 아니다는 규칙의 연장). 다시 연속을 채우면 그때 시각으로 새로 정한다.
+   */
   recoveredAt: number | null
   /** 이번 회차에 한 번이라도 비정상을 본 적이 있는지 */
   everFailed: boolean
@@ -262,7 +265,18 @@ export function applyObservation(
 ): TargetState {
   const streak = obs.ok ? prev.streak + 1 : 0
   const recent = [...prev.recent, { at: obs.at, ok: obs.ok }].slice(-RECENT_MAX)
-  let recoveredAt = prev.recoveredAt
+  /**
+   * 예전에는 한 번 정한 복구 시각을 끝까지 바꾸지 않았다. 페일오버 뒤 T+60 에 3회 연속 성공했다가
+   * T+120 에 failback·DB 전환으로 다시 503, T+200 에 최종 복구되면 타임라인과 이력에는 'T+60 복구'
+   * 만 남았다 — 실제보다 이른 복구 시각이다. 파드 쪽(podsDone)은 같은 이유로 '다시 깨지면 갱신' 이다.
+   *
+   * 다만 **실패 한 번으로는 취소하지 않는다.** 처음엔 한 번만 실패해도 지웠는데, 복구 뒤 T+600 에 내 PC 쪽
+   * 시간 초과·순간 네트워크 끊김 한 번이 나면 복구 시각이 T+605 로 밀리고, 그 직후 멈추면 복구 기록이
+   * 아예 없었다(조회 실패 ≠ 장애). 들어올 때와 같은 기준 — **연속 needed 회 실패** 해야 다시 깨진 것으로 본다.
+   */
+  let failRun = 0
+  for (let i = recent.length - 1; i >= 0 && !recent[i].ok; i--) failRun++
+  let recoveredAt = obs.ok || failRun < needed ? prev.recoveredAt : null
   if (recoveredAt === null && streak >= needed) {
     // 연속 구간의 첫 관측 시각을 되짚는다. 뒤에서부터 성공만 세어 needed 번째가 그 시작점.
     let seen = 0

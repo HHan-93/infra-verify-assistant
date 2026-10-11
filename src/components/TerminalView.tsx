@@ -108,9 +108,18 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>((props, ref) 
       const buf = term.buffer.active
       const total = buf.length // 스크롤백 포함 전체 줄 수
       const start = Math.max(0, total - maxLines)
+      // **화면 폭에서 접힌 줄은 이어 붙인다**(isWrapped). 접힌 행마다 줄바꿈을 넣었더니 마스킹(줄 단위)이
+      // 첫 조각만 가리고 나머지를 평문으로 AI 에 보냈다 — 188자 Keystone 토큰이 80열에서 첫 줄만
+      // 가려지고 120자가 그대로 나갔다. 드래그 선택(getSelection)은 원래 이렇게 이어 준다.
+      // 다음 행으로 이어지는 행은 끝 공백을 자르지 않는다 — 공백 바로 뒤에서 접힌 줄이면 "foo bar" 가
+      // "foobar" 로 붙었다. 논리적인 한 줄을 다 이은 뒤에만 끝 공백을 자른다.
       const lines: string[] = []
       for (let i = start; i < total; i++) {
-        lines.push(buf.getLine(i)?.translateToString(true) ?? '')
+        const line = buf.getLine(i)
+        const continues = !!buf.getLine(i + 1)?.isWrapped
+        const text = line?.translateToString(!continues) ?? ''
+        if (line?.isWrapped && lines.length) lines[lines.length - 1] += text
+        else lines.push(text)
       }
       // 끝쪽 빈 줄 제거
       return lines.join('\n').replace(/\n+$/, '')

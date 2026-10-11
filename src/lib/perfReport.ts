@@ -36,6 +36,8 @@ export interface OnePagerInput {
   startedAt: number
   endedAt?: number
   canceled?: boolean
+  /** 앱 종료·사고로 끊긴 회차 */
+  interrupted?: boolean
   exitCode?: number
   targetUrl: string
   sessionLabel?: string
@@ -253,6 +255,9 @@ export function buildOnePager(i: OnePagerInput): string {
       : '') +
     (i.canceled
       ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">사람이 중지한 회차입니다 — 계획한 시간을 채우지 않았습니다.</div>`
+      : '') +
+    (i.interrupted
+      ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">앱이 닫혔거나 비정상 종료되어 끊긴 회차입니다 — 계획한 시간을 채우지 않았습니다.</div>`
       : '') +
     `</div>` +
     (i.memo ? `<p style="margin:8px 0 0;font-size:12.5px;color:#3c4043">${esc(i.memo)}</p>` : '')

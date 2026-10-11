@@ -745,6 +745,15 @@ export default function App() {
   // 메인 프로세스(ssh2)가 보내는 연결 상태 이벤트 구독 (sessionId 별로 반영)
   useEffect(() => {
     const off = window.electronAPI.onStatus((event) => {
+      // 사람이 연결 해제를 눌렀다 — 자동 재연결 대상에서 빼고 예약된 시도도 지운다
+      if (event.userInitiated) {
+        manualClosingRef.current.add(event.sessionId)
+        const rc = reconnectRef.current
+        if (rc.timers[event.sessionId]) {
+          clearTimeout(rc.timers[event.sessionId])
+          delete rc.timers[event.sessionId]
+        }
+      }
       setStatuses((m) => {
         const prev = m[event.sessionId]
         // 연결/연결중일 때만 host 유지, 끊기면 제거 (제목이 기본으로 복귀)

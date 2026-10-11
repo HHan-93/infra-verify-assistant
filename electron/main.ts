@@ -49,6 +49,8 @@ import {
   type ConfigMapBackup,
   type CmBackupOrigin,
   type PodInfo,
+  type PodContainerInfo,
+  type PodEvent,
   type CommandCheck,
   type CaptureRule,
   type OnFailureAction,
@@ -312,6 +314,15 @@ function makeHostVerifier(host: string, port: number) {
   return (hashedKey: string): boolean => {
     const known = knownHosts![id]
     if (!known) {
+      /**
+       * known-hosts 를 **못 읽은** 실행에서는 처음 보는 키를 그냥 받지 않는다. 읽기 실패 때 빈 목록으로
+       * 시작하니 모든 서버가 '최초 접속' 이 되어 경고 없이 통과했다 — 그 실행 내내 중간자 공격 감지가
+       * 꺼진 셈이었고, 사용자는 알 길이 없었다(console.warn 만 남았다). 확인을 받는다.
+       */
+      if (knownHostsLoadFailed) {
+        pendingHostKey[id] = hashedKey
+        return false
+      }
       knownHosts![id] = hashedKey
       saveKnownHosts()
       return true
@@ -387,8 +398,28 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
   s.lastConfig = config
   s.lastPassword = config.password || undefined
   const targetId = hostKeyId(config.host, config.port)
+  /**
+   * 이 시도가 아직 유효한가. 시작한 뒤 사용자가 같은 칸에 다른 서버를 붙였거나(세대 증가),
+   * 연결을 끊었거나, 탭을 닫았으면 무효다. 예전에는 250ms 대기(옛 소켓 정리) 뒤에 이걸 다시 보지
+   * 않아, 재접속 루프의 begin() 이 사용자가 방금 붙인 새 연결의 s.client 를 옛 호스트로 덮어썼다 —
+   * 화면은 새 호스트인데 출력은 옛 호스트, 입력은 나중에 대입된 쪽으로 가는 상태가 됐다.
+   */
+  const myEpoch = s.connectEpoch ?? 0
+  const stale = () => (s.connectEpoch ?? 0) !== myEpoch || s.userClosed || sessions.get(sessionId) !== s
 
-  return new Promise<ConnectResult>((resolve) => {
+  return new Promise<ConnectResult>((resolveRaw) => {
+    /**
+     * 결과는 한 번만 낸다 — 그리고 **반드시 낸다.** 핸드셰이크 도중 서버가 error 없이 끊으면(재부팅 중
+     * sshd 가 preauth 단계에서 SIGTERM 으로 죽는 경우 — 이 앱의 주 용도다) close 만 오는데, close
+     * 핸들러에는 resolve 가 없어 Promise 가 영원히 끝나지 않았다. 재접속 루프가 그 자리에서 멈추고
+     * 칸이 '연결 중' 으로 굳었다. close 에서도 아직 결과를 안 냈으면 실패로 낸다.
+     */
+    let settled = false
+    const resolve = (r: ConnectResult) => {
+      if (settled) return
+      settled = true
+      resolveRaw(r)
+    }
     // 대상 서버에 연결 (sock 이 있으면 점프 호스트 경유)
     const connectTarget = (sock?: ClientChannel) => {
       const conn = new Client()
@@ -396,6 +427,17 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
 
       conn
         .on('ready', () => {
+          // 기다리는 사이 무효가 된 시도면 이 연결을 버린다 — 새 연결의 상태·셸을 덮어쓰지 않게
+          if (s.client !== conn || stale()) {
+            try {
+              conn.end()
+            } catch {
+              /* 무시 */
+            }
+            if ((s.connectEpoch ?? 0) === myEpoch && !s.client) s.connecting = false
+            resolve({ success: false, message: '다른 연결로 대체되었습니다.' })
+            return
+          }
           sendStatus(sessionId, {
             status: 'connected',
             message: `${config.username}@${config.host} 연결됨${sock ? ' (점프 경유)' : ''}`,
@@ -405,8 +447,16 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
             : { term: 'xterm-256color' }
           conn.shell(win, (err, stream) => {
             if (err) {
+              // connecting 을 내리고 인증까지 끝난 연결도 닫는다 — 안 그러면 로컬 셸이 다시 뜨지 않고
+              // 셸 없는 SSH 연결만 남는다
+              s.connecting = false
               sendStatus(sessionId, { status: 'error', message: `쉘 오픈 실패: ${err.message}` })
               resolve({ success: false, message: err.message })
+              try {
+                conn.end()
+              } catch {
+                /* 무시 */
+              }
               return
             }
             s.shellStream = stream
@@ -455,13 +505,20 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
           s.connecting = false
           s.hadError = true
           const changed = !!pendingHostKey[targetId]
-          const message = changed
-            ? '⚠ 호스트 키가 이전과 다릅니다 (보안 경고). 서버가 재설치되었거나 중간자 공격일 수 있습니다.'
-            : err.message
+          const message = !changed
+            ? err.message
+            : knownHostsLoadFailed
+              ? '⚠ 저장된 호스트 키 목록(known-hosts)을 읽지 못해 이 서버가 맞는지 확인할 수 없습니다.'
+              : '⚠ 호스트 키가 이전과 다릅니다 (보안 경고). 서버가 재설치되었거나 중간자 공격일 수 있습니다.'
           sendStatus(sessionId, { status: 'error', message })
-          resolve({ success: false, message, hostKeyChanged: changed })
+          resolve({ success: false, message, hostKeyChanged: changed, hostKeyUnverified: changed && knownHostsLoadFailed })
         })
         .on('close', () => {
+          // 결과를 아직 안 냈으면(핸드셰이크 도중 끊김) 실패로 낸다 — 위 resolve 주석
+          if (!settled) {
+            if (s.client === conn) s.connecting = false
+            resolve({ success: false, message: '연결이 닫혔습니다.' })
+          }
           // 이미 새 연결로 교체된 옛 연결의 늦은 close 는 무시 — 안 그러면 이 핸들러가
           // cleanupConnection 으로 갓 맺은 새 연결(s.client)을 끊고 상태를 'closed' 로
           // 덮어써, 드래그-드롭 재연결 시 "기존만 끊기고 새 연결은 안 되는" 문제가 생긴다.
@@ -529,12 +586,31 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
           s.connecting = false
           s.hadError = true
           const changed = !!pendingHostKey[jumpId]
-          const message = changed
-            ? '⚠ 점프 호스트의 키가 이전과 다릅니다 (보안 경고).'
-            : `점프 호스트 연결 실패: ${err.message}`
+          const message = !changed
+            ? `점프 호스트 연결 실패: ${err.message}`
+            : knownHostsLoadFailed
+              ? '⚠ 저장된 호스트 키 목록(known-hosts)을 읽지 못해 점프 호스트를 확인할 수 없습니다.'
+              : '⚠ 점프 호스트의 키가 이전과 다릅니다 (보안 경고).'
           sendStatus(sessionId, { status: 'error', message })
           if (!s.reconnecting) startLocalShell(s)
-          resolve({ success: false, message, hostKeyChanged: changed })
+          resolve({ success: false, message, hostKeyChanged: changed, hostKeyUnverified: changed && knownHostsLoadFailed })
+        })
+        .on('close', () => {
+          // 점프 호스트도 error 없이 끊길 수 있다 — 결과를 안 냈으면 실패로 낸다
+          if (!settled) {
+            // 이미 다른 연결로 바뀌었거나 사용자가 끊은 시도면 결과만 내고 세션 상태는 건드리지 않는다.
+            // (안 그러면 지금 연결에 hadError 가 박혀, 나중에 사용자가 exit 해도 자동 재접속됐다)
+            if (stale()) {
+              resolve({ success: false, message: '점프 호스트 연결이 닫혔습니다.' })
+              return
+            }
+            s.connecting = false
+            s.hadError = true
+            // error 핸들러와 같이 — 상태를 알리고 로컬 셸로 돌려 놓는다(안 그러면 칸에 아무 셸도 없다)
+            sendStatus(sessionId, { status: 'error', message: '점프 호스트 연결이 닫혔습니다.' })
+            if (!s.reconnecting) startLocalShell(s)
+            resolve({ success: false, message: '점프 호스트 연결이 닫혔습니다.' })
+          }
         })
       jc.connect({
         host: jump.host,
@@ -565,6 +641,13 @@ function connectSession(sessionId: string, config: SSHConfig): Promise<ConnectRe
       const go = () => {
         if (started) return
         started = true
+        // 기다린 250ms 사이 무효가 됐으면 시작하지 않는다(위 stale 주석)
+        if (stale()) {
+          // 새 세대가 아니라 사람이 끊은 것이면 '연결 중' 표시를 내린다 — 새 연결이 있으면 그쪽이 관리한다
+          if ((s.connectEpoch ?? 0) === myEpoch) s.connecting = false
+          resolve({ success: false, message: '다른 연결로 대체되었습니다.' })
+          return
+        }
         begin()
       }
       oldClient.once('close', go)
@@ -656,9 +739,18 @@ ipcMain.on('ssh:setAutoReconnect', (_evt, enabled: boolean) => {
 
 // 변경된 호스트 키를 신뢰(덮어쓰기) — 사용자가 경고 확인 후 재접속할 때.
 // 직전 접속에서 거부된 키(대상/점프 포함)를 모두 커밋한다.
-ipcMain.handle('ssh:trustHost', async () => {
+/**
+ * 호스트 키 변경을 신뢰한다 — **지금 다시 붙으려는 그 서버(와 그 점프 호스트)만.**
+ * 예전에는 인자를 무시하고 대기 중인 변경 키를 전부 저장했다. 세션 A 에서 X 의 키 변경(중간자 공격
+ * 가능성) 경고를 무시해 둔 뒤, Y 의 재설치 경고에서 '신뢰' 를 누르면 X 의 의심 키까지 함께 저장됐다.
+ */
+ipcMain.handle(
+  'ssh:trustHost',
+  async (_evt, arg: { host: string; port: number; jumpHost?: string; jumpPort?: number }) => {
   const map = await loadKnownHosts()
-  const ids = Object.keys(pendingHostKey)
+  const wanted = new Set([hostKeyId(arg.host, arg.port)])
+  if (arg.jumpHost) wanted.add(hostKeyId(arg.jumpHost, arg.jumpPort ?? 22))
+  const ids = Object.keys(pendingHostKey).filter((id) => wanted.has(id))
   if (ids.length) {
     for (const id of ids) {
       map[id] = pendingHostKey[id]
@@ -667,7 +759,8 @@ ipcMain.handle('ssh:trustHost', async () => {
     saveKnownHosts()
   }
   return { ok: true }
-})
+  },
+)
 
 // ─────────────────────────────────────────────────────────────
 // 세션 로그 인덱스 — 로그 뷰어(목록/검색/리플레이)를 위한 메타데이터.
@@ -720,8 +813,10 @@ async function readLogRetentionSettings(): Promise<LogRetentionSettings> {
   let raw: string
   try {
     raw = await readFile(logRetentionSettingsPath(), 'utf-8')
-  } catch {
-    return { ...DEFAULT_LOG_RETENTION } // 아직 설정한 적 없음 (정상)
+  } catch (e) {
+    // 없을 때만 기본값 — 일시적 읽기 오류(EBUSY·EPERM)를 '없음' 으로 읽으면 정리가 로그를 지운다
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { ...DEFAULT_LOG_RETENTION } // 아직 설정한 적 없음 (정상)
+    throw e
   }
   const parsed = JSON.parse(raw)
   const retentionDays = Number(parsed?.retentionDays)
@@ -1126,7 +1221,9 @@ ipcMain.on('ssh:disconnect', (_evt, sessionId: string) => {
   s.userClosed = true // 사용자 종료 → 자동 재접속 안 함
   s.reconnecting = false
   cleanupConnection(s)
-  sendStatus(sessionId, { status: 'closed', message: '사용자 요청으로 연결 종료' })
+  // userInitiated — 렌더러의 자동 재연결도 이걸 보고 물러난다. 백엔드만 막고 렌더러에 안 알렸더니,
+  // 렌더러가 '연결됨 → 닫힘' 을 끊김으로 보고 3초 뒤 같은 서버에 다시 붙었다(연결 해제가 무시됨).
+  sendStatus(sessionId, { status: 'closed', message: '사용자 요청으로 연결 종료', userInitiated: true })
   startLocalShell(s) // 연결 해제 → 로컬 셸로 복귀
 })
 
@@ -1712,12 +1809,29 @@ ipcMain.handle('session:run', async (_evt, { sessionId, cmd }: { sessionId: stri
 
 // ── 파일 탐색기 (SFTP) ─────────────────────────────────────────
 /** 세션당 SFTP 핸들 확보(없으면 열고 캐시, 닫히면 자동 해제) */
+/**
+ * 여는 중인 SFTP 채널 — 동시에 두 번 불리면 둘 다 채널을 열고 앞의 것은 참조를 잃은 채 연결이 끝날
+ * 때까지 남았다(파일 목록·미리보기가 겹칠 때). sshd MaxSessions 예산을 갉아먹으므로 하나로 모은다.
+ */
+const sftpOpening = new WeakMap<Session, Promise<SFTPWrapper>>()
 function getSftp(s: Session): Promise<SFTPWrapper> {
-  return new Promise((resolve, reject) => {
-    if (!s.client) return reject(new Error('연결되어 있지 않습니다.'))
-    if (s.sftp) return resolve(s.sftp)
-    s.client.sftp((err, sftp) => {
+  if (s.sftp) return Promise.resolve(s.sftp)
+  const pending = sftpOpening.get(s)
+  if (pending) return pending
+  const client = s.client
+  const p = new Promise<SFTPWrapper>((resolve, reject) => {
+    if (!client) return reject(new Error('연결되어 있지 않습니다.'))
+    client.sftp((err, sftp) => {
       if (err) return reject(err)
+      // 여는 사이 연결이 바뀌었으면 이 채널은 옛 연결의 것이다 — 새 연결에 붙이지 않는다
+      if (s.client !== client) {
+        try {
+          sftp.end()
+        } catch {
+          /* 무시 */
+        }
+        return reject(new Error('연결이 바뀌었습니다. 다시 시도하세요.'))
+      }
       s.sftp = sftp
       const drop = () => {
         if (s.sftp === sftp) s.sftp = undefined
@@ -1726,7 +1840,9 @@ function getSftp(s: Session): Promise<SFTPWrapper> {
       sftp.on('error', drop)
       resolve(sftp)
     })
-  })
+  }).finally(() => sftpOpening.delete(s))
+  sftpOpening.set(s, p)
+  return p
 }
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -1765,6 +1881,21 @@ async function rmrf(sftp: SFTPWrapper, p: string, isDir: boolean) {
 }
 
 // 재귀 다운로드 (원격 디렉토리 → 로컬)
+/**
+ * 원격 파일 이름 → 이 PC 에 써도 되는 이름 하나.
+ *
+ * `path.basename` 만으로는 모자랐다. 리눅스 파일 이름에는 `\` 를 쓸 수 있는데 Windows 에서는 그게
+ * 구분자다 — `x\..\..\AppData\…\Startup\a.bat` 를 드래그-아웃하면 임시 폴더 **밖**에 쓰였고,
+ * 이름이 `d\..` 인 디렉토리는 basename 이 `..` 가 되어 재귀 다운로드가 한 단계씩 위로 올라갔다.
+ * 구분자·Windows 예약 문자는 `_` 로 바꾸고, `.`·`..`·빈 이름은 이름으로 쓰지 않는다.
+ */
+function safeLocalName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  let n = name.replace(/[\\/<>:"|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '')
+  if (!n || n === '.' || n === '..') n = '_'
+  return n
+}
+
 async function getDirRecursive(sftp: SFTPWrapper, remote: string, localDir: string) {
   await mkdir(localDir, { recursive: true })
   for (const it of await sftpReaddir(sftp, remote)) {
@@ -1774,7 +1905,7 @@ async function getDirRecursive(sftp: SFTPWrapper, remote: string, localDir: stri
     const rc = rjoin(remote, it.filename)
     // 원격이 보낸 이름을 로컬 경로에 그대로 쓰지 않는다 — 이름 자체에 구분자가 섞여 와도
     // 이 디렉토리를 벗어나지 못하게 basename 으로 한 겹 자른다.
-    const lc = path.join(localDir, path.basename(it.filename))
+    const lc = path.join(localDir, safeLocalName(it.filename))
     if (it.longname?.[0] === 'd') await getDirRecursive(sftp, rc, lc)
     else if (it.longname?.[0] === '-')
       await new Promise<void>((res, rej) => sftp.fastGet(rc, lc, (e) => (e ? rej(e) : res())))
@@ -2019,7 +2150,7 @@ ipcMain.handle(
       const sftp = await getSftp(s)
       const downloaded: string[] = []
       for (const it of items) {
-        const lc = path.join(localDir, it.name)
+        const lc = path.join(localDir, safeLocalName(it.name))
         if (it.isDir) await getDirRecursive(sftp, it.path, lc)
         else
           await new Promise<void>((res, rej) =>
@@ -2081,7 +2212,7 @@ ipcMain.handle(
       const transferred: string[] = []
       for (const it of items) {
         // 이름은 렌더러(=원격 목록)에서 온다. 임시 폴더를 벗어나지 못하게 basename 으로 자른다.
-        const tmpLocal = path.join(tmpRoot, path.basename(it.name))
+        const tmpLocal = path.join(tmpRoot, safeLocalName(it.name))
         if (it.isDir) {
           await getDirRecursive(fromSftp, it.path, tmpLocal)
           await putDirRecursive(toSftp, tmpLocal, rjoin(toDir, it.name), toSessionId)
@@ -2159,13 +2290,27 @@ async function addForward(s: Session, o: AddForwardOpts): Promise<{ ok: boolean;
   if (o.type === 'local') {
     // 로컬 포트로 들어온 연결을 원격(remoteHost:remotePort)으로 터널
     const server = net.createServer((socket) => {
-      s.client!.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, o.remoteHost, o.remotePort, (err, stream) => {
-        if (err) {
-          socket.destroy()
-          return
-        }
-        socket.pipe(stream).pipe(socket)
-      })
+      // 양쪽에 'error' 를 단다 — 원격 포워딩 쪽에는 있었는데 여기만 없어, 브라우저 탭을 닫아 생긴
+      // ECONNRESET 같은 평범한 끊김이 메인 프로세스의 처리되지 않은 예외(오류 창)가 됐다.
+      socket.on('error', () => socket.destroy())
+      // 재접속 대기 중에는 s.client 가 비었거나 끊긴 연결이라 forwardOut 이 동기로 throw 한다
+      const client = s.client
+      if (!client) {
+        socket.destroy()
+        return
+      }
+      try {
+        client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, o.remoteHost, o.remotePort, (err, stream) => {
+          if (err) {
+            socket.destroy()
+            return
+          }
+          stream.on('error', () => socket.destroy())
+          socket.pipe(stream).pipe(socket)
+        })
+      } catch {
+        socket.destroy()
+      }
     })
     return await new Promise((resolve) => {
       server.once('error', (e: Error) => resolve({ ok: false, error: e.message }))
@@ -2227,7 +2372,7 @@ ipcMain.on(
     if (!s.client) return
     try {
       const sftp = await getSftp(s)
-      const tmp = path.join(app.getPath('temp'), `ivf-${Date.now()}-${name}`)
+      const tmp = path.join(app.getPath('temp'), `ivf-${Date.now()}-${safeLocalName(name)}`)
       await new Promise<void>((res, rej) => sftp.fastGet(remotePath, tmp, (e) => (e ? rej(e) : res())))
       evt.sender.startDrag({ file: tmp, icon: DRAG_ICON })
     } catch {
@@ -3136,6 +3281,10 @@ interface RunnerShell {
     replied: string[]
     /** sudo 비밀번호를 이미 보냈는지 (반복 전송 방지) */
     sudoSent?: boolean
+    /** 실행 중인 명령 원문 — 맨 `Password:` 프롬프트가 sudo 의 것인지 가르는 데 쓴다 */
+    cmd?: string
+    /** 사람이 '중단' 을 눌렀을 때 — Ctrl+C 를 보내고, 그래도 안 끝나면 잠깐 뒤 강제로 깬다 */
+    abort?: () => void
     /** 응답 없는 대화형 프롬프트를 감지해 걸어둔 타이머 */
     stuckTimer?: ReturnType<typeof setTimeout>
   }
@@ -3150,7 +3299,26 @@ interface RunnerShell {
  * 이걸 못 알아채면 셸이 조용히 45초를 기다렸다가 "응답 시간 초과" 로 끝나서,
  * 사용자는 명령이 틀린 줄 알고 엉뚱한 데를 뒤지게 된다.
  */
-const SUDO_PROMPT_RE = /\[sudo\] password for [^\n:]*:\s*$|^password( for [^\n:]*)?:\s*$/im
+/**
+ * sudo 비밀번호 자동응답의 범위.
+ *
+ * 예전 규칙 `[sudo] password for …:` **또는** `^password( for …)?:` 에 `m` 플래그가 붙어 있어,
+ * psql 의 `Password for user postgres:` · docker login 의 `Password:` · su 의 `Password:` 는 물론
+ * 출력 **중간의** `password:` 줄(설정 파일을 cat 한 결과)에까지 SSH 로그인 비밀번호를 보냈다.
+ * 레지스트리로 비밀번호가 나가거나, 읽는 프로그램이 없으면 셸이 그 줄을 명령으로 실행해 원격
+ * ~/.bash_history 에 평문으로 남았다.
+ *  - `[sudo] password for <계정>:` 가 **출력 끝**에 있으면 답한다(sudo 만 이렇게 묻는다).
+ *  - 맨 `Password:` 는 출력 끝에 있고 **명령이 sudo 로 시작하며** su·docker login·psql 처럼 따로
+ *    비밀번호를 묻는 프로그램이 없을 때만 답한다(sudoers 의 passprompt 를 바꾼 서버).
+ */
+const SUDO_PROMPT_RE = /\[sudo\] password for [^\n:]*:\s*$/i
+const BARE_PASSWORD_PROMPT_RE = /(?:^|\n)[ \t]*password:\s*$/i
+const OTHER_PW_ASKER_RE = /\b(su|passwd|docker\s+login|podman\s+login|helm\s+registry\s+login|psql|mysql|mariadb|ssh|scp|sftp|ftp|htpasswd|openssl|gpg|kinit|vault)\b/
+function looksLikeSudoPrompt(tail: string, cmd: string | undefined): boolean {
+  if (SUDO_PROMPT_RE.test(tail)) return true
+  if (!BARE_PASSWORD_PROMPT_RE.test(tail) || !cmd) return false
+  return /(?:^|[;&|(]\s*|\n\s*)sudo\b/.test(cmd.trim()) && !OTHER_PW_ASKER_RE.test(cmd)
+}
 /**
  * 아무도 답하지 않으면 멈춰 버리는 프롬프트들.
  *
@@ -3228,7 +3396,15 @@ function openRunnerShell(
       //    닫는 `}` 를 기다리며 계속 프롬프트("> ")를 찍는다. 그게 매 스텝 출력 맨 앞에
       //    "> > " 로 섞여 나온다(사용자가 실제 화면에서 발견).
       stream.write(
-        `PS1=''; PS2=''; PS3=''; PS4=''; PROMPT_COMMAND=''; unset LS_COLORS; stty -echo 2>/dev/null; export TERM=dumb\n`,
+        // history 를 끈다 — 러너가 보낸 명령은 플레이스홀더가 채워진 원문(INIT_PASSWORD=… 같은 값)이라
+        // 대화형 셸이 그대로 원격 ~/.bash_history 에 평문으로 남겼다. 리포트는 가려도 서버에는 남는다.
+        //
+        // `set +o history` 는 **맨 끝 별도 줄**로 보내고 `command` 를 붙인다. 처음엔 같은 줄 앞쪽에 넣었는데,
+        // dash·ash·ksh 에서 set 은 특수 내장이라 모르는 옵션이면 **그 줄의 나머지를 버린다**(2>/dev/null 로
+        // 메시지만 숨겨질 뿐). 로그인 셸이 /bin/sh(dash)인 서버에서 PS1 비우기·stty -echo 가 통째로 빠져
+        // 스텝 출력에 명령 원문·프롬프트가 섞였고, 'X 포함' 판정이 명령 글자에 걸려 통과할 수 있었다.
+        `unset HISTFILE; PS1=''; PS2=''; PS3=''; PS4=''; PROMPT_COMMAND=''; unset LS_COLORS; stty -echo 2>/dev/null; export TERM=dumb\n` +
+          `command set +o history 2>/dev/null\n`,
       )
       // 준비 완료를 센티넬로 확인 — 여기서 센티넬이 안 돌아오면 이 셸로는 종료코드를 읽을 수 없다.
       // (POSIX 가 아닌 셸, printf 없음, 프롬프트 억제 실패 등) 그런 셸을 ok 로 넘기면 이후 모든
@@ -3293,7 +3469,7 @@ function pumpRunner(sh: RunnerShell): void {
   // sudo 비밀번호는 이 세션에 로그인할 때 쓴 그 비밀번호로 자동 응답한다.
   // 같은 호스트에 같은 계정으로 보내는 것이라 새로 노출되는 정보가 없고,
   // 이게 없으면 sudo 가 들어간 스텝은 전부 타임아웃으로 죽는다.
-  if (!w.sudoSent && sh.password && SUDO_PROMPT_RE.test(tail)) {
+  if (!w.sudoSent && sh.password && looksLikeSudoPrompt(tail, w.cmd)) {
     w.sudoSent = true
     w.replied.push('[sudo] password → ••••••')
     sh.stream.write(sh.password + '\n')
@@ -3359,7 +3535,7 @@ async function runnerExec(
   // 자동응답 기록은 waiter 가 비워진 뒤에도 읽어야 하므로 바깥에 붙잡아 둔다
   const replied: string[] = []
   const result = await new Promise<{ code: number; out: string; timedOut?: boolean; dead?: string }>((resolve) => {
-    const w = { marker, resolve, fired: new Set<number>(), expect, replied }
+    const w: NonNullable<RunnerShell['waiter']> = { marker, resolve, fired: new Set<number>(), expect, replied, cmd }
     sh.waiter = w
     /**
      * 타임아웃이 발동해 Ctrl+C 를 보냈는지.
@@ -3369,8 +3545,15 @@ async function runnerExec(
      * 기록된다. 45초를 붙잡고 있다가 강제로 끊긴 것을 성공이라고 말하는 셈이다.
      */
     let interrupted = false
-    const timer = setTimeout(() => {
-      if (sh.waiter !== w) return
+    /**
+     * Ctrl+C 를 보내고, 2초 안에 센티넬이 안 오면 강제로 깬다.
+     * 대화형 bash 는 포그라운드 작업이 SIGINT 로 죽으면 실행 중인 목록 전체를 버려서
+     * `{ cmd } ; printf 마커` 의 printf 가 돌지 않는다 — 그래서 강제 해제가 필요하다.
+     * 예전에는 시간 초과에만 이걸 걸고 사람의 '중단' 은 Ctrl+C 만 보내, sleep·tail·fio(10분 바닥)
+     * 같은 스텝에서 중단을 누르면 남은 제한 시간 전체를 '중단 요청됨' 으로 기다렸다.
+     */
+    const interruptNow = () => {
+      if (sh.waiter !== w || interrupted) return
       interrupted = true
       // Ctrl+C → PTY 가 포그라운드 프로세스 그룹에 SIGINT. 그 뒤 센티넬이 오면 정상 회수된다.
       try {
@@ -3382,9 +3565,12 @@ async function runnerExec(
       setTimeout(() => {
         if (sh.waiter !== w) return
         sh.waiter = undefined
+        clearTimeout(timer)
         resolve({ code: 254, out: stripCtrl(sh.buf), timedOut: true })
       }, 2000)
-    }, timeoutMs)
+    }
+    w.abort = interruptNow
+    const timer = setTimeout(interruptNow, timeoutMs)
     // resolve 를 감싸 타이머 정리. 중단시킨 뒤에 돌아온 결과는 종료코드가 0 이더라도
     // '시간 초과로 끊은 것' 으로 표시한다 — 그 사실이 결과 해석의 전제다.
     w.resolve = (r) => {
@@ -3456,7 +3642,9 @@ ipcMain.handle('runner:interrupt', async (_evt, { runnerId }: { runnerId: string
   const sh = runnerShells.get(runnerId)
   if (!sh || sh.closed) return { ok: false, error: '셸이 열려 있지 않습니다.' }
   try {
-    sh.stream.write('\x03')
+    // 도는 명령이 있으면 시간 초과와 같은 길(Ctrl+C → 2초 뒤 강제 해제)로 끊는다
+    if (sh.waiter?.abort) sh.waiter.abort()
+    else sh.stream.write('\x03')
     return { ok: true }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -3568,10 +3756,39 @@ function execSudoPty(
       }
       let data = ''
       const dec = new StringDecoder('utf8')
-      stream.on('data', (chunk: Buffer) => (data += dec.write(chunk)))
-      stream.on('close', (code: number | null) => {
-        resolve({ code: code ?? 0, data: data + dec.end() })
+      let done = false
+      const finish = (code: number) => {
+        if (done) return
+        done = true
+        clearTimeout(hardTimer)
+        resolve({ code, data: data + dec.end() })
+      }
+      /**
+       * 끝이 있어야 한다. 비밀번호는 한 번만 쓰는데, 틀리면 sudo 가 "Sorry, try again" 뒤 다시 입력을
+       * 기다린다(passwd_timeout 기본 5분). 이 함수는 실행 슬롯(execCapture) 밖이라 EXEC_HARD_MS 도
+       * 걸리지 않아, 설정파일 뷰어에서 sudo 비밀번호를 오타 내면 후보 하나마다 약 5분씩 응답이 없었다.
+       * 재질문 문구가 보이면 곧바로 인증 실패로 끝내고, 그 밖에도 상한을 둔다.
+       */
+      const hardTimer = setTimeout(() => {
+        try {
+          stream.close()
+        } catch {
+          /* 무시 */
+        }
+        finish(124)
+      }, EXEC_HARD_MS)
+      stream.on('data', (chunk: Buffer) => {
+        data += dec.write(chunk)
+        if (/Sorry, try again|incorrect password/i.test(data) && !data.includes(MARK_A)) {
+          try {
+            stream.close()
+          } catch {
+            /* 무시 */
+          }
+          finish(1)
+        }
       })
+      stream.on('close', (code: number | null) => finish(code ?? 0))
       // sudo 프롬프트가 준비될 약간의 여유를 준 뒤 비밀번호 주입
       setTimeout(() => {
         try {
@@ -3773,18 +3990,29 @@ async function execEscalatedNoStdin(
 // 일반 exec(execCapture)는 종료(close)돼야 resolve 되므로 tail -f 처럼 끝나지 않는 명령엔 못 쓴다.
 // 채널을 계속 열어두고 데이터가 올 때마다 logtail:data 이벤트로 흘려보내는 전용 스트리밍 실행기.
 // target 종류(파일/파드)에 따라 명령만 다르고, 스트리밍 배관(그레이스 판정/전달/종료처리)은 공용이다.
+/**
+ * 실시간 로그 sudo 경로의 프롬프트 표식.
+ *
+ * 처음에는 `sudo -S -p ''` 로 띄워 놓고 **비밀번호를 쓰지 않았다** — sudo 가 입력을 기다리며 멈춰
+ * 있는데 0.7초 안에 죽지 않았으니 '정상 시작' 으로 보고, 화면은 아무것도 안 흐르는 빈 로그였다.
+ * 그렇다고 무조건 써 넣으면 안 된다: NOPASSWD 라 sudo 가 묻지 않으면 PTY 가 그 줄을 그대로
+ * 되돌려 보여줘 **비밀번호가 로그 창에 찍힌다.** 그래서 이 표식이 보일 때만 보낸다.
+ */
+const TAIL_SUDO_PROMPT = '__QTERM_SUDO_PW__'
+
 function buildTailCommand(target: LogTailTarget, usePty: boolean, tailLines = 200): string {
   // 초기 로드 줄 수 — "이전 로그 더 보기"로 늘려 재시작할 수 있게 파라미터화(과도한 값 방지 상한).
   const n = Math.min(Math.max(Math.floor(tailLines) || 200, 1), 50000)
+  const sudo = `sudo -S -p '${TAIL_SUDO_PROMPT}' `
   if (target.kind === 'file') {
     const q = shQuote(target.path)
-    return usePty ? `sudo -S -p '' tail -f -n ${n} ${q}` : `tail -f -n ${n} ${q}`
+    return usePty ? `${sudo}tail -f -n ${n} ${q}` : `tail -f -n ${n} ${q}`
   }
   if (target.kind === 'docker') {
     // 도커 소켓은 보통 root 만 붙을 수 있어 sudo 경로가 파일 tail 보다 오히려 흔하다.
     // (docker 그룹에 넣는 것은 사실상 root 권한을 주는 것이라 아무에게나 하지 않는다)
     const q = shQuote(target.container)
-    return usePty ? `sudo -S -p '' docker logs -f --tail ${n} ${q}` : `docker logs -f --tail ${n} ${q}`
+    return usePty ? `${sudo}docker logs -f --tail ${n} ${q}` : `docker logs -f --tail ${n} ${q}`
   }
   const podQ = shQuote(target.pod)
   const nsQ = shQuote(target.namespace)
@@ -3825,14 +4053,67 @@ ipcMain.handle(
         const forward = (data: string) => {
           mainWindow?.webContents.send('logtail:data', { sessionId, tailId, data })
         }
+        // sudo 경로: 표식 프롬프트를 몇 번 봤는가 — 두 번째면 비밀번호가 틀린 것이다(sudo 가 다시 묻는다)
+        let prompts = 0
+        let sudoFailed = false
+        let graceTimer: ReturnType<typeof setTimeout> | undefined
+        const settleOk = () => {
+          if (settled) return
+          settled = true
+          if (graceTimer) clearTimeout(graceTimer)
+          if (earlyText) forward(earlyText) // 오류가 아니었으므로 grace 기간 중 출력도 그대로 전달
+          resolve({ ok: true, tailId })
+        }
+        const failSudo = () => {
+          sudoFailed = true
+          try {
+            stream.close()
+          } catch {
+            /* 무시 */
+          }
+        }
         // 로그는 길고 한글이 섞이기 쉬워 청크 경계 깨짐이 특히 잘 보인다 → StringDecoder 필수
         const tailOutDec = new StringDecoder('utf8')
         const tailErrDec = new StringDecoder('utf8')
         stream.on('data', (d: Buffer) => {
-          const text = tailOutDec.write(d)
+          let text = tailOutDec.write(d)
           if (!text) return
-          if (!settled) earlyText += text
-          else forward(text)
+          if (usePty && text.includes(TAIL_SUDO_PROMPT)) {
+            prompts += text.split(TAIL_SUDO_PROMPT).length - 1
+            text = text.split(TAIL_SUDO_PROMPT).join('')
+            if (prompts === 1) {
+              try {
+                stream.write(sudoPassword + '\n')
+              } catch {
+                /* 이미 닫힘 */
+              }
+              // grace 는 **비밀번호를 보낸 시점부터** 다시 센다 — LDAP/sssd 처럼 프롬프트가 늦게 뜨는
+              // 곳에서 채널을 연 시점부터 세면, 틀린 비밀번호의 재질문이 오기 전에 '정상' 으로 넘어간다
+              if (!settled) {
+                if (graceTimer) clearTimeout(graceTimer)
+                graceTimer = setTimeout(settleOk, 3000)
+              }
+            } else {
+              // 틀린 비밀번호로 계속 다시 묻게 두면 아무것도 안 흐르는 창만 남는다 — 끊고 사실을 말한다
+              if (settled) forward('\n[sudo 비밀번호가 틀렸습니다 — 창을 닫고 다시 여세요]\n')
+              failSudo()
+              return
+            }
+          }
+          if (!text.trim() && !settled) return
+          if (!settled) {
+            // 틀린 비밀번호면 sudo 는 다시 묻기 전에 'Sorry, try again.' 한 줄만 먼저 찍는다.
+            // **그 한 줄만 온 청크**일 때만 실패로 본다. 처음엔 'Sorry, try again|incorrect password'
+            // 가 어디든 들어 있으면 실패로 봤는데, sudo 가 필요한 대표 파일인 /var/log/secure·auth.log 에는
+            // "3 incorrect password attempts" 줄이 흔해서 맞는 비밀번호도 tail 덤프에서 '틀림' 으로 끊겼다.
+            if (usePty && prompts > 0 && /^Sorry, try again\.?$/.test(text.trim())) {
+              failSudo()
+              return
+            }
+            earlyText += text
+            // 비밀번호를 보낸 뒤 첫 실제 출력이 왔다 = 인증이 지나갔다. 기다리지 않고 바로 흘린다
+            if (usePty && prompts > 0) settleOk()
+          } else forward(text)
         })
         if (!usePty) {
           // PTY 모드는 stdout/stderr 가 한 스트림으로 합쳐지므로 별도 처리 불필요
@@ -3847,19 +4128,19 @@ ipcMain.handle(
           if (s.logTailStreams?.get(tailId) === stream) s.logTailStreams.delete(tailId)
           if (!settled) {
             settled = true
-            if (/permission denied/i.test(earlyText)) resolve({ ok: false, needSudoPassword: true })
+            if (sudoFailed)
+              resolve({ ok: false, needSudoPassword: true, error: 'sudo 비밀번호가 틀렸습니다.' })
+            else if (/permission denied/i.test(earlyText)) resolve({ ok: false, needSudoPassword: true })
             else resolve({ ok: false, error: earlyText.trim() || '로그 스트림이 즉시 종료되었습니다.' })
             return
           }
           mainWindow?.webContents.send('logtail:closed', { sessionId, tailId })
         })
-        // grace 기간 동안 안 죽고 살아있으면 정상적으로 흐르고 있는 것으로 간주
-        setTimeout(() => {
-          if (settled) return
-          settled = true
-          if (earlyText) forward(earlyText) // 오류가 아니었으므로 grace 기간 중 출력도 그대로 전달
-          resolve({ ok: true, tailId })
-        }, 700)
+        // grace 기간 동안 안 죽고 살아있으면 정상적으로 흐르고 있는 것으로 간주.
+        // sudo 경로는 더 기다린다 — 틀린 비밀번호를 sudo 가 다시 묻기까지 PAM 이 2초쯤 끈다.
+        // 그 전에 '정상' 으로 넘겨 버리면 틀린 비밀번호가 빈 로그 창이 된다. (맞으면 첫 출력에서 바로 넘어간다)
+        // 프롬프트가 오면 위에서 비밀번호를 보낸 시점 기준으로 다시 건다.
+        graceTimer = setTimeout(settleOk, usePty ? 3000 : 700)
       }
       if (usePty) client.exec(cmd, { pty: true }, onStream)
       else client.exec(cmd, onStream)
@@ -3925,9 +4206,9 @@ ipcMain.handle('k8s:listNamespaces', async (_evt, { sessionId }: { sessionId: st
   const client = sessions.get(sessionId)?.client
   if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
   try {
-    const r = await execCapture(client, `kubectl get ns --no-headers -o custom-columns=:metadata.name 2>&1`)
-    if (r.code !== 0) return { ok: false, error: r.out.trim() || '네임스페이스 조회 실패' }
-    return { ok: true, namespaces: r.out.split('\n').map((s) => s.trim()).filter(Boolean) }
+    const r = await execCapture(client, `kubectl get ns --no-headers -o custom-columns=:metadata.name`)
+    if (r.code !== 0) return { ok: false, error: kubectlErrText(r) || '네임스페이스 조회 실패' }
+    return { ok: true, namespaces: k8sNames(r.out) }
   } catch (e) {
     return { ok: false, error: cleanErrorMessage(e) }
   }
@@ -3941,10 +4222,10 @@ ipcMain.handle(
     try {
       const r = await execCapture(
         client,
-        `kubectl get pods -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name 2>&1`,
+        `kubectl get pods -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name`,
       )
-      if (r.code !== 0) return { ok: false, error: r.out.trim() || '파드 조회 실패' }
-      return { ok: true, pods: r.out.split('\n').map((s) => s.trim()).filter(Boolean) }
+      if (r.code !== 0) return { ok: false, error: kubectlErrText(r) || '파드 조회 실패' }
+      return { ok: true, pods: k8sNames(r.out) }
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }
     }
@@ -3997,21 +4278,68 @@ ipcMain.handle(
  *
  * `-o json` 으로 받는다. `-o wide` 텍스트를 정규식으로 쪼개면 컬럼 서식이 바뀔 때(이 저장소가
  * 이미 pcs status 에서 겪은 문제) 조용히 틀어진다 — JSON 은 그 걱정이 없다.
+ *
+ * **호스트 시계도 같이 받는다(skewMs).** 생성 시각을 초 단위("37초 전")로 보여주면서 서버와 이 PC 의
+ * 시계 차이가 그대로 화면에 드러났다 — PC 가 5초 늦으면 막 뜬 파드가 '방금' 에 5초 머문다.
+ * kubectl **뒤에** date 를 찍는 이유: 앞에 두면 SSH 슬롯 대기·kubectl 실행 시간이 통째로 오차가
+ * 된다. 뒤에 두면 받은 직후 PC 시각과의 차이에서 빠지는 것은 돌아오는 한 구간의 지연뿐이다.
+ * 생성 시각은 API 서버의 시계이고 date 는 SSH 로 붙은 호스트의 시계다 — 같은 클러스터 노드는
+ * NTP 로 맞춰 둔다는 전제다. 그래도 노트북 시계가 몇 초~몇 분 틀어진 경우(실제로 흔한 쪽)는 잡는다.
  */
 ipcMain.handle(
   'k8s:listPodsDetail',
   async (_evt, { sessionId, namespace }: { sessionId: string; namespace: string }) => {
-    const r = await kubectlJson(sessionId, `get pods -n ${shQuote(namespace)} -o json`)
-    if (!r.ok) return { ok: false, error: r.error }
+    const client = sessions.get(sessionId)?.client
+    if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
+    let raw: { code: number; out: string; err: string }
+    try {
+      raw = await execCapture(
+        client,
+        `kubectl get pods -n ${shQuote(namespace)} -o json; rc=$?; echo; date +%s%3N; exit $rc`,
+      )
+    } catch (e) {
+      return { ok: false, error: cleanErrorMessage(e) }
+    }
+    const localAt = Date.now()
+    const text = (raw.out ?? '').replace(/\s+$/, '')
+    const nl = text.lastIndexOf('\n')
+    const tail = text.slice(nl + 1).trim()
+    // %3N 을 모르는 date(busybox 등)는 'N' 을 그대로 찍는다 — 13자리 숫자가 아니면 보정하지 않는다.
+    // 마지막 줄이 date 의 것(숫자 또는 %3N 을 모르는 date 의 'N' 꼬리)일 때만 본문에서 떼어 낸다 —
+    // date 가 아무것도 안 찍으면 JSON 의 마지막 `}` 를 잘라 해석이 깨지므로 모양을 확인한다
+    const hostMs = /^\d{13}$/.test(tail) ? Number(tail) : NaN
+    const body = /^\d+N?$/.test(tail) ? text.slice(0, Math.max(0, nl)).trim() : text.trim()
+    if (raw.code !== 0) return { ok: false, error: (raw.err ?? '').trim() || body || 'kubectl 실행 실패' }
+    let json: unknown
+    try {
+      json = JSON.parse(body)
+    } catch {
+      return { ok: false, error: body.slice(0, 300) || '응답을 해석할 수 없습니다.' }
+    }
+    type CTerm = { reason?: string; exitCode?: number; finishedAt?: string; message?: string }
     type CState = {
-      waiting?: { reason?: string }
-      terminated?: { reason?: string; exitCode?: number }
+      waiting?: { reason?: string; message?: string }
+      terminated?: CTerm
       running?: unknown
     }
-    type CStatus = { name?: string; ready?: boolean; started?: boolean; restartCount?: number; state?: CState }
-    const list = r.json as {
+    type CStatus = {
+      name?: string
+      ready?: boolean
+      started?: boolean
+      restartCount?: number
+      state?: CState
+      lastState?: { terminated?: CTerm }
+    }
+    const list = json as {
       items?: {
-        metadata?: { name?: string; creationTimestamp?: string; deletionTimestamp?: string; ownerReferences?: { kind?: string }[] }
+        metadata?: {
+          name?: string
+          uid?: string
+          generateName?: string
+          creationTimestamp?: string
+          deletionTimestamp?: string
+          ownerReferences?: { kind?: string }[]
+        }
         spec?: { nodeName?: string; containers?: unknown[]; initContainers?: { name?: string; restartPolicy?: string }[] }
         status?: {
           phase?: string
@@ -4021,6 +4349,10 @@ ipcMain.handle(
           initContainerStatuses?: CStatus[]
         }
       }[]
+    }
+    const toMs = (t?: string) => {
+      const v = t ? Date.parse(t) : NaN
+      return Number.isFinite(v) ? v : undefined
     }
     const pods: PodInfo[] = (list.items ?? [])
       .map((it) => {
@@ -4056,6 +4388,27 @@ ipcMain.handle(
         // 사이드카는 파드가 사는 동안 같이 도는 컨테이너라 준비·재시작 칸에도 센다(kubectl 1.29+ 와 같다)
         const sidecarStatuses = inits.filter((s) => sidecars.has(s.name))
         const runningSet = [...statuses, ...sidecarStatuses]
+        const detail = (s: CStatus, kind: PodContainerInfo['kind']): PodContainerInfo => {
+          const st = s.state
+          const last = s.lastState?.terminated
+          return {
+            name: s.name ?? '',
+            kind,
+            ready: !!s.ready,
+            restartCount: s.restartCount ?? 0,
+            state: st?.running
+              ? 'running'
+              : st?.waiting
+                ? `waiting:${st.waiting.reason ?? ''}`
+                : st?.terminated
+                  ? `terminated:${st.terminated.reason ?? `exit ${st.terminated.exitCode ?? '?'}`}`
+                  : 'unknown',
+            stateMessage: st?.waiting?.message || st?.terminated?.message || undefined,
+            lastTerminated: last
+              ? { reason: last.reason, exitCode: last.exitCode, finishedAtMs: toMs(last.finishedAt), message: last.message }
+              : undefined,
+          }
+        }
         return {
           name: it.metadata?.name ?? '',
           namespace,
@@ -4072,10 +4425,67 @@ ipcMain.handle(
           ownerKind: it.metadata?.ownerReferences?.[0]?.kind ?? null,
           terminating: !!it.metadata?.deletionTimestamp,
           node: it.spec?.nodeName,
+          uid: it.metadata?.uid,
+          generateName: it.metadata?.generateName,
+          containers: [
+            ...inits.map((s) => detail(s, sidecars.has(s.name) ? 'sidecar' : 'init')),
+            ...statuses.map((s) => detail(s, 'main')),
+          ],
         }
       })
       .filter((p) => p.name)
-    return { ok: true, pods }
+    return { ok: true, pods, skewMs: Number.isFinite(hostMs) ? hostMs - localAt : undefined }
+  },
+)
+
+/**
+ * 파드 하나의 이벤트 — 행을 펼쳤을 때 '왜 이 상태인가' 를 보여준다(스케줄 실패 · 이미지 못 받음 ·
+ * probe 실패 · OOM 등은 컨테이너 상태보다 이벤트에 먼저, 더 자세히 남는다).
+ * 펼칠 때 한 번만 부른다 — 1초 자동 갱신에 얹으면 파드마다 API 를 한 번씩 더 두드린다.
+ */
+ipcMain.handle(
+  'k8s:podEvents',
+  async (
+    _evt,
+    { sessionId, namespace, pod, uid }: { sessionId: string; namespace: string; pod: string; uid?: string },
+  ) => {
+    // **이름이 아니라 uid 로 거른다.** StatefulSet 파드(web-0)는 다시 생겨도 이름이 같아, 이름으로 거르면
+    // 1시간 안의 옛 파드의 BackOff·Unhealthy 가 섞여 막 뜬 새 파드에 '지금 문제' 가 떴다. 이름은 uid 를
+    // 못 받았을 때만 쓴다. kind=Pod 도 건다 — 같은 이름의 다른 리소스 이벤트가 섞이지 않게.
+    const sel = uid ? `involvedObject.uid=${uid}` : `involvedObject.name=${pod},involvedObject.kind=Pod`
+    const r = await kubectlJson(sessionId, `get events -n ${shQuote(namespace)} --field-selector ${shQuote(sel)} -o json`)
+    if (!r.ok) return { ok: false, error: r.error }
+    const list = r.json as {
+      items?: {
+        type?: string
+        reason?: string
+        message?: string
+        count?: number
+        lastTimestamp?: string
+        eventTime?: string
+        firstTimestamp?: string
+        series?: { count?: number; lastObservedTime?: string }
+        involvedObject?: { fieldPath?: string }
+      }[]
+    }
+    const toMs = (t?: string) => {
+      const v = t ? Date.parse(t) : NaN
+      return Number.isFinite(v) ? v : undefined
+    }
+    const events: PodEvent[] = (list.items ?? [])
+      .map((e) => ({
+        type: e.type ?? '',
+        reason: e.reason ?? '',
+        message: (e.message ?? '').trim(),
+        // events.k8s.io 식으로 기록된 반복은 count 가 아니라 series 에 쌓인다
+        count: e.series?.count ?? e.count ?? 1,
+        atMs: toMs(e.series?.lastObservedTime) ?? toMs(e.lastTimestamp) ?? toMs(e.eventTime) ?? toMs(e.firstTimestamp),
+        firstAtMs: toMs(e.firstTimestamp) ?? toMs(e.eventTime),
+        // spec.containers{app} · spec.initContainers{init} → 컨테이너 이름만
+        container: /\{([^}]+)\}/.exec(e.involvedObject?.fieldPath ?? '')?.[1],
+      }))
+      // 순서는 화면(src/lib/podEvents.ts)이 정한다 — 같은 초에 몰린 것을 단계 순서로 가르려면 거기서 해야 한다
+    return { ok: true, events }
   },
 )
 
@@ -4084,6 +4494,11 @@ ipcMain.handle(
  * Job 같은 컨트롤러가 있으면 즉시 새 파드로 재생성되지만, 컨트롤러 없는 단독 파드는 그냥
  * 사라지고 끝난다. 그 구분은 화면(PodManagerView)에서 ownerKind 로 미리 경고하고 확인을
  * 받는다 — 여기서는 받은 요청을 그대로 수행할 뿐, 다시 확인하지 않는다.
+ *
+ * **`--wait=false`.** kubectl delete 는 기본으로 파드가 다 지워질 때까지(정상 종료 대기, 기본 30초,
+ * DB 류는 그 이상) 붙잡고 있는데, 이 앱의 exec 는 60초(EXEC_HARD_MS)에 채널을 끊는다. 그래서 종료가
+ * 긴 파드는 삭제가 멀쩡히 진행되는데도 화면에 '재시작 실패' 가 떴다. 요청이 받아들여졌는지만 보고
+ * 바로 돌아온다 — 그 뒤의 Terminating → 재생성 → Ready 는 1초 자동 갱신이 표에서 보여준다.
  */
 ipcMain.handle(
   'k8s:restartPod',
@@ -4091,7 +4506,10 @@ ipcMain.handle(
     const client = sessions.get(sessionId)?.client
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
     try {
-      const r = await execCapture(client, `kubectl delete pod ${shQuote(pod)} -n ${shQuote(namespace)} 2>&1`)
+      const r = await execCapture(
+        client,
+        `kubectl delete pod ${shQuote(pod)} -n ${shQuote(namespace)} --wait=false 2>&1`,
+      )
       const out = (r.out ?? '').trim()
       if (r.code !== 0) return { ok: false, error: out || '파드 삭제 실패' }
       return { ok: true }
@@ -4231,15 +4649,55 @@ async function cmOriginOf(sessionId: string, alias?: string): Promise<CmBackupOr
 }
 
 /** kubectl 을 그 세션에서 실행 — 실패 메시지는 kubectl 원문을 그대로 올린다(권한·컨텍스트 문제를 감추지 않는다) */
+/**
+ * kubectl 실패 문구 — stderr 를 먼저 쓴다.
+ *
+ * kubectl 명령에 `2>&1` 을 붙여 받던 것을 걷어냈다. metrics-server 같은 aggregated API 가 죽어 있으면
+ * kubectl 은 `E1008 … memcache.go] couldn't get resource list …` 를 stderr 에 찍고도 **exit 0** 으로
+ * 끝나는데, 합쳐 받으면 그 줄이 JSON 앞에 붙어 해석이 깨지거나(파드 탭이 계속 '조회 실패')
+ * 네임스페이스·파드 목록에 이름처럼 끼어들었다. 노드를 죽이는 검증 중에 특히 잘 생긴다.
+ * 성공이면 stdout 만 해석하고, stderr 는 실패 사유로만 쓴다.
+ */
+function kubectlErrText(r: { out?: string; err?: string }): string {
+  return ((r.err ?? '').trim() || (r.out ?? '').trim()).slice(0, 600)
+}
+
+/** 이름 목록 — 한 줄에 하나. 이름 형태(DNS-1123)가 아닌 줄은 버린다(뽑은 값을 형태로 교차 검증) */
+function k8sNames(out: string): string[] {
+  return out
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(s))
+}
+
+/**
+ * `kubectl get -o yaml` 의 metadata.resourceVersion.
+ * 처음엔 'resourceVersion:' 으로 시작하는 **첫 줄**을 썼는데, kubectl YAML 은 data: 가 metadata: 보다
+ * 먼저 나온다 — 값 안에 매니페스트가 든 ConfigMap 이면 그 안의 resourceVersion 을 잡았다.
+ * metadata: 블록(들여쓰기 2칸) 안에서만 찾는다.
+ */
+function yamlMetadataRv(yaml: string): string {
+  const lines = yaml.split('\n')
+  const start = lines.findIndex((l) => /^metadata:\s*$/.test(l))
+  if (start < 0) return ''
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i]
+    if (/^\S/.test(l)) break // 다음 최상위 키 — metadata 블록 끝
+    const m = /^ {2}resourceVersion:\s*"?([^"\s]+)"?\s*$/.exec(l)
+    if (m) return m[1]
+  }
+  return ''
+}
+
 async function kubectlJson(
   sessionId: string,
   args: string,
 ): Promise<{ ok: true; json: unknown } | { ok: false; error: string }> {
   const client = sessions.get(sessionId)?.client
   if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
-  const r = await execCapture(client, `kubectl ${args} 2>&1`)
+  const r = await execCapture(client, `kubectl ${args}`)
   const out = (r.out ?? '').trim()
-  if (r.code !== 0) return { ok: false, error: out || 'kubectl 실행 실패' }
+  if (r.code !== 0) return { ok: false, error: kubectlErrText(r) || 'kubectl 실행 실패' }
   try {
     return { ok: true, json: JSON.parse(out) }
   } catch {
@@ -4255,10 +4713,10 @@ ipcMain.handle('k8s:listConfigMaps', async (_evt, { sessionId, namespace }: { se
     // NAME DATA AGE 세 컬럼. custom-columns 로 고정해 서식 변화에 흔들리지 않게 한다.
     const r = await execCapture(
       client,
-      `kubectl get cm -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name,:metadata.creationTimestamp 2>&1`,
+      `kubectl get cm -n ${shQuote(namespace)} --no-headers -o custom-columns=:metadata.name,:metadata.creationTimestamp`,
     )
     const out = (r.out ?? '').trim()
-    if (r.code !== 0) return { ok: false, error: out || 'ConfigMap 조회 실패' }
+    if (r.code !== 0) return { ok: false, error: kubectlErrText(r) || 'ConfigMap 조회 실패' }
     const items: ConfigMapRef[] = []
     for (const line of out.split('\n')) {
       const cols = line.trim().split(/\s+/)
@@ -4309,9 +4767,9 @@ ipcMain.handle(
     const client = sessions.get(sessionId)?.client
     if (!client) return { ok: false, error: 'SSH 연결이 없습니다.' }
     try {
-      const r = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml 2>&1`)
+      const r = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml`)
       const out = r.out ?? ''
-      if (r.code !== 0) return { ok: false, error: out.trim() || 'YAML 조회 실패' }
+      if (r.code !== 0) return { ok: false, error: kubectlErrText(r) || 'YAML 조회 실패' }
       return { ok: true, yaml: out }
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }
@@ -4347,13 +4805,15 @@ ipcMain.handle(
       const origin = await cmOriginOf(sessionId, alias)
 
       // 1) 적용 직전 원본 YAML 확보 — 백업과 충돌 검사를 같은 스냅샷으로 한다
-      const cur = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml 2>&1`)
+      // stderr 를 합치지 않는다 — 경고 줄이 섞이면 백업 YAML 이 오염되고 rv 를 엉뚱하게 읽는다
+      const cur = await execCapture(client, `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o yaml`)
       const yaml = cur.out ?? ''
-      if (cur.code !== 0) return { ok: false, error: (yaml.trim() || '원본 조회 실패') }
+      if (cur.code !== 0) return { ok: false, error: kubectlErrText(cur) || '원본 조회 실패' }
       // resourceVersion 은 YAML 에서 뽑는다(별도 조회를 또 하면 그 사이가 다시 벌어진다)
-      const rvLine = yaml.split('\n').find((l) => l.trim().startsWith('resourceVersion:'))
-      const nowRv = rvLine ? rvLine.split(':')[1].trim().replace(/"/g, '') : ''
-      if (baseResourceVersion && nowRv && nowRv !== baseResourceVersion)
+      const nowRv = yamlMetadataRv(yaml)
+      // 못 읽으면 **적용하지 않는다.** 예전에는 빈 값이면 검사를 건너뛰어(fail-open) 충돌 검사가 조용히 꺼졌다
+      if (!nowRv) return { ok: false, error: '현재 resourceVersion 을 읽지 못해 적용하지 않았습니다. 다시 불러오세요.' }
+      if (baseResourceVersion && nowRv !== baseResourceVersion)
         return {
           ok: false,
           conflict: true,
@@ -4380,13 +4840,24 @@ ipcMain.handle(
       }
 
       // 3) 바꾼 키만 한 번에 보낸다. --type merge 는 data 안의 키를 병합하므로 나머지는 그대로 남는다.
-      const patch = JSON.stringify({ data: changes })
+      //    본문에 resourceVersion 을 함께 실어 **API 서버가 선조건을 검사**하게 한다 — 위의 비교는 조회 시점
+      //    기준이라, 조회와 patch 사이에 누가 끼어들면 놓친다. 서버는 rv 가 다르면 409 Conflict 로 거절한다.
+      const patch = JSON.stringify({ metadata: { resourceVersion: nowRv }, data: changes })
       const r = await execCapture(
         client,
-        `kubectl patch cm ${shQuote(name)} -n ${shQuote(namespace)} --type merge -p ${shQuote(patch)} 2>&1`,
+        `kubectl patch cm ${shQuote(name)} -n ${shQuote(namespace)} --type merge -p ${shQuote(patch)}`,
       )
-      const out = (r.out ?? '').trim()
-      if (r.code !== 0) return { ok: false, error: out || 'patch 실패', backupPath }
+      if (r.code !== 0) {
+        const err = kubectlErrText(r)
+        if (/conflict|the object has been modified/i.test(err))
+          return {
+            ok: false,
+            conflict: true,
+            error: '적용하는 사이에 이 ConfigMap 이 바뀌었습니다. 다시 불러와 확인하세요.',
+            backupPath,
+          }
+        return { ok: false, error: err || 'patch 실패', backupPath }
+      }
 
       // 4) 보관 개수 초과분 정리 (오래된 것부터)
       try {
@@ -4401,7 +4872,7 @@ ipcMain.handle(
 
       const after = await execCapture(
         client,
-        `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o jsonpath={.metadata.resourceVersion} 2>&1`,
+        `kubectl get cm ${shQuote(name)} -n ${shQuote(namespace)} -o jsonpath={.metadata.resourceVersion}`,
       )
       return {
         ok: true,
@@ -5001,8 +5472,11 @@ async function readScenarioRetention(): Promise<ScenarioRunRetention> {
   let raw: string
   try {
     raw = await readFile(scenarioRetentionPath(), 'utf-8')
-  } catch {
-    return { ...DEFAULT_SCENARIO_RETENTION } // 아직 정한 적 없음 (정상)
+  } catch (e) {
+    // **파일이 없을 때만** 기본값이다. 백신이 잠깐 잡고 있는 EBUSY·EPERM 까지 '없음' 으로 읽으면
+    // 늘려 둔 한도가 기본값이 되어 정리가 남겨야 할 회차를 지운다 — 위 주석과 같은 사고가 다른 길로 난다
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { ...DEFAULT_SCENARIO_RETENTION }
+    throw e
   }
   const parsed = JSON.parse(raw)
   const maxRuns = Number(parsed?.maxRuns)
@@ -5223,8 +5697,12 @@ async function readPerfSettings(): Promise<PerfSettings> {
   }
 }
 async function writePerfSettings(patch: Partial<PerfSettings>): Promise<void> {
-  const cur = await readPerfSettings()
-  await writeFileAtomic(perfSettingsPath(), JSON.stringify({ ...cur, ...patch }, null, 2))
+  // 읽고-고쳐-쓰기를 락으로 묶는다 — locust·jmeter 경로를 연달아 저장하면 서로의 값을 덮었다
+  // (임시 파일 이름도 같아 rename 이 ENOENT 로 실패하기도 했다). 저장소 쓰기 규칙과 같다.
+  await withStoreLock('perfSettings', async () => {
+    const cur = await readPerfSettings()
+    await writeFileAtomic(perfSettingsPath(), JSON.stringify({ ...cur, ...patch }, null, 2))
+  })
 }
 
 /** 실행 중인 성능 테스트 (동시에 하나만 — 두 개를 돌리면 서로의 부하가 결과를 오염시킨다) */
@@ -5237,8 +5715,16 @@ interface PerfRun {
   flushTimer?: ReturnType<typeof setTimeout>
   decoders: { stdout: StringDecoder; stderr: StringDecoder }
   finished: boolean
+  /**
+   * 최근 로그 — 성능 창을 닫았다 다시 열면 진행 화면을 되살릴 때 쓴다(perf:status). 로그는 창에만
+   * 있었기 때문에 다시 연 창은 '아무것도 안 돎' 으로 보였고 중지 버튼도 없었다 — 부하가 서비스에
+   * 계속 들어가는데 앱에서 멈출 수단이 없었다.
+   */
+  logTail: string
 }
 let perfRun: PerfRun | null = null
+/** perf:status 로 돌려줄 최근 로그 길이 — 창의 LOG_MAX_CHARS 와 같은 규모 */
+const PERF_LOG_TAIL_MAX = 200_000
 
 /** `locust --version` 을 실제로 실행해 본다 — 파일이 있는지만 보면 파이썬이 깨진 경우를 놓친다 */
 /**
@@ -5620,7 +6106,11 @@ function buildLocustfile(cfg: PerfRunConfig): string {
     const hdr = own.length
       ? `, headers={**COMMON_HEADERS, ${own.map(([k, v]) => `${pyStr(k)}: ${pyStr(v)}`).join(', ')}}`
       : ', headers=COMMON_HEADERS'
-    const method = st.method.toLowerCase()
+    // method 는 파이썬 코드 자리(`self.client.<method>(`)에 그대로 들어간다 — 다른 칸처럼 문자열로 감쌀 수
+    // 없으므로 **아는 값만** 통과시킨다. 팀에서 받은 프리셋 JSON 의 method 에 `get("/");__import__('os')…#`
+    // 를 넣으면 실행할 때 그 코드가 돌 수 있었다(가져오기는 name·config 모양만 본다).
+    const m0 = String(st.method ?? '').toLowerCase()
+    const method = ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'].includes(m0) ? m0 : 'get'
     const bodyArg =
       (st.method === 'POST' || st.method === 'PUT') && (st.body ?? '').trim() ? `, data=${pyStr(st.body ?? '')}` : ''
     // catch_response 는 쓰지 않는다 — 상태 코드 판정은 requests 기본(4xx/5xx=실패)에 맡긴다
@@ -5744,6 +6234,11 @@ function perfFlush(run: PerfRun): void {
   const { stdout, stderr } = run.pending
   run.pending = { stdout: '', stderr: '' }
   run.flushTimer = undefined
+  const add = stdout + stderr
+  if (add) {
+    const t = run.logTail + add
+    run.logTail = t.length > PERF_LOG_TAIL_MAX ? t.slice(t.length - PERF_LOG_TAIL_MAX) : t
+  }
   if (stdout) mainWindow?.webContents.send('perf:log', { runId: run.meta.id, stream: 'stdout', text: stdout })
   if (stderr) mainWindow?.webContents.send('perf:log', { runId: run.meta.id, stream: 'stderr', text: stderr })
 }
@@ -5756,7 +6251,7 @@ async function writeRunMeta(dir: string, meta: PerfRunMeta): Promise<void> {
   await writeFileAtomic(path.join(dir, 'run.json'), JSON.stringify(meta, null, 2))
 }
 
-ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
+async function startPerfRun(cfg: PerfRunConfig) {
   if (perfRun && !perfRun.finished) {
     return { ok: false, error: '이미 성능 검증이 돌고 있습니다. 먼저 중지하세요.' }
   }
@@ -5834,6 +6329,9 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
         // jmeter.bat 은 배치라 셸을 거쳐야 실행된다(Windows)
         shell: process.platform === 'win32',
         env: { ...process.env },
+        // 자기 프로세스 그룹으로 띄운다(Locust 와 같이) — 그래야 killTree 의 process.kill(-pid) 가 듣는다.
+        // jmeter 셸 스크립트는 exec 없이 java 를 띄우므로, 그룹이 없으면 sh 만 죽고 java(부하)가 남았다.
+        detached: process.platform !== 'win32',
       })
     } catch (e) {
       return { ok: false, error: cleanErrorMessage(e) }
@@ -5845,6 +6343,7 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
       pending: { stdout: '', stderr: '' },
       decoders: { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') },
       finished: false,
+      logTail: '',
     }
     perfRun = run2
     /**
@@ -5944,6 +6443,15 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     // 시작 문구 몇 줄로 끝나 보였다). 화면의 숫자는 /stats/requests 로 받지만, 로그도 무슨 일이
     // 벌어지는지 보여야 한다.
     '--print-stats',
+    /**
+     * 초 단위 이력의 백분위를 **최근 구간 값**으로 남기게 한다. 이게 없으면 Locust 는 이력의 `95%`
+     * 칸에 **시작부터의 누적 p95** 를 적는다(stats.py `_stats_history_data_rows` 의
+     * `use_current=self.full_history`). 그래서 '워밍업 N초 제외 구간 p95 최대' 가 워밍업 표본이 섞인
+     * 누적값의 최댓값이었고(실제로는 아무것도 안 뺐다), 시간 그래프에서도 페일오버 순간의 지연 급등이
+     * 누적에 묻혀 거의 안 보였다. 켜면 최근 10초 창(CURRENT_RESPONSE_TIME_PERCENTILE_WINDOW)의 값이다.
+     * 엔드포인트별 행도 같이 쌓이지만 파서는 Aggregated 행만 읽는다.
+     */
+    '--csv-full-history',
     '--html',
     reportPath,
     '--csv',
@@ -5952,7 +6460,11 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     '127.0.0.1',
     '--web-port',
     String(port),
-    ...(cfg.processes && cfg.processes > 1 ? ['--processes', String(Math.round(cfg.processes))] : []),
+    // --processes 는 Windows 에서 지원되지 않고, --master 와 같이 쓸 수도 없다(둘 다 Locust 가 바로
+    // 끝낸다). 화면에서 막지만, 예전에 저장한 설정·가져온 프리셋으로 들어와도 실행이 죽지 않게 여기서도 뺀다.
+    ...(cfg.processes && cfg.processes > 1 && process.platform !== 'win32' && !(cfg.expectWorkers && cfg.expectWorkers > 0)
+      ? ['--processes', String(Math.round(cfg.processes))]
+      : []),
     // 워커를 기다리는 모드 — 워커가 붙기 전에는 부하가 시작되지 않는다
     ...(cfg.expectWorkers && cfg.expectWorkers > 0
       ? ['--master', '--expect-workers', String(Math.round(cfg.expectWorkers))]
@@ -6005,6 +6517,7 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
     pending: { stdout: '', stderr: '' },
     decoders: { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') },
     finished: false,
+    logTail: '',
   }
   perfRun = run
   child.stdin?.end() // 입력을 기다릴 일이 없다 — 열어 두면 멈춰 있는 원인만 늘어난다
@@ -6032,6 +6545,28 @@ ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
   })
 
   return { ok: true, meta }
+}
+
+/**
+ * 시작은 **한 번에 하나만.** perfRun 을 확인하고 대입하기까지 사이에 설정 읽기·파이썬 버전 확인(1~수 초)·
+ * 폴더 만들기가 끼어 있어, 시작을 두 번 누르면 locust 가 둘 떴다. perfRun 은 두 번째 것으로 덮여
+ * 첫 번째 부하는 중지 버튼으로도 앱 종료로도 멈출 수 없었다. 확인하는 그 줄에서 바로 막는다.
+ */
+let perfStarting = false
+ipcMain.handle('perf:start', async (_evt, cfg: PerfRunConfig) => {
+  if (perfStarting) return { ok: false, error: '시작하는 중입니다. 잠시 기다리세요.' }
+  perfStarting = true
+  try {
+    return await startPerfRun(cfg)
+  } finally {
+    perfStarting = false
+  }
+})
+
+/** 지금 도는 회차 — 성능 창을 다시 열었을 때 진행 화면·중지 버튼을 되살린다 */
+ipcMain.handle('perf:status', async () => {
+  if (!perfRun || perfRun.finished) return { running: null, log: '' }
+  return { running: perfRun.meta, log: perfRun.logTail + perfRun.pending.stdout + perfRun.pending.stderr }
 })
 
 ipcMain.handle('perf:cancel', async () => {
@@ -6056,6 +6591,14 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
     try {
       const dir = path.join(perfRunsDir(), id)
       const meta = JSON.parse(await readFile(path.join(dir, 'run.json'), 'utf-8')) as PerfRunMeta
+      // 종료 시각이 없는데 이 프로세스가 돌린 회차도 아니면 = 앱이 죽었거나 PC 가 꺼져 끊긴 회차다.
+      // 한 번 표시해 파일에 남긴다(다음부터 매번 추측하지 않게).
+      // 이 프로세스의 마지막 회차는 끝났더라도 건너뛴다 — close 처리가 endedAt 을 쓰는 중일 수 있어,
+      // 그 사이에 읽고 '끊김' 으로 덮어쓰면 멀쩡한 회차를 망친다.
+      if (meta.endedAt === undefined && !meta.interrupted && perfRun?.meta.id !== meta.id) {
+        meta.interrupted = true
+        await writeRunMeta(dir, meta).catch(() => {})
+      }
       let statsCsv: string | undefined
       try {
         statsCsv = await readFile(path.join(dir, 'run_stats.csv'), 'utf-8')
@@ -6077,6 +6620,12 @@ ipcMain.handle('perf:list', async (): Promise<PerfRunRecord[]> => {
         failuresCsv = await readFile(path.join(dir, 'run_failures.csv'), 'utf-8')
       } catch {
         /* 실패가 없으면 파일도 없다 */
+      }
+      // 도는 중인 회차는 통계를 싣지 않는다 — 실행 중에도 1초마다 다시 쓰이는 중간 수치라, 목록의 p95·
+      // 판정·리포트가 그걸로 만들어졌다. 끝나면 다시 읽어 채운다.
+      if (perfRun && !perfRun.finished && perfRun.meta.id === meta.id) {
+        out.push({ meta })
+        continue
       }
       out.push({ meta, statsCsv, failuresCsv, jmeterStatsJson })
     } catch {
@@ -6163,6 +6712,12 @@ ipcMain.handle(
       meta.label = label?.trim() || undefined
       meta.memo = memo?.trim() || undefined
       await writeFileAtomic(file, JSON.stringify(meta, null, 2))
+      // 도는 중인 회차면 메모리 쪽에도 반영한다 — 끝날 때(중지·종료) 메모리의 meta 를 통째로 다시 써서,
+      // 실행 중에 붙인 이름이 사라졌고 이름이 없어지면 보관 정리의 보호도 풀렸다
+      if (perfRun && perfRun.meta.id === id) {
+        perfRun.meta.label = meta.label
+        perfRun.meta.memo = meta.memo
+      }
       return { ok: true }
     } catch {
       return { ok: false }
@@ -6178,8 +6733,10 @@ async function readPerfRetention(): Promise<PerfRetention> {
   let raw: string
   try {
     raw = await readFile(perfRetentionPath(), 'utf-8')
-  } catch {
-    return { ...DEFAULT_PERF_RETENTION } // 아직 설정한 적 없음 (정상)
+  } catch (e) {
+    // 없을 때만 기본값 — 일시적 읽기 오류(EBUSY·EPERM)를 '없음' 으로 읽으면 정리가 회차를 지운다
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { ...DEFAULT_PERF_RETENTION } // 아직 설정한 적 없음 (정상)
+    throw e
   }
   const parsed = JSON.parse(raw)
   const maxRuns = Number(parsed?.maxRuns)
@@ -6742,44 +7299,78 @@ app.whenReady().then(() => {
   }
 })
 
-app.on('window-all-closed', async () => {
-  // 옵션이 켜져 있으면, 연결을 정리하기 전에 살아있는 각 세션의 서버 데몬을 종료.
-  if (killDaemonOnExit) {
+/**
+ * 앱을 끝낼 때의 정리 — 창을 다 닫은 경우와 Cmd+Q·app.quit() 경로가 **같은 일**을 한다.
+ *
+ * 예전에는 window-all-closed 에만 걸려 있어, macOS 의 Cmd+Q 처럼 그 이벤트 없이 끝나는 경로에서는
+ * 세션 로그 마무리(endedAt 없는 '기록중' 항목이 남아 영원히 정리 안 됨)·데몬 종료·성능 부하 종료가
+ * 전부 빠졌다. locust 는 detached 프로세스 그룹이라 앱과 같이 죽지도 않는다.
+ *
+ * **부하부터 죽인다.** 예전에는 원격 데몬 종료와 세션 로그 마무리를 먼저 기다렸는데, 일부러 죽인
+ * 노드에 SSH 가 물려 있으면 그게 최대 60초(EXEC_HARD_MS)를 끌어, 창이 닫힌 뒤에도 그만큼 부하가
+ * 서비스에 계속 들어갔다. 그 사이 작업관리자로 끄면 부하는 아예 남았다.
+ */
+let quitCleanup: Promise<void> | null = null
+function runQuitCleanup(): Promise<void> {
+  if (quitCleanup) return quitCleanup
+  quitCleanup = (async () => {
+    // 1) 부하 — 먼저 죽이고, 표시는 그다음에 쓴다. 사람이 누른 중지가 아니므로 canceled 가 아니라
+    //    interrupted 다(다음 실행에서 반쪽 회차가 PASS/FAIL 로 읽히거나 기준선으로 뽑히지 않게).
+    if (perfRun && !perfRun.finished) {
+      const run = perfRun
+      run.finished = true // 곧 올 close 이벤트가 이 기록을 덮어쓰지 않게
+      killTree(run.child)
+      run.meta.interrupted = true
+      run.meta.endedAt = Date.now()
+      await writeRunMeta(run.dir, run.meta).catch(() => {})
+    }
+    // 2) 옵션이 켜져 있으면, 연결을 정리하기 전에 살아있는 각 세션의 서버 데몬을 종료.
+    if (killDaemonOnExit) {
+      await Promise.all(
+        [...sessions.values()]
+          .filter((s) => s.client)
+          .map((s) => stopDaemon(s.client!).catch(() => {})),
+      )
+    }
+    // 3) 기록 중인 세션 로그를 제대로 마무리한다. 이걸 안 하면 인덱스에 endedAt 이 없는 '기록중'
+    //    유령 항목이 남아 자동 보관 정리에서 영구 제외되고(계속 쌓임), 평문 로그 끝부분도 유실된다.
     await Promise.all(
-      [...sessions.values()]
-        .filter((s) => s.client)
-        .map((s) => stopDaemon(s.client!).catch(() => {})),
+      [...sessions.values()].map(async (s) => {
+        try {
+          s.logStream?.end()
+        } catch {
+          /* 무시 */
+        }
+        s.logStream = undefined
+        await finalizeLogSession(s).catch(() => {})
+      }),
     )
-  }
-  // 기록 중인 세션 로그를 제대로 마무리한다. 이걸 안 하면 인덱스에 endedAt 이 없는 '기록중'
-  // 유령 항목이 남아 자동 보관 정리에서 영구 제외되고(계속 쌓임), 평문 로그 끝부분도 유실된다.
-  await Promise.all(
-    [...sessions.values()].map(async (s) => {
-      try {
-        s.logStream?.end()
-      } catch {
-        /* 무시 */
-      }
-      s.logStream = undefined
-      await finalizeLogSession(s).catch(() => {})
-    }),
-  )
-  // 모든 세션의 SSH 연결/로컬 셸 정리
-  for (const s of sessions.values()) {
-    cleanupConnection(s)
-    killLocalShell(s)
-    // 재접속 루프가 창 종료 후에도 살아 getSession 으로 세션을 되살리는 것을 막는다
-    s.userClosed = true
-    s.reconnecting = false
-  }
-  sessions.clear()
-  monitors.clear()
-  // 부하는 별도 프로세스라 창을 닫아도 계속 돈다 — 창을 닫았는데 서비스가 계속 맞는 것을 막는다
-  if (perfRun && !perfRun.finished) {
-    perfRun.meta.canceled = true
-    killTree(perfRun.child)
-  }
+    // 4) 모든 세션의 SSH 연결/로컬 셸 정리
+    for (const s of sessions.values()) {
+      cleanupConnection(s)
+      killLocalShell(s)
+      // 재접속 루프가 창 종료 후에도 살아 getSession 으로 세션을 되살리는 것을 막는다
+      s.userClosed = true
+      s.reconnecting = false
+    }
+    sessions.clear()
+    monitors.clear()
+  })()
+  return quitCleanup
+}
+
+app.on('window-all-closed', async () => {
+  await runQuitCleanup()
   if (process.platform !== 'darwin') app.quit()
+  // macOS 는 창을 다 닫아도 앱이 살아 있다 — 다시 창을 열어 세션·부하를 시작할 수 있으므로, 정리 기록을
+  // 비워 둬야 다음 종료(창 닫기·Cmd+Q)에서 다시 정리한다. 남겨 두면 그때는 정리 없이 끝나 부하가 남는다.
+  else quitCleanup = null
+})
+
+app.on('before-quit', (e) => {
+  if (quitCleanup) return // 이미 정리했거나 정리 중 — 그대로 끝낸다
+  e.preventDefault()
+  void runQuitCleanup().finally(() => app.quit())
 })
 
 app.on('activate', () => {

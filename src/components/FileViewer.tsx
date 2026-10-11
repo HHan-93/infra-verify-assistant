@@ -319,6 +319,12 @@ export default function FileViewer({
   const [content, setContent] = useState('')
   const [original, setOriginal] = useState('') // 편집 취소 시 되돌릴 원본
   const [loaded, setLoaded] = useState(false)
+  /**
+   * UTF-8 로 풀리지 않은 바이트가 있는 파일 — **편집·저장을 막는다.** 원격 파일을 UTF-8 로 읽어
+   * 그대로 다시 쓰므로, EUC-KR 주석이나 바이너리 바이트가 전부 U+FFFD(EF BF BD)로 바뀌어 저장됐다.
+   * 값 하나만 고쳐도 손대지 않은 부분까지 깨진다. 읽어 보는 것은 그대로 둔다.
+   */
+  const [notUtf8, setNotUtf8] = useState(false)
   const [loading, setLoading] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [editing, setEditing] = useState(false) // 기본 읽기 전용, '편집' 눌러야 수정 가능
@@ -663,6 +669,7 @@ export default function FileViewer({
     setLoading(false)
     if (res.ok) {
       setLoadedPath(p.trim())
+      setNotUtf8((res.content ?? '').includes('\uFFFD'))
       setContent(res.content ?? '')
       setOriginal(res.content ?? '')
       setLoaded(true)
@@ -709,6 +716,10 @@ export default function FileViewer({
   }
 
   const doSave = async (pw?: string) => {
+    if (notUtf8) {
+      setMsg('UTF-8 이 아닌 내용이 있는 파일이라 저장하지 않았습니다 — 저장하면 그 부분이 깨집니다.')
+      return
+    }
     setConfirmOpen(false)
     const p = loadedPath
     if (!p) return
@@ -1196,8 +1207,12 @@ export default function FileViewer({
             {!editing ? (
               <button
                 onClick={() => setEditing(true)}
-                disabled={!loaded}
-                title="편집 모드로 전환"
+                disabled={!loaded || notUtf8}
+                title={
+                  notUtf8
+                    ? 'UTF-8 이 아닌 글자(EUC-KR 주석·바이너리 등)가 있어 편집할 수 없습니다 — 저장하면 그 부분이 깨집니다. 서버에서 직접 고치세요.'
+                    : '편집 모드로 전환'
+                }
                 className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
               >
                 <Pencil size={13} />

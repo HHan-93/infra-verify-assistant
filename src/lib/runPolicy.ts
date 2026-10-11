@@ -161,7 +161,8 @@ export const INTERACTIVE_RULES: {
     re: /kubectl\s+(edit|attach|port-forward)\b|kubectl\s+exec\s+(-\S+\s+)*-\S*it\b/i,
     why: '대화형 kubectl — 사람이 조작해야 합니다',
   },
-  { re: /(^|[|;&]\s*)(sudo\s+)?ping\s+(?![^|;&]*-c\s)/i, why: '횟수 제한(-c)이 없어 끝나지 않습니다' },
+  // -c3 처럼 붙여 쓴 것, -w 5(시간 제한)도 끝나는 명령이다 — 예전 `-c\s` 는 둘 다 '안 끝남' 으로 뺐다
+  { re: /(^|[|;&]\s*)(sudo\s+)?ping\s+(?![^|;&]*-[cw]\s*\d)/i, why: '횟수 제한(-c)이 없어 끝나지 않습니다' },
   // while true; do … done 처럼 사람이 Ctrl+C 로 끊어야 하는 감시 루프
   { re: /\bwhile\s+(true|:)\b|\buntil\s+false\b|\bfor\s*\(\(\s*;;/i, why: '무한 반복 — Ctrl+C 를 눌러야 끝납니다' },
   // 사용자 전환 — 새 셸이 열려서 이후 스텝이 그 셸 안에서 돌아버린다
@@ -181,7 +182,9 @@ export const INTERACTIVE_RULES: {
  * 명령을 "끝나지 않는다" 며 건너뛰면 돌릴 수 있는 스텝이 이유 없이 '대기' 로 남는다.
  * `timeout` 뒤에 **시간이 오는** 형태만 인정한다 — 옵션만 있고 시간이 없으면 안 끊긴다.
  */
-const BOUNDED_RE = /\btimeout\s+(-\S+\s+)*\d+[smhd]?\s/i
+//  **명령 자리에 온 timeout 만** 인정한다 — 예전에는 어디든 `timeout 5 ` 가 보이면 면제해서,
+//  `curl --connect-timeout 5 x; ping host` 의 `timeout 5 ` 에 걸려 끝나지 않는 ping 이 자동 실행에 들어갔다.
+const BOUNDED_RE = /(^|[|;&(]\s*|\n\s*)(sudo\s+)?timeout\s+(-\S+\s+)*\d+[smhd]?\s/i
 
 /** 대화형이면 그 이유, 아니면 null. expect 가 답할 수 있는 프롬프트는 대화형으로 보지 않는다. */
 export function interactiveReason(cmd: string, expect?: ExpectRule[]): string | null {

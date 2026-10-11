@@ -183,6 +183,24 @@ interface StepRun {
  * 회차에도 ran 으로 남았다 — 원래 있던 계정을 지우는 길이었다. 그래서 '나갔다' 는 증거가 있을 때만 참이다.
  * running 도 넣는다 — 명령은 이미 나갔고, 도중에 창이 닫혀 저장되는 회차도 그 사실을 잃으면 안 된다.
  */
+/** 원복을 마친 지난 회차 id — 이 PC 의 편의 기록이다(없어져도 권하는 목록이 다시 뜰 뿐 해가 없다) */
+const UNDO_DONE_KEY = 'scenario_undo_done_runs'
+function undoDoneRuns(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(UNDO_DONE_KEY) ?? '[]') as string[])
+  } catch {
+    return new Set()
+  }
+}
+function markUndoDone(runId: string): void {
+  try {
+    const ids = [...undoDoneRuns(), runId].slice(-500)
+    localStorage.setItem(UNDO_DONE_KEY, JSON.stringify(ids))
+  } catch {
+    /* 저장 못 해도 이번 창에서는 목록을 닫았다 */
+  }
+}
+
 const stepRan = (r: StepResult | undefined): boolean =>
   !!r && (r.status === 'ran' || r.status === 'running' || (r.status === 'error' && !!r.runs?.length))
 
@@ -1216,7 +1234,11 @@ ${primary?.err ?? ''}`)
    * '항상 보여주기' 로 하지 않는 이유는 아래 undoTargets 주석과 같다 — 하지도 않은 일을
    * 되돌리는 명령이 나가면, 검증과 무관한 실제 자원을 지운다.
    */
-  const [prevUndo, setPrevUndo] = useState<{ at: number; items: { i: number; undo: string }[] } | null>(null)
+  const [prevUndo, setPrevUndo] = useState<{
+    at: number
+    runId: string
+    items: { i: number; undo: string; failed: boolean; recordedOn?: string }[]
+  } | null>(null)
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -1228,12 +1250,20 @@ ${primary?.err ?? ''}`)
       const d = await window.electronAPI.scenarioRunsRead([last.id])
       if (!alive || !d.ok || !d.list.length) return
       const detail = d.list[0]
+      // 이미 원복한 회차는 다시 권하지 않는다 — 예전에는 원복 사실이 어디에도 남지 않아 창을 열 때마다
+      // 같은 목록이 떴다(며칠 뒤 같은 이름으로 실제 계정을 만들었는데 `deluser --remove-home` 이 다시 권해졌다)
+      if (undoDoneRuns().has(detail.id)) return
       const items = detail.steps
         // 옛 회차에는 ran·undoCmd 가 없다 = '모른다' → 넣지 않는다.
         // 제목까지 맞춰 보는 것은 그 뒤 시나리오가 편집돼 번호가 밀렸을 수 있어서다.
         .filter((st) => st.ran && st.undoCmd && scenario.steps[st.index]?.title === st.title)
-        .map((st) => ({ i: st.index, undo: st.undoCmd as string }))
-      if (items.length) setPrevUndo({ at: detail.startedAt, items })
+        .map((st) => ({
+          i: st.index,
+          undo: st.undoCmd as string,
+          failed: st.effective === 'fail' || st.effective === 'error',
+          recordedOn: st.sessionName,
+        }))
+      if (items.length) setPrevUndo({ at: detail.startedAt, runId: detail.id, items })
     })()
     return () => {
       alive = false
@@ -1245,8 +1275,10 @@ ${primary?.err ?? ''}`)
   /**
    * 원복 대상 — **실제로 실행된** 스텝 중 원복 명령이 있는 것을 **역순**으로.
    *  · 실행 안 된 스텝은 되돌릴 것도 없으므로 자동 제외된다.
-   *  · 실패한 스텝도 포함한다 — 부분적으로 만들어졌을 수 있고, 되돌리기가 실패해도 해가 없다.
-   *    (반대로 성공했는데 안 되돌리면 잔여물이 남는다 → 안전한 쪽은 '시도한다')
+   *  · 실패한 스텝도 목록에는 넣되 **기본으로 체크하지 않는다**(failed). 예전에는 '부분적으로 만들어졌을
+   *    수 있고 되돌려도 해가 없다' 며 체크해 두었는데, 해가 있었다 — 이미 있는 계정 때문에 `adduser` 가
+   *    실패한 스텝의 원복 `deluser --remove-home` 이 체크된 채 올라와, 한 번 누르면 **원래 있던 계정과
+   *    홈이 지워졌다.** 실패는 '이번 회차가 만든 것이 아닐 수 있다' 는 뜻이라 사람이 보고 고르게 한다.
    *  · 역순인 이유: mount 를 먼저 풀어야 mkdir 한 디렉토리를 지울 수 있다.
    */
   const undoTargets = useMemo(
@@ -1259,7 +1291,8 @@ ${primary?.err ?? ''}`)
         .map((st, i) => {
           const r = results[i]
           const ran = stepRan(r)
-          return { i, step: st, undo: st.undo?.trim() ?? '', ran }
+          const failed = r?.status === 'error' || r?.verdict === 'fail'
+          return { i, step: st, undo: st.undo?.trim() ?? '', ran, failed }
         })
         .filter((x) => x.undo && x.ran)
         .reverse(),
@@ -1269,10 +1302,18 @@ ${primary?.err ?? ''}`)
   const undoPrev = useMemo(
     () =>
       (prevUndo?.items ?? [])
-        .map((it) => ({ i: it.i, step: scenario.steps[it.i], undo: it.undo }))
+        .map((it) => {
+          const step = scenario.steps[it.i]
+          // 원복은 **지금의** 대상 매핑으로 나간다. 그 회차가 돈 서버와 다르면 엉뚱한 서버에서 지운다 —
+          // 기본으로 꺼 두고 두 이름을 함께 보여 준다
+          const now = step ? sessionsForStep(step, it.i).map(nameOfSession).join(', ') : ''
+          const mismatch = !!it.recordedOn && !!now && it.recordedOn !== now
+          return { i: it.i, step, undo: it.undo, failed: it.failed, mismatch, recordedOn: it.recordedOn }
+        })
         .filter((x) => !!x.step)
         .reverse(),
-    [prevUndo, scenario.steps],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [prevUndo, scenario.steps, roleKeys],
   )
   /** 이번 창에서 실행한 것이 있으면 그쪽이 우선이다 — 지난 회차는 아무것도 안 돌렸을 때만 쓴다 */
   const fromPrev = undoTargets.length === 0 && undoPrev.length > 0
@@ -1353,8 +1394,20 @@ ${primary?.err ?? ''}`)
       setExpanded((e) => new Set(e).add(t.i))
     }
     setUndoBusy(false)
-    // 지난 회차를 되돌렸으면 그 목록은 더 이상 유효하지 않다 (결과는 아래 스텝에 남는다)
-    if (fromPrev) setPrevUndo(null)
+    // 지난 회차를 **다** 되돌렸으면 그 목록은 더 이상 유효하지 않다 (결과는 아래 스텝에 남는다).
+    // 꺼 둔 항목(실패한 스텝·대상이 다른 것)이 남았거나 원복이 실패했으면 '완료' 로 적지 않는다 —
+    // 그 항목들은 '매핑을 맞춘 뒤 고르라' 고 안내한 것이라 다음에 다시 권해야 한다
+    const allDone =
+      list.length === undoList.length &&
+      list.every((t) => done[t.i]?.runs.length && done[t.i].runs.every((x) => x.ok))
+    if (fromPrev && prevUndo && allDone) {
+      markUndoDone(prevUndo.runId)
+      setPrevUndo(null)
+    } else if (fromPrev && prevUndo) {
+      // 일부만 했으면 **제대로 끝난 것만** 목록에서 뺀다 — 이미 되돌린 것을 다시 권하지 않게
+      const okIdx = new Set(list.filter((t) => done[t.i]?.runs.every((x) => x.ok)).map((t) => t.i))
+      setPrevUndo({ ...prevUndo, items: prevUndo.items.filter((it) => !okIdx.has(it.i)) })
+    }
     /**
      * **어느 스텝이 실패했는지 이름으로 말한다.**
      *
@@ -1405,10 +1458,10 @@ ${primary?.err ?? ''}`)
     bumpSave() // 수동 판정은 회차 기록에 반영한다 (위 saveTick 주석)
   }
 
-  const summary = useMemo(() => {
+  const summarize = (rs: Record<number, StepResult>) => {
     let pass = 0, fail = 0, info = 0, skip = 0, waiting = 0, pending = 0, error = 0
     scenario.steps.forEach((step, idx) => {
-      const e = effectiveOf(step, results[idx])
+      const e = effectiveOf(step, rs[idx])
       if (e === 'pass') pass++
       else if (e === 'fail') fail++
       // 실행 오류는 '미실행' 이 아니라 별도로 세고, 리포트/배지에 따로 표시한다
@@ -1419,9 +1472,42 @@ ${primary?.err ?? ''}`)
       else pending++
     })
     return { pass, fail, info, skip, waiting, pending, error }
-  }, [scenario.steps, results])
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const summary = useMemo(() => summarize(results), [scenario.steps, results])
 
-  const buildReport = (): string => {
+  /**
+   * **회차가 끝난 순간의 결과.** 회차 기록은 이것으로 만든다.
+   *
+   * 저장 effect 의 의존성에서 results 를 빼 '끝난 뒤의 개별 재실행이 회차를 덮어쓰지 않게' 했지만,
+   * 수동 판정·원복 때문에 저장이 다시 돌면 그 순간의 results 를 읽어 결국 덮어썼다 — 3번 스텝이
+   * 실패로 끝난 회차에서 20분 뒤 원인을 고쳐 3번만 다시 돌려 통과시키고 다른 스텝에 수동 판정을
+   * 누르면, 회차 기록의 3번이 '정상' 으로 바뀌었다. 끝난 순간을 붙잡아 두고, 그 뒤에는 사람의
+   * 수동 판정만 덧입힌다(그건 회차에 대한 판단이라 반영해야 한다). 화면·복사·저장 리포트는 지금 화면 그대로다.
+   */
+  const runSnapshotRef = useRef<Record<number, StepResult> | null>(null)
+  const wasBusyRef = useRef(false)
+  useEffect(() => {
+    if (busy) runSnapshotRef.current = null
+    else if (wasBusyRef.current) runSnapshotRef.current = results
+    wasBusyRef.current = busy
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy])
+  const recordedResults = (): Record<number, StepResult> => {
+    const snap = runSnapshotRef.current
+    if (!snap) return results
+    const out: Record<number, StepResult> = {}
+    scenario.steps.forEach((_st, i) => {
+      const base = snap[i]
+      const manual = results[i]?.manual
+      if (base) out[i] = { ...base, manual }
+      else if (manual) out[i] = { status: 'pending', manual } as StepResult
+    })
+    return out
+  }
+
+  const buildReport = (rs: Record<number, StepResult> = results): string => {
+    const sum = rs === results ? summary : summarize(rs)
     const now = new Date().toLocaleString('ko-KR', { hour12: false })
     const lines: string[] = []
     lines.push(`# 시나리오 검증 리포트: ${scenario.title}`)
@@ -1446,11 +1532,11 @@ ${primary?.err ?? ''}`)
         `- ⚠ 실행 모드: 일부 세션에서 영속 셸을 열지 못해 호환 모드(exec)로 실행됨 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다`,
       )
     lines.push(
-      `- 결과 요약: 정상 ${summary.pass} · 실패 ${summary.fail} · 실행오류 ${summary.error} · 실행됨 ${summary.info} · 건너뜀 ${summary.skip} · 수동대기 ${summary.waiting} · 미실행 ${summary.pending}`,
+      `- 결과 요약: 정상 ${sum.pass} · 실패 ${sum.fail} · 실행오류 ${sum.error} · 실행됨 ${sum.info} · 건너뜀 ${sum.skip} · 수동대기 ${sum.waiting} · 미실행 ${sum.pending}`,
     )
     lines.push('')
     scenario.steps.forEach((step, idx) => {
-      const r = results[idx]
+      const r = rs[idx]
       const e = effectiveOf(step, r)
       const meta = EFFECTIVE_META[e]
       lines.push(`## ${idx + 1}. ${step.title}  [${meta.label}${r?.manual ? ' (수동)' : ''}]`)
@@ -1547,8 +1633,9 @@ ${primary?.err ?? ''}`)
    */
   /** 지금 상태로 회차 한 건을 만든다 (저장 effect 와 언마운트 flush 가 함께 쓴다) */
   const buildRunDetail = (id: string): ScenarioRunDetail => {
+      const rs = recordedResults()
       const steps: ScenarioRunStep[] = scenario.steps.map((st, i) => {
-        const r = results[i]
+        const r = rs[i]
         // 원복 목록과 **같은 기준**으로 판단한다 (위 undoTargets 주석)
         const ran = stepRan(r)
         const undoRaw = st.undo?.trim() ?? ''
@@ -1579,14 +1666,14 @@ ${primary?.err ?? ''}`)
         endedAt: runEndRef.current || Date.now(),
         targets: targets.length ? targets : [targetName],
         stepCount: scenario.steps.length,
-        counts: summary,
+        counts: summarize(rs),
         ...(runStoppedRef.current.stopped
           ? { stopped: true, ...(runStoppedRef.current.at ? { stoppedAt: runStoppedRef.current.at } : {}) }
           : {}),
         ...(Object.values(shellOkRef.current).some((ok) => !ok) ? { compatShell: true } : {}),
         steps,
         // 리포트는 마스킹을 거친 것이다(buildReport 의 출구) — 저장본도 같은 규칙을 따른다
-        reportMd: buildReport(),
+        reportMd: buildReport(rs),
       }
       return detail
   }
@@ -1755,6 +1842,22 @@ ${primary?.err ?? ''}`)
                         <span className="flex items-center gap-1.5 text-[12px] text-gray-100">
                           <span className="text-gray-500">{t.i + 1}번</span>
                           <span className="truncate">{t.step.title}</span>
+                          {'mismatch' in t && t.mismatch && (
+                            <span
+                              className="shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-200"
+                              title={`그 회차는 ${t.recordedOn} 에서 돌았는데, 지금 원복은 다른 대상으로 나갑니다. 대상 매핑을 그때와 같게 맞춘 뒤 고르세요.`}
+                            >
+                              대상이 그때와 다름 · 기본 꺼짐
+                            </span>
+                          )}
+                          {t.failed && (
+                            <span
+                              className="shrink-0 rounded bg-red-500/15 px-1 text-[10px] text-red-300"
+                              title="이 스텝은 실패했습니다 — 이미 있던 자원 때문에 실패했다면, 원복이 원래 있던 것을 지웁니다. 확인한 뒤 고르세요."
+                            >
+                              실패한 스텝 · 기본 꺼짐
+                            </span>
+                          )}
                           <span className="ml-auto shrink-0 text-[10.5px] text-sky-300">
                             {sessionsForStep(t.step, t.i).map(nameOfSession).map(svcShort).join(', ')}
                           </span>
@@ -2023,7 +2126,10 @@ ${primary?.err ?? ''}`)
             {undoList.length > 0 && (
               <button
                 onClick={() => {
-                  setUndoSkip(new Set())
+                  // 실패한 스텝의 원복은 꺼 둔 채 연다 — 위 undoTargets 주석
+                  setUndoSkip(
+                    new Set(undoList.filter((t) => t.failed || ('mismatch' in t && t.mismatch)).map((t) => t.i)),
+                  )
                   setUndoOpen(true)
                 }}
                 disabled={running || undoBusy}

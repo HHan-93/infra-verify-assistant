@@ -33,18 +33,40 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
 }
 
 // ── Anthropic (Claude) ────────────────────────────────────────
+/**
+ * adaptive thinking 을 받는 모델인가 — Opus/Sonnet 4.6 이상, 그리고 5 세대부터.
+ * 예전에는 모든 모델에 무조건 붙여 보내, 기본 목록에 있는 claude-haiku-4-5(와 '불러오기' 로 받은
+ * 옛 모델)를 고르면 **모든 요청이 400 으로 실패**했다. 모르는 이름은 붙이지 않는 쪽으로 둔다 —
+ * 생각 없이 답하는 것은 실패보다 낫다.
+ */
+function supportsAdaptiveThinking(model: string): boolean {
+  const m = /claude-([a-z]+)-(\d+)(?:-(\d+))?/i.exec(model)
+  if (!m) return false
+  const family = m[1].toLowerCase()
+  const major = Number(m[2])
+  const minor = m[3] !== undefined && m[3].length <= 2 ? Number(m[3]) : 0
+  if (major >= 5) return true
+  if (major === 4 && minor >= 6) return family !== 'haiku'
+  return false
+}
+
 async function streamAnthropic({ apiKey, model, system, messages, onText }: StreamChatOptions) {
   const client = new Anthropic({ apiKey })
-  // 긴 입력/출력 대비 스트리밍. 복잡한 분석이므로 adaptive thinking 활성화.
+  // 긴 입력/출력 대비 스트리밍. 복잡한 분석이므로 받는 모델이면 adaptive thinking 활성화.
+  // 생각에 쓰는 토큰도 max_tokens 에서 나가므로, 켤 때는 넉넉히 둔다 — 4096 이면 상세 분석이
+  // 생각만 하다 텍스트 없이 끝나 빈 답이 남았다.
+  const thinking = supportsAdaptiveThinking(model)
   const stream = client.messages.stream({
     model,
-    max_tokens: 4096,
-    thinking: { type: 'adaptive' },
+    max_tokens: thinking ? 16000 : 4096,
+    ...(thinking ? { thinking: { type: 'adaptive' as const } } : {}),
     system,
     messages,
   })
   stream.on('text', (delta) => onText(delta))
-  await stream.finalMessage()
+  const final = await stream.finalMessage()
+  // 길이 한도로 잘렸으면 조용히 끝내지 않고 밝힌다 — 잘린 분석을 다 읽은 결론으로 오해하지 않게
+  if (final.stop_reason === 'max_tokens') onText('\n\n_(응답이 길이 한도에서 잘렸습니다)_')
 }
 
 // ── Google (Gemini) ───────────────────────────────────────────

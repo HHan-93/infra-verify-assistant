@@ -4,6 +4,12 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   onConfirm: () => void
   onCancel: () => void
+  /**
+   * 가운데 세 번째 선택지(선택) — '중지하고 닫기 / 계속 돌리고 닫기 / 취소' 처럼 파괴적이지 않은
+   * 다른 길이 있을 때. 빨간 확인 버튼과 구분되게 중립색으로 그린다.
+   */
+  secondaryLabel?: string
+  onSecondary?: () => void
 }
 
 /**
@@ -16,6 +22,8 @@ export default function ConfirmDialog({
   confirmLabel = '삭제',
   onConfirm,
   onCancel,
+  secondaryLabel,
+  onSecondary,
 }: ConfirmDialogProps) {
   return (
     // 배경(어두운 영역)을 눌러도 닫지 않는다 — 이 앱의 모든 모달이 같은 규칙이다.
@@ -43,6 +51,14 @@ export default function ConfirmDialog({
           >
             취소
           </button>
+          {secondaryLabel && onSecondary && (
+            <button
+              onClick={onSecondary}
+              className="rounded-md border border-white/15 bg-panel-light px-3 py-1.5 text-xs text-gray-100 hover:bg-white/10"
+            >
+              {secondaryLabel}
+            </button>
+          )}
           <button
             autoFocus
             onClick={onConfirm}

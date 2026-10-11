@@ -169,12 +169,20 @@ const SSHForm = forwardRef<SSHFormHandle, SSHFormProps>(function SSHForm(
     } else if (result.hostKeyChanged) {
       // 호스트 키 변경 경고 → 신뢰 후 재접속 확인
       setPending({
-        message:
-          '⚠ 이 서버의 호스트 키가 이전에 저장된 것과 다릅니다.\n서버 재설치라면 정상이지만, 중간자 공격일 수도 있습니다.\n신뢰하고 다시 접속할까요?',
+        message: result.hostKeyUnverified
+          ? '⚠ 저장된 호스트 키 목록(known-hosts)을 읽지 못해 이 서버가 맞는지 확인할 수 없습니다.\n' +
+            '(OS 사용자·Windows 자격 증명이 바뀌면 암호화된 목록을 풀 수 없습니다)\n' +
+            '처음 접속하는 서버처럼 신뢰하고 접속할까요? 이번 실행 동안만 기억합니다.'
+          : '⚠ 이 서버의 호스트 키가 이전에 저장된 것과 다릅니다.\n서버 재설치라면 정상이지만, 중간자 공격일 수도 있습니다.\n신뢰하고 다시 접속할까요?',
         label: '신뢰 후 재접속',
         danger: true,
         onYes: async () => {
-          await window.electronAPI.sshTrustHost(p.host.trim(), Number(p.port) || 22)
+          await window.electronAPI.sshTrustHost(
+            p.host.trim(),
+            Number(p.port) || 22,
+            p.jump?.host.trim() || undefined,
+            p.jump ? Number(p.jump.port) || 22 : undefined,
+          )
           connect(p)
         },
       })

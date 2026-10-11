@@ -432,10 +432,26 @@ function LogTailPane({
     jumpTopAfterLoadRef.current = false
   }, [lines])
 
+  /**
+   * 지금 열린 tail 이 **어느 세션의 것인가.** 정리·재시작에서 stop 을 화면 상태(targetSessionId)로
+   * 보냈더니, 세션을 바꾼 뒤 닫으면 stop 이 옛 세션으로 가서 새 세션의 tail -f 채널이 서버에 남았다
+   * (쌓이면 MaxSessions 초과 → "Channel open failure"). 채널을 연 세션을 tailId 와 같이 들고 다닌다.
+   */
+  const tailSessionRef = useRef<string | null>(null)
+  /** 언마운트됐는가 — 시작 응답이 창을 닫은 뒤에 도착하면 그 채널을 바로 닫는다(아무도 stop 하지 않는다) */
+  const unmountedRef = useRef(false)
+  const stopCurrentTail = () => {
+    if (tailIdRef.current) window.electronAPI.logtailStop(tailSessionRef.current ?? targetSessionId, tailIdRef.current)
+    tailIdRef.current = null
+    tailSessionRef.current = null
+  }
+
   // 언마운트 시 tail + 자동완성 디바운스 타이머 정리
   useEffect(() => {
+    unmountedRef.current = false
     return () => {
-      if (tailIdRef.current) window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+      unmountedRef.current = true
+      if (tailIdRef.current) window.electronAPI.logtailStop(tailSessionRef.current ?? targetSessionId, tailIdRef.current)
       if (acTimerRef.current) clearTimeout(acTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -455,10 +471,7 @@ function LogTailPane({
     // 새 tail 을 열기 전에 이전 tail 채널을 반드시 닫는다. 안 그러면 재시작('이전 로그 더 보기')마다
     // 서버에 tail -f 채널이 누수돼 sshd MaxSessions 한도를 넘겨 "Channel open failure" 가 난다.
     // (세션 전환/다른 경로 경로는 호출 전에 이미 stop 하고 tailIdRef 를 null 로 비워 중복 stop 되지 않는다.)
-    if (tailIdRef.current) {
-      window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
-      tailIdRef.current = null
-    }
+    stopCurrentTail()
     // 새 대상(다른 파일/파드)으로 열면 히스토리 줄 수를 기본값으로 리셋. 같은 대상 재시작('이전 로그 더 보기')은 유지.
     if (!sameLogTarget(currentTargetRef.current, target)) {
       historyLinesRef.current = 200
@@ -467,9 +480,15 @@ function LogTailPane({
     setStarting(true)
     setStartError('')
     const r = await window.electronAPI.logtailStart(sid, target, sudoPassword, historyLinesRef.current)
+    // 시작을 기다리는 사이 창이 닫혔다 — 이 채널은 이제 아무도 닫지 않으므로 여기서 닫는다
+    if (unmountedRef.current) {
+      if (r.ok && r.tailId) window.electronAPI.logtailStop(sid, r.tailId)
+      return
+    }
     setStarting(false)
     if (r.ok) {
       tailIdRef.current = r.tailId ?? null
+      tailSessionRef.current = sid
       sudoPwRef.current = sudoPassword // '이전 로그 더 보기' 재시작 시 sudo 재사용
       setTailLabel(targetLabel(target))
       setLines([])
@@ -502,6 +521,8 @@ function LogTailPane({
       onActiveTarget?.(target, sid) // '세트로 저장'용 — 현재 대상/세션 부모에 보고
     } else if (r.needSudoPassword) {
       setNeedSudo(true)
+      // 비밀번호가 틀렸으면 그 사실을 말한다 — 같은 입력창만 다시 뜨면 입력이 먹지 않은 것처럼 보인다
+      if (r.error) setStartError(r.error)
       // tail 중(세션 전환 등)이라면 입력 단계의 sudo UI 가 안 보이므로 배너로 안내
       if (stage === 'tail') {
         setLines([])
@@ -550,7 +571,7 @@ function LogTailPane({
   const retargetSession = (newSid: string) => {
     const t = currentTargetRef.current
     if (!t || newSid === targetSessionId) return
-    if (tailIdRef.current) window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+    if (tailIdRef.current) window.electronAPI.logtailStop(tailSessionRef.current ?? targetSessionId, tailIdRef.current)
     tailIdRef.current = null
     // 전환 순간 이전 세션의 로그를 즉시 비운다 — 새 세션에서 안 열려도 옛 로그가 남지 않게.
     setLines([])
@@ -615,7 +636,7 @@ function LogTailPane({
   }
 
   const backToEntry = () => {
-    if (tailIdRef.current) window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+    if (tailIdRef.current) window.electronAPI.logtailStop(tailSessionRef.current ?? targetSessionId, tailIdRef.current)
     tailIdRef.current = null
     setStage('entry')
   }
@@ -944,7 +965,7 @@ function LogTailPane({
         {onRequestClose && (
           <button
             onClick={() => {
-              if (tailIdRef.current) window.electronAPI.logtailStop(targetSessionId, tailIdRef.current)
+              if (tailIdRef.current) window.electronAPI.logtailStop(tailSessionRef.current ?? targetSessionId, tailIdRef.current)
               onRequestClose()
             }}
             title="이 패널 닫기"

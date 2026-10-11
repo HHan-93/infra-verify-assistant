@@ -22,6 +22,7 @@ import {
   CornerDownLeft,
   Play,
   ShieldCheck,
+  Square,
 } from 'lucide-react'
 import {
   PROVIDER_INFO,
@@ -47,6 +48,11 @@ interface ChatItem {
   /** 'command' 면 명령어 생성 모드의 응답 — 일반 markdown 대신 명령어 카드로 렌더링 */
   mode?: 'command'
   /**
+   * 오류·중지로 **끝까지 받지 못한** 응답. 명령어 카드면 잘린 명령일 수 있어 실행을 막는다 —
+   * `rm -rf /var/lib/ceph/osd/ceph-12/tmp` 가 `…/ceph-1` 에서 끊기면 원래보다 넓은 대상을 가리킨다.
+   */
+  failed?: boolean
+  /**
    * 이 응답을 만들 때의 대상 세션. 대화는 localStorage 에 남아 앱을 껐다 켜도 복원되므로,
    * 이 정보가 없으면 "지난주 A서버를 보고 만든 실행 버튼"이 오늘의 활성 세션(=다른 서버)에
    * 그대로 나간다. 실행 시 지금 대상과 다르면 막기 위해 함께 저장한다.
@@ -60,7 +66,37 @@ function parseCommandCard(content: string): { command: string; explain: string }
   const m = content.match(/COMMAND:\s*(.+)/)
   if (!m) return null
   const explainMatch = content.match(/설명:\s*([\s\S]*)/)
-  return { command: m[1].trim(), explain: explainMatch ? explainMatch[1].trim() : '' }
+  // AI 가 ``COMMAND: `df -h` `` 처럼 백틱으로 감싸 오면 그대로 실행돼 셸이 명령 치환으로 읽는다 — 벗긴다.
+  // **전체를 감싼 한 쌍일 때만** 벗긴다. 처음엔 앞·뒤 백틱을 따로 지웠는데 ``kill -9 `pidof nova-api` `` 처럼
+  // 끝에 명령 치환이 있는 정상 명령이 반쪽 백틱으로 잘려 셸이 '>' 입력 대기에 빠졌다.
+  const raw = m[1].trim()
+  const wrapped = raw.match(/^(`{1,3})([^`]+)\1$/)
+  const command = (wrapped ? wrapped[2] : raw).trim()
+  return { command, explain: explainMatch ? explainMatch[1].trim() : '' }
+}
+
+/**
+ * 보낼 대화를 고른다.
+ *  - **빈 메시지는 뺀다.** 텍스트 없이 끝난 응답(생각만 하다 끝남·안전 필터)이 빈 assistant 로 남으면
+ *    Anthropic 은 마지막이 아닌 빈 메시지를 400 으로 거절해, 대화를 지울 때까지 모든 요청이 실패했다.
+ *  - **글자 예산 안에서 최근 것부터.** 저장된 대화(최대 200개)를 통째로 보내 500줄 분석을 몇 번 하면
+ *    컨텍스트·요금 한도에 걸리고, 그 뒤로는 대화를 지울 때까지 계속 실패했다.
+ *  - 첫 메시지는 user 여야 한다(앞에 남은 assistant 는 뺀다).
+ */
+const SEND_BUDGET_CHARS = 150_000
+function trimHistoryForSend(history: ChatItem[]): ChatItem[] {
+  const nonEmpty = history.filter((m) => m.content.trim())
+  const picked: ChatItem[] = []
+  let used = 0
+  for (let i = nonEmpty.length - 1; i >= 0; i--) {
+    const len = nonEmpty[i].content.length
+    // 마지막(지금 묻는) 메시지는 길어도 보낸다 — 그걸 빼면 질문 자체가 없어진다
+    if (picked.length > 0 && used + len > SEND_BUDGET_CHARS) break
+    picked.unshift(nonEmpty[i])
+    used += len
+  }
+  while (picked.length > 1 && picked[0].role !== 'user') picked.shift()
+  return picked
 }
 
 const ALL_PRESET_COMMANDS = PRESETS.flatMap((g) => g.subgroups.flatMap((sg) => sg.commands)).filter(
@@ -256,7 +292,7 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
       setMessages((prev) =>
         prev.map((m) =>
           m.id === activeAssistantRef.current
-            ? { ...m, content: (m.content ? m.content + '\n\n' : '') + '⚠️ ' + (e.error ?? '오류 발생') }
+            ? { ...m, failed: true, content: (m.content ? m.content + '\n\n' : '') + '⚠️ ' + (e.error ?? '오류 발생') }
             : m,
         ),
       )
@@ -304,8 +340,11 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
      * 화면의 대화 기록은 원문 그대로 둔다 — 보낸 사람이 자기가 붙여넣은 것을 알아볼 수 있어야
      * 하고, 무엇이 가려져 나갔는지는 아래 입력창 안내로 밝힌다.
      */
-    const outgoing = history.map((m) => ({ role: m.role, content: maskForAI(m.content) }))
-    setMaskedCount(outgoing.filter((m, i) => m.content !== history[i].content).length)
+    const toSend = trimHistoryForSend(history)
+    const outgoing = toSend.map((m) => ({ role: m.role, content: maskForAI(m.content) }))
+    // 가리기 전·후를 견준다 — '••••••' 가 들어 있는지로 세면 이미 가려진 글을 붙여넣었거나 AI 가 그대로
+    // 따라 쓴 뒤로는 새로 가린 것이 없어도 매번 'N건 가림' 이라고 했다
+    setMaskedCount(outgoing.filter((m, i) => m.content !== toSend[i].content).length)
     window.electronAPI.aiSend({
       requestId,
       provider: p,
@@ -314,6 +353,24 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
       apiKey: c[p].key || undefined,
       messages: outgoing,
     })
+  }
+
+  /**
+   * 받던 응답을 그만 기다린다. 메인의 스트림은 계속 돌 수 있지만 이 요청 id 의 조각은 더 받지 않는다.
+   * 예전에는 중지 수단이 없어, 응답이 멈추면 streaming 이 true 로 굳어 입력창이 잠기고 분석 요청도
+   * '이미 생성 중' 으로 튕겨, 앱을 다시 켜야 풀렸다.
+   */
+  const stopStream = () => {
+    if (!activeReqRef.current) return
+    activeReqRef.current = null
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === activeAssistantRef.current
+          ? { ...m, failed: true, content: (m.content ? m.content + '\n\n' : '') + '⏹ 중지함' }
+          : m,
+      ),
+    )
+    setStreaming(false)
   }
 
   const submit = (text: string, mode: 'chat' | 'command' = 'chat') => {
@@ -766,7 +823,9 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
                   //     대상과 실제 대상이 달라진다(활성 세션이 대상에서 빠져 있을 수도 있다)
                   //  ③ 그 세션이 SSH 연결됨 — 끊긴 칸은 로컬 셸이라 내 PC 에서 실행돼 버린다
                   const sameTarget = !!m.sessionId && m.sessionId === activeSessionId
-                  const blockReason = !sameTarget
+                  const blockReason = m.failed
+                    ? 'failed'
+                    : !sameTarget
                     ? 'target'
                     : broadcasting
                       ? 'broadcast'
@@ -788,6 +847,12 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
                             </p>
                           ) : (
                             <p className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-relaxed text-amber-200">
+                              {blockReason === 'failed' && (
+                                <>
+                                  이 응답은 <span className="font-semibold">끝까지 받지 못했습니다</span>(오류·중지). 명령이
+                                  중간에 잘렸을 수 있습니다.
+                                </>
+                              )}
                               {blockReason === 'target' && (
                                 <>
                                   이 명령은 <span className="font-semibold">{m.sessionLabel || '다른 세션'}</span> 기준으로
@@ -824,7 +889,9 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
                               onClick={() => onRunCommand?.(card.command, true)}
                               disabled={blockRun}
                               title={
-                                blockReason === 'target'
+                                blockReason === 'failed'
+                                  ? '응답이 끝까지 오지 않아 명령이 잘렸을 수 있습니다'
+                                  : blockReason === 'target'
                                   ? '생성 시점과 대상 세션이 달라 실행할 수 없습니다'
                                   : blockReason === 'broadcast'
                                     ? '동시입력이 켜져 있어 실행할 수 없습니다'
@@ -921,17 +988,23 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
             disabled={streaming}
             className="max-h-28 flex-1 resize-none bg-transparent text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none disabled:opacity-50"
           />
-          <button
-            onClick={() => {
-              submit(input, chatMode)
-              setInput('')
-            }}
-            disabled={streaming || !input.trim()}
-            className="text-blue-400 disabled:text-gray-600"
-            title="전송"
-          >
-            {streaming ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-          </button>
+          {streaming ? (
+            <button onClick={stopStream} className="text-red-300 hover:text-red-200" title="응답 받기 중지">
+              <Square size={15} />
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                submit(input, chatMode)
+                setInput('')
+              }}
+              disabled={!input.trim()}
+              className="text-blue-400 disabled:text-gray-600"
+              title="전송"
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
       </div>
     </div>

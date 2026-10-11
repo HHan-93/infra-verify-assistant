@@ -17,7 +17,13 @@
 // `grep -o 'nova:name>[^<]*'` 처럼 쓴다. (`</disk>` 처럼 `/` 가 든 것은 여기서 걸러진다)
 // 길이도 40자로 제한한다 — 그보다 긴 것은 이름이 아니라 코드다.
 // (heredoc `<< 'EOF'` 는 `<` 가 연속이라 자연히 제외된다)
-const PH_BODY = "[^<>\\n(){}\\[\\];\"'`$=%*+\\\\|&,/!?]{1,40}"
+//
+// **앞뒤가 공백이면 이름이 아니다.** `mysql db < dump.sql > out.log` 의 ` dump.sql `,
+// `done < list.txt 2>/dev/null` 의 ` list.txt 2` 가 입력값으로 잡혀 스텝이 '입력값이 필요합니다' 로
+// 거부되거나 전체 실행에서 빠졌다. 끝이 `공백+숫자` 인 것도 뺀다 — `cmd <file 2>&1` 의 `2>` 는
+// 파일 디스크립터 리다이렉션이다.
+const PH_CHARS = "[^<>\\n(){}\\[\\];\"'`$=%*+\\\\|&,/!?]"
+const PH_BODY = `(?!\\s)${PH_CHARS}{1,40}(?<!\\s)(?<!\\s\\d)`
 
 /** 전역 매칭용 — 매번 새로 만든다(lastIndex 공유 사고 방지) */
 export const placeholderRe = (): RegExp => new RegExp(`<(${PH_BODY})>`, 'g')

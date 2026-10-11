@@ -15,6 +15,7 @@ import AutocompleteInput from './AutocompleteInput'
 import ConfirmDialog from './ConfirmDialog'
 import { computeMoveOrder, computeInsertBeforeOrder, computeAppendOrder } from '../lib/orderedMerge'
 import { extractPlaceholders, fillPlaceholders, hasPlaceholder } from '../lib/placeholder'
+import { dangerReason } from '../lib/dangerCmd'
 
 interface PresetPanelProps {
   connected: boolean
@@ -112,6 +113,16 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
   const bodyRef = useRef<HTMLDivElement>(null)
   // 값 입력 인라인 영역 — 어느 명령어(key) 아래에 펼쳐져 있는지 + 그 명령어/플레이스홀더 목록
   const [openPh, setOpenPh] = useState<{ key: string; command: string; placeholders: string[] } | null>(null)
+  /**
+   * 지우기·끄기·죽이기 명령은 누른 즉시 돌리지 않고 한 번 묻는다(src/lib/dangerCmd.ts 기준).
+   * 동시 입력 중이면 모든 세션에서 돌기 때문에 확인창에 그 사실도 적는다.
+   */
+  const [dangerAsk, setDangerAsk] = useState<{ cmd: string; why: string } | null>(null)
+  const runChecked = (cmd: string) => {
+    const why = dangerReason(cmd)
+    if (why) setDangerAsk({ cmd, why })
+    else onRun(cmd, true)
+  }
   const [phValues, setPhValues] = useState<Record<string, string>>({})
 
   // 사용자 정의 프리셋(런타임 추가) — 메인 프로세스에 JSON 으로 저장, 내장 PRESETS 와 병합해 표시
@@ -242,7 +253,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
   const submitPlaceholders = () => {
     if (!openPh) return
     const filled = fillPlaceholders(openPh.command, phValues)
-    onRun(filled, true)
+    runChecked(filled)
     setOpenPh(null)
   }
 
@@ -516,7 +527,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
               onClick={() => {
                 markRecent(presetId(sol, sub, c.command))
                 if (ph) togglePlaceholderInput(key, c.command)
-                else onRun(c.command, true)
+                else runChecked(c.command)
               }}
               disabled={!connected}
               title={
@@ -833,6 +844,24 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
           subgroupsOf={(sol) => groups.find((g) => g.solution === sol)?.subgroups.map((s) => s.name) ?? []}
           onCancel={() => setEditing(null)}
           onSave={saveCustomPreset}
+        />
+      )}
+
+      {dangerAsk && (
+        <ConfirmDialog
+          title="위험할 수 있는 명령"
+          confirmLabel="실행"
+          message={
+            `${dangerAsk.why} 명령입니다. 터미널에서 바로 실행됩니다.\n` +
+            '동시 입력을 켜 둔 경우 묶인 모든 세션에서 실행됩니다.\n\n' +
+            dangerAsk.cmd
+          }
+          onCancel={() => setDangerAsk(null)}
+          onConfirm={() => {
+            const c = dangerAsk.cmd
+            setDangerAsk(null)
+            onRun(c, true)
+          }}
         />
       )}
 

@@ -82,6 +82,11 @@ interface PerfPanelProps {
 type Tab = 'dash' | 'log' | 'summary'
 
 const LOG_MAX_CHARS = 200_000
+/**
+ * Locust 는 Windows 에서 --processes 를 지원하지 않는다(`--processes is not supported in Windows` 로
+ * 바로 끝난다). 이 앱의 주 사용 환경이 Windows 인데 '코어만큼' 칩을 누르는 순간 모든 실행이 실패했다.
+ */
+const IS_WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
 
 /** `con1 (10.255.233.21)` 처럼 이름에 든 주소를 뽑는다 — 대상 주소를 미리 채우기 위한 것 */
 function hostOf(name: string): string {
@@ -647,6 +652,45 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     setNote(existing ? `'${name}' 설정을 덮어썼습니다.` : `'${name}' 으로 저장했습니다.`)
   }
 
+  /**
+   * 창을 다시 열었을 때 **도는 회차를 되살린다.**
+   *
+   * 부하 프로세스는 메인이 들고 있는데 '돌고 있다' 는 상태는 이 창에만 있었다. 그래서 창을 닫았다
+   * 다시 열면 아무것도 안 도는 것처럼 보였고 중지 버튼도 없었다 — 시작을 누르면 "먼저 중지하세요"
+   * 가 뜨는데 중지할 수단이 없었다. 그동안 대상 서비스는 계속 부하를 받는다.
+   */
+  useEffect(() => {
+    let alive = true
+    void window.electronAPI.perfStatus().then((st) => {
+      if (!alive || !st.running) return
+      // 도구도 되살린다 — 안 그러면 도는 JMeter 회차가 목록(도구별)에서 빠지고, 도는 동안엔 도구
+      // 버튼이 잠겨 있어 바꿀 수도 없다
+      setTool(st.running.config.tool ?? 'locust')
+      setRunning(st.running)
+      setLog(st.log.length > LOG_MAX_CHARS ? st.log.slice(st.log.length - LOG_MAX_CHARS) : st.log)
+      setTab('log')
+      setNote('창을 닫은 동안에도 돌고 있던 회차입니다 — 위의 중지로 멈출 수 있습니다.')
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /** 도는 중에 닫으려 하면 묻는다 — 창을 닫아도 부하는 멈추지 않는다는 사실을 모르고 닫기 쉽다 */
+  const [closeAsk, setCloseAsk] = useState(false)
+  const requestClose = () => {
+    if (running) setCloseAsk(true)
+    else onClose()
+  }
+
+  /**
+   * 콘솔 요약을 어느 도구 형식으로 읽을지 — 아래 구독은 한 번만 걸리므로(deps []) 그 안에서 `tool` 을
+   * 읽으면 마운트 때 값('locust')에 굳는다. 그래서 JMeter 실행 중의 진행 숫자가 한 번도 안 나왔다.
+   * 도는 회차가 있으면 그 회차의 도구를 따른다.
+   */
+  const liveToolRef = useRef<PerfTool>(tool)
+  liveToolRef.current = running?.config.tool ?? tool
+
   // 실시간 로그 — 100ms 씩 묶여서 온다. 화면에 다 쌓아 두면 느려지므로 앞부분을 버린다.
   useEffect(() => {
     const offLog = window.electronAPI.onPerfLog((e) => {
@@ -655,7 +699,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         return next.length > LOG_MAX_CHARS ? next.slice(next.length - LOG_MAX_CHARS) : next
       })
       // JMeter 는 통계 API 가 없어 콘솔의 누적 요약 줄이 유일한 진행 정보다
-      const l = tool === 'jmeter' ? parseJmeterConsole(e.text) : parseLocustConsole(e.text)
+      const l = liveToolRef.current === 'jmeter' ? parseJmeterConsole(e.text) : parseLocustConsole(e.text)
       if (Object.keys(l).length) setLive((prev) => ({ ...prev, ...l }))
     })
     const offDone = window.electronAPI.onPerfDone((e) => {
@@ -759,7 +803,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     ...(tool === 'jmeter'
       ? {}
       : {
-          processes: Math.max(1, Number(processes) || 1),
+          // Windows·워커 모드에서는 실제로 한 갈래로 돈다 — 회차 기록에도 그대로 남긴다(IS_WINDOWS 주석)
+          processes: IS_WINDOWS || Number(expectWorkers) > 0 ? 1 : Math.max(1, Number(processes) || 1),
           expectWorkers: Math.max(0, Number(expectWorkers) || 0),
         }),
     stages:
@@ -975,7 +1020,11 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
   const verdict = useMemo(
     () =>
-      selected
+      // 도는 중인 회차는 판정하지 않는다 — Locust 는 실행 중에도 run_stats.csv 를 1초마다 다시 써서,
+      // 30초치 중간 수치로 '기준 통과' 가 뜨고 그대로 한 장 리포트·AI 분석까지 만들 수 있었다
+      selected && running?.id === selected.meta.id
+        ? { tone: 'info' as const, label: '진행 중 — 끝나면 판정합니다', reasons: [] as string[] }
+        : selected
         ? perfVerdict(
             selectedSummary,
             {
@@ -987,6 +1036,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             },
                         {
               canceled: selected.meta.canceled,
+              interrupted: selected.meta.interrupted,
               exitCode: selected.meta.exitCode,
               history,
               failures,
@@ -994,7 +1044,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             },
           )
         : null,
-    [selected, selectedSummary, history, failures],
+    [selected, selectedSummary, history, failures, running],
   )
 
   useEffect(() => {
@@ -1056,7 +1106,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
    * 중지된 회차는 짝으로 쓰지 않는다 — 끝까지 돌지 않은 값과 비교하면 결론이 거짓이 된다.
    */
   const compare = useMemo(() => {
-    if (!selected || !selectedSummary || selected.meta.canceled) return null
+    if (!selected || !selectedSummary || selected.meta.canceled || selected.meta.interrupted) return null
     // 같은 도구끼리만 비교한다 — 도구가 다르면 백분위 출처부터 달라 비교가 성립하지 않는다
     const sameTool = runs.filter(
       (r) => (r.meta.config.tool ?? 'locust') === (selected.meta.config.tool ?? 'locust'),
@@ -1065,7 +1115,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     if (idx < 0) return null
     const prevRec = sameTool
       .slice(idx + 1)
-      .find((r) => !r.meta.canceled && (r.statsCsv || r.jmeterStatsJson))
+      .find((r) => !r.meta.canceled && !r.meta.interrupted && (r.statsCsv || r.jmeterStatsJson))
     const prev = !prevRec
       ? null
       : (prevRec.meta.config.tool ?? 'locust') === 'jmeter'
@@ -1195,6 +1245,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       startedAt: selected.meta.startedAt,
       endedAt: selected.meta.endedAt,
       canceled: selected.meta.canceled,
+              interrupted: selected.meta.interrupted,
       exitCode: selected.meta.exitCode,
       targetUrl: cfg.targetUrl,
       sessionLabel: cfg.sessionLabel,
@@ -1512,7 +1563,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               <Square size={11} /> 중지
             </button>
           )}
-          <button onClick={onClose} title="닫기" className="rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200">
+          <button onClick={requestClose} title="닫기" className="rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200">
             <X size={15} />
           </button>
         </div>
@@ -2452,8 +2503,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         unit="개"
                         value={processes}
                         onChange={setProcesses}
-                        disabled={!!running}
-                        hint="파이썬 한 갈래(프로세스)는 코어 하나만 씁니다. 갈래를 늘리면 이 PC 가 더 센 부하를 낼 수 있습니다."
+                        disabled={!!running || IS_WINDOWS || Number(expectWorkers) > 0}
+                        hint={
+                          IS_WINDOWS
+                            ? 'Windows 에서는 쓸 수 없습니다 — Locust 가 여러 갈래(--processes)를 지원하지 않아 시작하자마자 끝납니다. 더 센 부하가 필요하면 오른쪽 "다른 PC 도 함께" 를 쓰세요.'
+                            : Number(expectWorkers) > 0
+                              ? '다른 PC 를 붙이는 모드와 함께 쓸 수 없습니다(Locust 가 거절합니다) — 이 PC 도 워커로 하나 더 붙이세요.'
+                              : '파이썬 한 갈래(프로세스)는 코어 하나만 씁니다. 갈래를 늘리면 이 PC 가 더 센 부하를 낼 수 있습니다.'
+                        }
                       />
                       <Field
                         label="다른 PC 도 함께"
@@ -2474,7 +2531,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       <Chip
                         label={`코어만큼 (${coreCount}개)`}
                         on={processes === String(coreCount)}
-                        disabled={!!running}
+                        disabled={!!running || IS_WINDOWS || Number(expectWorkers) > 0}
                         onClick={() => setProcesses(String(coreCount))}
                         title="이 PC 의 코어 수입니다"
                       />
@@ -3428,6 +3485,28 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         </div>
       </div>
 
+      {closeAsk && (
+        <ConfirmDialog
+          title="성능 검증이 돌고 있습니다"
+          confirmLabel="중지하고 닫기"
+          secondaryLabel="계속 돌리고 닫기"
+          message={
+            '창을 닫아도 부하는 멈추지 않고 대상 서비스에 계속 들어갑니다.\n' +
+            '계속 돌리고 닫으면, 성능 검증 창을 다시 열어 진행을 보거나 중지할 수 있습니다.'
+          }
+          onCancel={() => setCloseAsk(false)}
+          onSecondary={() => {
+            setCloseAsk(false)
+            onClose()
+          }}
+          onConfirm={() => {
+            setCloseAsk(false)
+            void window.electronAPI.perfCancel()
+            onClose()
+          }}
+        />
+      )}
+
       {/* 설치는 반드시 묻고 나서 — 무엇을 어떤 명령으로 설치하는지 그대로 보여준다 */}
       {confirmInstall && (
         <ConfirmDialog
@@ -3693,6 +3772,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                             </span>
                             {isRunning && <span className="shrink-0 text-[10px] text-blue-300">진행 중</span>}
                             {r.meta.canceled && <span className="shrink-0 text-[10px] text-amber-300/80">중지</span>}
+                            {r.meta.interrupted && (
+                              <span
+                                className="shrink-0 text-[10px] text-amber-300/80"
+                                title="앱이 닫혔거나 비정상 종료되어 끝까지 돌지 못한 회차 — 판정·비교 기준에서 뺍니다"
+                              >
+                                끊김
+                              </span>
+                            )}
                             {/* 어떤 조건으로 돌린 회차인지 — 이것이 없으면 회차끼리 비교가 안 된다 */}
                             <span className="ml-auto shrink-0 text-[10px] text-gray-600">
                               {(r.meta.config.tool ?? 'locust') === 'jmeter'
@@ -3711,7 +3798,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               </>
                             ) : (
                               <span className="text-gray-600">
-                                {isRunning ? '끝나면 결과가 채워집니다' : r.meta.canceled ? '결과 없음' : '통계 없음'}
+                                {isRunning ? '끝나면 결과가 채워집니다' : r.meta.canceled || r.meta.interrupted ? '결과 없음' : '통계 없음'}
                               </span>
                             )}
                           </div>
