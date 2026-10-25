@@ -19,9 +19,28 @@ import {
   Maximize2,
   Plus,
   Eye,
+  FileText,
+  Copy,
+  Download,
 } from 'lucide-react'
 import PortalPanel, { type PortalMilestone } from './PortalPanel'
 import { notifyOs } from '../lib/notify'
+import {
+  parsePcsRoles,
+  parseCrmOps,
+  parseCtimeLocal,
+  parseLogTime,
+  podFactsFromJson,
+  parseEvacMigrations,
+  parseControllers,
+  type ControllerStat,
+  type PcsResource,
+} from '../lib/clusterEvidence'
+import { maskForExport } from '../lib/mask'
+import { newPodCand, podCandPending, stepPodRecovery, type PodCand } from '../lib/podRecovery'
+import { parseDurationInput } from '../lib/durationInput'
+import { alignTabBlocks } from '../lib/textAlign'
+import type { BoardEvidenceItem } from '../../electron/shared-types'
 
 interface BoardSession {
   id: string
@@ -252,11 +271,24 @@ interface OsStat {
  */
 interface Milestones {
   /** 노드 DOWN 인지 (여러 노드가 죽으면 첫 노드 기준) */
-  down?: { at: number; node: string; source: 'pcs' | 'ssh' | 'pre' }
-  /** VIP 가 다른 노드로 넘어간 시점 */
-  vip?: { at: number; from: string; to: string }
+  down?: { at: number; node: string; source: 'pcs' | 'ssh' | 'pre'; /** corosync·pacemaker 저널이 노드 이탈을 처음 남긴 시각(증적) */ srvAt?: number }
+  /**
+   * VIP 가 다른 노드로 넘어간 시점(툴 관측).
+   * `pcmkAt` 은 pacemaker 가 **스스로 기록한** 새 노드의 int_vip start 시각(`crm_mon -1 -t` 의 last-rc-change,
+   * 호스트 시계 → PC 시계 보정). 판정에는 쓰지 않고 증적으로 나란히 보여 준다.
+   */
+  vip?: { at: number; from: string; to: string; pcmkAt?: number; /** VIP 와 같은 리소스 그룹이라 함께 옮겨 간 리소스 — 역할 이동 줄을 따로 두지 않는다 */ with?: string[] }
   /** masakari evacuation 완료 */
-  masakari?: { at: number; by: string; evac: number }
+  masakari?: {
+    at: number
+    by: string
+    evac: number
+    /**
+     * Nova 의 VM 별 evacuation 기록 요약(증적) — 첫 VM 시작 · 마지막 VM 완료 · 대수 · 실패.
+     * masakari 의 'finished' 는 알림 하나가 끝났다는 뜻이라, 20대를 옮길 때 각 VM 이 언제 끝났는지는 Nova 에 있다.
+     */
+    vms?: { count: number; failed: number; firstAt: number; lastAt: number }
+  }
   /** 워크로드(Deployment/StatefulSet) 단위 파드 정상화 */
   pods: { at: number; ns: string; workload: string }[]
   /**
@@ -265,23 +297,51 @@ interface Milestones {
    * 완료로 적히고 새 복구가 관측될 때마다 시각이 뒤로 밀린다.
    * 옛 이력에는 이 필드가 없다(undefined) — 표시할 때 그것으로 갈라 예전 모양을 유지한다.
    */
-  podsDone?: { at: number; ns: string }[]
+  podsDone?: { at: number; ns: string; readyAt?: number }[]
+  /**
+   * pacemaker 가 관리하는 리소스(그룹)·DC 가 다른 노드로 옮겨 간 시점 — 데몬 표의 (m)/(s) 가 바뀐 순간.
+   * VIP(int_vip)는 위 `vip` 줄이 따로 있어 여기서 뺀다. 리소스마다 **첫 이동만** 남긴다(되돌아오는 failback 은
+   * 총 소요를 부풀릴 뿐 '언제 넘어갔나' 의 답이 아니다).
+   */
+  roles?: { at: number; name: string; from: string; to: string }[]
   /** Ceph degraded + misplaced 가 모두 0 이 된 시점 (= 데이터 복제 복구 완료) */
-  ceph?: { at: number }
+  ceph?: { at: number; /** Ceph 클러스터 로그의 'Health check cleared' 시각(증적) */ srvAt?: number }
   /**
    * Ceph 이 HEALTH_OK 까지 간 시점.
    * 위 `ceph` 와 반드시 구분해야 한다 — clock skew 처럼 복제와 무관한 사유로 WARN 이 남으면
    * degraded·misplaced 가 0 이어도 클러스터는 정상이 아니고, 종합 판정도 통과하지 않는다.
    */
-  cephHealthy?: { at: number }
+  cephHealthy?: { at: number; /** Ceph 클러스터 로그의 'Cluster is now healthy' 시각(증적) */ srvAt?: number }
   /** IPMI 재기동 후 SSH 세션이 다시 붙은 시점 */
-  reconnect?: { at: number; node: string }
+  reconnect?: { at: number; node: string; /** 그 노드가 부팅된 시각(uptime -s, 증적) */ bootAt?: number }
+  /**
+   * 노드가 **클러스터에** 돌아온 시각들 — SSH 가 붙었다고 클러스터에 다시 들어온 것은 아니다. 이미 받는 조회에서 뽑는다.
+   *  - rejoin  : pcs 가 OFFLINE 으로 보고했던 노드가 다시 Online
+   *  - k8sReady: 이 회차에 NotReady 였던 k8s 노드가 다시 Ready
+   *  - osdUp   : `ceph -s` 의 OSD 가 모자랐다가 다시 전부 up·in (연속 2회)
+   */
+  rejoin?: { at: number; node: string }[]
+  k8sReady?: { at: number; node: string }[]
+  osdUp?: { at: number; up: number; total: number }
   /**
    * 서비스 포털 각 페이지가 다시 실데이터를 내려주기 시작한 시점.
    * 사용자가 "언제부터 포털을 쓸 수 있었나" 를 판단하는 최종 지표라, 클러스터 복구와
    * **같은 타임라인** 위에 있어야 의미가 있다(따로 재면 두 시계를 눈으로 맞춰야 한다).
    */
   portal: { at: number; name: string; group?: string; streak?: number }[]
+  /**
+   * 장애 뒤 끊겼다가 **아직 복구되지 않은** 포털 대상(회차를 저장·갱신한 시점 기준). 비어 있지 않으면 그 회차의
+   * 포털은 미복구(Fail) — '포털 서비스 정상화' 를 돌아온 대상만으로 계산하지 않는다(사용자 기준: 모두 돌아와야 완료).
+   */
+  portalPending?: string[]
+  /**
+   * 장애를 **넣은** 시각 — DOWN 감지에는 감지 지연(pcs 수 초 · SSH 최대 90초)이 있어, 사용자가 체감한 중단 시작은 이보다 이르다.
+   *  - button : 노드를 끈 순간 [장애 주입] 을 눌러 남긴 PC 시각
+   *  - manual : 나중에 IPMI(BMC) 이벤트 로그의 전원 꺼짐 시각을 보고 사람이 넣은 값(note 에 출처). BMC 시계는 NTP 를
+   *             안 쓰는 경우가 많아 수 분씩 틀리기도 한다 — 화면과 리포트에 그 사실을 함께 적는다.
+   * 판정·총 소요에는 쓰지 않고 '주입 → 감지' 와 '주입부터의 시간' 을 나란히 보여 준다.
+   */
+  inject?: { at: number; source: 'button' | 'manual'; note?: string }
 }
 const emptyMilestones = (): Milestones => ({ pods: [], podsDone: [], portal: [] })
 /** 이 회차에서 가장 늦은 마일스톤 시각 (없으면 0) — 이력의 '총 소요' 기준 */
@@ -294,10 +354,28 @@ const lastMilestoneAt = (ms: Milestones): number =>
     ms.ceph?.at ?? 0,
     ms.cephHealthy?.at ?? 0,
     ms.reconnect?.at ?? 0,
+    // 역할 이동(ms.roles)은 넣지 않는다 — 복구의 끝이 아니라 증적이다. 노드가 돌아와 리소스가 되돌아가거나
+    // 누가 `pcs resource move` 를 하면 첫 이동이 검증 끝 무렵에 찍혀 총 소요가 그만큼 늘어난다.
     ...(ms.pods ?? []).map((p) => p.at),
     ...(ms.podsDone ?? []).map((p) => p.at),
     ...(ms.portal ?? []).map((p) => p.at),
   )
+
+/** pcs 노드명을 상태보드 host(세션 id)로 이은 리소스 역할 */
+interface BoardRoleRes extends PcsResource {
+  ownerIds: string[]
+  standbyIds: string[]
+}
+interface BoardRoles {
+  /** DC 노드(pcs 이름) · 그 host id */
+  dc: string
+  dcId: string
+  resources: BoardRoleRes[]
+  /** pacemaker 클러스터에 속한 host — 컴퓨트처럼 클러스터 밖 노드에는 '대기' 를 그리지 않는다 */
+  clusterIds: string[]
+  /** 이번 프레임에 pcs 가 답하지 않아 **직전 역할**을 보여 주는 중 — 몇 초 전 값인지 */
+  staleSec?: number
+}
 
 interface BoardState {
   hosts: HostStat[]
@@ -318,6 +396,8 @@ interface BoardState {
   pods: PodStat[]
   podScope: 'abnormal' | 'all'
   serviceUnits: string[] // 서비스 패널 행(유닛) 목록
+  /** pacemaker 리소스의 주(m)/보조(s) 노드와 DC — 데몬 표에 역할 표시. pcs 를 못 읽었으면 null */
+  roles: BoardRoles | null
   services: NodeSvc[] // 노드별 서비스 데몬 상태
   openstack: OsStat | null // OpenStack 서비스(API) 상태
   osScope: 'abnormal' | 'all'
@@ -457,7 +537,7 @@ function parseMasakari(
   out: string,
   t0: number,
   delta: number,
-): { state: MasakariState; detail: string; evac: number; at?: number } {
+): { state: MasakariState; detail: string; evac: number; at?: number; line?: string } {
   const all = stripAnsi(out).split('\n').filter(Boolean)
   const recent = all.filter((l) => {
     const ts = lineTs(l)
@@ -500,6 +580,8 @@ function parseMasakari(
       evac,
       // delta 를 빼서 호스트 로컬 표기를 절대시각으로 되돌린다(t0 비교와 같은 기준).
       at: ts != null ? ts - delta : undefined,
+      // 판정 근거가 된 바로 그 줄 — 증적 화면이 이 줄로 스크롤해 강조한다
+      line: finishedLine,
     }
   }
   // 처리할 알림이 하나도 안 잡혔으면 '진행 중'이 아니라 '아직 아무 일 없음'이다
@@ -651,8 +733,20 @@ function parsePods(
     const readyFull = rf ? rf[1] === rf[2] : true // "a/b" 형태가 아니면 판정 보류(정상 취급)
     // 노드가 Ready 가 아니면 파드 상태와 무관하게 '확인되지 않음' 이다 (parseNotReadyNodes 주석 참고)
     const nodeNotReady = notReadyNodes.has(node)
+    /**
+     * CronJob 이 띄운 파드(`<cronjob>-<예약 분 8자리 이상>-<5자>`)는 판정에서 뺀다. 주기마다 새로 생겨
+     * ContainerCreating → Running 0/1 → Completed 를 거치는데, 그 생성 순간이 '비정상' 으로 잡혀 장애와 무관한
+     * '파드 복구 시작·완료' 가 찍혔다(실제로 10분마다 도는 valkey-cluster-maintenance-cronjob 이 그랬다).
+     * 배치 작업은 서비스 가용성이 아니다. 이름 규칙으로만 가리므로 CronJob 없이 직접 만든 Job 의 파드
+     * (`<job>-<5자>`)는 가려내지 못한다 — 그런 것이 문제가 되면 네임스페이스 범위에서 빼야 한다.
+     * 숫자 자리는 **예약 시각(epoch 분)** 이므로 지금과 이틀 안쪽인지 교차 검증한다 — Deployment 파드의 해시
+     * (`api-<해시>-<5자>`)가 우연히 숫자만으로 나오면 그 파드가 판정에서 통째로 빠지기 때문이다(검토 지적).
+     * 지난 회차의 완료 파드는 어차피 Completed(정상)라 이틀 밖이어도 상관없다.
+     */
+    const cronMin = /-(\d{8,})-[a-z0-9]{5}$/.exec(name)?.[1]
+    const cronPod = !!cronMin && Math.abs(Number(cronMin) * 60_000 - Date.now()) < 2 * 86_400_000
     const healthy =
-      !nodeNotReady && (/^Completed$/i.test(status) || (/^Running$/i.test(status) && readyFull))
+      cronPod || (!nodeNotReady && (/^Completed$/i.test(status) || (/^Running$/i.test(status) && readyFull)))
     all.push({ name, ready, status, node, healthy, ...(nodeNotReady ? { nodeNotReady: true } : {}) })
   }
   const abnormalCount = all.filter((p) => !p.healthy).length
@@ -879,6 +973,10 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const [view, setView] = useState<'config' | 'board'>('config')
   const [history, setHistory] = useState<HistoryRecord[]>(loadHistory)
   const [showHistory, setShowHistory] = useState(false)
+  /** 회차 id(t0) → 저장된 증적 key 들 — 타임라인의 [증적] 버튼을 띄울지 정한다 */
+  const [evIndex, setEvIndex] = useState<Record<string, string[]>>({})
+  /** 지금 열어 둔 증적 (회차 id + key) */
+  const [evOpen, setEvOpen] = useState<{ id: string; key: string } | null>(null)
   /**
    * 이번 회차 이름. 검증 중에 입력해두면 이력에 함께 저장된다.
    * 회차를 시작할 때 비우지 않는다 — '…1차' → '…2차' 처럼 고쳐 쓰는 게 대부분이고,
@@ -942,6 +1040,13 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const runningRef = useRef(false)
   const mountedRef = useRef(true)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /**
+   * 폴링 루프의 세대. 루프는 자기를 setTimeout 으로 다시 부르므로, 이전 루프가 await 중일 때 새 루프를 띄우면
+   * 둘 다 살아 조회가 두 배가 된다. 새로 띄울 때 세대를 올리고, 세대가 바뀐 루프는 다음 주기를 잡지 않는다.
+   */
+  const loopGenRef = useRef(0)
+  /** 정리(cleanup) 순간 검증이 돌고 있었는지 — 같은 화면이 다시 붙으면(dev 의 HMR) 이어서 돌린다 */
+  const resumeRef = useRef(false)
   // 재연결 감시 전용 타이머 (폴링과 분리)
   const probeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const t0Ref = useRef<number>(0)
@@ -969,8 +1074,26 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const seenUpRef = useRef<Set<string>>(new Set())
   // 직전에 관측한 VIP 노드명 — 이 값이 바뀌는 순간이 'VIP 이동'
   const vipSeenRef = useRef('')
+  /** pacemaker 리소스(·DC)별 처음 본 주 노드 — 바뀌면 역할 이동 마일스톤 */
+  const rolesSeenRef = useRef<Record<string, string>>({})
+  /** 이미 이동을 기록한 리소스 — 첫 이동만 남긴다 */
+  const rolesDoneRef = useRef<Set<string>>(new Set())
+  /** 마지막으로 **제대로 읽은** 역할 — pcs 가 답하지 않는 프레임에 '몇 초 전 값' 으로 보여 준다 */
+  const lastRolesRef = useRef<{ v: BoardRoles; at: number } | null>(null)
+  /** 직전 프레임의 pcs status 원문 — 이동 증적에 '이동 전' 으로 붙인다 */
+  const lastPcsOutRef = useRef('')
+  /** masakari 완료를 원문 없이(직전 값으로) 처음 본 회차 — 다음 성공 조회에서 증적을 남긴다 */
+  const masakariEvPendingRef = useRef(false)
   // 네임스페이스 → 직전 폴링에서 비정상이던 워크로드 집합 (사라지면 복구로 판정)
   const badWorkloadsRef = useRef<Record<string, Set<string>>>({})
+  /** pcs 가 OFFLINE 으로 본 적 있는 host — 다시 Online 이면 '클러스터 재합류' */
+  const pcsSawOfflineRef = useRef<Set<string>>(new Set())
+  /** 이 회차에 NotReady 였던 k8s 노드 */
+  const k8sNotReadySeenRef = useRef<Set<string>>(new Set())
+  /** OSD 가 모자란 것을 본 적 있나 · 전부 돌아온 연속 횟수 */
+  const osdRef = useRef<{ short: boolean; hits: number; firstAt: number }>({ short: false, hits: 0, firstAt: 0 })
+  /** 네임스페이스별 복구 후보 — 연속 2프레임 정상이어야 확정한다 */
+  const podCandRef = useRef<Record<string, PodCand>>({})
   // 재연결 감시 상태 — lastFire: 마지막 재연결 요청 시각(연속 호출 방지), state: 화면 표시용
   const probeRef = useRef<{
     lastFire: Record<string, number>
@@ -1080,6 +1203,561 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     setState((s) => (s ? { ...s, pods: s.pods.filter((p) => p.namespace !== ns) } : s))
   }
 
+  useEffect(() => {
+    window.electronAPI
+      .boardEvidenceList()
+      .then((r) => {
+        if (mountedRef.current) setEvIndex(Object.fromEntries(r.list.map((x) => [x.id, x.keys])))
+      })
+      .catch(() => {})
+  }, [])
+
+  // ── 증적 — 마일스톤이 찍히는 순간 서버 원문을 떠 둔다 ─────────────────────
+  //
+  // 사후에 다시 구할 수 없어서다. k8s 이벤트는 기본 1시간 뒤 사라지고, pacemaker 동작 이력은
+  // `pcs resource cleanup` 한 번에 지워지며, masakari 로그는 로테이트된다. 판정에는 쓰지 않는다.
+
+  /** 회차(runT0)에 증적 한 건을 남긴다. 원문·강조 문자열 모두 마스킹 설정을 거친다(강조가 원문과 어긋나지 않게) */
+  const saveEvidence = (runT0: number, item: BoardEvidenceItem) => {
+    const id = String(runT0)
+    const masked: BoardEvidenceItem = {
+      ...item,
+      text: maskForExport(item.text),
+      focus: item.focus?.map((f) => maskForExport(f)),
+    }
+    window.electronAPI
+      .boardEvidenceSave(id, masked)
+      .then((r) => {
+        if (!r.ok) {
+          console.warn('[상태보드] 증적 저장 실패', r.error)
+          return
+        }
+        if (mountedRef.current)
+          setEvIndex((cur) => ({ ...cur, [id]: Array.from(new Set([...(cur[id] ?? []), item.key])) }))
+      })
+      .catch((e) => console.warn('[상태보드] 증적 저장 실패', e))
+  }
+  /** 이력에서 빠진 회차의 증적 파일을 지운다 */
+  const dropEvidence = (ids: string[]) => {
+    if (!ids.length) return
+    void window.electronAPI.boardEvidenceDelete(ids).catch(() => {})
+    setEvIndex((cur) => {
+      const next = { ...cur }
+      for (const id of ids) delete next[id]
+      return next
+    })
+  }
+  /** 증적에서 얻은 서버 시각을 마일스톤에 붙였으면, 이미 저장된 이력에도 반영한다 */
+  const refreshSavedHistory = (runT0: number) => {
+    if (t0Ref.current === runT0 && savedRef.current) commitRef.current(closedAtRef.current, true)
+  }
+
+  /**
+   * 호스트 시계 → PC 시계 보정값. 짧은 date 의 왕복 가운데를 '호스트가 찍은 순간' 으로 본다(masakari 와 같은 방식).
+   *  - delta: 호스트 **로컬 표기**(시간대 없음)를 PC 로컬로 읽은 값 → PC 시계  (시간대 차이 + 시계 차이)
+   *  - skew : 호스트 **epoch** → PC 시계  (시계 차이만 — 시간대가 붙은 로그 줄에 쓴다)
+   * 장애 중에는 같은 연결의 실행 슬롯(4개)을 폴링이 차지해 date 가 줄을 서는데, 그 대기가 왕복에 들어가면
+   * 가운데 값이 실제보다 이르게 잡혀 서버 시각이 **이르게** 보인다(검토 지적). 세 번 재고 **왕복이 가장 짧은**
+   * 측정을 쓴다(NTP 와 같은 방식). 못 읽으면 null — 그 사실을 증적에 밝힌다.
+   */
+  const measureClock = async (sid: string): Promise<{ delta: number; skew: number; rtt: number } | null> => {
+    let best: { delta: number; skew: number; rtt: number } | null = null
+    for (let i = 0; i < 3; i++) {
+      const pcBefore = Date.now()
+      // 밀리초까지 받는다 — 초 단위로 자르면 보정값이 0~1초 치우쳐 서버 시각이 최대 1초 늦게 찍혔다(검토 지적).
+      // %3N 을 모르는 date 면 글자 N 이 남는다 — 그때는 초 단위로 읽는다
+      const d = await run(sid, `date '+%s%3N %Y-%m-%dT%H:%M:%S.%3N'`, 10_000)
+      const pcAfter = Date.now()
+      const pcMid = (pcBefore + pcAfter) / 2
+      const [ep, loc] = (d.ok ? d.out ?? '' : '').trim().split('\n')[0].split(/\s+/)
+      const epochMs = /^\d{13}$/.test(ep ?? '') ? parseInt(ep, 10) : parseInt((ep ?? '').replace(/\D.*$/, ''), 10) * 1000
+      const epoch = epochMs / 1000
+      const hostLocal = loc ? Date.parse(loc.replace(/\.[^\d].*$/, '').replace(/\.$/, '')) : NaN
+      if (Number.isNaN(epoch) || Number.isNaN(hostLocal)) continue
+      const m = { delta: hostLocal - pcMid, skew: epoch * 1000 - pcMid, rtt: pcAfter - pcBefore }
+      if (!best || m.rtt < best.rtt) best = m
+      if (m.rtt < 300) break // 충분히 짧다 — 더 잴 필요 없다
+    }
+    return best
+  }
+  /**
+   * 로그 줄 앞머리 시각 → PC 시계 epoch.
+   * 시간대가 붙은 표기(journalctl short-iso · ceph 로그)도 **호스트 시계 차이(skew)** 는 빼야 다른 증적과 같은 기준이 된다
+   * (CLAUDE.md: 원격 시각은 호스트 시계 오차를 빼서 맞춘다). 보정값이 없으면 시간대 붙은 줄만 그대로 쓴다.
+   */
+  const logLineAt = (line: string, clock: { delta: number; skew: number } | null): number | null => {
+    const t = parseLogTime(line)
+    if (!t) return null
+    if (t.tz) return clock ? t.ms - clock.skew : t.ms
+    return clock == null ? null : t.ms - clock.delta
+  }
+  /**
+   * 증적 수집은 **세션마다 한 번에 하나씩** 돈다. 장애 순간에는 DOWN·VIP·역할 증적이 같은 pcs 노드로 몰리고,
+   * 각 명령이 연결의 실행 슬롯(4개)을 오래 쥐면 그 노드의 pcs·ceph·서비스 폴링이 밀려 '확인 불가'·늦은 확정이
+   * 됐다(검토 지적). 줄을 세우면 폴링이 쓸 슬롯이 남는다.
+   */
+  const captureChainRef = useRef<Record<string, Promise<unknown>>>({})
+  const inSeq = (sid: string, fn: () => Promise<unknown>) => {
+    const prev = captureChainRef.current[sid] ?? Promise.resolve()
+    const next = prev.then(fn, fn).catch((e) => console.warn('[상태보드] 증적 수집 실패', e))
+    captureChainRef.current[sid] = next
+    return next
+  }
+
+  const readCrm = async (srcId: string) => {
+    // 시각은 crm_mon 과 **따로** 짧은 date 한 번으로 잰다. 처음엔 crm_mon 뒤에 date 를 붙이고 왕복 전체의
+    // 가운데를 썼는데, 장애 중 crm_mon 은 몇 초씩 걸려(sudo -n 실패면 두 번 돈다) 보정값이 그 절반만큼
+    // 틀어졌다 — pacemaker 시각이 실제보다 **이르게** 보이는 쪽이라 증적으로 쓸 수 없다.
+    const clock = await measureClock(srcId)
+    const delta = clock ? clock.delta : null
+    const r = await run(srcId, sudoOr('crm_mon -1 -t'), 20_000)
+    const body = (r.out ?? '').trim()
+    const ops = parseCrmOps(body)
+    const abs = (raw: string) => {
+      const t = parseCtimeLocal(raw)
+      return t == null || delta == null ? null : t - delta
+    }
+    return { ok: r.ok && !r.timedOut && ops.length > 0, body, ops, abs, delta }
+  }
+
+  /**
+   * VIP·리소스 그룹·DC 이동의 증적 — pacemaker 의 동작 이력에서 **새 노드의 start 시각**을 뽑는다.
+   * VIP 는 이동이 '보인' 직후라도 start 기록이 아직 안 올라왔을 수 있어 5초 간격으로 두 번까지 다시 읽는다.
+   */
+  const captureMove = async (
+    runT0: number,
+    opt: {
+      key: string
+      title: string
+      srcId: string
+      before: string
+      after: string
+      targets: { resources: string[]; to: string; label: string }[]
+      vip?: boolean
+    },
+    attempt = 0,
+  ): Promise<void> => {
+    const crm = await readCrm(opt.srcId)
+    const facts: { label: string; at?: number; text?: string }[] = []
+    const focus: string[] = []
+    let vipAt: number | null = null
+    /** start 기록이 아직 안 올라온 리소스 — VIP 와 같은 그룹은 몇 초 늦게 뜬다(haproxy 는 int_vip 3초 뒤) */
+    const missing: string[] = []
+    for (const tg of opt.targets) {
+      facts.push({ label: tg.label, text: '툴이 이동을 감지한 순간' })
+      const want = new Set(tg.resources.map((x) => x.toLowerCase()))
+      for (const o of crm.ops) {
+        if (o.node.toLowerCase() !== tg.to.toLowerCase() || !want.has(o.resource.toLowerCase())) continue
+        if (!/^(start|promote)$/.test(o.op) || o.rc !== 0) continue
+        const at = crm.abs(o.raw)
+        // 검증 전의 기록(지난 이동)은 증적이 아니다 — 1분 여유는 호스트 시계 오차 몫
+        if (at == null || at < runT0 - 60_000) continue
+        facts.push({ label: `pacemaker 기록 · ${o.resource} ${o.op} — ${o.node}`, at })
+        focus.push(`last-rc-change="${o.raw}"`)
+        if (/int_vip/i.test(o.resource)) vipAt = vipAt == null ? at : Math.min(vipAt, at)
+      }
+      for (const name of tg.resources)
+        if (!facts.some((f) => f.label.startsWith(`pacemaker 기록 · ${name} `))) missing.push(name)
+      focus.push(`Started ${tg.to}`)
+    }
+    if (missing.length && attempt < 2 && t0Ref.current === runT0) {
+      setTimeout(() => void inSeq(opt.srcId, () => captureMove(runT0, opt, attempt + 1)), 5_000)
+      return
+    }
+    if (opt.vip && vipAt != null && t0Ref.current === runT0 && msRef.current.vip) {
+      msRef.current.vip.pcmkAt = vipAt
+      refreshSavedHistory(runT0)
+    }
+    saveEvidence(runT0, {
+      key: opt.key,
+      title: opt.title,
+      capturedAt: Date.now(),
+      host: nameOf(opt.srcId),
+      command: 'crm_mon -1 -t  ·  pcs status (상태보드 폴링)',
+      verifyCmd: opt.targets.length
+        ? `crm_mon -1 -t   # Operations > Node: ${opt.targets[0].to} > ${opt.targets[0].resources[0]} > start 의 last-rc-change`
+        : 'pcs status --full   # Current DC 줄',
+      text: [
+        `# crm_mon -1 -t  (${nameOf(opt.srcId)})`,
+        crm.body || '(읽지 못함)',
+        '',
+        '# 이동 직전 pcs status',
+        opt.before.trim() || '(없음 — 검증 첫 조회에서 바로 바뀌었습니다)',
+        '',
+        '# 이동을 감지한 pcs status',
+        opt.after.trim(),
+      ].join('\n'),
+      focus,
+      facts,
+      note: !crm.ok
+        ? 'crm_mon 동작 이력을 읽지 못했습니다 — pcs status 원문만 남깁니다.'
+        : crm.delta == null
+          ? '호스트 시각을 읽지 못해 pacemaker 시각을 PC 시계로 보정하지 못했습니다.'
+          : 'pacemaker 시각은 호스트 시계 표기를 PC 시계로 보정한 값입니다(1초 단위). 동작 이력은 pcs resource cleanup 으로 지워집니다.',
+    })
+  }
+
+  /**
+   * 노드 DOWN 의 근거 — 살아 있는 노드의 corosync·pacemaker 저널. 막(membership)에서 빠진 순간이
+   * 서버 쪽 기록으로 남는다. `-o short-iso` 라 시각에 시간대가 붙어 그대로 절대시각이다.
+   */
+  const captureDown = async (runT0: number, srcId: string, node: string, pcsSnap: string) => {
+    const since = Math.floor((runT0 - 60_000) / 1000)
+    const safeNode = node.replace(/[^\w.-]/g, '')
+    const pat = `lost|left|down|offline|unclean|failed|quorum|membership|members|fenc${safeNode ? `|${safeNode}` : ''}`
+    /**
+     * corosync 는 노드를 **이름이 아니라 번호**로 적는다 — 실제 저널(2026-10-22 contrabass):
+     *   `2026-10-20T18:03:45+0900 contrabass01 corosync[56612]: [KNET  ] link: host: 3 link: 0 is down`
+     * 처음엔 노드 이름이 든 줄만 찾아서 이탈 시각을 하나도 못 잡았다. `crm_node -l`(번호 이름 상태)로
+     * 번호를 얻어 `host: <번호>` · `left…: <번호>` 도 그 노드의 줄로 본다.
+     */
+    const r = await run(
+      srcId,
+      `{ ${sudoOr('crm_node -l')}; }; echo '__QT_SPLIT__'; { ${sudoOr(`journalctl -u corosync -u pacemaker --since @${since} --no-pager -o short-iso`)}; } | grep -iE "${pat}" | head -n 400`,
+      20_000,
+    )
+    const [nodeList, journal = ''] = (r.ok ? r.out ?? '' : '').split('__QT_SPLIT__')
+    const short = safeNode.toLowerCase().split('.')[0]
+    const nodeId = nodeList
+      .split('\n')
+      .map((l) => l.trim().match(/^(\d+)\s+(\S+)/))
+      .find((m) => m && m[2].toLowerCase().split('.')[0] === short)?.[1]
+    const lines = journal.split('\n').filter((l) => l.trim())
+    const clock = await measureClock(srcId)
+    const esc = safeNode.replace(/[.]/g, '\\.')
+    // 이탈 '첫 줄' 이 필요하므로 앞에서부터 자른다(head) — 예전엔 tail 이라 줄이 많으면 첫 줄이 잘려 서버 시각이 늦게 찍혔다.
+    // 노드 이름을 못 얻었으면(빈 이름) 이름 조건을 넣지 않는다 — `\b\b` 는 모든 줄에 맞는다
+    const idPart = nodeId ? `host:\\s*${nodeId}\\b|left[^:\\n]*:[\\s\\d]*\\b${nodeId}\\b` : ''
+    const namePart = esc ? `\\b${esc}\\b` : ''
+    const nodeRe = new RegExp([idPart, namePart].filter(Boolean).join('|') || '(?!)', 'i')
+    const first = lines.find((l) => {
+      const at = logLineAt(l, clock)
+      // 링크 down 은 순간 네트워크 흔들림에도 남는다(위 예의 10-20 줄들) — 이 회차 시작 뒤의 그 노드 줄만
+      return at != null && at >= runT0 && nodeRe.test(l) && /lost|left|down|offline|unclean|failed/i.test(l)
+    })
+    const srvAt = first ? logLineAt(first, clock) : null
+    if (srvAt != null && t0Ref.current === runT0 && msRef.current.down && msRef.current.down.source !== 'pre') {
+      msRef.current.down.srvAt = srvAt
+      refreshSavedHistory(runT0)
+    }
+    saveEvidence(runT0, {
+      key: 'down',
+      title: `호스트 DOWN — ${node}`,
+      capturedAt: Date.now(),
+      host: nameOf(srcId),
+      command: `journalctl -u corosync -u pacemaker --since @${since} -o short-iso | grep …  ·  pcs status`,
+      verifyCmd: `journalctl -u corosync -u pacemaker --since "${fmtDateTime(runT0 - 60_000)}" | grep -i ${node}`,
+      text: [
+        `# crm_node -l (노드 번호 — corosync 저널은 번호로 적는다${nodeId ? ` · ${node} = ${nodeId}` : ''})`,
+        nodeList.trim() || '(읽지 못함)',
+        '',
+        `# corosync · pacemaker 저널 (${nameOf(srcId)})`,
+        lines.join('\n').trim() || '(해당 줄 없음 — 권한·저널 보관 설정을 확인하세요)',
+        '',
+        '# DOWN 을 감지한 pcs status',
+        pcsSnap.trim(),
+      ].join('\n'),
+      focus: [first ?? '', ...(nodeId ? [`host: ${nodeId} `] : []), `OFFLINE`, node].filter(Boolean),
+      facts: [
+        { label: '툴이 DOWN 을 감지 (pcs OFFLINE)', text: '타임라인 시각' },
+        ...(srvAt != null ? [{ label: `저널 기록 · ${node} 이탈 첫 줄`, at: srvAt }] : []),
+      ],
+      note: '살아 있는 노드의 저널입니다. 강조된 첫 줄이 클러스터가 노드를 잃었다고 남긴 시각입니다.',
+    })
+  }
+
+  /** 재연결의 근거 — 그 노드가 실제로 재부팅됐는지, 언제 부팅됐는지 */
+  const captureReconnect = async (runT0: number, id: string) => {
+    const clock = await measureClock(id)
+    const r = await run(
+      id,
+      `uptime -s 2>/dev/null; echo '---'; who -b 2>/dev/null; echo '---'; journalctl --list-boots --no-pager 2>/dev/null | tail -n 3`,
+      15_000,
+    )
+    const out = (r.out ?? '').trim()
+    const bootLine = out.split('\n')[0] ?? ''
+    const bootAt = logLineAt(bootLine.replace(' ', 'T'), clock)
+    // 이 회차 안의 부팅이어야 재부팅의 증거다(1분은 시계 오차 여유)
+    const inRun = bootAt != null && bootAt >= runT0 - 60_000
+    // 그사이 대상 노드의 재연결로 마일스톤이 바뀌었으면 다른 노드의 부팅 시각을 붙이지 않는다
+    if (inRun && t0Ref.current === runT0 && msRef.current.reconnect?.node === svcShortName(nameOf(id))) {
+      msRef.current.reconnect.bootAt = bootAt as number
+      refreshSavedHistory(runT0)
+    }
+    saveEvidence(runT0, {
+      key: 'reconnect',
+      title: `세션 재연결 — ${svcShortName(nameOf(id))}`,
+      capturedAt: Date.now(),
+      host: nameOf(id),
+      command: 'uptime -s  ·  who -b  ·  journalctl --list-boots',
+      verifyCmd: 'uptime -s; journalctl --list-boots | tail -3',
+      text: out || '(읽지 못함)',
+      focus: [bootLine].filter(Boolean),
+      facts: [
+        { label: '툴이 SSH 재연결', text: '타임라인 시각' },
+        bootAt != null
+          ? { label: inRun ? '부팅 시각 (uptime -s, PC 시계로 보정)' : '부팅 시각 — 이 회차 전 (재부팅 아님)', at: bootAt }
+          : { label: '부팅 시각', text: '읽지 못함' },
+      ],
+      note: inRun ? undefined : '부팅 시각이 검증 시작보다 이릅니다 — 이 재연결은 재부팅이 아니라 네트워크 단절 뒤 복구일 수 있습니다.',
+    })
+  }
+
+  /**
+   * Ceph 복구의 근거 — 모니터가 남긴 클러스터 로그(`ceph log last`). 'Health check cleared: PG_DEGRADED' ·
+   * 'Cluster is now healthy' 처럼 Ceph 자신이 상태가 바뀐 순간을 적는다.
+   */
+  const captureCeph = async (runT0: number, sid: string, which: 'ceph' | 'cephHealthy') => {
+    // 한꺼번에 돌리면 같은 노드의 ceph -s 폴링이 밀려 다음 확정이 늦어진다 — 하나씩
+    const clock = await measureClock(sid)
+    const lg = await run(sid, sudoOr('ceph log last 1000'), 20_000)
+    const st = await run(sid, `${sudoOr('ceph -s')}; echo; ${sudoOr('ceph health detail')}`, 20_000)
+    const lines = (lg.ok ? lg.out ?? '' : '').split('\n')
+    const want =
+      which === 'ceph'
+        ? /Health check cleared: (PG_DEGRADED|OBJECT_DEGRADED|OBJECT_MISPLACED|PG_AVAILABILITY|OSD_DOWN|OSD_HOST_DOWN)/i
+        : /Cluster is now healthy|overall HEALTH_OK/i
+    const hits = lines
+      .map((l) => ({ l, at: logLineAt(l, clock) }))
+      .filter((x) => x.at != null && (x.at as number) >= runT0 && want.test(x.l))
+    const last = hits[hits.length - 1]
+    if (last && t0Ref.current === runT0) {
+      const m = which === 'ceph' ? msRef.current.ceph : msRef.current.cephHealthy
+      if (m) {
+        m.srvAt = last.at as number
+        refreshSavedHistory(runT0)
+      }
+    }
+    saveEvidence(runT0, {
+      key: which,
+      title: which === 'ceph' ? 'Ceph 데이터 복구 완료 — 클러스터 로그' : 'Ceph HEALTH_OK — 클러스터 로그',
+      capturedAt: Date.now(),
+      host: nameOf(sid),
+      command: 'ceph log last 1000  ·  ceph -s',
+      verifyCmd: which === 'ceph' ? 'ceph log last 1000 | grep -i "health check cleared"' : 'ceph log last 1000 | grep -i "now healthy"',
+      text: [
+        '# ceph log last 1000',
+        lines.join('\n').trim() ||
+          (lg.ok && !lg.timedOut
+            ? '(비어 있음 — 이 클러스터는 모니터 클러스터 로그를 남기지 않습니다. 아래 상태 원문이 근거입니다)'
+            : `(읽지 못함${lg.timedOut ? ' — 시간 초과' : ''})`),
+        '',
+        '# ceph -s · ceph health detail (완료를 확정한 직후)',
+        (st.out ?? '').trim(),
+      ].join('\n'),
+      focus: [last?.l ?? '', ...hits.map((h) => h.l)].filter(Boolean),
+      facts: [
+        { label: `툴이 ${which === 'ceph' ? 'degraded·misplaced 0' : 'HEALTH_OK'} 를 연속 2회 확인`, text: '타임라인 시각' },
+        ...hits.map((h) => ({ label: `Ceph 기록 · ${h.l.replace(/^.*?cluster \[\w+\]\s*/i, '').slice(0, 80)}`, at: h.at as number })),
+      ],
+      note: hits.length
+        ? 'Ceph 모니터의 클러스터 로그입니다. 시간대가 없는 표기는 그 서버 시계를 PC 시계로 보정했습니다.'
+        : '클러스터 로그에서 해당 기록을 찾지 못해 서버 기록 시각은 없습니다 — 완료를 확정한 순간의 ceph -s · health detail 원문만 남깁니다.',
+    })
+  }
+
+  /**
+   * Masakari 완료 판정의 근거 — 판정에 쓴 engine 로그 + **Nova 의 VM 별 evacuation 기록**.
+   *
+   * engine 로그는 VM 마다 'evacuate 시작' 만 남기고, 끝은 알림 전체의 'finished' 한 줄이다. 20대를 옮기면
+   * 어느 VM 이 언제 끝났는지가 로그에 없다. Nova 는 VM 마다 migration(type=evacuation) 레코드를 남기고
+   * 생성(시작) · 마지막 갱신(완료) · 출발/도착 호스트 · 상태를 갖는다 — 그것으로 VM 별 표를 만든다.
+   * 로그 원문은 그 VM 들의 UUID 가 든 줄만 남기고, 길면 앞뒤만 둔다(20대면 수백 줄이 된다).
+   * VM 이 아직 옮겨지는 중(status 가 끝나지 않음)이면 20초 간격으로 다섯 번까지 다시 읽는다.
+   */
+  const captureMasakari = async (
+    runT0: number,
+    id: string,
+    raw: string,
+    p: { at?: number; evac: number; line?: string },
+    logPath: string,
+    os: { sid: string; rc: string },
+    attempt = 0,
+  ): Promise<void> => {
+    const mr = os.sid
+      ? // --limit 은 compute API 2.59 이상에서만 받는 CLI 가 있어 빼 둔다(회차 필터는 코드가 한다)
+        await run(os.sid, `bash -lc '. ${os.rc} 2>/dev/null; openstack server migration list --type evacuation -f json'`, 30_000)
+      : null
+    // session:run 은 종료코드와 무관하게 ok 다 — JSON 배열로 읽히지 않으면 **조회 실패**다('기록 없음' 이 아니다)
+    const parsed = mr && mr.ok && !mr.timedOut ? parseEvacMigrations(mr.out ?? '', runT0 - 60_000) : null
+    const vms = parsed ?? []
+    const unfinished = vms.filter((v) => !v.done)
+    // 한 번의 조회 실패(CLI·인증 순간 오류)로 VM 표를 영영 잃지 않게, 실패도 아직 안 끝난 VM 처럼 다시 묻는다
+    if ((unfinished.length || (mr && parsed === null)) && attempt < 5 && t0Ref.current === runT0) {
+      setTimeout(() => void inSeq(os.sid, () => captureMasakari(runT0, id, raw, p, logPath, os, attempt + 1)), 20_000)
+      return
+    }
+    // VM 이름 — 표에 UUID 만 있으면 사람이 못 알아본다. 못 읽으면 UUID 앞자리로 둔다.
+    const names: Record<string, string> = {}
+    if (vms.length && os.sid) {
+      const nr = await run(
+        os.sid,
+        `bash -lc '. ${os.rc} 2>/dev/null; openstack server list --all-projects --limit 2000 -c ID -c Name -f json'`,
+        30_000,
+      )
+      try {
+        for (const x of JSON.parse(nr.out ?? '[]') as { ID?: string; Name?: string }[]) if (x.ID) names[x.ID] = x.Name ?? ''
+      } catch {
+        /* 이름 없이 간다 */
+      }
+    }
+    const vmName = (u: string) => names[u] || u.slice(0, 8)
+    const failed = vms.filter((v) => v.failed).length
+    if (vms.length && t0Ref.current === runT0 && msRef.current.masakari) {
+      msRef.current.masakari.vms = {
+        count: vms.length,
+        failed,
+        firstAt: Math.min(...vms.map((v) => v.createdAt)),
+        // 아직 옮기는 중인 VM 의 updatedAt 은 '완료' 가 아니다 — 끝난 VM 만
+        lastAt: Math.max(...(vms.some((v) => v.done) ? vms.filter((v) => v.done) : vms).map((v) => v.updatedAt)),
+      }
+      refreshSavedHistory(runT0)
+    }
+    const uuid = p.line?.match(new RegExp(`Notification\\s+(${UUID})`, 'i'))?.[1]
+    // 로그는 이 VM 들 · 이 알림의 줄만 — 없으면(Nova 를 못 읽음) 판정에 쓴 원문 그대로
+    const all = stripAnsi(raw).split('\n')
+    const keys = [...vms.map((v) => v.server.toLowerCase()), ...(uuid ? [uuid.toLowerCase()] : [])]
+    let logLines = keys.length ? all.filter((l) => keys.some((k) => l.toLowerCase().includes(k))) : all
+    const LOG_KEEP = 300
+    if (logLines.length > LOG_KEEP * 2)
+      logLines = [...logLines.slice(0, LOG_KEEP), `… (${logLines.length - LOG_KEEP * 2}줄 생략 — 서버에서 직접 확인 명령으로 전체를 볼 수 있습니다) …`, ...logLines.slice(-LOG_KEEP)]
+    const table = vms.length
+      ? ''
+      : !mr
+        ? '(OpenStack 조회 세션이 없어 Nova 기록을 읽지 않았습니다 — 상태보드 설정의 OpenStack 세션·openrc 를 지정하세요)'
+        : parsed
+          ? '(이 회차의 evacuation 기록 없음)'
+          : `(Nova 기록 조회 실패 — openrc(${os.rc})·openstack CLI 를 확인하세요)\n${((mr.out || mr.err || mr.error || '') + '').trim().slice(0, 400)}`
+    saveEvidence(runT0, {
+      key: 'masakari',
+      title: `Masakari evacuation 완료${vms.length ? ` — VM ${vms.length}대` : ''}`,
+      capturedAt: Date.now(),
+      host: nameOf(id),
+      command: `masakari-engine 로그(tail · grep)  ·  openstack server migration list --type evacuation`,
+      verifyCmd: uuid
+        ? `grep -n "${uuid}" ${logPath}   ·   openstack server migration list --type evacuation`
+        : `openstack server migration list --type evacuation`,
+      text: [
+        ...(vms.length ? [] : ['# Nova evacuation 기록', table, '']),
+        `# masakari-engine 로그 (${nameOf(id)}${keys.length ? ' — 이 VM 들 · 이 알림의 줄만' : ''})`,
+        logLines.join('\n').trim(),
+      ].join('\n'),
+      table: vms.length
+        ? {
+            title: `Nova evacuation 기록 — VM ${vms.length}대 (시작 순 · 이 PC 시간대)`,
+            columns: ['VM', '출발 → 도착', '상태', '시작', '완료', '소요'],
+            rows: vms.map((v) => [
+              vmName(v.server),
+              `${v.src} → ${v.dest}`,
+              v.status,
+              fmtClock(v.createdAt),
+              fmtClock(v.updatedAt),
+              fmtElapsed(v.updatedAt - v.createdAt),
+            ]),
+            bad: vms.map((v) => v.failed || !v.done),
+            titles: vms.map((v) => v.server),
+          }
+        : undefined,
+      focus: [p.line ?? '', ...vms.map((v) => v.server)].filter(Boolean),
+      facts: [
+        { label: 'evacuation 완료 (masakari 로그 시각, PC 시계로 보정)', at: p.at },
+        ...(vms.length
+          ? [
+              { label: `첫 VM 시작 (Nova)`, at: Math.min(...vms.map((v) => v.createdAt)) },
+              {
+                label: unfinished.length ? `마지막 VM 완료 (Nova · 아직 ${unfinished.length}대 진행 중)` : `마지막 VM 완료 (Nova)`,
+                at: Math.max(...(vms.some((v) => v.done) ? vms.filter((v) => v.done) : vms).map((v) => v.updatedAt)),
+              },
+              { label: 'VM 수 · 실패', text: `${vms.length}대 · 실패 ${failed}` },
+            ]
+          : [{ label: '대상 인스턴스 (masakari 로그)', text: `${p.evac}대` }]),
+        ...(uuid ? [{ label: 'notification id', text: uuid }] : []),
+      ],
+      note:
+        (vms.length
+          ? 'VM 별 시각은 Nova migration 레코드(Created = 시작, Updated = 마지막 갱신 ≒ 완료, UTC 를 PC 시간대로 표시)입니다. '
+          : '') +
+        (unfinished.length ? `조회 시점에 아직 끝나지 않은 VM ${unfinished.length}대가 있었습니다. ` : '') +
+        '강조된 줄이 완료 판정 근거입니다.',
+    })
+  }
+
+  /**
+   * 네임스페이스 파드 복구 완료의 근거 — apiserver 가 기록한 생성·시작·Ready 전환 시각과 이벤트.
+   * 이벤트는 기본 1시간이면 사라지므로 **완료가 관측된 그 순간** 떠 둔다.
+   */
+  const capturePods = async (
+    runT0: number,
+    sid: string,
+    ns: string,
+    workloads: Set<string>,
+    entry: { readyAt?: number },
+  ) => {
+    const [pj, ev] = await Promise.all([
+      run(sid, `kubectl get pods -n ${ns} -o json --request-timeout=10s`, 25_000),
+      run(
+        sid,
+        `kubectl get events -n ${ns} --sort-by=.lastTimestamp --request-timeout=10s -o custom-columns=FIRST:.firstTimestamp,LAST:.lastTimestamp,TYPE:.type,REASON:.reason,KIND:.involvedObject.kind,OBJECT:.involvedObject.name,MESSAGE:.message`,
+        25_000,
+      ),
+    ])
+    const facts = podFactsFromJson(pj.ok ? pj.out ?? '' : '')
+    const mine = facts.filter((f) => workloads.has(workloadOf(f.name)) && !f.deleting)
+    const factRows: { label: string; at?: number; text?: string }[] = []
+    let nsReady: number | null = null
+    let allReady = workloads.size > 0
+    for (const w of workloads) {
+      const ready = mine.filter((f) => workloadOf(f.name) === w && f.ready && f.readyAt != null)
+      if (!ready.length) {
+        allReady = false
+        factRows.push({ label: `${w} — Ready 파드 없음`, text: '조회 시점 기준' })
+        continue
+      }
+      // 죽은 노드의 파드가 지워져서 '복구' 된 워크로드는 남은 파드가 며칠째 Ready 다 — 그 시각은 이번 복구의
+      // 근거가 아니다(검토 지적). 이 회차에 Ready 가 된 파드만 센다(1분은 시계 오차 여유)
+      const fresh = ready.filter((f) => (f.readyAt as number) >= runT0 - 60_000)
+      if (!fresh.length) {
+        factRows.push({ label: `${w} — 이 회차에 새로 Ready 된 파드 없음 (기존 파드가 계속 Ready)`, text: '-' })
+        continue
+      }
+      const at = Math.max(...fresh.map((f) => f.readyAt as number))
+      nsReady = nsReady == null ? at : Math.max(nsReady, at)
+      factRows.push({ label: `클러스터 기록 · ${w} Ready`, at })
+    }
+    if (allReady && nsReady != null && t0Ref.current === runT0) {
+      entry.readyAt = nsReady
+      refreshSavedHistory(runT0)
+    }
+    const fmt = (t: number | null) => (t == null ? '-' : fmtDateTime(t))
+    const table = facts.length
+      ? [
+          'NAME\tNODE\tCREATED\tSTARTED\tREADY(전환)\tRESTARTS',
+          ...facts.map(
+            (f) =>
+              `${f.name}\t${f.node || '-'}\t${fmt(f.createdAt)}\t${fmt(f.startedAt)}\t${f.ready ? fmt(f.readyAt) : `아님(${fmt(f.readyAt)})`}\t${f.restarts}`,
+          ),
+        ].join('\n')
+      : `(파드 JSON 을 읽지 못함${pj.timedOut ? ' — 시간 초과' : ''})`
+    saveEvidence(runT0, {
+      key: `pods:${ns}`,
+      title: `${ns} : 파드 복구 완료 — 클러스터 기록`,
+      capturedAt: Date.now(),
+      host: nameOf(sid),
+      command: `kubectl get pods -n ${ns} -o json  ·  kubectl get events -n ${ns} --sort-by=.lastTimestamp`,
+      verifyCmd: `kubectl get pods -n ${ns} -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp,READY_AT:'.status.conditions[?(@.type=="Ready")].lastTransitionTime'`,
+      text: [
+        `# 파드 시각 (kubectl get pods -o json 에서 추출 · 표시는 이 PC 시간대)`,
+        table,
+        '',
+        `# 이벤트 (kubectl get events -n ${ns} · 시각은 이 PC 시간대로 바꿔 표시, 원본은 UTC)`,
+        ev.ok ? utcToLocalInText((ev.out ?? '').trim()) || '(이벤트 없음)' : `(이벤트를 읽지 못함${ev.timedOut ? ' — 시간 초과' : ''})`,
+      ].join('\n'),
+      focus: [...workloads],
+      facts: factRows,
+      note: '시각은 apiserver(클러스터) 시계 기준입니다. 이벤트는 기본 1시간 뒤 클러스터에서 사라지므로 이 기록이 남는 유일한 사본일 수 있습니다.',
+    })
+  }
+
   /**
    * 한 번 폴링 — 6개 그룹을 병렬로 돌리되 **끝나는 그룹부터 즉시 화면에 반영**한다.
    * 예전에는 전부 Promise.all 로 묶어 한 번에 setState 했는데, 노드 DOWN 상태에서
@@ -1115,7 +1793,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       setState((prev) => ({
         ...(prev ?? {
           hosts: [], vipNode: '', delayed: [], pendingHosts: 0, ready: false, masakari: [], ceph: null, pods: [],
-          podScope: c.podScope, serviceUnits: [], services: [], openstack: null,
+          podScope: c.podScope, serviceUnits: [], roles: null, services: [], openstack: null,
           osScope: c.osScope, tzNote: '', lastAt: 0, notReadyNodes: [], updatedAt: {}, jobErrors: {},
         }),
         ...p,
@@ -1195,26 +1873,69 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
     // ── 1) Host: pcs status → 노드 Online/OFFLINE + VIP 위치 ────────────────
     const hostJob = async () => {
+      /**
+       * 이 프레임의 기준 시각 — **pcs 를 묻기 직전**. DOWN 은 이 시각으로 찍는다.
+       * 예전엔 pcs 응답을 받은 뒤의 시각을 썼고, 후보를 차례로 물어 죽인 노드가 첫 후보면 12초 타임아웃을 다 기다렸다.
+       * 그만큼 DOWN 이 늦게 찍혀 'DOWN 부터의 복구 시간' 이 **짧게(유리하게)** 나왔다(검토 지적).
+       */
+      const frameAt = Date.now()
       let pcsOut = ''
-      // 노드 목록을 실제로 읽어낸 응답이 나올 때까지 후보를 옮겨 가며 물어본다.
-      // 죽어가는 노드는 타임아웃하거나 빈/부분 출력만 주므로 그걸로 판정하면 안 된다.
-      for (const id of pcsCandidates) {
-        const r = await run(id, sudoOr('pcs status'))
-        if (r.timedOut) {
-          delayed.add('Host(pcs)')
-          continue // 다음 노드에 물어본다
+      /**
+       * 노드 목록을 실제로 읽어낸 첫 응답을 쓴다. 직전에 답한 노드를 먼저 묻고, **2초 안에 못 받으면 다음 후보에도 함께**
+       * 묻는다(먼저 온 유효 응답 채택). 둘을 늘 같이 물으면 평소 pcs 조회가 두 배가 되고, 차례로만 물으면 죽은 첫 후보의
+       * 타임아웃(12초)을 다 기다린다. 죽어가는 노드는 타임아웃하거나 빈/부분 출력만 주므로 그걸로 판정하지 않는다.
+       */
+      pcsOut = await new Promise<string>((resolve) => {
+        let settled = false
+        let fallback = ''
+        let started = 0
+        let finished = 0
+        const ask = (id: string) => {
+          started++
+          void run(id, sudoOr('pcs status')).then((r) => {
+            finished++
+            if (settled) return
+            if (r.timedOut) delayed.add('Host(pcs)')
+            const out = r.ok ? (r.out ?? '') : ''
+            const n = parsePcsNodes(out)
+            const readable = n.online.length > 0 || n.offline.length > 0
+            /**
+             * 쿼럼 없는 파티션의 답은 채택하지 않는다 — 네트워크 격리 시험에서 떨어져 나간 노드는 **나머지를 OFFLINE** 으로
+             * 답한다. 그 답이 먼저 오면 멀쩡한 두 노드가 DOWN 으로 찍히고, 그 노드가 다음 폴링의 첫 후보로 굳었다(검토 지적).
+             * 다른 후보의 답을 기다리고, 끝내 그것뿐이면 대체값으로만 쓴다(아래 호스트 판정에서 OFFLINE 을 믿지 않는다).
+             */
+            if (readable && !/partition WITHOUT quorum/i.test(out)) {
+              settled = true
+              pcsSourceRef.current = id // 다음 폴링부터 이 노드를 먼저 물어본다
+              resolve(out)
+              return
+            }
+            // 아무데서도 못 읽으면 마지막 응답이라도 남긴다 — 노드 목록을 읽을 수 있는 답(쿼럼 없는 쪽)을 빈 답보다 앞세운다
+            if (!fallback || (readable && !parsePcsNodes(fallback).online.length && !parsePcsNodes(fallback).offline.length)) fallback = out
+            // 이 후보가 실패했으면 아직 안 물은 다음 후보를 바로 묻는다
+            if (started < pcsCandidates.length) ask(pcsCandidates[started])
+            else if (finished >= started) {
+              settled = true
+              resolve(fallback)
+            }
+          })
         }
-        const out = r.ok ? (r.out ?? '') : ''
-        const n = parsePcsNodes(out)
-        if (n.online.length || n.offline.length) {
-          pcsOut = out
-          pcsSourceRef.current = id // 다음 폴링부터 이 노드를 먼저 물어본다
-          break
-        }
-        if (!pcsOut) pcsOut = out // 아무데서도 못 읽으면 마지막 응답이라도 남겨 VIP 파싱에 쓴다
-      }
-      const vipNode = parseVipNode(pcsOut)
-      const pcs = parsePcsNodes(pcsOut)
+        if (!pcsCandidates.length) return resolve('')
+        ask(pcsCandidates[0])
+        setTimeout(() => {
+          if (!settled && started < pcsCandidates.length) ask(pcsCandidates[started])
+        }, 2000)
+      })
+      /**
+       * 쿼럼이 없는 파티션의 시각은 믿지 않는다 — 네트워크 격리 시험에서 떨어져 나간 노드가 pcs 원천이면 자기 쪽에서
+       * 리소스가 Started 라고 답해(no-quorum-policy=ignore 등) 가짜 VIP·역할 이동이 찍혔다(검토 지적). DC 와 같은 기준.
+       * 호스트 판정도 같다 — 그 답의 OFFLINE 은 '내가 남들과 끊겼다' 는 뜻이지 남들이 죽었다는 뜻이 아니다.
+       * 그래서 노드 목록 자체를 '이번 프레임 pcs 무응답' 으로 다룬다(직전 판정 유지 · SSH 판정).
+       */
+      const noQuorum = /partition WITHOUT quorum/i.test(pcsOut)
+      // VIP 위치도 그쪽 시각이라 화면에 'VIP 여기' 로 그리지 않는다(모름)
+      const vipNode = noQuorum ? '' : parseVipNode(pcsOut)
+      const pcs = noQuorum ? { online: [] as string[], offline: [] as string[] } : parsePcsNodes(pcsOut)
       const now = Date.now()
 
       const hosts: HostStat[] = hostIds.map((id) => {
@@ -1238,7 +1959,15 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         const pcsAnswered = pcs.online.length + pcs.offline.length > 0
         if (pcsAnswered) {
           if (trustedOffline) pcsDownRef.current.set(id, { at: now, sshDropped: !sshUp })
-          else if (pcsOnline) pcsDownRef.current.delete(id)
+          if (trustedOffline) pcsSawOfflineRef.current.add(id)
+          // 클러스터 재합류 — OFFLINE 이었던 노드를 pcs 가 다시 Online 으로 본 첫 순간
+          if (pcsOnline && pcsSawOfflineRef.current.has(id)) {
+            pcsSawOfflineRef.current.delete(id)
+            ;(msRef.current.rejoin ??= []).push({ at: now, node: svcShortName(nm) })
+          }
+          // 재합류 프레임에도 지운다 — 예전엔 위 분기와 else 로 묶여 남았고, 바로 다음 pcs 무응답 프레임에 그 낡은
+          // OFFLINE 이 '유지' 되어 돌아온 노드가 다시 DOWN 으로 그려졌다(검토 지적)
+          if (pcsOnline) pcsDownRef.current.delete(id)
         }
         /**
          * 단, 유지는 **SSH 가 끊김을 알아채기 전의 틈만** 덮는다. 처음엔 pcs 가 다시 답할 때까지 무조건
@@ -1264,7 +1993,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           // 이때 지금 시각을 DOWN 시각이라고 적으면 타임라인에 가짜 시각이 박히므로 따로 구분한다.
           const everUp = seenUpRef.current.has(id)
           downAtRef.current[id] = everUp
-            ? { at: now, source: trustedOffline ? 'pcs' : 'ssh' }
+            ? { at: frameAt, source: trustedOffline ? 'pcs' : 'ssh' }
             : { at: t0Ref.current, source: 'pre' }
           wasDownRef.current.add(id)
         }
@@ -1296,6 +2025,10 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             node: svcShortName(real.name),
             source: real.downSource === 'pcs' ? 'pcs' : 'ssh',
           }
+          // 살아 있는 pcs 노드의 저널에서 이탈 기록을 뜬다(죽은 노드 자신은 물어볼 수 없다)
+          const evSrc = pcsSourceRef.current && pcsSourceRef.current !== real.id ? pcsSourceRef.current : ''
+          if (evSrc)
+            void inSeq(evSrc, () => captureDown(t0Ref.current, evSrc, hostnamesRef.current[real.id] || svcShortName(real.name), pcsOut))
         }
       } else if (!cur) {
         const pre = downs.find((h) => h.downSource === 'pre')
@@ -1307,18 +2040,137 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       // 한 겹 더 — pcs 가 알려준 노드 목록에 **없는** 값으로의 변화는 이동이 아니라 파싱 잡음이다.
       // 파서를 고쳐도 서식이 또 바뀔 수 있으니, '노드 목록에 있는 이름' 이라는 사실로 검증한다.
       const knownNodes = [...pcs.online, ...pcs.offline]
+      let vipMoved: { from: string; to: string } | null = null
       const isKnown = (n: string) => knownNodes.some((k) => k.toLowerCase() === n.toLowerCase())
-      if (vipNode && (knownNodes.length === 0 || isKnown(vipNode))) {
+      if (vipNode && !noQuorum && (knownNodes.length === 0 || isKnown(vipNode))) {
         if (!vipSeenRef.current) vipSeenRef.current = vipNode
         else if (vipSeenRef.current !== vipNode && !msRef.current.vip) {
           msRef.current.vip = { at: now, from: vipSeenRef.current, to: vipNode }
+          vipMoved = { from: vipSeenRef.current, to: vipNode }
           vipSeenRef.current = vipNode
         }
       }
-      patch({ hosts, vipNode, pendingHosts })
+
+      /**
+       * pacemaker 역할 — 데몬 표의 (m)/(s)·DC.
+       *
+       * systemd 데몬 자체에는 주/보조가 없다(rabbitmq·memcached·httpd 등은 모든 노드가 같은 일을 한다).
+       * 역할이 있는 것은 **pacemaker 가 한 노드에서만 띄우는 리소스**(`systemd:haproxy` 처럼 유닛과 이어진다)와
+       * promotable 리소스, 그리고 클러스터 결정을 내리는 DC 다. 이미 받은 pcs status 를 읽을 뿐 명령은 늘지 않는다.
+       * 노드 이름은 VIP 와 같이 **pcs 노드 목록에 있는 이름만** 믿는다.
+       */
+      const srcId = pcsSourceRef.current
+      const pcsOk = knownNodes.length > 0
+      const idOfPcs = (n: string) => hostIds.find((id) => pcsHas([n], nameOf(id), hostnamesRef.current[id])) ?? ''
+      let roles: BoardRoles | null = null
+      if (pcsOk) {
+        const pr = parsePcsRoles(pcsOut)
+        const resources: BoardRoleRes[] = pr.resources.map((r) => {
+          const owners = r.owners.filter(isKnown)
+          const standbys = r.standbys.filter(isKnown)
+          return {
+            ...r,
+            owners,
+            standbys,
+            ownerIds: owners.map(idOfPcs).filter(Boolean),
+            standbyIds: standbys.map(idOfPcs).filter(Boolean),
+          }
+        })
+        const dc = pr.dc && isKnown(pr.dc) ? pr.dc : ''
+        roles = { dc, dcId: dc ? idOfPcs(dc) : '', resources, clusterIds: knownNodes.map(idOfPcs).filter(Boolean) }
+        lastRolesRef.current = { v: roles, at: now }
+
+        // 역할 이동 — 처음 본 주 노드에서 다른 노드로 '새로 Started' 된 순간. Stopped·전환 중 프레임은 건너뛴다.
+        const changes: { name: string; group?: string; from: string; to: string }[] = []
+        const track = (key: string, owner: string, group?: string) => {
+          if (!owner) return
+          const seen = rolesSeenRef.current[key]
+          if (!seen) {
+            rolesSeenRef.current[key] = owner
+            return
+          }
+          if (seen === owner) return
+          if (!rolesDoneRef.current.has(key)) {
+            rolesDoneRef.current.add(key)
+            changes.push({ name: key, group, from: seen, to: owner })
+          }
+          rolesSeenRef.current[key] = owner
+        }
+        // 네트워크 격리 시험에서 떨어져 나간 노드가 답하면 'Current DC: 자기 자신 … partition WITHOUT quorum' 이다 —
+        // 그걸 DC 이동으로 적지 않는다(검토 지적)
+        if (!noQuorum) track('DC', dc)
+        /**
+         * VIP(int_vip)와 **같은 리소스 그룹**은 따로 남기지 않는다. 그룹은 한 몸으로 옮겨 가므로 'VIP 이동' 과
+         * '역할 이동 — openstack 그룹' 두 줄이 같은 사건을 두 번 말했다(사용자 지적). VIP 줄 하나에 '함께 옮겨 간
+         * 리소스' 로 붙이고, 증적도 VIP 증적에 그 리소스들의 start 시각을 함께 담는다.
+         * 그룹 밖 리소스(thanos 등)와 DC 는 VIP 와 따로 움직이므로 지금처럼 역할 이동 줄로 남긴다.
+         */
+        const vipGroup = resources.find((r) => /int_vip/i.test(r.name))?.group
+        for (const r of noQuorum ? [] : resources) {
+          if (/int_vip/i.test(r.name) || (vipGroup && r.group === vipGroup)) continue
+          track(r.name, r.owners.join(','), r.group)
+        }
+        // 그룹째 옮겨 간 리소스는 한 줄로 — 한 번의 페일오버가 리소스 수만큼 줄을 차지하지 않게
+        const byMove = new Map<string, { names: string[]; group?: string; from: string; to: string }>()
+        for (const ch of changes) {
+          const k = `${ch.group ?? ch.name}|${ch.from}|${ch.to}`
+          const cur = byMove.get(k)
+          if (cur) cur.names.push(ch.name)
+          else byMove.set(k, { names: [ch.name], group: ch.group, from: ch.from, to: ch.to })
+        }
+        if (byMove.size) {
+          if (!msRef.current.roles) msRef.current.roles = []
+          const targets: { resources: string[]; to: string; label: string }[] = []
+          for (const g of byMove.values()) {
+            const name = g.names[0] === 'DC' ? 'DC (pacemaker)' : g.group ? `${g.group} 그룹 (${g.names.join(', ')})` : g.names[0]
+            msRef.current.roles.push({ at: now, name, from: g.from, to: g.to })
+            if (g.names[0] !== 'DC') targets.push({ resources: g.names, to: g.to, label: `${name}: ${g.from} → ${g.to}` })
+          }
+          const dcMove = [...byMove.values()].find((g) => g.names[0] === 'DC')
+          if (srcId)
+            void ((runT0: number, opt: Parameters<typeof captureMove>[1]) => inSeq(srcId, () => captureMove(runT0, opt)))(t0Ref.current, {
+              key: `roles:${now}`,
+              title: `pacemaker 역할 이동${dcMove ? ` — DC ${dcMove.from} → ${dcMove.to}` : ''}`,
+              srcId,
+              before: lastPcsOutRef.current,
+              after: pcsOut,
+              targets,
+            })
+        }
+        if (vipMoved && srcId) {
+          // VIP 와 같은 그룹의 리소스 start 시각도 함께 — 'VIP 는 넘어갔는데 haproxy 는 언제 떴나' 가 증적의 핵심이다
+          const vipRes = resources.find((r) => /int_vip/i.test(r.name))
+          const groupMates = vipRes?.group ? resources.filter((r) => r.group === vipRes.group).map((r) => r.name) : []
+          if (msRef.current.vip) msRef.current.vip.with = groupMates.filter((n) => !/int_vip/i.test(n))
+          void ((runT0: number, opt: Parameters<typeof captureMove>[1]) => inSeq(srcId, () => captureMove(runT0, opt)))(t0Ref.current, {
+            key: 'vip',
+            title: `VIP 이동 — ${vipMoved.from} → ${vipMoved.to}`,
+            srcId,
+            before: lastPcsOutRef.current,
+            after: pcsOut,
+            targets: [
+              {
+                resources: Array.from(new Set([vipRes?.name ?? 'int_vip', ...groupMates])),
+                to: vipMoved.to,
+                label: `VIP: ${vipMoved.from} → ${vipMoved.to}`,
+              },
+            ],
+            vip: true,
+          })
+        }
+        lastPcsOutRef.current = pcsOut
+      } else if (lastRolesRef.current) {
+        roles = { ...lastRolesRef.current.v, staleSec: Math.max(1, Math.round((now - lastRolesRef.current.at) / 1000)) }
+      }
+      patch({ hosts, vipNode, pendingHosts, roles })
     }
 
     // ── 2) Masakari: engine 로그에서 evacuation 완료 판정 ────────────────────
+    /** Nova 기록을 읽을 세션 — OpenStack 세션이 붙어 있으면 그것, 아니면 로그를 읽은 노드에서 openrc 로 */
+    const masaOs = (logId: string) => ({
+      sid: c.osSession && connectedOf(c.osSession) ? c.osSession : logId,
+      rc: c.osRc,
+    })
     const masakariJob = async () => {
       const results = await Promise.all(
         masaIds.map(async (id) => {
@@ -1342,7 +2194,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           }
           const p = parseMasakari(r.out ?? '', t0Ref.current, calibRef.current[id]?.delta ?? 0)
           lastMasakariRef.current[id] = { p, at: Date.now() }
-          return { id, ...p }
+          return { id, ...p, raw: r.out ?? '' }
         }),
       )
       const masakari: MasakariStat[] = results.map((m) => ({
@@ -1358,6 +2210,21 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         // 폴링 주기만큼 늦고, 호스트 시계가 PC 와 어긋나 있으면 그 오차까지 그대로 실린다.
         // (delta 는 시간대와 호스트↔PC 시계 차이를 함께 잡는다 — 보정값 산출부 주석)
         msRef.current.masakari = { at: done.at ?? Date.now(), by: svcShortName(nameOf(done.id)), evac: done.evac }
+        // 조회 실패 프레임의 '직전 값' 으로 완료를 처음 본 경우에는 원문이 없다 — 다음 성공 프레임에서 남긴다
+        if ('raw' in done && done.raw) {
+          const os = masaOs(done.id)
+          const runT0 = t0Ref.current
+          void inSeq(os.sid, () => captureMasakari(runT0, done.id, done.raw, done, c.logPath, os))
+        }
+        else masakariEvPendingRef.current = true
+      } else if (msRef.current.masakari && masakariEvPendingRef.current) {
+        const okDone = results.find((m) => m.state === 'finished' && 'raw' in m && m.raw)
+        if (okDone && 'raw' in okDone && okDone.raw) {
+          masakariEvPendingRef.current = false
+          const os = masaOs(okDone.id)
+          const runT0 = t0Ref.current
+          void inSeq(os.sid, () => captureMasakari(runT0, okDone.id, okDone.raw, okDone, c.logPath, os))
+        }
       }
       patch({ masakari })
     }
@@ -1390,6 +2257,22 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       if (!out) return patch({ ceph: unknownCeph('조회 실패 (권한/명령 확인) — 확인 불가') })
       const parsed = parseCeph(out)
       /**
+       * OSD 복귀 — `osd: 12 osds: 11 up (since 3m), 12 in (since 2w)`. 모자란 것을 본 뒤 전부 up·in 이 **연속 2회**면
+       * 처음 그렇게 본 시각으로 남긴다(Ceph 데이터 복구와 같은 기준). 형식을 못 읽은 프레임은 건너뛴다.
+       */
+      const om = out.match(/osd:\s*(\d+)\s*osds?:\s*(\d+)\s*up[^,\n]*,\s*(\d+)\s*in/)
+      if (om && !msRef.current.osdUp) {
+        const total = +om[1]
+        const up = +om[2]
+        const inn = +om[3]
+        if (up < total || inn < total) osdRef.current = { short: true, hits: 0, firstAt: 0 }
+        else if (osdRef.current.short) {
+          if (!osdRef.current.hits) osdRef.current.firstAt = Date.now()
+          osdRef.current.hits++
+          if (osdRef.current.hits >= 2) msRef.current.osdUp = { at: osdRef.current.firstAt, up, total }
+        }
+      }
+      /**
        * 출력은 왔는데 `HEALTH_` 문자열이 없다 = 클러스터가 상태를 답하지 못한 것이다.
        * mon quorum 이 흔들리는 동안 `ceph -s` 는 이런 걸 돌려준다:
        *   monclient(hunting): authenticate timed out / [errno 110] RADOS timed out
@@ -1420,7 +2303,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       // 연속 2회 관측해야 확정한다.
       if (!msRef.current.ceph && cephPeakRef.current > 0 && remain === 0) {
         cephDoneHitsRef.current += 1
-        if (cephDoneHitsRef.current >= 2) msRef.current.ceph = { at: Date.now() }
+        if (cephDoneHitsRef.current >= 2) {
+          msRef.current.ceph = { at: Date.now() }
+          const runT0 = t0Ref.current
+          void inSeq(c.ceph, () => captureCeph(runT0, c.ceph, 'ceph'))
+        }
       } else {
         cephDoneHitsRef.current = 0
       }
@@ -1432,7 +2319,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
        */
       if (!msRef.current.cephHealthy && cephPeakRef.current > 0 && remain === 0 && parsed.health === 'OK') {
         cephOkHitsRef.current += 1
-        if (cephOkHitsRef.current >= 2) msRef.current.cephHealthy = { at: Date.now() }
+        if (cephOkHitsRef.current >= 2) {
+          msRef.current.cephHealthy = { at: Date.now() }
+          const runT0 = t0Ref.current
+          void inSeq(c.ceph, () => captureCeph(runT0, c.ceph, 'cephHealthy'))
+        }
       } else {
         cephOkHitsRef.current = 0
       }
@@ -1467,6 +2358,17 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       const nodeRes = await run(c.pod, 'kubectl get nodes --no-headers --request-timeout=5s 2>&1')
       if (nodeRes.timedOut) delayed.add('노드 상태')
       const notReady = parseNotReadyNodes(nodeRes.ok ? (nodeRes.out ?? '') : '')
+      // k8s 노드 복귀 — 제대로 받은 프레임에서만 본다(조회 실패를 'NotReady 없음 = 다 돌아옴' 으로 읽지 않게)
+      if (nodeRes.ok && !nodeRes.timedOut && /\b(Ready|NotReady)\b/.test(nodeRes.out ?? '')) {
+        for (const n of notReady) k8sNotReadySeenRef.current.add(n)
+        for (const n of [...k8sNotReadySeenRef.current]) {
+          if (notReady.has(n)) continue
+          k8sNotReadySeenRef.current.delete(n)
+          ;(msRef.current.k8sReady ??= []).push({ at: Date.now(), node: n })
+        }
+      }
+      /** 네임스페이스별 컨트롤러 Ready — undefined = 묻지 않음(이상 없음), null = 조회 실패 */
+      const ctrlByNs = new Map<string, ControllerStat[] | null | undefined>()
       const pods = await Promise.all(
         namespaces.map(async (ns) => {
           // kubectl 자체 타임아웃을 걸어, 죽은 노드의 apiserver 엔드포인트를 물고 늘어지지 않게 한다
@@ -1474,6 +2376,19 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           if (r.timedOut) delayed.add(`파드(${ns})`)
           const raw = r.ok ? (r.out ?? '') : ''
           const p = parsePods(ns, raw, c.podScope, notReady)
+          /**
+           * 워크로드(Deployment·StatefulSet)의 Ready 수 — 이상이 있거나 복구를 지켜보는 중인 네임스페이스만 묻는다(평소엔 안 묻는다).
+           * 파드 행만 보면 죽은 노드 위에 Terminating 으로 멈춘 StatefulSet 파드(강제 삭제 전에는 다시 안 뜬다)를 nodeNotReady
+           * 라 빼서, DB 계열이 내려가 있는데도 '복구 완료' 가 찍혔다. 레플리카가 모자란데 새 파드가 아직 안 생긴 경우도 같다(검토 지적).
+           */
+          const watching =
+            p.abnormalCount > 0 || (badWorkloadsRef.current[ns]?.size ?? 0) > 0 || podCandPending(podCandRef.current[ns])
+          let ctrl: ControllerStat[] | null | undefined
+          if (watching && r.ok && !r.timedOut) {
+            const cr = await run(c.pod, `kubectl get deploy,sts -n ${ns} -o json --request-timeout=5s`)
+            ctrl = cr.ok && !cr.timedOut ? parseControllers(cr.out ?? '') : null
+          }
+          ctrlByNs.set(ns, ctrl)
           // 조회 자체가 실패했는지 — 세션 오류/타임아웃이거나, kubectl 이 에러 문구만 뱉은 경우.
           // (정상적으로 '파드가 하나도 없는' 네임스페이스와 구분해야 한다)
           const failed =
@@ -1508,12 +2423,22 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
         const bad = new Set(
           p.rows.filter((r) => !r.healthy && !r.nodeNotReady).map((r) => workloadOf(r.name)),
         )
+        // 컨트롤러 기준으로도 모자란 워크로드를 더한다(Ready < 원하는 수). DaemonSet 은 묻지 않는다 — 노드에 묶여 있어
+        // 그 노드가 돌아와야 뜨므로 그 복구는 '노드 복귀' 다(위 주석)
+        const ctrl = ctrlByNs.get(p.namespace)
+        // 컨트롤러 조회가 실패한 프레임에는 복구를 확정하지 않는다(조회 실패 ≠ 복구) — 직전 상태를 그대로 둔다
+        if (ctrl === null) continue
+        for (const k of ctrl ?? []) if (k.replicas > 0 && k.ready < k.replicas) bad.add(k.name)
         // 전체 보기 모드에서는 rows 에 정상 파드도 섞여 있으므로 비정상만 추린 위 집합이 정답이다.
         const prev = badWorkloadsRef.current[p.namespace]
-        if (prev) {
-          for (const w of prev) {
-            if (!bad.has(w)) msRef.current.pods.push({ at: now, ns: p.namespace, workload: w })
-          }
+        /**
+         * 복구는 **연속 2프레임** 정상이어야 확정한다(Ceph 와 같은 기준). 처음엔 한 프레임만 보고 찍어, 재생성 중
+         * 잠깐 Ready 가 됐다 다시 빠지는 파드에 이른 복구가 찍혔다. 시각은 처음 정상으로 본 프레임이다.
+         */
+        const cand = (podCandRef.current[p.namespace] ??= newPodCand())
+        const step = stepPodRecovery(cand, prev, bad, now)
+        for (const r of step.recovered) msRef.current.pods.push({ at: r.at, ns: p.namespace, workload: r.workload })
+        {
           /**
            * 비정상 워크로드가 **하나도 안 남은 순간**이 그 네임스페이스의 진짜 '복구 완료' 다.
            *
@@ -1524,9 +2449,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
            * 다시 깨졌다 또 복구되면 그 시각으로 갱신되는 게 맞으므로, 전이마다 기록하고
            * 표시할 때 가장 늦은 것을 쓴다.
            */
-          if (prev.size > 0 && bad.size === 0) {
+          if (step.doneAt != null) {
+            const doneAt = step.doneAt
             if (!msRef.current.podsDone) msRef.current.podsDone = []
-            msRef.current.podsDone.push({ at: now, ns: p.namespace })
+            const entry: { at: number; ns: string; readyAt?: number } = { at: doneAt, ns: p.namespace }
+            msRef.current.podsDone.push(entry)
+            const recovered = new Set(msRef.current.pods.filter((x) => x.ns === p.namespace).map((x) => x.workload))
+            const runT0 = t0Ref.current
+            void inSeq(c.pod, () => capturePods(runT0, c.pod, p.namespace, recovered, entry))
           }
         }
         badWorkloadsRef.current[p.namespace] = bad
@@ -1651,9 +2581,28 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       node: ms.down?.node ?? '(미확인)',
       label: runLabelRef.current.trim() || undefined,
       // ref 를 그대로 넣으면 이후 폴링이 같은 객체를 계속 수정한다 → 깊은 복사
-      milestones: { ...ms, pods: [...ms.pods], portal: [...ms.portal] },
+      // 저장 뒤에 붙는 값(역할 이동 · 파드 Ready 시각 · pacemaker 시각)이 화면 이력만 바꾸고 저장본에는
+      // 안 들어가는 일이 없게, 나중에 바뀌는 것은 전부 떼어 복사한다
+      milestones: {
+        ...ms,
+        pods: [...ms.pods],
+        portal: [...ms.portal],
+        podsDone: ms.podsDone?.map((d) => ({ ...d })),
+        roles: ms.roles?.map((r) => ({ ...r })),
+        vip: ms.vip ? { ...ms.vip } : undefined,
+        down: ms.down ? { ...ms.down } : undefined,
+        masakari: ms.masakari ? { ...ms.masakari } : undefined,
+        reconnect: ms.reconnect ? { ...ms.reconnect } : undefined,
+        ceph: ms.ceph ? { ...ms.ceph } : undefined,
+        cephHealthy: ms.cephHealthy ? { ...ms.cephHealthy } : undefined,
+        portalPending: ms.portalPending?.length ? [...ms.portalPending] : undefined,
+        rejoin: ms.rejoin ? [...ms.rejoin] : undefined,
+        k8sReady: ms.k8sReady ? [...ms.k8sReady] : undefined,
+      },
     }
     const next = [rec, ...loadHistory().filter((h) => h.id !== rec.id)]
+    // 50회를 넘어 밀려나는 회차의 증적도 같이 지운다
+    dropEvidence(next.slice(HIST_MAX).map((h) => h.id))
     saveHistory(next)
     // 언마운트(보드 닫기) 중에도 저장은 돼야 하므로, 화면 갱신만 마운트 상태에서 한다
     if (mountedRef.current) setHistory(next)
@@ -1697,6 +2646,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             const cur = msRef.current.reconnect
             if (!cur || (target && short === target && cur.node !== target)) {
               msRef.current.reconnect = { at: now, node: short }
+              const runT0 = t0Ref.current
+              void inSeq(id, () => captureReconnect(runT0, id))
             }
             wasDownRef.current.delete(id)
             sshLostRef.current.delete(id)
@@ -1752,8 +2703,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   const probeInflightRef = useRef<Promise<unknown> | null>(null)
   const startingRef = useRef(false)
 
-  const probeLoop = async () => {
-    if (!runningRef.current) return
+  const probeLoop = async (gen = loopGenRef.current) => {
+    if (!runningRef.current || gen !== loopGenRef.current) return
     try {
       const pr = probeReconnect()
       probeInflightRef.current = pr
@@ -1761,11 +2712,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     } catch {
       /* 개별 실패는 무시하고 다음 주기에 재시도 — 감시는 절대 멈추면 안 된다 */
     }
-    if (runningRef.current) probeTimerRef.current = setTimeout(probeLoop, PROBE_TICK_MS)
+    if (runningRef.current && gen === loopGenRef.current) probeTimerRef.current = setTimeout(() => probeLoop(gen), PROBE_TICK_MS)
   }
 
-  const loop = async () => {
-    if (!runningRef.current) return
+  const loop = async (gen = loopGenRef.current) => {
+    if (!runningRef.current || gen !== loopGenRef.current) return
     try {
       const pr = pollOnce()
       pollInflightRef.current = pr
@@ -1773,7 +2724,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     } catch {
       /* 폴링 오류는 무시하고 다음 주기 재시도 */
     }
-    if (runningRef.current) timerRef.current = setTimeout(loop, cfgRef.current.intervalSec * 1000)
+    if (runningRef.current && gen === loopGenRef.current) timerRef.current = setTimeout(() => loop(gen), cfgRef.current.intervalSec * 1000)
   }
 
   const start = () => {
@@ -1814,7 +2765,16 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     pcsSourceRef.current = ''
     seenUpRef.current = new Set()
     vipSeenRef.current = ''
+    rolesSeenRef.current = {}
+    rolesDoneRef.current = new Set()
+    lastRolesRef.current = null
+    lastPcsOutRef.current = ''
+    masakariEvPendingRef.current = false
     badWorkloadsRef.current = {}
+    podCandRef.current = {}
+    pcsSawOfflineRef.current = new Set()
+    k8sNotReadySeenRef.current = new Set()
+    osdRef.current = { short: false, hits: 0, firstAt: 0 }
     probeRef.current = { lastFire: {}, state: {} }
     savedRef.current = false
     savedHealthyRef.current = false
@@ -1823,8 +2783,9 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     runningRef.current = true
     setRunning(true)
     setView('board')
-    loop()
-    probeLoop()
+    const gen = ++loopGenRef.current
+    loop(gen)
+    probeLoop(gen)
   }
   const stop = () => {
     runningRef.current = false
@@ -1841,7 +2802,21 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   useEffect(() => {
     // StrictMode 이중 마운트 시 cleanup 이 mountedRef 를 false 로 만들므로, 마운트마다 true 로 되돌린다.
     mountedRef.current = true
+    /**
+     * 정리 뒤 같은 화면이 다시 붙은 경우 — 검증 중이었으면 폴링을 이어서 돌린다.
+     * dev 에서 이 파일을 고치면 React Fast Refresh 가 effect 를 정리 → 재실행하는데, 정리가 타이머를 끄고
+     * runningRef 를 내리지만 화면 상태(running)는 그대로 '검증 중' 으로 남았다. 폴링만 조용히 죽어
+     * 모든 섹션에 '갱신 멈춤 n분 전' 이 떴다. 진짜로 닫힌 경우에는 이 setup 이 다시 오지 않는다.
+     */
+    if (resumeRef.current) {
+      resumeRef.current = false
+      runningRef.current = true
+      const gen = ++loopGenRef.current
+      void loop(gen)
+      void probeLoop(gen)
+    }
     return () => {
+      resumeRef.current = runningRef.current
       // 검증 도중 보드를 그냥 닫아도 그 회차 기록은 남긴다 (중지 버튼을 누르지 않는 경우가 잦다).
       // 저장 이후에 붙은 마일스톤까지 담기도록 덮어쓴다 — 닫는 순간이 가장 완전한 상태다.
       commitRef.current(Date.now(), true)
@@ -1854,6 +2829,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 
   // 경과시간 표시용 1초 틱
   const [tick, forceTick] = useState(0)
+  // 진행 중 회차의 장애 주입 시각 수정 — 이력에는 Ceph 복구 시점에야 저장되므로 그 전에는 여기서만 고칠 수 있다
+  const [injectEdit, setInjectEdit] = useState(false)
+  useEffect(() => {
+    if (!running) setInjectEdit(false)
+  }, [running])
 
   /**
    * 포털 감시 패널이 '복구 확정' 을 올려주면 이번 회차 마일스톤에 합친다.
@@ -1868,6 +2848,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
       if (i < 0) cur.push(m)
       else if (m.at > cur[i].at) cur[i] = m
     }
+    forceTick((n) => n + 1)
+  }, [])
+  /** 포털 미복구 대상 — 바뀌면 이미 저장한 회차에도 반영한다(돌아올 때까지 계속 감시하므로 나중에 비워질 수 있다) */
+  const setPortalPending = useCallback((names: string[]) => {
+    const cur = msRef.current.portalPending ?? []
+    if (cur.length === names.length && cur.every((n, i) => n === names[i])) return
+    msRef.current.portalPending = names
+    if (savedRef.current) commitRef.current(closedAtRef.current, true)
     forceTick((n) => n + 1)
   }, [])
   /** 다시 깨진 대상의 복구 줄을 거둔다 — 다시 복구되면 addPortalMilestones 가 새 시각으로 올린다 */
@@ -1924,8 +2912,16 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
     // unknown(조회 실패/세션 끊김)은 '이상 없음'이 아니다 — 확인을 못 한 것이다
     const podOk = state.pods.every((p) => !p.unknown && p.abnormalCount === 0)
     const downCount = state.hosts.filter((h) => !h.up).length
-    if (masaOk && cephOk && podOk && downCount === 0)
+    // 포털은 감시한 페이지가 **모두** 돌아와야 완료다 — 하나라도 남아 있으면 초록을 주지 않는다(사용자 기준)
+    const portalPending = msRef.current.portalPending ?? []
+    if (masaOk && cephOk && podOk && downCount === 0 && portalPending.length === 0)
       return { label: '정상 (다음 노드 가능)', cls: 'bg-emerald-500/20 text-emerald-300' }
+    if (masaOk && cephOk && podOk && downCount === 0 && portalPending.length)
+      return {
+        label: `포털 미복구 ${portalPending.length}개`,
+        cls: 'bg-amber-500/20 text-amber-300',
+        detail: `아직 돌아오지 않은 포털 대상: ${portalPending.join(', ')}`,
+      }
     /**
      * '복구를 기다리는 중'과 '확인을 못 하는 중'은 사용자가 해야 할 일이 다르다.
      * 전자는 기다리면 되고, 후자는 세션을 다시 붙이거나 권한을 봐야 한다.
@@ -1978,6 +2974,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
   if (minimized) {
     return (
       <div
+        data-anchor="board-chip"
         onMouseDown={onChipDown}
         style={chipPos ? { left: chipPos.x, top: chipPos.y } : { left: 16, bottom: 16 }}
         className="fixed z-50 flex cursor-move select-none items-center gap-2 rounded-lg border border-white/10 bg-panel px-3 py-2 shadow-2xl"
@@ -2050,6 +3047,50 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
           )}
           {/* 회차 이름 — 지금 무슨 조건으로 돌리는지 알고 있는 '검증 중'에 적어두는 게 가장 정확하다.
               (며칠 뒤 이력에서 노드명·시각만 보고는 어떤 회차였는지 구분이 안 된다) */}
+          {view === 'board' && running && (
+            <button
+              onClick={() => {
+                msRef.current.inject = { at: Date.now(), source: 'button' }
+                if (savedRef.current) commitRef.current(closedAtRef.current, true)
+                forceTick((n) => n + 1)
+              }}
+              title="노드를 끈(장애를 넣은) 순간 누르세요 — 그 시각을 '장애 주입' 으로 남겨 '주입 → DOWN 감지' 지연과 주입부터의 복구 시간을 리포트에 함께 적습니다. 다시 누르면 새 시각으로 바뀝니다"
+              className={
+                'ml-2 flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-xs ' +
+                (msRef.current.inject
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                  : 'border-red-500/40 bg-red-500/15 text-red-100 hover:bg-red-500/25')
+              }
+            >
+              <Bolt size={12} />
+              {msRef.current.inject ? `장애 주입 ${fmtClock(msRef.current.inject.at)}` : '장애 주입'}
+            </button>
+          )}
+          {view === 'board' && running && (
+            <span className="relative shrink-0">
+              <button
+                onClick={() => setInjectEdit((v) => !v)}
+                title="장애 주입 시각을 직접 넣거나 고칩니다 (IPMI 이벤트 로그 시각 등)"
+                className="ml-1 whitespace-nowrap rounded-md border border-white/10 px-1.5 py-1 text-[11px] text-gray-300 hover:bg-white/10"
+              >
+                {msRef.current.inject ? '수정' : '수동 입력'}
+              </button>
+              {injectEdit && (
+                <div className="absolute left-0 top-full z-30 mt-1 w-[560px] rounded-md border border-white/10 bg-panel p-2 shadow-xl">
+                  <InjectEditor
+                    value={msRef.current.inject}
+                    downAt={msRef.current.down?.at}
+                    onSave={(v) => {
+                      msRef.current.inject = v
+                      if (savedRef.current) commitRef.current(closedAtRef.current, true)
+                      forceTick((n) => n + 1)
+                    }}
+                    onDone={() => setInjectEdit(false)}
+                  />
+                </div>
+              )}
+            </span>
+          )}
           {view === 'board' && (
             <input
               value={runLabel}
@@ -2126,6 +3167,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             downAt={msRef.current.down?.at ?? null}
             onMilestones={addPortalMilestones}
             onMilestoneRevoked={revokePortalMilestone}
+            onPending={setPortalPending}
           />
         </div>
 
@@ -2163,19 +3205,25 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             onRemoveNamespace={removeNamespaceLive}
             intervalSec={cfg.intervalSec}
             running={running}
+            evKeys={evIndex[String(t0Ref.current)] ?? []}
+            onEvidence={(key) => setEvOpen({ id: String(t0Ref.current), key })}
           />
         )}
       </div>
       {showHistory && (
         <HistoryView
           list={history}
+          evIndex={evIndex}
+          onEvidence={(id, key) => setEvOpen({ id, key })}
           onClose={() => setShowHistory(false)}
           onClear={() => {
+            dropEvidence(history.map((h) => h.id))
             saveHistory([])
             setHistory([])
           }}
           onRemove={(id) => {
             const next = history.filter((h) => h.id !== id)
+            dropEvidence([id])
             saveHistory(next)
             setHistory(next)
           }}
@@ -2184,8 +3232,915 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
             saveHistory(next)
             setHistory(next)
           }}
+          onSetInject={(id, inject) => {
+            // 지금 진행 중인 회차면 메모리에도 넣는다 — 안 그러면 다음 갱신 저장이 이 값을 덮어쓴다
+            if (id === String(t0Ref.current)) msRef.current.inject = inject
+            const next = history.map((h) => (h.id === id ? { ...h, milestones: { ...h.milestones, inject } } : h))
+            saveHistory(next)
+            setHistory(next)
+          }}
         />
       )}
+      {evOpen && <EvidenceView id={evOpen.id} initialKey={evOpen.key} onClose={() => setEvOpen(null)} />}
+    </div>
+  )
+}
+
+// ── 증적 보기 · 내보내기 ─────────────────────────────────────
+
+/**
+ * 원문 안의 UTC 시각(`2026-10-22T05:20:58Z`)을 이 PC 시간대(한국이면 KST, +9시간) 표기로 바꾼다.
+ * k8s 이벤트는 UTC 로만 나와 화면의 다른 시각(KST)과 9시간 어긋나 보였다. 시간대 표기가 없는 줄은 건드리지 않는다.
+ */
+function utcToLocalInText(text: string): string {
+  return text.replace(/\b(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z\b/g, (m, d: string, t: string) => {
+    const ms = Date.parse(`${d}T${t}Z`)
+    return Number.isNaN(ms) ? m : fmtDateTime(ms)
+  })
+}
+
+/**
+ * 회차의 복구 시간 — **DOWN 감지 시각부터** 잰다(사용자 요청).
+ * 처음엔 '검증 시작' 부터 쟀는데, 시작을 누르고 몇 분 뒤에 노드를 죽이면 그 몇 분이 복구 시간에 섞였다.
+ *  - 포털 서비스 정상화: 감시한 포털 API 가 모두 연속 N회 200 OK 가 된 시각(가장 늦게 돌아온 페이지)
+ *  - 전체 복구: 노드가 돌아온 뒤 Ceph 가 HEALTH_OK 가 된 시각(없으면 데이터 복구, 그것도 없으면 마지막 기록)
+ * DOWN 을 못 잡은 회차(검증 전부터 죽어 있었거나 기록 없음)는 검증 시작을 기준으로 하고 그 사실을 표시한다.
+ */
+function runTotals(h: HistoryRecord): { base: number; fromDown: boolean; svc: number | null; all: number; svcPending: string[] } {
+  const ms = h.milestones
+  const fromDown = !!ms.down && ms.down.source !== 'pre'
+  const base = fromDown ? (ms.down as { at: number }).at : h.t0
+  const portal = ms.portal?.length ? Math.max(...ms.portal.map((p) => p.at)) : null
+  const end = ms.cephHealthy?.at ?? ms.ceph?.at ?? h.closedAt
+  // 미복구 대상이 남았으면 포털 서비스 정상화는 없다(돌아온 대상만으로 시각을 만들지 않는다)
+  const svcPending = ms.portalPending ?? []
+  return { base, fromDown, svc: portal == null || svcPending.length ? null : portal - base, all: Math.max(0, end - base), svcPending }
+}
+
+/** 경과 표기 — 음수(DOWN 감지보다 먼저 관측)는 0 으로 자르지 않고 −mm:ss 로. 리포트·이력·Markdown 이 같은 표기를 쓴다 */
+function fmtSigned(ms: number): string {
+  return ms < 0 ? `−${fmtElapsed(-ms)}` : fmtElapsed(ms)
+}
+
+/** 네임스페이스 파드 복구 완료 중 가장 늦은 것 + 아직 완료되지 않은 네임스페이스 수 */
+function podsDoneSummary(ms: Milestones): { at: number | null; pending: number } {
+  // podsDone 이 생기기 전의 회차는 '완료' 를 따로 남기지 않았다 — 타임라인(legacyPods)과 같이 마지막 복구를 완료로 보고
+  // 미완으로 세지 않는다. 안 그러면 옛 회차가 전부 '파드 미완' 으로 리포트에 찍힌다(검토 지적)
+  if (ms.podsDone === undefined) {
+    const at = (ms.pods ?? []).length ? Math.max(...(ms.pods ?? []).map((p) => p.at)) : null
+    return { at, pending: 0 }
+  }
+  const done = new Map<string, number>()
+  for (const d of ms.podsDone ?? []) done.set(d.ns, Math.max(done.get(d.ns) ?? 0, d.at))
+  const started = new Set((ms.pods ?? []).map((p) => p.ns))
+  let pending = 0
+  for (const ns of started) if (!done.has(ns)) pending++
+  return { at: done.size ? Math.max(...done.values()) : null, pending }
+}
+
+const he = (v: unknown) =>
+  String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+/**
+ * 목표 복구 시간(합격 기준) — 기본 **Off**. 합격 기준이 정해지지 않은 검증이 많아 평소엔 평균만 보고, 기준이 명확해지면
+ * On 으로 두고 회차별 합격·불합격을 판정한다(사용자 결정). 값은 DOWN 감지부터의 초, 비워 둔 항목은 판정하지 않는다.
+ */
+interface RtoTargets {
+  enabled: boolean
+  vip?: number
+  masa?: number
+  pods?: number
+  svc?: number
+  all?: number
+}
+const RTO_KEY = 'statusboard_rto_v1'
+const RTO_ITEMS: { key: keyof Omit<RtoTargets, 'enabled'>; label: string }[] = [
+  { key: 'vip', label: 'VIP 이동' },
+  { key: 'masa', label: 'Masakari 완료' },
+  { key: 'pods', label: '파드 복구' },
+  { key: 'svc', label: '포털 서비스 정상화' },
+  { key: 'all', label: '전체 복구' },
+]
+function loadRto(): RtoTargets {
+  try {
+    const v = JSON.parse(localStorage.getItem(RTO_KEY) || 'null')
+    return v && typeof v === 'object' ? { enabled: !!v.enabled, ...v } : { enabled: false }
+  } catch {
+    return { enabled: false }
+  }
+}
+/** '1:30' · '90' · '2분' → 초. 비우면 undefined */
+/**
+ * 여러 회차를 묶은 제출용 HTML 리포트 — 인터넷 없이 열리는 한 파일(CSS 내장, 스크립트는 펼치기·이동 보조뿐이라
+ * 꺼져 있어도 내용은 다 보인다).
+ *
+ * 구성: 머리(기간·회차·노드) → 주요 수치 → ① 핵심 요약(자동 문장) → ② 회차 비교표 → ③ 복구 흐름(포털 정상화까지
+ * 단계 점) → ④ 회차별 상세(접힘, 표에서 이름을 누르면 이동) → 읽는 법.
+ * 복구 시간은 모두 **DOWN 감지 시각부터**다(runTotals). 20회차를 쭉 펼치면 스크롤이 끝없이 길어져(사용자 지적)
+ * 상세는 회차마다 접고, 접힌 머리에 핵심 숫자를 띄웠다. PDF 는 접힌 내용이 인쇄되지 않으므로 전부 펼쳐 뽑는다.
+ * 증적 원문은 저장할 때 이미 마스킹 설정을 거쳤다.
+ */
+function buildHtmlReport(
+  recs: HistoryRecord[],
+  evidence: Record<string, BoardEvidenceItem[]>,
+  opts: { openEvidence: boolean; rto?: RtoTargets },
+): string {
+  const runs = [...recs].sort((a, b) => a.t0 - b.t0)
+  const msOf = (h: HistoryRecord): Milestones => ({ ...h.milestones, pods: h.milestones.pods ?? [], portal: h.milestones.portal ?? [] })
+  const tot = runs.map(runTotals)
+  const nameOfRun = (h: HistoryRecord, i: number) => h.label || `${i + 1}회차 · ${h.node}`
+  /** 단계·총 소요 열 — 값은 그 회차의 DOWN 감지(없으면 검증 시작)부터의 경과 */
+  type Col = { key: string; label: string; grp: 'step' | 'total'; at: (h: HistoryRecord, ms: Milestones, i: number) => number | null; note?: (ms: Milestones) => string }
+  const cols: Col[] = [
+    { key: 'vip', label: 'VIP 이동', grp: 'step', at: (_h, ms) => ms.vip?.at ?? null },
+    { key: 'masa', label: 'Masakari 완료', grp: 'step', at: (_h, ms) => ms.masakari?.at ?? null },
+    {
+      key: 'pods',
+      label: '파드 복구',
+      grp: 'step',
+      at: (_h, ms) => podsDoneSummary(ms).at,
+      note: (ms) => {
+        const n = podsDoneSummary(ms).pending
+        return n ? ` (미완 ${n})` : ''
+      },
+    },
+    { key: 'portal1', label: '포털 API 첫 정상', grp: 'step', at: (_h, ms) => (ms.portal.length ? Math.min(...ms.portal.map((p) => p.at)) : null) },
+    { key: 'ceph', label: 'Ceph 데이터', grp: 'step', at: (_h, ms) => ms.ceph?.at ?? null },
+    { key: 'ok', label: 'Ceph HEALTH_OK', grp: 'step', at: (_h, ms) => ms.cephHealthy?.at ?? null },
+    { key: 'svc', label: '포털 서비스 정상화', grp: 'total', at: (_h, _ms, i) => (tot[i].svc == null ? null : tot[i].base + (tot[i].svc as number)) },
+    { key: 'all', label: '전체 복구', grp: 'total', at: (_h, _ms, i) => tot[i].base + tot[i].all },
+  ]
+  const ci = (k: string) => cols.findIndex((c) => c.key === k)
+  const vals = cols.map((c) =>
+    runs.map((h, i) => {
+      const at = c.at(h, msOf(h), i)
+      // 0 으로 자르지 않는다 — SSH 끊김으로 DOWN 을 잡은 회차는 감지가 최대 90초 늦어 VIP 이동이 먼저 보일 수 있다.
+      // 그걸 00:00 으로 그리면 '즉시 넘어갔다' 로 읽힌다. 음수 그대로 두고 표기에서 밝힌다.
+      return at == null ? null : at - tot[i].base
+    }),
+  )
+  const nums = (k: string) => vals[ci(k)].filter((v): v is number => v != null)
+  const stat = (k: string) => {
+    const a = nums(k)
+    if (!a.length) return null
+    const i = vals[ci(k)].indexOf(Math.max(...a))
+    return { avg: a.reduce((x, y) => x + y, 0) / a.length, max: Math.max(...a), maxRun: runs[i], maxIdx: i, n: a.length }
+  }
+  // 값이 없는 칸은 짧은 하이픈 — 긴 대시(—)는 표에서 선처럼 보였다(사용자 지적)
+  const E = (ms: number | null | undefined) => (ms == null ? '-' : fmtSigned(ms))
+  const first = runs[0]
+  const last = runs[runs.length - 1]
+  const nodes = Array.from(new Set(runs.map((h) => h.node)))
+  const vmFailRuns = runs.filter((h) => (h.milestones.masakari?.vms?.failed ?? 0) > 0)
+  const vmFailTotal = runs.reduce((a, h) => a + (h.milestones.masakari?.vms?.failed ?? 0), 0)
+  const podPendingRuns = runs.filter((h) => podsDoneSummary(msOf(h)).pending > 0)
+  const noPortalRuns = runs.filter((_h, i) => tot[i].svc == null && !tot[i].svcPending.length)
+  const pendingRuns = runs.filter((_h, i) => tot[i].svcPending.length)
+  const noDownRuns = runs.filter((_h, i) => !tot[i].fromDown)
+  const noEvRuns = runs.filter((h) => !(evidence[h.id] ?? []).length)
+  const sSvc = stat('svc')
+  const sAll = stat('all')
+  const sVip = stat('vip')
+  const sMasa = stat('masa')
+  const sPods = stat('pods')
+  const sCeph = stat('ceph')
+  const runLink = (h: HistoryRecord) => he(nameOfRun(h, runs.indexOf(h)))
+  // 목표 기준 — 켜져 있고 값이 있는 항목만 판정한다. 회차는 판정한 항목이 모두 목표 이내면 합격, 값이 없는 항목은 건너뛴다
+  const rto = opts.rto
+  const rtoOn = !!rto?.enabled && RTO_ITEMS.some((x) => rto[x.key] != null)
+  const rtoGoal = (colKey: string): number | undefined => {
+    if (!rtoOn || !rto) return undefined
+    const k = colKey as keyof Omit<RtoTargets, 'enabled'>
+    return RTO_ITEMS.some((x) => x.key === k) ? rto[k] : undefined
+  }
+  const verdicts: ('pass' | 'fail' | 'none')[] = runs.map((h, i) => {
+    if (!rtoOn) return 'none'
+    // 포털 대상이 하나라도 돌아오지 않았으면 그 회차는 불합격이다(모두 돌아와야 완료)
+    if (tot[i].svcPending.length) return 'fail'
+    // 파드도 같다 — 복구가 시작됐는데 끝나지 않은 네임스페이스가 있으면 값이 없다고 건너뛰지 않는다.
+    // 건너뛰면 끝내 안 돌아온 회차가 다른 항목만으로 '합격' 이 됐다(검토 지적). VIP·Masakari 는 값이 없는 것이
+    // '그 노드에 VIP 가 없었다 · 감시하지 않았다' 일 수 있어 미완과 구분할 수 없으므로 지금처럼 건너뛴다
+    if (rto?.pods != null && podsDoneSummary(msOf(h)).pending > 0) return 'fail'
+    let any = false
+    for (const it of RTO_ITEMS) {
+      const goal = rto?.[it.key]
+      if (goal == null) continue
+      const v = vals[ci(it.key)][i]
+      if (v == null) continue
+      any = true
+      if (v > goal * 1000) return 'fail'
+    }
+    return any ? 'pass' : 'none'
+  })
+
+  // ── ① 핵심 요약 — 숫자를 문장으로 ──
+  const S: { tone: 'ok' | 'warn' | 'info'; html: string }[] = []
+  S.push({ tone: 'info', html: `${runs.length}회차를 검증했습니다 — 대상 노드 <b>${he(nodes.join(', '))}</b>. 아래 시간은 모두 <b>DOWN 감지 시각부터</b>입니다.` })
+  if (sSvc)
+    S.push({
+      tone: 'ok',
+      html: `<b>포털 서비스 정상화</b>(감시한 포털 API 가 모두 연속 200 OK)까지 평균 <b>${E(sSvc.avg)}</b>, 가장 오래 걸린 회차는 <b>${he(nameOfRun(sSvc.maxRun, sSvc.maxIdx))}</b> ${E(sSvc.max)}입니다.`,
+    })
+  if (sAll)
+    S.push({
+      tone: 'info',
+      html:
+        `<b>전체 복구</b>(노드 UP 이후 Ceph 클러스터 정상화까지)는 평균 <b>${E(sAll.avg)}</b>, 최대 ${E(sAll.max)}입니다.` +
+        (() => {
+          // 포털 값이 있는 회차끼리만 뺀다 — 포털을 안 본 회차의 전체 복구가 섞이면 차이가 부풀거나 음수가 된다
+          const gaps = runs
+            .map((_h, i) => (tot[i].svc == null ? null : tot[i].all - (tot[i].svc as number)))
+            .filter((v): v is number => v != null)
+          return gaps.length ? ` 포털이 돌아온 뒤 Ceph 정상화를 기다린 시간이 평균 약 ${E(gaps.reduce((a, b) => a + b, 0) / gaps.length)}입니다.` : ''
+        })(),
+    })
+  const steps = [
+    sVip && `VIP 이동 ${E(sVip.avg)}`,
+    sMasa && `Masakari 완료 ${E(sMasa.avg)}`,
+    sPods && `파드 복구 ${E(sPods.avg)}`,
+    sCeph && `Ceph 데이터 복구 ${E(sCeph.avg)}`,
+  ].filter(Boolean)
+  if (steps.length) S.push({ tone: 'info', html: `단계별 평균: ${steps.join(' · ')}.` })
+  if (vmFailTotal) S.push({ tone: 'warn', html: `Masakari evacuation 에 <b>실패한 VM ${vmFailTotal}대</b> — ${vmFailRuns.map(runLink).join(', ')}.` })
+  if (podPendingRuns.length) S.push({ tone: 'warn', html: `파드 복구가 끝나지 않은 채 기록된 회차 ${podPendingRuns.length}개 — ${podPendingRuns.map(runLink).join(', ')}.` })
+  if (noDownRuns.length) S.push({ tone: 'warn', html: `DOWN 을 감지하지 못해 검증 시작부터 잰 회차 ${noDownRuns.length}개 — ${noDownRuns.map(runLink).join(', ')} (표에 * 표시).` })
+  const injected = runs.filter((h, i) => h.milestones.inject && tot[i].fromDown)
+  if (injected.length) {
+    const lags = injected.map((h) => runTotals(h).base - (h.milestones.inject as { at: number }).at)
+    S.push({
+      tone: 'info',
+      html: `장애 주입 시각이 있는 회차 ${injected.length}개 — <b>주입 → DOWN 감지</b> 평균 ${E(lags.reduce((a, b) => a + b, 0) / lags.length)}, 최대 ${E(Math.max(...lags))}. 표의 시간은 DOWN 감지부터이므로 실제 중단 시간은 이만큼 더 깁니다.`,
+    })
+  }
+  if (pendingRuns.length)
+    S.push({
+      tone: 'warn',
+      html: `<b>포털 미복구(Fail)</b> 회차 ${pendingRuns.length}개 — ${pendingRuns
+        .map((h) => `${runLink(h)}(${he(runTotals(h).svcPending.join(', '))})`)
+        .join(' · ')}. 감시한 포털 페이지가 모두 돌아와야 완료입니다.`,
+    })
+  if (noPortalRuns.length) S.push({ tone: 'info', html: `포털을 감시하지 않아 포털 서비스 정상화 시간이 없는 회차 ${noPortalRuns.length}개.` })
+  if (noEvRuns.length) S.push({ tone: 'info', html: `증적(서버 원문)이 없는 회차 ${noEvRuns.length}개 — 증적 저장 기능 이전의 회차입니다.` })
+  if (!vmFailTotal && !podPendingRuns.length) S.push({ tone: 'ok', html: '모든 회차에서 실패한 VM 이나 끝나지 않은 파드 복구는 없었습니다.' })
+  if (rtoOn) {
+    const judged = verdicts.filter((v) => v !== 'none').length
+    const passed = verdicts.filter((v) => v === 'pass').length
+    const failedRuns = runs.filter((_h, i) => verdicts[i] === 'fail')
+    const goals = RTO_ITEMS.filter((x) => rto?.[x.key] != null).map((x) => `${x.label} ≤ ${fmtElapsed((rto?.[x.key] as number) * 1000)}`)
+    S.unshift({
+      tone: failedRuns.length ? 'warn' : 'ok',
+      html:
+        `<b>목표 기준 판정</b>(${he(goals.join(' · '))}): ${judged}회 중 <b>${passed}회 합격</b>` +
+        (failedRuns.length ? ` — 불합격 ${failedRuns.map(runLink).join(', ')}.` : '.'),
+    })
+  }
+
+  const H: string[] = []
+  H.push(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>가용성 검증 결과 — ${he(fmtDateTime(first.t0).slice(0, 10))}</title>
+<style>
+:root{--fg:#1b2430;--mut:#5b6675;--line:#dfe3ea;--soft:#f5f7fa;--brand:#1f3a68;--acc:#2f6fdc;--ok:#13804b;--okbg:#e3f6ec;--warn:#a15c00;--warnbg:#fff4dd;--bad:#c62f2f;--badbg:#fdeaea}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{font-family:"Pretendard","Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:var(--fg);margin:0;background:#eef1f5;font-size:13px;line-height:1.6}
+.page{max-width:1160px;margin:0 auto;padding:0 24px 48px}
+header.hero{background:linear-gradient(135deg,#1f3a68,#2f6fdc);color:#fff;padding:30px 24px 26px}
+header.hero .in{max-width:1112px;margin:0 auto}
+header.hero h1{margin:0;font-size:26px;letter-spacing:-.3px}
+header.hero .meta{margin-top:6px;opacity:.85;font-size:13px}
+header.hero .chips{margin-top:12px;display:flex;flex-wrap:wrap;gap:6px}
+header.hero .chip{background:rgba(255,255,255,.16);border-radius:999px;padding:2px 10px;font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:-18px 0 8px}
+.kpi{background:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 1px 3px rgba(20,30,50,.08);border-top:3px solid var(--acc)}
+.kpi span{display:block;color:var(--mut);font-size:12px}.kpi b{display:block;font-size:22px;font-variant-numeric:tabular-nums;margin-top:2px}.kpi small{color:var(--mut);font-size:11.5px}
+.kpi.ok{border-top-color:var(--ok)}.kpi.warn{border-top-color:var(--warn)}.kpi.bad{border-top-color:var(--bad)}
+section.sec{background:#fff;border-radius:14px;box-shadow:0 1px 3px rgba(20,30,50,.08);padding:18px 20px;margin-top:16px}
+.sh{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding-bottom:10px;border-bottom:2px solid var(--soft)}
+.sh .n{width:26px;height:26px;border-radius:8px;background:var(--brand);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+.sh h2{margin:0;font-size:17px}.sh .d{margin-left:auto;color:var(--mut);font-size:12px}
+ul.sum{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+ul.sum li{padding:8px 12px 8px 14px;border-radius:8px;background:var(--soft);border-left:4px solid var(--acc)}
+ul.sum li.ok{border-left-color:var(--ok);background:var(--okbg)}ul.sum li.warn{border-left-color:var(--warn);background:var(--warnbg)}
+table{border-collapse:separate;border-spacing:0;width:100%}
+table.grid{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+table.grid th{background:#eef2f8;color:#34404f;font-weight:600;font-size:12px;padding:8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+table.grid td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+table.grid tr:last-child td{border-bottom:0}table.grid tbody tr:nth-child(even) td{background:#fafbfd}
+table.grid th.grp{text-align:center;background:#e3eaf6}table.grid th.c,table.grid td.c{text-align:center}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.best{color:var(--ok);font-weight:700}.worst{color:var(--warn);font-weight:700}.pass{color:var(--ok);font-weight:700}.fail{color:var(--bad);font-weight:700}
+td.key{background:#f3f7ff!important;font-weight:600}tr.avg td{background:#eef2f8!important;font-weight:700}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.mut{color:var(--mut)}.note{color:var(--mut);font-size:12px;margin:8px 0 0}
+.explain{margin:12px 0 0;padding:10px 14px;border-radius:8px;background:var(--soft);font-size:12.5px;line-height:1.7}
+.explain b{color:var(--brand)}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--mut);margin:10px 0 0}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.flow{display:grid;grid-template-columns:200px 1fr 120px;gap:6px 12px;align-items:center;font-size:12px}
+.track{position:relative;height:20px;background:var(--soft);border-radius:6px}
+.bar{position:absolute;top:7px;height:6px;left:0;border-radius:3px;background:#c9d6ee}
+.dot{position:absolute;top:3px;width:14px;height:14px;margin-left:-7px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.08)}
+.tools{display:flex;gap:6px;margin-bottom:10px}.tools button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
+details.run{border:1px solid var(--line);border-radius:12px;margin:8px 0;background:#fff;scroll-margin-top:12px}
+details.run>summary{list-style:none;cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+details.run>summary::-webkit-details-marker{display:none}
+details.run>summary:before{content:'▸';color:var(--mut);transition:transform .15s}details.run[open]>summary:before{transform:rotate(90deg)}
+details.run[open]>summary{border-bottom:1px solid var(--line);background:var(--soft);border-radius:12px 12px 0 0}
+.rt{font-weight:700;font-size:14px}.tag{background:#e6eefc;color:var(--brand);border-radius:6px;padding:1px 8px;font-size:12px;font-weight:600}
+.pill{border-radius:999px;padding:1px 9px;font-size:11.5px;background:var(--soft);color:var(--mut)}.pill.ok{background:var(--okbg);color:var(--ok)}.pill.warn{background:var(--warnbg);color:var(--warn)}.pill.bad{background:var(--badbg);color:var(--bad)}
+.rb{padding:12px 16px 16px}
+.kv{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:4px 0 12px}.kv div{background:var(--soft);border-radius:8px;padding:6px 10px}.kv span{display:block;color:var(--mut);font-size:11.5px}.kv b{font-variant-numeric:tabular-nums}
+h3{font-size:13.5px;margin:14px 0 6px;color:var(--brand)}
+.svr{background:var(--okbg);color:var(--ok);border-radius:4px;padding:0 6px;font-size:11.5px;white-space:nowrap}
+details.ev{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:6px 0;background:#fcfdff}details.ev>summary{cursor:pointer;font-weight:600}
+.evk{display:grid;grid-template-columns:150px 1fr;gap:2px 10px;margin:6px 0;font-size:12px}.evk span:nth-child(odd){color:var(--mut)}
+code,.pre{font-family:Consolas,"D2Coding",monospace;font-size:11.5px}.pre{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre;line-height:1.5;max-height:420px;overflow:auto}
+.h1l{background:#ffe8a3;color:#7a4b00;font-weight:700}.h2l{background:#fff7d6}
+tr.badrow td{background:var(--badbg)!important;color:var(--bad)}
+.top{display:inline-block;margin-top:10px;font-size:12px}
+@media print{body{background:#fff}.tools,.top{display:none}section.sec,.kpi{box-shadow:none;border:1px solid var(--line)}.pre{max-height:none;overflow:visible;white-space:pre-wrap;word-break:break-all}details.run{break-inside:auto}header.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+@media (max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.flow{grid-template-columns:120px 1fr 80px}.kv{grid-template-columns:repeat(2,1fr)}}
+</style></head><body>`)
+
+  // ── 머리 · 주요 수치 ──
+  H.push(`<header class="hero" id="top"><div class="in"><h1>가용성 검증 결과</h1>
+<div class="meta">${he(fmtDateTime(first.t0))} ~ ${he(fmtDateTime(last.closedAt))} · 작성 ${he(fmtDateTime(Date.now()))} · Q-Term</div>
+<div class="chips"><span class="chip">${runs.length}회차</span>${nodes.map((n) => `<span class="chip">${he(n)}</span>`).join('')}</div></div></header><div class="page">`)
+  const kpi = (cls: string, label: string, v: string, sub = '') => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`
+  H.push(
+    `<div class="kpis">${kpi('', '회차', String(runs.length), `대상 노드 ${nodes.length}개`)}${kpi('ok', '포털 서비스 정상화 평균', E(sSvc?.avg), sSvc ? `최대 ${E(sSvc.max)}` : '포털 감시 없음')}${kpi('', '전체 복구 평균', E(sAll?.avg), sAll ? `최대 ${E(sAll.max)}` : '')}${
+      rtoOn
+        ? kpi(
+            verdicts.includes('fail') ? 'bad' : 'ok',
+            '목표 합격',
+            `${verdicts.filter((v) => v === 'pass').length} / ${verdicts.filter((v) => v !== 'none').length}회`,
+            '목표 기준 On',
+          )
+        : kpi('', 'VIP 이동 평균', E(sVip?.avg), sVip ? `${sVip.n}회차` : 'VIP 이동 없음')
+    }${kpi(vmFailTotal ? 'bad' : 'ok', '실패한 VM', `${vmFailTotal}대`, vmFailTotal ? `${vmFailRuns.length}개 회차` : 'evacuation 실패 없음')}</div>`,
+  )
+
+  // ── ① 핵심 요약 ──
+  H.push(`<section class="sec"><div class="sh"><span class="n">1</span><h2>핵심 요약</h2><span class="d">아래 표·상세에서 자동으로 뽑은 문장입니다</span></div><ul class="sum">${S.map((x) => `<li class="${x.tone}">${x.html}</li>`).join('')}</ul></section>`)
+
+  // ── ② 회차 비교 ──
+  const nStep = cols.filter((c) => c.grp === 'step').length
+  const nTotal = cols.length - nStep
+  H.push(`<section class="sec"><div class="sh"><span class="n">2</span><h2>회차 비교</h2><span class="d">DOWN 감지부터의 경과 (분:초)</span></div>`)
+  H.push(
+    `<table class="grid"><thead><tr><th rowspan="2">회차</th><th rowspan="2">대상 노드</th><th rowspan="2" class="c">DOWN 감지</th><th class="grp" colspan="${nStep}">단계별 복구</th><th class="grp" colspan="${nTotal}">총 소요</th>${rtoOn ? '<th rowspan="2" class="c">목표 판정</th>' : ''}</tr><tr>${cols
+      .map((c) => `<th class="c">${he(c.label)}${rtoGoal(c.key) != null ? `<div class="mut" style="font-weight:400;font-size:11px">목표 ≤ ${fmtElapsed((rtoGoal(c.key) as number) * 1000)}</div>` : ''}</th>`)
+      .join('')}</tr></thead><tbody>`,
+  )
+  runs.forEach((h, i) => {
+    const ms = msOf(h)
+    const cells = cols
+      .map((c, k) => {
+        const v = vals[k][i]
+        const a = nums(c.key)
+        // 모든 회차가 같은 값이면 빠르고 느린 것이 없다 — 전부 초록으로 칠하지 않는다
+        const lo = Math.min(...a)
+        const hi = Math.max(...a)
+        if (c.key === 'svc' && tot[i].svcPending.length)
+          return `<td class="num c fail key" title="${he(tot[i].svcPending.join(', '))}">미복구 ${tot[i].svcPending.length}</td>`
+        // 목표 기준이 켜져 있고 이 항목에 목표가 있으면 빠름·느림 대신 합격·불합격으로 칠한다
+        const goal = rtoGoal(c.key)
+        const cls =
+          goal != null
+            ? v == null
+              ? ''
+              : v <= goal * 1000
+                ? 'pass'
+                : 'fail'
+            : a.length > 1 && v != null && lo < hi
+              ? v === lo
+                ? 'best'
+                : v === hi
+                  ? 'worst'
+                  : ''
+              : ''
+        const key = c.grp === 'total' ? ' key' : ''
+        return `<td class="num c ${cls}${key}">${E(v)}${goal != null && v != null ? (v <= goal * 1000 ? ' ✓' : ' ✗') : ''}${c.note ? he(c.note(ms)) : ''}${!tot[i].fromDown && v != null ? '*' : ''}</td>`
+      })
+      .join('')
+    H.push(
+      `<tr><td><a href="#run-${i + 1}" data-open="run-${i + 1}">${he(nameOfRun(h, i))}</a><div class="mut" style="font-size:11.5px">${he(fmtDateTime(h.t0))}</div></td><td>${he(h.node)}</td><td class="num c">${tot[i].fromDown ? he(fmtClock(tot[i].base)) : '-'}</td>${cells}${
+        rtoOn ? `<td class="c">${verdicts[i] === 'pass' ? '<span class="pill ok">합격</span>' : verdicts[i] === 'fail' ? '<span class="pill bad">불합격</span>' : '<span class="mut">-</span>'}</td>` : ''
+      }</tr>`,
+    )
+  })
+  const avgRow = cols.map((c) => {
+    const a = nums(c.key)
+    return `<td class="num c${c.grp === 'total' ? ' key' : ''}">${a.length ? E(a.reduce((x, y) => x + y, 0) / a.length) : '-'}</td>`
+  })
+  H.push(`<tr class="avg"><td colspan="3">평균</td>${avgRow.join('')}${rtoOn ? '<td></td>' : ''}</tr></tbody></table>`)
+  H.push(`<div class="explain">
+<div><b>포털 서비스 정상화</b> — 노드 DOWN 을 감지한 시점부터, 감시 중인 포털 API(페이지)가 <b>모두</b> 200 OK 를 연속 정해진 횟수(예: 10회) 받아 정상으로 확정된 시점까지의 시간입니다. 가장 늦게 돌아온 페이지 기준입니다.</div>
+<div><b>전체 복구</b> — 노드 DOWN 을 감지한 시점부터, 노드가 다시 올라온 뒤 Ceph 클러스터가 정상(HEALTH_OK)이 된 시점까지의 시간입니다.</div>
+<div><b>단계별 복구</b> — 같은 기준(DOWN 감지부터)으로 각 단계가 끝난 시점입니다. 포털 API 첫 정상은 가장 먼저 돌아온 페이지, 포털 서비스 정상화는 마지막 페이지입니다.</div>
+</div>`)
+  H.push(`<div class="legend">${
+    rtoOn
+      ? `<span><b class="pass">✓</b> 목표 이내</span><span><b class="fail">✗</b> 목표 초과</span><span>목표가 없는 열은 <b class="best">초록</b> 가장 빠름 · <b class="worst">노랑</b> 가장 느림</span>`
+      : `<span><b class="best">초록</b> 가장 빠름</span><span><b class="worst">노랑</b> 가장 느림</span>`
+  }<span>- 해당 없음(그 회차에 일어나지 않았거나 감시하지 않음)</span><span>* DOWN 을 감지하지 못해 검증 시작부터 잰 값</span><span>− DOWN 감지보다 먼저 관측됨(SSH 끊김으로 DOWN 을 잡은 회차는 감지가 최대 90초 늦을 수 있음)</span></div></section>`)
+
+  // ── ③ 복구 흐름 — 포털 서비스 정상화까지 단계 점 ──
+  const marks = [
+    { key: 'vip', label: 'VIP 이동', color: '#2f6fdc' },
+    { key: 'masa', label: 'Masakari 완료', color: '#13804b' },
+    { key: 'pods', label: '파드 복구', color: '#0e8fa3' },
+    { key: 'portal1', label: '포털 API 첫 정상', color: '#b06ce0' },
+    { key: 'svc', label: '포털 서비스 정상화', color: '#6a2fc0' },
+  ]
+  const scale = Math.max(1, ...runs.map((_h, i) => Math.max(...marks.map((m) => vals[ci(m.key)][i] ?? 0))))
+  H.push(`<section class="sec"><div class="sh"><span class="n">3</span><h2>복구 흐름</h2><span class="d">DOWN 감지(왼쪽 끝)부터 포털 서비스 정상화까지 · 막대 끝 = ${E(scale)}</span></div><div class="flow">`)
+  runs.forEach((h, i) => {
+    const end = Math.max(...marks.map((m) => vals[ci(m.key)][i] ?? 0))
+    const dots = marks
+      .map((m) => {
+        const v = vals[ci(m.key)][i]
+        // DOWN 감지보다 먼저 관측된 단계(음수)는 막대 왼쪽 끝에 붙이고, 값은 툴팁에 그대로 둔다
+        return v == null
+          ? ''
+          : `<span class="dot" title="${he(m.label)} ${v < 0 ? '' : '+'}${E(v)}" style="left:${((Math.max(0, v) / scale) * 100).toFixed(2)}%;background:${m.color}"></span>`
+      })
+      .join('')
+    H.push(
+      `<div><a href="#run-${i + 1}" data-open="run-${i + 1}">${he(nameOfRun(h, i))}</a></div><div class="track"><span class="bar" style="width:${((end / scale) * 100).toFixed(2)}%"></span>${dots}</div><div class="num mut">전체 ${E(vals[ci('all')][i])}</div>`,
+    )
+  })
+  H.push(`</div><div class="legend">${marks.map((m) => `<span><i style="background:${m.color}"></i>${he(m.label)}</span>`).join('')}<span>점에 마우스를 올리면 경과가 보입니다 · Ceph 정상화는 수십 분이라 막대에서 뺐습니다(오른쪽 '전체')</span></div></section>`)
+
+  // ── ④ 회차별 상세 ──
+  H.push(`<section class="sec"><div class="sh"><span class="n">4</span><h2>회차별 상세</h2><span class="d">회차를 눌러 펼치세요</span></div>`)
+  H.push(`<div class="tools"><button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=true)">모두 펼치기</button><button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=false)">모두 접기</button></div>`)
+  runs.forEach((h, i) => {
+    const ms = msOf(h)
+    const t = tot[i]
+    const items = evidence[h.id] ?? []
+    const fails = h.milestones.masakari?.vms?.failed ?? 0
+    const pend = podsDoneSummary(ms).pending
+    const pills = [
+      t.svcPending.length ? `<span class="pill bad">포털 미복구 ${t.svcPending.length}</span>` : `<span class="pill ok">포털 ${E(t.svc)}</span>`,
+      `<span class="pill">전체 ${E(t.all)}</span>`,
+      t.fromDown ? '' : `<span class="pill warn">DOWN 미감지 — 시작 기준</span>`,
+      fails ? `<span class="pill bad">실패 VM ${fails}</span>` : '',
+      pend ? `<span class="pill warn">파드 미완 ${pend}</span>` : '',
+      `<span class="pill">증적 ${items.length}</span>`,
+    ].join('')
+    H.push(
+      `<details class="run" id="run-${i + 1}"${opts.openEvidence ? ' open' : ''}><summary><span class="rt">${i + 1}. ${he(nameOfRun(h, i))}</span><span class="tag">${he(h.node)}</span><span class="mut">${he(fmtDateTime(h.t0))}</span>${pills}</summary><div class="rb">`,
+    )
+    H.push(
+      `<div class="kv"><div><span>대상 노드</span><b>${he(h.node)}</b></div><div><span>DOWN 감지</span><b>${t.fromDown ? he(fmtDateTime(t.base)) : '- (검증 시작 기준)'}</b></div><div><span>포털 서비스 정상화</span><b>${t.svcPending.length ? `<span class="fail">미복구 — ${he(t.svcPending.join(', '))}</span>` : t.svc == null ? '- (포털 감시 없음)' : `${E(t.svc)} · ${he(fmtClock(t.base + t.svc))}`}</b></div><div><span>전체 복구</span><b>${E(t.all)} · ${he(fmtClock(t.base + t.all))}</b></div>${
+        h.milestones.inject
+          ? `<div><span>장애 주입 (${h.milestones.inject.source === 'manual' ? `수동${h.milestones.inject.note ? ` · ${he(h.milestones.inject.note)}` : ''}` : '버튼'})</span><b>${he(fmtClock(h.milestones.inject.at))}${
+              t.fromDown ? ` · 감지까지 ${E(t.base - h.milestones.inject.at)}` : ''
+            }</b></div><div><span>주입부터 포털 정상화 · 전체 복구</span><b>${t.svc != null && !t.svcPending.length ? E(t.base + t.svc - h.milestones.inject.at) : '-'} · ${E(t.base + t.all - h.milestones.inject.at)}</b></div>`
+          : ''
+      }</div>`,
+    )
+    H.push(`<h3>타임라인</h3><table class="grid"><thead><tr><th style="width:150px">시각</th><th class="c" style="width:70px">검증 시작 후</th><th>내용 (Q-Term 관측)</th><th style="width:230px">서버 기록</th></tr></thead><tbody>`)
+    for (const r of buildTimelineRows(ms, h.t0))
+      H.push(
+        `<tr><td class="num">${he(fmtDateTime(r.at))}</td><td class="num c">+${fmtElapsed(r.at - h.t0)}</td><td>${he(r.text)}${r.sub ? ` <span class="mut">${he(r.sub)}</span>` : ''}</td><td>${r.server ? `<span class="svr">${he(r.server)}</span>` : ''}</td></tr>`,
+      )
+    H.push(`</tbody></table><h3>증적 (서버 원문)</h3>`)
+    if (!items.length) H.push(`<div class="note">이 회차에는 저장된 증적이 없습니다 — 증적 저장 기능 이전의 회차이거나 해당 마일스톤이 없었습니다.</div>`)
+    for (const it of items) {
+      const lines = alignTabBlocks(it.text.split('\n'))
+      const focus = (it.focus ?? []).filter(Boolean)
+      let fi = focus.length ? lines.findIndex((l) => l.includes(focus[0])) : -1
+      if (fi < 0) fi = lines.findIndex((l) => focus.some((f) => l.includes(f)))
+      const pre = lines
+        .map((l, li) => {
+          const cls = li === fi ? 'h1l' : focus.some((f) => l.includes(f)) ? 'h2l' : ''
+          return cls ? `<span class="${cls}">${he(l)}</span>` : he(l)
+        })
+        .join('\n')
+      H.push(`<details class="ev"${opts.openEvidence ? ' open' : ''}><summary>${he(it.title)}</summary>`)
+      H.push(
+        `<div class="evk"><span>읽은 서버</span><span>${he(it.host)}</span><span>떠 온 시각</span><span>${he(fmtDateTime(it.capturedAt))}</span><span>Q-Term 이 실행한 명령</span><code>${he(it.command)}</code>${it.verifyCmd ? `<span>서버에서 직접 확인</span><code>${he(it.verifyCmd)}</code>` : ''}</div>`,
+      )
+      if (it.facts?.length)
+        H.push(`<table class="grid" style="margin:6px 0"><thead><tr><th style="width:170px">시각 / 값</th><th>기록</th></tr></thead><tbody>${it.facts.map((f) => `<tr><td class="num">${he(f.at ? fmtDateTime(f.at) : f.text ?? '-')}</td><td>${he(f.label)}</td></tr>`).join('')}</tbody></table>`)
+      if (it.table)
+        H.push(
+          `<h3 style="font-size:12.5px">${he(it.table.title)}</h3><table class="grid"><thead><tr>${it.table.columns.map((c) => `<th class="c">${he(c)}</th>`).join('')}</tr></thead><tbody>${it.table.rows
+            .map((r, ri) => `<tr${it.table?.bad?.[ri] ? ' class="badrow"' : ''}>${r.map((c, k) => `<td class="num${k ? ' c' : ''}">${he(c)}</td>`).join('')}</tr>`)
+            .join('')}</tbody></table>`,
+        )
+      if (it.note) H.push(`<div class="note">${he(it.note)}</div>`)
+      H.push(`<div class="pre" style="margin-top:6px">${pre}</div></details>`)
+    }
+    H.push(`<a class="top" href="#top">↑ 맨 위로</a></div></details>`)
+  })
+  H.push(`</section>`)
+
+  H.push(`<section class="sec"><div class="sh"><span class="n">i</span><h2>읽는 법</h2></div><ul class="sum">
+<li><b>기준 시각</b> — 복구 시간은 모두 노드 DOWN 을 감지한 시각(pcs 가 OFFLINE 을 보고한 순간)부터 잽니다. DOWN 을 감지하지 못한 회차만 검증 시작부터 재고 * 로 표시합니다. 타임라인의 '검증 시작 후' 는 검증 시작부터의 경과입니다.</li>
+<li><b>Q-Term 관측</b> — 상태보드가 주기적으로 조회해 처음 확인한 시각입니다. 복구는 연속 성공(포털 N회 · Ceph 2회)으로 확정하므로 한 번 튄 성공은 복구로 세지 않습니다. 표와 판정은 이 시각 기준입니다.</li>
+<li><b>서버 기록</b> — pacemaker(동작 이력) · corosync 저널 · k8s(Ready 전환) · Nova(VM 별 evacuation) · masakari-engine 로그가 스스로 남긴 시각입니다. 시간대가 없는 표기는 그 서버 시계를 Q-Term PC 시계로 보정했고, UTC 기록은 이 PC 시간대로 바꿔 표시했습니다.</li>
+<li><b>증적 원문</b> — 마일스톤이 찍힌 순간 떠 둔 원문입니다. 진한 노란 줄이 그 시각의 근거입니다. k8s 이벤트(1시간 보관)·pacemaker 이력(cleanup 시 삭제)은 나중에 다시 구할 수 없을 수 있습니다.</li>
+</ul></section></div>
+<script>
+// 비교표·흐름의 회차 이름을 누르면 그 상세를 펼치고 이동한다(스크립트가 꺼져 있어도 이동은 된다)
+document.querySelectorAll('[data-open]').forEach(function(a){a.addEventListener('click',function(){var d=document.getElementById(a.getAttribute('data-open'));if(d)d.open=true})});
+if(location.hash){var d=document.getElementById(location.hash.slice(1));if(d&&d.tagName==='DETAILS')d.open=true}
+</script></body></html>`)
+  return H.join('\n')
+}
+
+async function makeRunsReport(recs: HistoryRecord[], kind: 'html' | 'pdf', rto?: RtoTargets): Promise<string> {
+  const evidence: Record<string, BoardEvidenceItem[]> = {}
+  for (const h of recs) {
+    const r = await window.electronAPI.boardEvidenceRead(h.id).catch(() => ({ ok: false, items: [] as BoardEvidenceItem[] }))
+    evidence[h.id] = r.items ?? []
+  }
+  const html = buildHtmlReport(recs, evidence, { openEvidence: kind === 'pdf', rto })
+  const d = new Date()
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
+  const base = `가용성검증결과_${recs.length}회차_${stamp}`
+  const res =
+    kind === 'pdf'
+      ? await window.electronAPI.saveReportPdf({ html, defaultName: `${base}.pdf` })
+      : await window.electronAPI.saveReport({ defaultName: `${base}.html`, content: html, format: 'html' })
+  if (res.saved) return `저장했습니다 — ${res.path ?? ''}`
+  return res.error ? `저장 실패 — ${res.error}` : ''
+}
+
+/** 이력 한 회차를 제출용 Markdown 으로 — 툴 타임라인 + 증적(서버 원문·서버 기록 시각) */
+function buildRunReport(h: HistoryRecord, items: BoardEvidenceItem[]): string {
+  /** 표 칸 — 포털·워크로드 이름에 | 가 있으면 표가 깨진다 */
+  const cell = (v: unknown) => String(v ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ')
+  const ms = { ...h.milestones, pods: h.milestones.pods ?? [], portal: h.milestones.portal ?? [] }
+  const rows = buildTimelineRows(ms, h.t0)
+  const L: string[] = []
+  L.push(`# 가용성 검증 회차 — ${h.label || h.node} (${fmtDateTime(h.t0)})`, '')
+  const t = runTotals(h)
+  L.push(
+    `- 대상 노드: ${h.node}`,
+    `- 검증 시작: ${fmtDateTime(h.t0)}`,
+    `- DOWN 감지: ${t.fromDown ? fmtDateTime(t.base) : '- (감지 못함 — 아래 시간은 검증 시작 기준)'}`,
+    `- 포털 서비스 정상화 (DOWN 감지 → 포털 API 모두 연속 200 OK): ${t.svcPending.length ? `미복구(Fail) — ${t.svcPending.join(', ')}` : t.svc == null ? '- (포털 감시 없음)' : fmtSigned(t.svc)}`,
+    `- 전체 복구 (DOWN 감지 → 노드 UP 이후 Ceph 정상화): ${fmtElapsed(t.all)}`,
+    '',
+  )
+  L.push('## 복구 타임라인 (Q-Term 관측)', '', '| 시각 | 검증 시작 후 | 내용 | 비고 |', '|---|---|---|---|')
+  for (const r of rows) L.push(`| ${fmtDateTime(r.at)} | +${fmtElapsed(r.at - h.t0)} | ${cell(r.text)} | ${cell([r.sub, r.server].filter(Boolean).join(' · '))} |`)
+  L.push('')
+  if (!items.length) {
+    L.push('_이 회차에는 저장된 증적이 없습니다(증적 저장 기능 이전의 회차이거나, 해당 마일스톤이 없었습니다)._')
+    return L.join('\n')
+  }
+  L.push('## 증적 (서버 원문)', '')
+  for (const it of items) {
+    L.push(`### ${it.title}`, '')
+    L.push(`- 읽은 서버: ${it.host} · 떠 온 시각: ${fmtDateTime(it.capturedAt)}`)
+    L.push(`- Q-Term 이 실행한 명령: \`\` ${it.command} \`\``)
+    if (it.verifyCmd) L.push(`- 서버에서 직접 확인: \`\` ${it.verifyCmd} \`\``)
+    L.push('')
+    if (it.facts?.length) {
+      L.push('| 기록 | 시각 / 값 |', '|---|---|')
+      for (const f of it.facts) L.push(`| ${cell(f.label)} | ${cell(f.at ? fmtDateTime(f.at) : f.text ?? '-')} |`)
+      L.push('')
+    }
+    if (it.table) {
+      L.push(`**${it.table.title}**`, '', `| ${it.table.columns.map(cell).join(' | ')} |`, `|${it.table.columns.map(() => '---').join('|')}|`)
+      for (const r of it.table.rows) L.push(`| ${r.map(cell).join(' | ')} |`)
+      L.push('')
+    }
+    if (it.note) L.push(`> ${it.note}`, '')
+    L.push('~~~~text', it.text, '~~~~', '')
+  }
+  return L.join('\n')
+}
+
+async function exportRun(h: HistoryRecord): Promise<string> {
+  const r = await window.electronAPI.boardEvidenceRead(h.id).catch(() => ({ ok: false, items: [] as BoardEvidenceItem[] }))
+  const d = new Date(h.t0)
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
+  const name = `가용성검증_${(h.label || h.node).replace(/[\\/:*?"<>|\s]+/g, '_')}_${stamp}.md`
+  const res = await window.electronAPI.saveReport({ defaultName: name, content: buildRunReport(h, r.items ?? []) })
+  if (res.saved) return `저장했습니다 — ${res.path ?? ''}`
+  return res.error ? `저장 실패 — ${res.error}` : ''
+}
+
+/**
+ * 증적 한 건 보기 — 서버 원문을 보여 주고 **판정 근거 줄로 스크롤해 강조**한다.
+ * 모달 규칙대로 배경 클릭으로 닫지 않는다(X 만).
+ */
+function EvidenceView({ id, initialKey, onClose }: { id: string; initialKey: string; onClose: () => void }) {
+  const [items, setItems] = useState<BoardEvidenceItem[] | null>(null)
+  const [err, setErr] = useState('')
+  const [key, setKey] = useState(initialKey)
+  const [copied, setCopied] = useState(false)
+  /**
+   * 원문 줄바꿈 — 기본은 끈다(가로 스크롤). 명령 출력은 열로 읽는 표라, 창 너비에서 접히면 한 행이 두세 줄로
+   * 쪼개져 다음 행과 섞여 보였다. 긴 메시지 한 줄을 통째로 읽고 싶을 때만 켠다(PC 에 기억)
+   */
+  const [wrap, setWrap] = useState(() => {
+    try {
+      return localStorage.getItem('evidence_wrap') === '1'
+    } catch {
+      return false
+    }
+  })
+  const focusRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    let alive = true
+    window.electronAPI
+      .boardEvidenceRead(id)
+      .then((r) => {
+        if (!alive) return
+        if (!r.ok) setErr(r.error || '증적을 읽지 못했습니다')
+        setItems(r.items ?? [])
+      })
+      .catch((e) => alive && setErr(String(e)))
+    return () => {
+      alive = false
+    }
+  }, [id])
+  const item = items?.find((x) => x.key === key)
+  useEffect(() => {
+    // 원문이 그려진 다음 첫 근거 줄을 가운데로
+    focusRef.current?.scrollIntoView({ block: 'center' })
+  }, [item])
+  const lines = item ? alignTabBlocks(item.text.split('\n')) : []
+  const focus = (item?.focus ?? []).filter(Boolean)
+  // 첫 스크롤 자리는 focus[0] 을 담은 줄 — 없으면 다른 강조 줄
+  let firstIdx = focus.length ? lines.findIndex((l) => l.includes(focus[0])) : -1
+  if (firstIdx < 0) firstIdx = lines.findIndex((l) => focus.some((f) => l.includes(f)))
+  const tabs = items ?? []
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-8">
+      <div className="flex h-[86vh] w-[1400px] max-w-[96vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <FileText size={16} className="text-blue-400" />
+          <span className="shrink-0 text-sm font-semibold text-gray-100">증적</span>
+          <span className="min-w-0 truncate text-[12px] text-gray-400">{item?.title}</span>
+          {item && (
+            <>
+              <button
+                onClick={() => {
+                  const v = !wrap
+                  setWrap(v)
+                  try {
+                    localStorage.setItem('evidence_wrap', v ? '1' : '0')
+                  } catch {
+                    /* 저장 못 해도 이번 창에서는 동작한다 */
+                  }
+                }}
+                title="원문이 창보다 길 때 — 끄면 가로 스크롤로 한 줄씩, 켜면 창 너비에서 접어 보여 줍니다"
+                className={
+                  'ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded border px-2 py-1 text-[11px] ' +
+                  (wrap ? 'border-blue-500/40 bg-blue-500/15 text-blue-100' : 'border-white/10 text-gray-300 hover:bg-white/10')
+                }
+              >
+                줄바꿈 {wrap ? 'On' : 'Off'}
+              </button>
+              <button
+                onClick={() => {
+                  void navigator.clipboard.writeText(item.text).then(() => {
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1500)
+                  })
+                }}
+                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded border border-white/10 px-2 py-1 text-[11px] text-gray-300 hover:bg-white/10"
+              >
+                <Copy size={12} /> {copied ? '복사됨' : '원문 복사'}
+              </button>
+            </>
+          )}
+          <button onClick={onClose} className={'rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200 ' + (item ? '' : 'ml-auto')}>
+            <X size={16} />
+          </button>
+        </div>
+        {tabs.length > 1 && (
+          <div className="flex flex-wrap gap-1 border-b border-white/10 px-4 py-1.5">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setKey(t.key)}
+                className={
+                  'rounded px-2 py-0.5 text-[11px] ' +
+                  (t.key === key ? 'bg-blue-500/25 text-blue-100' : 'text-gray-400 hover:bg-white/10')
+                }
+              >
+                {t.title.split(' — ')[0]}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 text-[12px]">
+          {err && <div className="mb-2 text-red-300">{err}</div>}
+          {!items && !err && (
+            <div className="flex items-center text-gray-400">
+              <Loader2 size={14} className="mr-2 animate-spin" /> 불러오는 중…
+            </div>
+          )}
+          {items && !item && <div className="text-gray-400">이 항목의 증적이 없습니다.</div>}
+          {item && (
+            <>
+              <div className="mb-3 grid gap-1 text-[11.5px] text-gray-400" style={{ gridTemplateColumns: '120px 1fr' }}>
+                <span>읽은 서버</span>
+                <span className="text-gray-200">{item.host}</span>
+                <span>떠 온 시각</span>
+                <span className="text-gray-200">{fmtDateTime(item.capturedAt)}</span>
+                <span>Q-Term 이 실행한 명령</span>
+                <code className="break-all text-gray-300">{item.command}</code>
+                {item.verifyCmd && (
+                  <>
+                    <span>서버에서 직접 확인</span>
+                    <code className="break-all text-emerald-300/90">{item.verifyCmd}</code>
+                  </>
+                )}
+              </div>
+              {!!item.facts?.length && (
+                <div className="mb-3 rounded-lg border border-white/10 bg-black/20 p-2.5">
+                  {item.facts.map((f, i) => (
+                    <div key={i} className="flex gap-3 py-0.5">
+                      <span className="w-[150px] shrink-0 tabular-nums text-gray-100">{f.at ? fmtDateTime(f.at) : f.text ?? '-'}</span>
+                      <span className="text-gray-300">{f.label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {item.table && (
+                <div className="mb-3">
+                  <div className="mb-1 text-[11.5px] font-medium text-gray-300">{item.table.title}</div>
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full text-[11.5px]">
+                      <thead className="bg-white/[0.04] text-gray-400">
+                        <tr>
+                          {item.table.columns.map((c) => (
+                            <th key={c} className="whitespace-nowrap px-2 py-1 text-left font-normal">
+                              {c}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {item.table.rows.map((r, ri) => (
+                          <tr
+                            key={ri}
+                            title={item.table?.titles?.[ri]}
+                            className={'border-t border-white/5 ' + (item.table?.bad?.[ri] ? 'bg-red-500/10 text-red-200' : 'text-gray-200')}
+                          >
+                            {r.map((c, ci) => (
+                              <td key={ci} className="whitespace-nowrap px-2 py-0.5 tabular-nums">
+                                {c}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {item.note && <p className="mb-2 text-[11px] leading-relaxed text-gray-500">{item.note}</p>}
+              <div className={'rounded-lg bg-black/40 p-2 font-mono text-[11px] leading-[1.55] text-gray-300 ' + (wrap ? '' : 'overflow-x-auto')}>
+                {/* 줄바꿈을 끄면 줄들을 가장 긴 줄 너비로 맞춰(w-max) 강조 띠가 화면 끝에서 끊기지 않게 한다 */}
+                <div className={wrap ? '' : 'w-max min-w-full'}>
+                {lines.map((l, i) => {
+                  const hit = focus.some((f) => l.includes(f))
+                  return (
+                    <div
+                      key={i}
+                      ref={i === firstIdx ? focusRef : undefined}
+                      className={
+                        (wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre') + ' px-1 ' +
+                        (i === firstIdx ? 'rounded bg-amber-400/25 text-amber-100' : hit ? 'rounded bg-amber-400/10 text-amber-100/90' : '')
+                      }
+                    >
+                      {l || ' '}
+                    </div>
+                  )
+                })}
+              </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** '2026-10-22 14:19:58' · '14:19:58'(그 회차 날짜) → epoch ms(이 PC 시간대) */
+function parseLocalDateTime(text: string, baseDay: number): number | null {
+  const t = text.trim()
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (m) {
+    const v = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0)).getTime()
+    return Number.isNaN(v) ? null : v
+  }
+  m = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (m) {
+    const d = new Date(baseDay)
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), +m[1], +m[2], +(m[3] ?? 0)).getTime()
+  }
+  return null
+}
+
+/**
+ * 이력 회차의 '장애 주입' 시각 — 버튼으로 남긴 값을 보거나, IPMI(BMC) 이벤트 로그 시각을 보고 수동으로 넣는다.
+ */
+function InjectEditor({
+  value,
+  downAt,
+  onSave,
+  onDone,
+}: {
+  value: Milestones['inject']
+  downAt?: number
+  onSave: (v: Milestones['inject'] | undefined) => void
+  /** 있으면 처음부터 입력 상태로 열리고, 저장·지우기·취소 뒤 이것을 부른다 (보드 머리줄의 진행 중 회차 수정용) */
+  onDone?: () => void
+}) {
+  const [edit, setEditRaw] = useState(!!onDone)
+  const [text, setText] = useState(() => (onDone && value ? fmtDateTime(value.at) : ''))
+  const [note, setNote] = useState(() => (onDone ? value?.note ?? 'IPMI 이벤트 로그' : ''))
+  const [err, setErr] = useState('')
+  const setEdit = (v: boolean) => {
+    setEditRaw(v)
+    if (!v) onDone?.()
+  }
+  const base = value?.at ?? downAt ?? Date.now()
+  if (!edit)
+    return (
+      <div className="mb-1.5 flex items-center gap-2 text-[11.5px] text-gray-400">
+        <Bolt size={11} className="text-amber-400" />
+        {value ? (
+          <span>
+            장애 주입 <b className="text-gray-200 tabular-nums">{fmtDateTime(value.at)}</b>{' '}
+            {value.source === 'manual' ? `(수동${value.note ? ` · ${value.note}` : ''})` : '(버튼)'}
+            {downAt && downAt >= value.at && <span className="text-gray-500"> · DOWN 감지까지 {fmtElapsed(downAt - value.at)}</span>}
+          </span>
+        ) : (
+          <span className="text-gray-500">장애 주입 시각 없음</span>
+        )}
+        <button
+          onClick={() => {
+            setText(value ? fmtDateTime(value.at) : '')
+            setNote(value?.note ?? 'IPMI 이벤트 로그')
+            setErr('')
+            setEdit(true)
+          }}
+          className="rounded border border-white/10 px-1.5 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
+        >
+          {value ? '수정' : '수동 입력'}
+        </button>
+      </div>
+    )
+  return (
+    <div className="mb-1.5 rounded border border-white/10 bg-black/20 px-2 py-1.5 text-[11.5px] text-gray-300">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-gray-400">장애 주입 시각</span>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="2026-10-22 14:19:58"
+          className="w-[150px] rounded border border-white/10 bg-panel-light px-1.5 py-0.5 font-mono text-[11.5px] text-gray-100 placeholder:text-gray-600"
+        />
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="출처 (예: IPMI 이벤트 로그)"
+          className="w-[160px] rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11.5px] text-gray-100 placeholder:text-gray-600"
+        />
+        <button
+          onClick={() => {
+            const at = parseLocalDateTime(text, base)
+            if (at == null) return setErr('2026-10-22 14:19:58 또는 14:19:58 처럼 넣으세요')
+            onSave({ at, source: 'manual', note: note.trim() || undefined })
+            setEdit(false)
+          }}
+          className="rounded border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-100 hover:bg-blue-500/25"
+        >
+          저장
+        </button>
+        {value && (
+          <button
+            onClick={() => {
+              onSave(undefined)
+              setEdit(false)
+            }}
+            className="rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
+          >
+            지우기
+          </button>
+        )}
+        <button onClick={() => setEdit(false)} className="rounded px-1.5 py-0.5 text-[11px] text-gray-400 hover:bg-white/10">
+          취소
+        </button>
+      </div>
+      {err && <div className="mt-1 text-red-300">{err}</div>}
+      <div className="mt-1 text-[10.5px] text-gray-500">
+        이 PC 시간대(KST)로 넣습니다. IPMI(BMC) 시계는 NTP 를 쓰지 않아 수 분씩 틀린 경우가 많습니다 — BMC 시각과 실제 시각의 차이를 확인하고
+        (예: <code>ipmitool sel time get</code> 과 <code>date</code> 비교) 그만큼 고쳐 넣으세요.
+      </div>
     </div>
   )
 }
@@ -2193,39 +4148,178 @@ export default function StatusBoard({ sessions, onClose, onReconnect }: StatusBo
 // ── 검증 이력 (회차별 복구 타임라인) ───────────────────────────
 function HistoryView({
   list,
+  evIndex,
+  onEvidence,
   onClose,
   onClear,
   onRemove,
   onRename,
+  onSetInject,
 }: {
   list: HistoryRecord[]
+  evIndex: Record<string, string[]>
+  onEvidence: (id: string, key: string) => void
   onClose: () => void
   onClear: () => void
   onRemove: (id: string) => void
   onRename: (id: string, label: string) => void
+  onSetInject: (id: string, inject: Milestones['inject'] | undefined) => void
 }) {
+  /** 리포트에 담을 회차 — 체크한 순서와 무관하게 시작 시각 순으로 담긴다 */
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [rto, setRtoState] = useState<RtoTargets>(loadRto)
+  const [rtoOpen, setRtoOpen] = useState(false)
+  const [rtoErr, setRtoErr] = useState('')
+  const setRto = (next: RtoTargets) => {
+    setRtoState(next)
+    try {
+      localStorage.setItem(RTO_KEY, JSON.stringify(next))
+    } catch {
+      /* 무시 — 설정은 이 창에서만 쓰인다 */
+    }
+  }
+  const pickedRecs = list.filter((h) => picked.has(h.id))
+  const toggle = (id: string) =>
+    setPicked((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const makeReport = async (kind: 'html' | 'pdf') => {
+    if (!pickedRecs.length || busy) return
+    setBusy(true)
+    setMsg('')
+    try {
+      setMsg(await makeRunsReport(pickedRecs, kind, rto))
+    } catch (e) {
+      setMsg(`만들지 못했습니다 — ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
       <div
-        className="flex h-[78vh] w-[840px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
+        className="flex h-[78vh] w-[1000px] max-w-[94vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <Activity size={16} className="text-blue-400" />
-          <span className="text-sm font-semibold text-gray-100">검증 이력</span>
-          <span className="text-[11px] text-gray-500">{list.length}회 · 최근 {HIST_MAX}회까지 보관</span>
+          <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-gray-100">검증 이력</span>
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-gray-500">{list.length}회 · 최근 {HIST_MAX}회까지 보관</span>
           {list.length > 0 && (
-            <button
-              onClick={onClear}
-              className="ml-auto rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-300 hover:bg-white/10"
-            >
-              전체 삭제
-            </button>
+            <>
+              <label className="ml-3 inline-flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap text-[11px] text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={pickedRecs.length > 0 && pickedRecs.length === list.length}
+                  onChange={(e) => setPicked(e.target.checked ? new Set(list.map((h) => h.id)) : new Set())}
+                />
+                전체 선택
+              </label>
+              <span className="min-w-0 truncate text-[11px] text-gray-500">{pickedRecs.length ? `${pickedRecs.length}회 선택` : '리포트에 담을 회차를 고르세요'}</span>
+              <button
+                onClick={() => void makeReport('html')}
+                disabled={!pickedRecs.length || busy}
+                title="고른 회차를 비교표 · 타임라인 · 증적이 담긴 HTML 한 파일로 저장 (브라우저로 열고 인쇄)"
+                className="ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-blue-500/40 bg-blue-500/15 px-2 py-1 text-xs text-blue-100 hover:bg-blue-500/25 disabled:opacity-40"
+              >
+                {busy ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} 리포트 (HTML)
+              </button>
+              <button
+                onClick={() => void makeReport('pdf')}
+                disabled={!pickedRecs.length || busy}
+                title="같은 리포트를 PDF 로 — 증적은 펼친 채로 인쇄됩니다"
+                className="shrink-0 whitespace-nowrap rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-300 hover:bg-white/10 disabled:opacity-40"
+              >
+                PDF
+              </button>
+              {/* 버튼이 곧 On/Off 다. 예전에는 이 버튼이 설정 칸만 펼치고 켜고 끄는 것은 안쪽 체크박스였는데,
+                  눌러도 글자가 'Off' 그대로라 고장 난 것처럼 보였다. 켜면 목표 시간 칸을 함께 펼친다 */}
+              <button
+                onClick={() => {
+                  const on = !rto.enabled
+                  setRto({ ...rto, enabled: on })
+                  setRtoOpen(on)
+                }}
+                title={rto.enabled ? '눌러서 끄기 — 평균·최대만 봅니다' : '눌러서 켜기 — 목표 복구 시간으로 회차별 합격·불합격을 판정합니다'}
+                className={
+                  'shrink-0 whitespace-nowrap rounded-md border px-2 py-1 text-xs ' +
+                  (rto.enabled ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-100 hover:bg-emerald-500/30' : 'border-white/10 bg-panel-light text-gray-300 hover:bg-white/10')
+                }
+              >
+                목표 기준 {rto.enabled ? 'On' : 'Off'}
+              </button>
+              {rto.enabled && (
+                <button
+                  onClick={() => setRtoOpen((v) => !v)}
+                  title="목표 시간 설정 펼치기·접기"
+                  className={
+                    'shrink-0 rounded-md border p-1 ' +
+                    (rtoOpen ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-white/10 bg-panel-light text-gray-300 hover:bg-white/10')
+                  }
+                >
+                  <Settings2 size={14} />
+                </button>
+              )}
+              <button
+                onClick={onClear}
+                className="shrink-0 whitespace-nowrap rounded-md border border-white/10 bg-panel-light px-2 py-1 text-xs text-gray-300 hover:bg-white/10"
+              >
+                전체 삭제
+              </button>
+            </>
           )}
-          <button onClick={onClose} className={'rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200 ' + (list.length ? '' : 'ml-auto')}>
+          <button onClick={onClose} className={'shrink-0 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200 ' + (list.length ? '' : 'ml-auto')}>
             <X size={16} />
           </button>
         </div>
+        {rtoOpen && rto.enabled && (
+          <div className="border-b border-white/10 bg-white/[0.02] px-4 py-2.5 text-[12px] text-gray-300">
+            <div className="mb-2 flex items-center gap-2">
+              <span>
+                목표 복구 시간으로 <b>합격·불합격</b> 판정 중 <span className="text-gray-500">— 끄려면 위의 [목표 기준 On] 을 누르세요</span>
+              </span>
+              <button onClick={() => setRtoOpen(false)} className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-gray-400 hover:bg-white/10">
+                접기
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {RTO_ITEMS.map((it) => (
+                <label key={it.key} className="flex items-center gap-1.5">
+                  <span className="text-gray-400">{it.label} ≤</span>
+                  <input
+                    key={`${it.key}-${rto[it.key] ?? ''}`}
+                    defaultValue={rto[it.key] != null ? fmtElapsed((rto[it.key] as number) * 1000) : ''}
+                    disabled={!rto.enabled}
+                    onBlur={(e) => {
+                      const sec = parseDurationInput(e.target.value)
+                      // 못 읽은 값은 직전 목표로 되돌린다 — 조용히 비우면 그 항목이 판정에서 빠진다
+                      if (sec === null) {
+                        setRtoErr(`${it.label}: '${e.target.value}' 는 읽을 수 없어 직전 값으로 되돌렸습니다 — 1:30 · 1분 30초 · 90 처럼 넣으세요`)
+                        e.target.value = rto[it.key] != null ? fmtElapsed((rto[it.key] as number) * 1000) : ''
+                        return
+                      }
+                      setRtoErr('')
+                      setRto({ ...rto, [it.key]: sec })
+                    }}
+                    placeholder="예: 1:30"
+                    title="1:30 · 1분 30초 · 5분 · 30초 · 90(숫자만 = 초) 모두 됩니다. 칸을 벗어나면 분:초로 바뀝니다"
+                    className="w-20 rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[12px] text-gray-100 placeholder:text-gray-600 disabled:opacity-50"
+                  />
+                </label>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] text-gray-500">
+              DOWN 감지부터의 시간입니다. <b className="text-gray-300">1:30 · 1분 30초 · 5분 · 30초 · 90</b>(숫자만 쓰면 초) 모두 되고, 칸을 벗어나면 분:초로 정리됩니다. 비워 둔 항목은 판정하지 않습니다. 리포트(HTML·PDF)에 회차별 합격·불합격과 합격 수가 들어갑니다.
+            </p>
+            {rtoErr && <p className="mt-1 text-[11px] text-amber-300">{rtoErr}</p>}
+          </div>
+        )}
+        {msg && <div className="border-b border-white/10 px-4 py-1.5 text-[11.5px] text-gray-300">{msg}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {list.length === 0 ? (
             <div className="text-[12px] leading-relaxed text-gray-500">
@@ -2238,9 +4332,34 @@ function HistoryView({
               {list.map((h) => (
                 <div key={h.id} className="rounded-xl border border-white/10 bg-panel-light p-3.5">
                   <div className="mb-2 flex items-center gap-2 text-[12px]">
+                    <input
+                      type="checkbox"
+                      checked={picked.has(h.id)}
+                      onChange={() => toggle(h.id)}
+                      title="리포트에 담기"
+                      aria-label="리포트에 담기"
+                    />
                     <span className="rounded bg-blue-500/20 px-2 py-0.5 font-medium text-blue-200">{h.node}</span>
                     <span className="whitespace-nowrap text-gray-300">{fmtDateTime(h.t0)}</span>
-                    <span className="whitespace-nowrap text-gray-500">총 소요 {fmtElapsed(h.closedAt - h.t0)}</span>
+                    {(() => {
+                      const t = runTotals(h)
+                      return (
+                        <span
+                          className="whitespace-nowrap text-gray-500"
+                          title={`${t.fromDown ? 'DOWN 감지부터' : 'DOWN 을 감지하지 못해 검증 시작부터'} · 포털 = 감시한 포털 API 가 모두 연속 200 OK · 전체 = 노드 UP 이후 Ceph 정상화까지`}
+                        >
+                          {t.svcPending.length ? (
+                            <span className="text-red-300">포털 미복구 {t.svcPending.length} · </span>
+                          ) : t.svc != null ? (
+                            `포털 ${fmtSigned(t.svc)} · `
+                          ) : (
+                            ''
+                          )}
+                          전체 {fmtElapsed(t.all)}
+                          {t.fromDown ? '' : ' *'}
+                        </span>
+                      )
+                    })()}
                     {/* 이름은 나중에도 고칠 수 있어야 한다 — 검증 중엔 손이 바빠 못 적고 지나가기 쉽다.
                         평소엔 테두리 없는 글자처럼 보이고, 올리면 입력칸임이 드러난다. */}
                     <input
@@ -2251,18 +4370,32 @@ function HistoryView({
                       className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 font-medium text-gray-100 placeholder:font-normal placeholder:text-gray-600 hover:border-white/10 focus:border-blue-500/60 focus:bg-black/20 focus:outline-none"
                     />
                     <button
+                      onClick={() => {
+                        exportRun(h)
+                          .then((m) => m && setMsg(m))
+                          .catch((e) => setMsg(`저장 실패 — ${e instanceof Error ? e.message : String(e)}`))
+                      }}
+                      title="이 회차의 타임라인과 증적(서버 원문)을 Markdown 으로 저장 — 제출용"
+                      className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
+                    >
+                      <Download size={12} /> 내보내기
+                    </button>
+                    <button
                       onClick={() => onRemove(h.id)}
-                      title="이 회차 삭제"
-                      className="ml-auto rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                      title="이 회차 삭제 (저장된 증적도 함께 지웁니다)"
+                      className="rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
                     >
                       <X size={13} />
                     </button>
                   </div>
+                  <InjectEditor value={h.milestones.inject} downAt={h.milestones.down?.at} onSave={(v) => onSetInject(h.id, v)} />
                   <div className="rounded-lg bg-black/20 p-2.5 text-[12px]">
                     <Timeline
                       milestones={{ ...h.milestones, pods: h.milestones.pods ?? [], portal: h.milestones.portal ?? [] }}
                       t0={h.t0}
                       showDate
+                      evKeys={evIndex[h.id]}
+                      onEvidence={(key) => onEvidence(h.id, key)}
                     />
                   </div>
                 </div>
@@ -2714,10 +4847,15 @@ function BoardView({
   onRemoveNamespace,
   intervalSec,
   running,
+  evKeys,
+  onEvidence,
 }: {
   state: BoardState | null
   milestones: Milestones
   t0: number
+  /** 이번 회차에 저장된 증적 key — 타임라인 [증적] 버튼 */
+  evKeys: string[]
+  onEvidence: (key: string) => void
   /**
    * 세션 이름을 '그리는 시점에' 다시 조회한다.
    * 폴링할 때 잡아둔 이름을 그대로 쓰면, 그 순간 프로필을 못 찾았을 경우 "세션 N" 이 화면에
@@ -3097,7 +5235,7 @@ function BoardView({
         <span className="text-[11px] text-gray-500">시:분:초 (검증 시작 후 경과)</span>
       </div>
       <div className="rounded-xl bg-panel-light/50 p-3.5 text-[12px]">
-        <Timeline milestones={milestones} t0={t0} />
+        <Timeline milestones={milestones} t0={t0} evKeys={evKeys} onEvidence={onEvidence} />
         <div className="mt-1.5 text-[11px] text-gray-500">
           마지막 갱신 {fmtClock(state.lastAt)}
           <span className="ml-2 text-gray-600">· 각 시각은 폴링 주기만큼(기본 5초) 오차가 있습니다</span>
@@ -3108,7 +5246,9 @@ function BoardView({
         <>
           <div className="w-px shrink-0 bg-white/10" />
           <div className="min-h-0 w-[520px] shrink-0 space-y-4 overflow-y-auto p-4">
-            {hasServices && <ServicePanel units={state.serviceUnits} nodes={state.services} resolveName={resolveName} />}
+            {hasServices && (
+              <ServicePanel units={state.serviceUnits} nodes={state.services} resolveName={resolveName} roles={state.roles} />
+            )}
             {hasOpenstack && state.openstack && <OpenstackPanel os={state.openstack} scope={state.osScope} />}
           </div>
         </>
@@ -3224,13 +5364,71 @@ const SVC_CELL: Record<SvcState | 'down', [string, string]> = {
   unknown: ['bg-white/5 text-gray-500', '—'],
   down: ['bg-white/5 text-gray-600', '·'],
 }
-function SvcCell({ state }: { state: SvcState | 'down' }) {
-  const [cls, label] = SVC_CELL[state] ?? SVC_CELL.unknown
+function SvcCell({ state, role }: { state: SvcState | 'down'; role?: SvcRole }) {
+  const [baseCls, baseLabel] = SVC_CELL[state] ?? SVC_CELL.unknown
+  const cls = role?.cls ?? baseCls
+  const label = role?.label ?? baseLabel
   return (
-    <div className={'truncate rounded px-1 py-1 text-center text-[10.5px] ' + cls} title={label}>
+    <div className={'truncate rounded px-1 py-1 text-center text-[10.5px] ' + cls} title={role?.title ?? label}>
       {label}
     </div>
   )
+}
+
+/** 범례 한 칸 — 표의 칸과 같은 색 견본 + 짧은 설명 */
+function LegendChip({ cls, label, text }: { cls: string; label: string; text: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={'rounded px-1.5 py-px text-[10px] ' + cls}>{label}</span>
+      <span>{text}</span>
+    </span>
+  )
+}
+
+/** 셀 하나의 역할 표시 — 라벨·색을 덮어쓴다. abnormal=false 면 '중지' 여도 이상으로 세지 않는다(대기 노드) */
+interface SvcRole {
+  label: string
+  cls?: string
+  title: string
+  abnormal: boolean
+}
+const ROLE_STANDBY_CLS = 'bg-sky-500/10 text-sky-300/80'
+/**
+ * 유닛 u 가 노드 n 에서 맡은 역할.
+ *  - pacemaker 가 이 유닛을 리소스(`systemd:<유닛>`)로 관리하면: 도는 노드 = (m), 나머지 클러스터 노드 = (s) 대기.
+ *    대기 노드에서 유닛이 inactive 인 건 **정상**이다 — 예전처럼 빨간 '중지' 로 그리면 안 된다.
+ *  - pacemaker 유닛 행에는 DC 노드를 표시한다.
+ *  - 그 밖의 데몬(rabbitmq·memcached·httpd …)은 모든 노드가 같은 일을 해 주/보조가 없다 — 표시하지 않는다.
+ */
+function svcRoleOf(u: string, nodeId: string, state: SvcState, roles: BoardRoles | null): SvcRole | undefined {
+  if (!roles) return undefined
+  const key = svcKey(u)
+  if (key === 'pacemaker' && roles.dcId === nodeId && state === 'active')
+    return { label: 'active (DC)', title: `pacemaker DC — 클러스터 결정을 내리는 노드 (${roles.dc})`, abnormal: false }
+  const res = roles.resources.find((r) => r.unit && svcKey(r.unit) === key)
+  if (!res || !res.ownerIds.length) return undefined
+  /**
+   * pcs 가 이번 프레임에 답하지 않아 **직전 역할**을 쓰는 중이면 '대기(정상)' 로 덮지 않는다.
+   * 주 노드를 죽인 직후 pcs 가 몇 프레임 응답하지 않는 사이, 새 노드에서 리소스가 못 떠 inactive 인 것이
+   * 옛 역할 때문에 조용한 '대기' 로 보이고 이상 개수에서도 빠졌다(조회 실패 ≠ 정상).
+   */
+  if (roles.staleSec && state !== 'active') return undefined
+  const isOwner = res.ownerIds.includes(nodeId)
+  const isStandby = res.standbyIds.includes(nodeId)
+  const inCluster = roles.clusterIds.includes(nodeId)
+  const where = `pacemaker 리소스 ${res.name} — ${res.owners.join(', ')} 에서 실행`
+  if (isOwner) return state === 'active' ? { label: 'active (m)', title: where, abnormal: false } : undefined
+  if (isStandby) return state === 'active' ? { label: 'active (s)', title: `${where} · 이 노드는 보조`, abnormal: false } : undefined
+  if (!inCluster) return undefined
+  if (state === 'inactive') return { label: '대기 (s)', cls: ROLE_STANDBY_CLS, title: `${where} · 이 노드는 대기(정상)`, abnormal: false }
+  if (state === 'active')
+    return {
+      label: 'active ?',
+      cls: 'bg-amber-500/15 text-amber-300',
+      title: `${where}이라고 pcs 가 보고했는데 이 노드에서도 active 입니다 — 전환 중이거나 두 곳에서 도는 중일 수 있습니다`,
+      abnormal: false,
+    }
+  return undefined
 }
 
 // 노드별 서비스 데몬 상태 매트릭스 (행=유닛, 열=노드). systemctl is-active 결과.
@@ -3238,16 +5436,49 @@ function ServicePanel({
   units,
   nodes,
   resolveName,
+  roles,
 }: {
   units: string[]
   nodes: NodeSvc[]
   resolveName: (id: string, fallback: string) => string
+  roles: BoardRoles | null
 }) {
+  const roleAt = (u: string, n: NodeSvc) => svcRoleOf(u, n.id, n.states[svcKey(u)] ?? 'unknown', roles)
   // 이상 = 로드됐지만 죽은 것(failed) 또는 멈춘 것(inactive). '없음'(미설치)·전환중(activating)·미상은 제외.
+  // pacemaker 가 다른 노드에서 돌리는 리소스의 대기 노드(inactive)는 정상이라 세지 않는다.
   const abnormal = nodes.reduce(
-    (acc, n) => acc + (n.up ? units.filter((u) => n.states[svcKey(u)] === 'failed' || n.states[svcKey(u)] === 'inactive').length : 0),
+    (acc, n) =>
+      acc +
+      (n.up
+        ? units.filter((u) => {
+            const st = n.states[svcKey(u)]
+            if (st !== 'failed' && st !== 'inactive') return false
+            return roleAt(u, n)?.abnormal !== false
+          }).length
+        : 0),
     0,
   )
+  /** 데몬 행으로 이어지지 않는 pacemaker 리소스(int_vip 같은 ocf 리소스 · 표에 없는 유닛) — 아래에 따로 그린다 */
+  const unitKeys = new Set(units.map(svcKey))
+  const extraRes = (roles?.resources ?? []).filter(
+    (r) => (r.ownerIds.length || r.standbyIds.length) && !(r.unit && unitKeys.has(svcKey(r.unit))),
+  )
+  const resCell = (r: BoardRoleRes, n: NodeSvc) => {
+    if (!n.up) return <SvcCell key={n.id} state="down" />
+    if (r.ownerIds.includes(n.id))
+      return (
+        <SvcCell
+          key={n.id}
+          state="active"
+          role={{ label: r.standbys.length ? 'Promoted (m)' : '실행 (m)', title: `${r.name} (${r.agent || 'clone'}) — ${r.state}`, abnormal: false }}
+        />
+      )
+    if (r.standbyIds.includes(n.id))
+      return <SvcCell key={n.id} state="active" role={{ label: 'Unpromoted (s)', cls: ROLE_STANDBY_CLS, title: `${r.name} 보조`, abnormal: false }} />
+    if (roles?.clusterIds.includes(n.id))
+      return <SvcCell key={n.id} state="unknown" role={{ label: '대기 (s)', cls: ROLE_STANDBY_CLS, title: `${r.name} 은 ${r.owners.join(', ')} 에서 실행 — 이 노드는 대기`, abnormal: false }} />
+    return <SvcCell key={n.id} state="unknown" role={{ label: '·', cls: 'bg-white/[0.03] text-gray-600/70', title: 'pacemaker 클러스터 밖 노드', abnormal: false }} />
+  }
   return (
     <>
       <div className="mb-1.5 flex items-center gap-1.5 text-[13px] text-gray-300">
@@ -3280,8 +5511,27 @@ function ServicePanel({
                   {u}
                 </div>
                 {nodes.map((n) => (
-                  <SvcCell key={n.id} state={n.up ? (n.states[svcKey(u)] ?? 'unknown') : 'down'} />
+                  <SvcCell key={n.id} state={n.up ? (n.states[svcKey(u)] ?? 'unknown') : 'down'} role={n.up ? roleAt(u, n) : undefined} />
                 ))}
+              </Fragment>
+            ))}
+            {extraRes.length > 0 && (
+              <div
+                className="sticky left-0 z-10 bg-panel-light pt-1.5 text-[10px] font-medium text-gray-500"
+                style={{ gridColumn: '1 / -1' }}
+              >
+                pacemaker 리소스{roles?.staleSec ? ` — pcs 응답 없음, ${roles.staleSec}초 전 역할` : ''}
+              </div>
+            )}
+            {extraRes.map((r) => (
+              <Fragment key={'res:' + r.name}>
+                <div
+                  className="sticky left-0 z-10 truncate bg-panel-light py-1 pr-2 font-mono text-[11px] text-gray-400"
+                  title={`${r.name} (${r.agent || 'clone'})${r.group ? ` · 그룹 ${r.group}` : ''}`}
+                >
+                  {r.name}
+                </div>
+                {nodes.map((n) => resCell(r, n))}
               </Fragment>
             ))}
           </div>
@@ -3299,10 +5549,28 @@ function ServicePanel({
           </span>
         </p>
       )}
-      <p className="mt-2 text-[10px] leading-relaxed text-gray-500">
-        <code className="text-gray-400">systemctl show</code> 결과 · active 만 정상. 노드에 없는 유닛은 '없음', SSH 세션이 끊긴 노드는 열 전체 '·'(조회 불가),
-        <span className="text-gray-400"> '—'</span> 는 상태를 읽지 못한 유닛(조회 실패)입니다.
-      </p>
+      {/* 범례 — 한 문단으로 이어 쓰면 읽히지 않아(사용자 지적) 칸 모양 그대로 견본을 두고 짧게 단다 */}
+      <div className="mt-2 space-y-1.5 rounded-md bg-white/[0.03] px-2.5 py-2 text-[10.5px] text-gray-500">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-gray-400">
+            <code>systemctl show</code> 상태
+          </span>
+          <LegendChip cls={SVC_CELL.active[0]} label="active" text="정상" />
+          <LegendChip cls={SVC_CELL.inactive[0]} label="중지" text="멈춤" />
+          <LegendChip cls={SVC_CELL.notfound[0]} label="없음" text="설치 안 됨" />
+          <LegendChip cls={SVC_CELL.down[0]} label="·" text="SSH 끊김(조회 불가)" />
+          <LegendChip cls={SVC_CELL.unknown[0]} label="—" text="조회 실패" />
+        </div>
+        {roles && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-gray-400">pacemaker 역할</span>
+            <LegendChip cls={SVC_CELL.active[0]} label="(m)" text="이 노드에서 실행" />
+            <LegendChip cls={ROLE_STANDBY_CLS} label="(s)" text="대기 — 멈춰 있는 게 정상" />
+            <LegendChip cls={SVC_CELL.active[0]} label="(DC)" text={`클러스터 결정 노드${roles.dc ? ` · ${roles.dc}` : ''}`} />
+            <span className="text-gray-600">rabbitmq·memcached 등 pacemaker 밖 데몬은 역할 없음</span>
+          </div>
+        )}
+      </div>
     </>
   )
 }
@@ -3433,15 +5701,21 @@ function TimelineRow({
   icon,
   text,
   sub,
+  server,
   showDate,
+  onEvidence,
 }: {
   at: number
   t0: number
   icon: React.ReactNode
   text: string
   sub?: string
+  /** 서버 기록 시각 배지 — 있으면 본문 아래 줄에 따로 단다 */
+  server?: string
   /** 지난 회차를 볼 때는 시:분:초만으로 언제 일인지 알 수 없으므로 날짜까지 표기 */
   showDate?: boolean
+  /** 이 줄의 증적(서버 원문) 열기 — 저장된 증적이 있을 때만 */
+  onEvidence?: () => void
 }) {
   return (
     <div className="flex items-baseline gap-2.5 py-1">
@@ -3455,19 +5729,52 @@ function TimelineRow({
       </span>
       <span className="w-[46px] shrink-0 whitespace-nowrap text-[11px] text-gray-500 tabular-nums">+{fmtElapsed(at - t0)}</span>
       <span className="shrink-0 translate-y-0.5">{icon}</span>
-      <span className="min-w-0 text-gray-200">
+      <span className="min-w-0 flex-1 text-gray-200">
         {text}
         {sub && <span className="ml-1.5 text-[11px] text-gray-500">{sub}</span>}
+        {server && (
+          <span className="mt-0.5 block">
+            <span
+              className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-px text-[10.5px] text-emerald-300/90"
+              title="서버(pacemaker · k8s)가 스스로 기록한 시각 — 판정에는 쓰지 않고 근거로 나란히 보여 줍니다"
+            >
+              <Server size={10} /> {server}
+            </span>
+          </span>
+        )}
       </span>
+      {onEvidence && (
+        <button
+          onClick={onEvidence}
+          title="이 시각의 근거가 된 서버 원문(로그·pacemaker 기록·k8s 기록) 보기"
+          className="inline-flex shrink-0 items-center gap-1 self-start rounded border border-white/10 px-1.5 py-0.5 text-[10.5px] text-gray-300 hover:bg-white/10"
+        >
+          <FileText size={11} /> 증적
+        </button>
+      )}
     </div>
   )
 }
 
+interface TimelineItem {
+  at: number
+  icon: React.ReactNode
+  text: string
+  sub?: string
+  /** 이 줄의 증적 key — 저장돼 있으면 [증적] 버튼이 붙는다 */
+  ev?: string
+  /**
+   * 서버가 스스로 남긴 시각(pacemaker start · k8s Ready). 처음엔 sub 문구 끝에 이어 붙였는데, 긴 줄이
+   * 중간에서 접혀 읽기 어려웠다(사용자 지적) — 툴 시각과 구분되는 별도 배지로 다음 줄에 둔다.
+   */
+  server?: string
+}
 /**
  * 복구 타임라인 — 검증 시작 → 노드 DOWN → VIP 이동 → evacuation → 파드 → Ceph → 세션 재연결.
  * 마일스톤을 절대시각으로 들고 있으므로 시:분:초와 경과를 함께 보여준다.
+ * 화면 타임라인과 회차 내보내기(Markdown)가 같은 줄을 쓴다 — 둘이 다른 내용을 말하면 안 된다.
  */
-function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0: number; showDate?: boolean }) {
+function buildTimelineRows(m: Milestones, t0: number): TimelineItem[] {
   // 파드 복구는 워크로드가 많으면 줄이 폭주하므로 네임스페이스별 '마지막 복구 시각'으로 접는다
   // 네임스페이스별 첫 복구 / 마지막 복구 / 복구된 워크로드 수
   const podByNs = new Map<string, { first: number; last: number; count: number; sample: string }>()
@@ -3484,15 +5791,34 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
   }
   /** 네임스페이스별 '비정상 0이 된' 시각 — 여러 번 있었으면 가장 늦은 것 */
   const doneByNs = new Map<string, number>()
-  for (const d of m.podsDone ?? []) doneByNs.set(d.ns, Math.max(doneByNs.get(d.ns) ?? 0, d.at))
+  /** 그 완료 시각에 떠 둔 클러스터 기록의 Ready 시각 */
+  const readyByNs = new Map<string, number | undefined>()
+  for (const d of m.podsDone ?? []) {
+    if (d.at >= (doneByNs.get(d.ns) ?? 0)) {
+      doneByNs.set(d.ns, d.at)
+      readyByNs.set(d.ns, d.readyAt)
+    }
+  }
   /**
    * 예전에 저장된 이력에는 podsDone 자체가 없다(필드가 생기기 전 회차).
    * 그 회차는 예전 방식 그대로 한 줄로 그린다 — 지난 기록의 모양이 바뀌면 비교가 안 된다.
    */
   const legacyPods = m.podsDone === undefined
-  const rows: { at: number; icon: React.ReactNode; text: string; sub?: string }[] = [
+  const rows: TimelineItem[] = [
     { at: t0, icon: <Play size={13} className="text-gray-400" />, text: '검증 시작' },
   ]
+  if (m.inject)
+    rows.push({
+      at: m.inject.at,
+      icon: <Bolt size={13} className="text-amber-400" />,
+      text: m.inject.source === 'manual' ? '장애 주입 (수동 입력)' : '장애 주입 (버튼)',
+      sub:
+        m.inject.source === 'manual'
+          ? `${m.inject.note ? `${m.inject.note} · ` : ''}BMC 시계 기준일 수 있음`
+          : m.down && m.down.source !== 'pre'
+            ? `DOWN 감지까지 ${fmtElapsed(Math.max(0, m.down.at - m.inject.at))}`
+            : undefined,
+    })
   if (m.down)
     rows.push({
       at: m.down.at,
@@ -3504,12 +5830,25 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
           : m.down.source === 'ssh'
             ? '(SSH 끊김 기준 · 최대 90초 늦을 수 있음)'
             : '(DOWN 시각 불명 — 검증 시작 시점으로 표기)',
+      server: m.down.srvAt ? `클러스터 저널 이탈 ${fmtClock(m.down.srvAt)}` : undefined,
+      ev: m.down.source === 'pre' ? undefined : 'down',
     })
   if (m.vip)
     rows.push({
       at: m.vip.at,
       icon: <MapPin size={13} className="text-blue-400" />,
       text: `VIP 이동 — ${m.vip.from} → ${m.vip.to}`,
+      sub: m.vip.with?.length ? `(함께 이동: ${m.vip.with.join(', ')})` : undefined,
+      server: m.vip.pcmkAt ? `pacemaker 기록 start ${fmtClock(m.vip.pcmkAt)}` : undefined,
+      ev: 'vip',
+    })
+  for (const r of m.roles ?? [])
+    rows.push({
+      at: r.at,
+      icon: <MapPin size={13} className="text-amber-300" />,
+      text: `역할 이동 — ${r.name}: ${r.from} → ${r.to}`,
+      sub: '(pcs status 기준 · (m) 이 바뀐 순간)',
+      ev: `roles:${r.at}`,
     })
   if (m.masakari)
     rows.push({
@@ -3522,6 +5861,10 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
        */
       text: `Masakari evacuation 완료${m.masakari.evac > 0 ? ` — ${m.masakari.evac}대` : ''}`,
       sub: `${m.masakari.by} 의 masakari-engine 로그 기준 (이동 대상 호스트 아님)`,
+      server: m.masakari.vms
+        ? `Nova VM ${m.masakari.vms.count}대 · 첫 시작 ${fmtClock(m.masakari.vms.firstAt)} → 마지막 완료 ${fmtClock(m.masakari.vms.lastAt)}${m.masakari.vms.failed ? ` · 실패 ${m.masakari.vms.failed}` : ''}`
+        : undefined,
+      ev: 'masakari',
     })
   for (const [ns, v] of podByNs) {
     const detail = v.count > 1 ? `워크로드 ${v.count}개 (${v.sample} 외)` : v.sample
@@ -3548,6 +5891,8 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
         icon: <Server size={13} className="text-sky-400" />,
         text: `${ns} : 파드 복구 완료`,
         sub: `비정상 워크로드 0 · ${detail}`,
+        server: readyByNs.get(ns) ? `클러스터 기록 Ready ${fmtClock(readyByNs.get(ns) as number)}` : undefined,
+        ev: `pods:${ns}`,
       })
   }
   if (m.ceph)
@@ -3557,18 +5902,34 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
       icon: <CircleCheck size={13} className={m.cephHealthy ? 'text-emerald-400' : 'text-amber-400'} />,
       text: 'Ceph 데이터 복구 완료 — degraded · misplaced 0',
       sub: m.cephHealthy ? undefined : 'HEALTH_OK 아직 아님 — 복제와 무관한 경고가 남아 있습니다',
+      server: m.ceph.srvAt ? `Ceph 기록 ${fmtClock(m.ceph.srvAt)}` : undefined,
+      ev: 'ceph',
     })
   if (m.cephHealthy)
     rows.push({
       at: m.cephHealthy.at,
       icon: <CircleCheck size={13} className="text-emerald-400" />,
       text: 'Ceph HEALTH_OK — 경고 해소',
+      server: m.cephHealthy.srvAt ? `Ceph 기록 ${fmtClock(m.cephHealthy.srvAt)}` : undefined,
+      ev: 'cephHealthy',
+    })
+  for (const r of m.rejoin ?? [])
+    rows.push({ at: r.at, icon: <Server size={13} className="text-emerald-400" />, text: `클러스터 재합류 — ${r.node}`, sub: '(pcs Online 복귀)' })
+  for (const r of m.k8sReady ?? [])
+    rows.push({ at: r.at, icon: <Server size={13} className="text-emerald-400" />, text: `k8s 노드 Ready — ${r.node}` })
+  if (m.osdUp)
+    rows.push({
+      at: m.osdUp.at,
+      icon: <CircleCheck size={13} className="text-emerald-400" />,
+      text: `Ceph OSD 전부 up — ${m.osdUp.up}/${m.osdUp.total}`,
     })
   if (m.reconnect)
     rows.push({
       at: m.reconnect.at,
       icon: <Activity size={13} className="text-emerald-400" />,
       text: `세션 재연결 — ${m.reconnect.node}`,
+      server: m.reconnect.bootAt ? `부팅 ${fmtClock(m.reconnect.bootAt)}` : undefined,
+      ev: 'reconnect',
     })
   for (const p of m.portal ?? [])
     rows.push({
@@ -3579,10 +5940,38 @@ function Timeline({ milestones: m, t0, showDate }: { milestones: Milestones; t0:
       sub: p.group && p.group !== p.name ? `(${p.group})` : undefined,
     })
   rows.sort((a, b) => a.at - b.at)
+  return rows
+}
+
+function Timeline({
+  milestones: m,
+  t0,
+  showDate,
+  evKeys,
+  onEvidence,
+}: {
+  milestones: Milestones
+  t0: number
+  showDate?: boolean
+  /** 이 회차에 저장된 증적 key 들 */
+  evKeys?: string[]
+  onEvidence?: (key: string) => void
+}) {
+  const rows = buildTimelineRows(m, t0)
   return (
     <>
       {rows.map((r, i) => (
-        <TimelineRow key={i} at={r.at} t0={t0} icon={r.icon} text={r.text} sub={r.sub} showDate={showDate} />
+        <TimelineRow
+          key={i}
+          at={r.at}
+          t0={t0}
+          icon={r.icon}
+          text={r.text}
+          sub={r.sub}
+          server={r.server}
+          showDate={showDate}
+          onEvidence={r.ev && onEvidence && evKeys?.includes(r.ev) ? () => onEvidence(r.ev as string) : undefined}
+        />
       ))}
     </>
   )

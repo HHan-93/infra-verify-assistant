@@ -34,6 +34,7 @@ import LiveLogViewer from './components/LiveLogViewer'
 import TunnelManager from './components/TunnelManager'
 import MultiRun from './components/MultiRun'
 import PerfPanel from './components/PerfPanel'
+import ResponseProbe from './components/ResponseProbe'
 import StatusBoard from './components/StatusBoard'
 import ScenarioRunner, { type RunnerScenario } from './components/ScenarioRunner'
 import TabBar, { type TabInfo, type LayoutMode, type GridGroupInfo } from './components/TabBar'
@@ -301,6 +302,11 @@ export default function App() {
   const [, setNowTick] = useState(0)
   // 외형 설정 (글꼴 크기 / 테마) — localStorage 보존
   const [showPerf, setShowPerf] = useState(false)
+  /**
+   * 응답 측정 — 가용성 상태보드와 **같은 시간에** 돌리는 도구라 따로 연다. 창을 닫아도 측정은 측정 호스트에서
+   * 계속되고(다시 열면 이어 붙는다), 최소화하면 화면만 비킨다.
+   */
+  const [showProbe, setShowProbe] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   // 설정 모달에서 보고 있는 칸. 창을 닫았다 열면 '화면' 으로 돌아온다 — 마지막에 본 칸을
   // 기억하면 "설정을 열었는데 못 보던 화면이 뜬다" 가 된다.
@@ -482,6 +488,22 @@ export default function App() {
     // 프로필을 못 찾아도 "세션 N" 으로 되돌아가지 않는다 — 노드를 죽여놓고 보는 화면에서
     // 이름이 바뀌면 어느 서버였는지 알 수가 없다. 마지막으로 확인된 이름을 계속 쓴다.
     return lastLabelRef.current[t.id] ?? gridCellLabel(t)
+  }
+
+  /**
+   * 응답 측정의 클라이언트 VM 목록용 — **사이드바와 같은 세션 이름**에 IP 를 붙인다.
+   * 사이드바는 프로필 별칭, 없으면 '사용자@IP' 를 보인다. 처음엔 별칭이 없을 때 기본 탭 이름('세션 1')을 붙여
+   * 어느 서버인지 알 수 없었다(사용자 지적) — 기본 탭 이름은 쓰지 않는다.
+   */
+  const probeSessionLabel = (t: TabInfo) => {
+    const host = statuses[t.id]?.host
+    const key = statuses[t.id]?.key
+    const p = key ? profiles.find((pp) => profileKey(pp) === key) : undefined
+    if (t.custom) return host && !t.title.includes(host) ? `${t.title} (${host})` : t.title
+    const label = p?.label?.trim()
+    if (label) return `${label} (${p?.host ?? host})`
+    if (p) return `${p.username}@${p.host}`
+    return host ?? stableSessionLabel(t)
   }
 
   // 저장된 세션 프로필 로드 (앱 시작 시 1회)
@@ -1837,6 +1859,7 @@ export default function App() {
           onToggleLog={toggleLog}
           onOpenSettings={() => setShowSettings(true)}
           onOpenPerf={() => setShowPerf(true)}
+          onOpenProbe={() => setShowProbe(true)}
           onOpenStatusBoard={() => setShowStatusBoard(true)}
           onAnalyzeSelection={analyzeSelection}
         />
@@ -2391,6 +2414,21 @@ export default function App() {
             })}
           onClose={() => setShowPerf(false)}
           onAnalyze={analyzeText}
+        />
+      )}
+
+      {/* 응답 측정 — 측정 호스트에서 대상 VM 서비스의 끊김·복구 */}
+      {showProbe && (
+        <ResponseProbe
+          sessions={tabs.map((t) => ({
+            id: t.id,
+            // '세션 이름 (IP)' — 별칭이 없는 프로필은 stableSessionLabel 이 IP 만 내놓아 어느 VM 인지 알기 어려웠다(사용자 지적).
+            // 탭 이름(사용자가 고친 것 · 프로필 별칭 · 기본 탭 이름)을 앞에 붙인다.
+            name: probeSessionLabel(t),
+            connected: statuses[t.id]?.status === 'connected',
+            profileKey: statuses[t.id]?.key,
+          }))}
+          onClose={() => setShowProbe(false)}
         />
       )}
 

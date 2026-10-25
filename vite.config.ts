@@ -9,6 +9,9 @@ export default defineConfig(({ command }) => ({
   // 패키징(설치본) 시 file:// 로 로드되므로 상대경로(./) 필수.
   // 개발 서버(serve)에서는 절대경로(/) 사용.
   base: command === 'serve' ? '/' : './',
+  // dev 포트 고정 — 렌더러 localStorage(상태보드 이력·응답 측정 이력·UI 설정)는 **origin 별**이라, 5173 이 잡혀 있어
+  // vite 가 5174 로 비켜 뜨면 이력이 통째로 빈 것처럼 보인다(지워진 게 아니라 다른 칸에 있다). 조용히 옮기지 말고 실패시킨다.
+  server: { port: 5173, strictPort: true },
   plugins: [
     react(),
     electron({

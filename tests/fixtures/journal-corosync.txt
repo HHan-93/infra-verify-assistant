@@ -1,0 +1,4 @@
+2026-10-20T15:14:43+0900 contrabass01 corosync[56612]:   [KNET  ] link: host: 2 link: 0 is down
+2026-10-20T18:03:45+0900 contrabass01 corosync[56612]:   [KNET  ] link: host: 3 link: 0 is down
+2026-10-20T18:03:45+0900 contrabass01 corosync[56612]:   [KNET  ] link: host: 2 link: 0 is down
+2026-10-21T00:05:23+0900 contrabass01 corosync[56612]:   [KNET  ] link: host: 3 link: 0 is down

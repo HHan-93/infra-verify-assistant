@@ -1,0 +1,30 @@
+Cluster Summary:
+  * Stack: corosync (Pacemaker is running)
+  * Current DC: contrabass03 (version 2.1.6-10.1.el9_3-6fdc9deea29) - MIXED-VERSION partition with quorum
+  * Last updated: Thu Oct 22 11:30:15 2026 on contrabass01
+
+Node List:
+  * Online: [ contrabass01 contrabass02 contrabass03 contrabass04 ]
+
+Active Resources:
+  * Resource Group: openstack:
+    * int_vip   (ocf:heartbeat:IPaddr2):         Started contrabass01
+    * haproxy   (systemd:haproxy):       Started contrabass01
+    * openstack_exporter        (systemd:openstack-exporter):    Started contrabass01
+  * thanos-compact-timer        (systemd:thanos-compact.timer):  Started contrabass02
+
+Operations:
+  * Node: contrabass03:
+    * haproxy: migration-threshold=1000000:
+      * (8) probe: last-rc-change="Wed Oct 14 10:42:54 2026" exec-time="1ms" queue-time="0ms" rc=0 (ok)
+      * (10) stop: last-rc-change="Wed Oct 14 10:42:56 2026" exec-time="2003ms" queue-time="0ms" rc=0 (ok)
+  * Node: contrabass02:
+    * thanos-compact-timer: migration-threshold=1000000:
+      * (19) start: last-rc-change="Wed Oct 14 15:14:48 2026" exec-time="2251ms" queue-time="0ms" rc=0 (ok)
+      * (20) monitor: interval="30000ms" last-rc-change="Wed Oct 14 15:14:48 2026" exec-time="0ms" queue-time="0ms" rc=0 (ok)
+  * Node: contrabass01:
+    * haproxy: migration-threshold=1000000:
+      * (13) start: last-rc-change="Wed Oct 14 10:42:59 2026" exec-time="2172ms" queue-time="0ms" rc=0 (ok)
+    * int_vip: migration-threshold=1000000:
+      * (11) start: last-rc-change="Wed Oct 14 10:42:56 2026" exec-time="60ms" queue-time="0ms" rc=0 (ok)
+      * (12) monitor: interval="10000ms" last-rc-change="Wed Oct 14 10:42:57 2026" exec-time="46ms" queue-time="0ms" rc=0 (ok)

@@ -294,7 +294,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
     try {
       const content =
         kind === 'md' ? buildBundleMd(ordered, { title }) : buildBundleHtml(ordered, { title })
-      const r = await window.electronAPI.saveReport({ defaultName: `${fileBase(title)}.${kind}`, content })
+      const r = await window.electronAPI.saveReport({ defaultName: `${fileBase(title)}.${kind}`, content, format: kind })
       if (r.saved) setNotice(`저장됨: ${r.path}`)
       else if (r.error) setNotice(r.error)
     } finally {

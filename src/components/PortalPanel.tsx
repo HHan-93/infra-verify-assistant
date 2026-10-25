@@ -85,6 +85,11 @@ interface Props {
    * 복구되지 않은 채 회차를 멈췄을 때, 실제로는 장애 중인 대상에 이른 '복구' 시각이 기록으로 남는다.
    */
   onMilestoneRevoked?: (name: string) => void
+  /**
+   * 장애 뒤 **끊겼다가 아직 복구되지 않은** 대상 이름 — 조회할 때마다 알린다. 포털은 모든 페이지가 돌아와야 '완료' 다
+   * (사용자 기준). 하나라도 남아 있으면 상위가 판정·리포트에서 미복구(Fail)로 다룬다.
+   */
+  onPending?: (names: string[]) => void
 }
 
 const fmtClock = (ms: number) => {
@@ -97,7 +102,7 @@ const fmtElapsed = (ms: number) => {
   return s < 60 ? `${s}초` : `${Math.floor(s / 60)}분 ${s % 60}초`
 }
 
-export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked }: Props) {
+export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending }: Props) {
   const [cfg, setCfg] = useState<PortalConfig | null>(null)
   const [view, setView] = useState<'board' | 'config'>('board')
   const [states, setStates] = useState<Record<string, TargetState>>({})
@@ -170,6 +175,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   onMilestonesRef.current = onMilestones
   const onRevokedRef = useRef(onMilestoneRevoked)
   onRevokedRef.current = onMilestoneRevoked
+  const onPendingRef = useRef(onPending)
+  onPendingRef.current = onPending
 
   // ── 설정 로드/저장 ────────────────────────────────────────────
   useEffect(() => {
@@ -525,6 +532,12 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
     setStates(next)
     if (newlyRecovered.length) onMilestonesRef.current(newlyRecovered)
     for (const n of revoked) onRevokedRef.current?.(n)
+    // 끊겼다가 아직 돌아오지 않은 대상 — 감시 중인 대상만(설정에서 뺀 대상은 세지 않는다)
+    onPendingRef.current?.(
+      downAtRef.current === null
+        ? []
+        : targets.filter((t) => next[t.id]?.everFailed && next[t.id]?.recoveredAt == null).map((t) => t.name),
+    )
   }
 
   const loop = async (gen: number) => {

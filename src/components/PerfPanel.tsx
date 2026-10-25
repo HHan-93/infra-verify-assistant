@@ -3004,7 +3004,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                                 <YAxis
                                   yAxisId="rps"
                                   orientation="right"
-                                  tick={{ fontSize: 10, fill: '#6b7280' }}
+                                  tick={{ fontSize: 10, fill: '#a1a9b5' }}
                                   tickFormatter={(v: number) => String(Math.round(v))}
                                 />
                                 <Tooltip

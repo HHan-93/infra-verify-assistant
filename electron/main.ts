@@ -9,6 +9,7 @@ import {
   safeStorage,
   clipboard,
   nativeImage,
+  screen,
 } from 'electron'
 import path from 'node:path'
 import os from 'node:os'
@@ -72,6 +73,8 @@ import {
   type ScenarioRunSummary,
   type ScenarioRunDetail,
   type ScenarioRunRetention,
+  type BoardEvidenceItem,
+  type BoardEvidenceSummary,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -222,9 +225,11 @@ function killLocalShell(s: Session) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    // 사이드바 + 터미널 + AI 패널이 줄바꿈 없이 한 번에 보이는 기본 크기
-    width: 1800,
-    height: 1000,
+    // 사이드바 + 터미널 + AI 패널이 줄바꿈 없이 한 번에 보이는 기본 크기.
+    // 툴바는 세션 목록(256px)과 AI 패널(기본 460px) 사이에 있어, 1800 에서 남는 폭(약 1078px)이 버튼 줄(약 1090px,
+    // '응답 측정' 추가 후)보다 좁았다 — 화면이 허락하는 만큼(최대 1920) 넓혀 연다(사용자 요청).
+    width: Math.min(1920, screen.getPrimaryDisplay().workAreaSize.width),
+    height: Math.min(1040, screen.getPrimaryDisplay().workAreaSize.height),
     minWidth: 1280,
     minHeight: 720,
     backgroundColor: '#1e1e2e',
@@ -1380,14 +1385,20 @@ function cleanErrorMessage(err: unknown): string {
 // 분석 리포트를 파일로 저장 (네이티브 저장 다이얼로그)
 ipcMain.handle(
   'report:save',
-  async (_evt, payload: { defaultName: string; content: string }) => {
+  async (_evt, payload: { defaultName: string; content: string; format?: 'md' | 'html' | 'csv' }) => {
     const result = await dialog.showSaveDialog(mainWindow!, {
       title: '분석 리포트 저장',
       defaultPath: payload.defaultName,
-      filters: [
-        { name: 'Markdown', extensions: ['md'] },
-        { name: 'Text', extensions: ['txt'] },
-      ],
+      // 가용성 검증 회차 리포트는 HTML 한 파일(브라우저로 열고 인쇄) — 형식을 안 주면 예전처럼 md/txt
+      filters:
+        payload.format === 'html'
+          ? [{ name: 'HTML', extensions: ['html'] }]
+          : payload.format === 'csv'
+            ? [{ name: 'CSV', extensions: ['csv'] }]
+            : [
+              { name: 'Markdown', extensions: ['md'] },
+              { name: 'Text', extensions: ['txt'] },
+            ],
     })
     if (result.canceled || !result.filePath) {
       return { saved: false }
@@ -1414,8 +1425,12 @@ ipcMain.handle(
       return { saved: false }
     }
     const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true } })
+    // data: URL 은 수 MB 를 넘으면 로드가 실패한다 — 증적 원문이 붙은 검증 리포트는 그 크기를 넘기 쉬워
+    // 임시 파일로 써서 연다. (예전 AI 분석 리포트는 작아서 data: URL 로도 됐다)
+    const tmpHtml = path.join(app.getPath('temp'), `qterm-report-${Date.now()}.html`)
     try {
-      await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(payload.html))
+      await writeFile(tmpHtml, payload.html, 'utf-8')
+      await win.loadFile(tmpHtml)
       const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' })
       await writeFile(result.filePath, pdf)
       return { saved: true, path: result.filePath }
@@ -1423,6 +1438,7 @@ ipcMain.handle(
       return { saved: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
       win.destroy()
+      await rm(tmpHtml, { force: true }).catch(() => {})
     }
   },
 )
@@ -5660,6 +5676,140 @@ ipcMain.handle('scenarioRuns:delete', async (_evt, ids: string[]) => {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 })
+// ── 가용성 검증 증적 (statusboard-evidence/) ─────────────────────
+//
+// 상태보드 회차의 마일스톤 시각은 렌더러 localStorage(최근 50회)에 있고, 그 근거가 된 서버 원문
+// (masakari 로그 · crm_mon · kubectl)은 회차별 파일로 여기 둔다. 평문 JSON — 원문은 렌더러가
+// 마스킹 설정(maskForExport)을 적용한 뒤 넘긴다(시나리오 회차와 같은 출구).
+const boardEvidenceDir = () => path.join(app.getPath('userData'), 'statusboard-evidence')
+/** 회차 id = 이력의 t0(epoch ms). 파일 경로를 만들기 전에 숫자만인지 확인해 상위 경로 탈출을 막는다 */
+const BOARD_EVIDENCE_ID = /^\d{10,16}$/
+/** 항목 하나의 원문 상한 — masakari 로그 800줄·이벤트 수백 줄이면 넉넉하다. 넘으면 앞을 자른다 */
+const BOARD_EVIDENCE_TEXT_MAX = 400_000
+const boardEvidencePath = (id: string) => path.join(boardEvidenceDir(), `${id}.json`)
+
+async function readBoardEvidence(id: string): Promise<BoardEvidenceItem[]> {
+  let raw: string
+  try {
+    raw = await readFile(boardEvidencePath(id), 'utf-8')
+  } catch (e) {
+    // 파일이 없을 때만 빈 목록이다. 백신·색인기의 잠금(EBUSY·EPERM)까지 [] 로 뭉개면, 저장이 그 빈 목록에
+    // 새 항목 하나만 얹어 써서 그 회차의 다른 증적을 지운다(CLAUDE.md 저장소 규칙 · 검토 지적)
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return []
+    throw e
+  }
+  const arr = JSON.parse(raw)
+  if (!Array.isArray(arr)) throw new Error(`증적 ${id}: 배열이 아닙니다 (파일 손상 가능성)`)
+  return arr as BoardEvidenceItem[]
+}
+
+ipcMain.handle('boardEvidence:save', async (_evt, id: string, item: BoardEvidenceItem) => {
+  if (!BOARD_EVIDENCE_ID.test(id) || !item || typeof item.key !== 'string') return { ok: false, error: '잘못된 회차 id' }
+  try {
+    const text = String(item.text ?? '')
+    const clipped: BoardEvidenceItem = {
+      ...item,
+      text: text.length > BOARD_EVIDENCE_TEXT_MAX ? '…(앞부분 생략)\n' + text.slice(-BOARD_EVIDENCE_TEXT_MAX) : text,
+    }
+    await withStoreLock('statusboard-evidence', async () => {
+      await mkdir(boardEvidenceDir(), { recursive: true })
+      // 손상된 파일을 [] 로 뭉개고 덮어쓰면 그 회차의 다른 증적이 사라진다 — 읽기 실패는 그대로 던진다
+      const list = await readBoardEvidence(id)
+      const next = [...list.filter((x) => x.key !== clipped.key), clipped]
+      await writeFileAtomic(boardEvidencePath(id), JSON.stringify(next, null, 1))
+    })
+    return { ok: true }
+  } catch (e) {
+    // 증적 저장이 실패해도 검증은 계속된다 — 사유만 돌려준다
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('boardEvidence:list', async () => {
+  const out: BoardEvidenceSummary[] = []
+  let names: string[] = []
+  try {
+    names = await readdir(boardEvidenceDir())
+  } catch {
+    return { ok: true, list: out }
+  }
+  for (const n of names) {
+    const id = n.replace(/\.json$/, '')
+    if (!n.endsWith('.json') || !BOARD_EVIDENCE_ID.test(id)) continue
+    try {
+      out.push({ id, keys: (await readBoardEvidence(id)).map((x) => x.key) })
+    } catch {
+      /* 손상된 회차는 버튼을 안 띄울 뿐 — 나머지 회차는 보여야 한다 */
+    }
+  }
+  return { ok: true, list: out }
+})
+
+ipcMain.handle('boardEvidence:read', async (_evt, id: string) => {
+  if (!BOARD_EVIDENCE_ID.test(id)) return { ok: false, error: '잘못된 회차 id', items: [] as BoardEvidenceItem[] }
+  try {
+    return { ok: true, items: await readBoardEvidence(id) }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), items: [] as BoardEvidenceItem[] }
+  }
+})
+
+/**
+ * 이력에서 빠진 회차의 증적을 지운다(개별 삭제 · 전체 삭제 · 50회 초과로 밀려남).
+ *
+ * '남길 목록' 을 받아 나머지를 지우는 방식은 쓰지 않는다 — dev 와 설치본은 이 폴더(userData)를 같이 쓰지만
+ * 이력(localStorage)은 출처가 달라 **따로** 갖는다. 한쪽의 남길 목록으로 정리하면 다른 쪽 회차의 증적이 지워진다.
+ */
+ipcMain.handle('boardEvidence:delete', async (_evt, ids: string[]) => {
+  const gone = (Array.isArray(ids) ? ids : []).filter((x) => BOARD_EVIDENCE_ID.test(x))
+  try {
+    await withStoreLock('statusboard-evidence', async () => {
+      for (const id of gone) await rm(boardEvidencePath(id), { force: true }).catch(() => {})
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// ── 응답 측정 원문 (response-probe-raw/) ──────────────────────────
+//
+// 클라이언트 VM 의 checks.csv(모든 요청 기록)는 그 서버 /tmp 에만 있어 재부팅·정리·VM 삭제로 사라진다. 측정을 끝낼 때
+// 받아 여기 둔다 — 회차 id 는 측정 시작 epoch ms. 원문 그대로(평문 .csv: IP·HTTP 코드뿐, 비밀정보 없음) 두고,
+// 내보낼 때 마스킹 설정을 거친다.
+const probeRawDir = () => path.join(app.getPath('userData'), 'response-probe-raw')
+const PROBE_RAW_ID = /^\d{10,16}$/
+const PROBE_RAW_MAX = 50 * 1024 * 1024
+ipcMain.handle('probeRaw:save', async (_evt, id: string, content: string) => {
+  if (!PROBE_RAW_ID.test(id) || typeof content !== 'string') return { ok: false, error: '잘못된 회차 id' }
+  if (content.length > PROBE_RAW_MAX) return { ok: false, error: '원문이 너무 큽니다(50MB 초과)' }
+  try {
+    await withStoreLock('response-probe-raw', async () => {
+      await mkdir(probeRawDir(), { recursive: true })
+      await writeFileAtomic(path.join(probeRawDir(), `${id}.csv`), content)
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+ipcMain.handle('probeRaw:read', async (_evt, id: string) => {
+  if (!PROBE_RAW_ID.test(id)) return { ok: false, error: '잘못된 회차 id' }
+  try {
+    return { ok: true, content: await readFile(path.join(probeRawDir(), `${id}.csv`), 'utf-8') }
+  } catch (e) {
+    const missing = (e as NodeJS.ErrnoException)?.code === 'ENOENT'
+    return { ok: false, missing, error: missing ? '이 PC 에 저장된 원문이 없습니다' : e instanceof Error ? e.message : String(e) }
+  }
+})
+ipcMain.handle('probeRaw:delete', async (_evt, ids: string[]) => {
+  const gone = (Array.isArray(ids) ? ids : []).filter((x) => PROBE_RAW_ID.test(x))
+  await withStoreLock('response-probe-raw', async () => {
+    for (const id of gone) await rm(path.join(probeRawDir(), `${id}.csv`), { force: true }).catch(() => {})
+  })
+  return { ok: true }
+})
+
 const perfSettingsPath = () => path.join(app.getPath('userData'), 'perf-settings.json')
 
 interface PerfSettings {

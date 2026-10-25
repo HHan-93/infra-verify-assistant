@@ -1294,3 +1294,52 @@ export interface ScenarioRunDetail extends ScenarioRunSummary {
    */
   reportMd: string
 }
+
+// ── 가용성 검증 증적 (상태보드 회차별) ────────────────────────────
+
+/**
+ * 상태보드 마일스톤 하나의 **증적** — 툴이 본 시각 말고, 서버가 남긴 원문과 그 안의 시각.
+ *
+ * 검증 이력(마일스톤 시각)은 렌더러 localStorage 에 있고, 원문은 수십~수백 KB 라 거기 둘 수 없어
+ * `statusboard-evidence/<회차 id>.json` 에 따로 둔다. 회차 id 는 이력과 같은 `t0`(epoch ms 문자열)다.
+ *
+ * k8s 이벤트는 기본 1시간 뒤 사라지고 pacemaker 동작 이력은 `pcs resource cleanup` 으로 지워진다 —
+ * **복구가 관측된 그 순간** 떠 두지 않으면 나중에 다시 구할 수 없다. 그래서 사후 조회가 아니라 저장이다.
+ */
+export interface BoardEvidenceItem {
+  /** 회차 안에서의 자리 — `masakari` · `vip` · `roles` · `pods:<ns>`. 같은 key 는 덮어쓴다 */
+  key: string
+  title: string
+  /** 떠 온 시각 (epoch ms, PC 시계) */
+  capturedAt: number
+  /** 어느 서버에서 읽었나 (세션 표시명) */
+  host: string
+  /** 툴이 실제로 실행한 명령 */
+  command: string
+  /** 같은 것을 사람이 서버에서 직접 확인할 때 칠 명령 — 툴 밖 증적의 출발점 */
+  verifyCmd?: string
+  /** 원문(마스킹 설정 적용 후) */
+  text: string
+  /** 강조할 줄에 들어 있는 문자열 — 첫 번째가 처음 스크롤할 자리(판정 근거 줄) */
+  focus?: string[]
+  /** 원문에서 뽑은 서버 기록 시각 — 표로 보여 준다 */
+  facts?: { label: string; at?: number; text?: string }[]
+  /**
+   * 행이 여럿인 서버 기록(예: VM 20대의 evacuation) — 사실(facts) 칸에 한 줄씩 늘어놓으면 원문과 겹쳐 두 번 나오고
+   * 읽기도 어렵다. 증적 화면 · HTML 리포트 · Markdown 에서 정식 표로 그린다.
+   */
+  table?: {
+    title: string
+    columns: string[]
+    rows: string[][]
+    /** 행별 문제 표시(실패 · 아직 진행 중) — 붉게 그린다 */
+    bad?: boolean[]
+    /** 행에 마우스를 올렸을 때 보일 값(예: VM UUID) */
+    titles?: string[]
+  }
+  note?: string
+}
+export interface BoardEvidenceSummary {
+  id: string
+  keys: string[]
+}

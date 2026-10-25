@@ -1,0 +1,36 @@
+Cluster name: openstack
+Cluster Summary:
+  * Stack: corosync (Pacemaker is running)
+  * Current DC: contrabass03 (3) (version 2.1.6-10.1.el9_3-6fdc9deea29) - MIXED-VERSION partition with quorum
+  * Last updated: Thu Oct 22 11:29:52 2026 on contrabass01
+  * Last change:  Wed Oct 14 15:14:46 2026 by root via cibadmin on contrabass01
+  * 4 nodes configured
+  * 4 resource instances configured
+
+Node List:
+  * Node contrabass01 (1): online, feature set 3.17.4
+  * Node contrabass02 (2): online, feature set 3.17.4
+  * Node contrabass03 (3): online, feature set 3.17.4
+  * Node contrabass04 (4): online, feature set 3.19.6
+
+Full List of Resources:
+  * Resource Group: openstack:
+    * int_vip	(ocf:heartbeat:IPaddr2):	 Started contrabass01
+    * haproxy	(systemd:haproxy):	 Started contrabass01
+    * openstack_exporter	(systemd:openstack-exporter):	 Started contrabass01
+  * thanos-compact-timer	(systemd:thanos-compact.timer):	 Started contrabass02
+
+Migration Summary:
+
+Tickets:
+
+PCSD Status:
+  contrabass01: Online
+  contrabass02: Online
+  contrabass03: Online
+  contrabass04: Online
+
+Daemon Status:
+  corosync: active/enabled
+  pacemaker: active/enabled
+  pcsd: active/enabled

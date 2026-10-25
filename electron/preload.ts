@@ -40,6 +40,8 @@ import type {
   PortalHttpResult,
   ScenarioRunSummary,
   ScenarioRunDetail,
+  BoardEvidenceItem,
+  BoardEvidenceSummary,
   ScenarioRunRetention,
 } from './shared-types'
 
@@ -118,6 +120,20 @@ const electronAPI = {
     ipcRenderer.invoke('scenarioRuns:read', ids),
   scenarioRunsDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('scenarioRuns:delete', ids),
+  /** 가용성 검증 증적 — 상태보드 회차(id = t0)별 서버 원문. 같은 key 는 덮어쓴다 */
+  boardEvidenceSave: (id: string, item: BoardEvidenceItem): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('boardEvidence:save', id, item),
+  boardEvidenceList: (): Promise<{ ok: boolean; list: BoardEvidenceSummary[] }> => ipcRenderer.invoke('boardEvidence:list'),
+  boardEvidenceRead: (id: string): Promise<{ ok: boolean; error?: string; items: BoardEvidenceItem[] }> =>
+    ipcRenderer.invoke('boardEvidence:read', id),
+  boardEvidenceDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('boardEvidence:delete', ids),
+  /** 응답 측정 원문(checks.csv) — 측정을 끝낼 때 클라이언트 VM 에서 받아 이 PC 에 둔다 */
+  probeRawSave: (id: string, content: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('probeRaw:save', id, content),
+  probeRawRead: (id: string): Promise<{ ok: boolean; content?: string; missing?: boolean; error?: string }> =>
+    ipcRenderer.invoke('probeRaw:read', id),
+  probeRawDelete: (ids: string[]): Promise<{ ok: boolean }> => ipcRenderer.invoke('probeRaw:delete', ids),
   /** 회차 보관 한도(개수·기간) 조회 · 변경 */
   scenarioRunsGetRetention: (): Promise<ScenarioRunRetention> => ipcRenderer.invoke('scenarioRuns:getRetention'),
   scenarioRunsSetRetention: (v: ScenarioRunRetention): Promise<{ ok: boolean; settings: ScenarioRunRetention }> =>
@@ -262,6 +278,8 @@ const electronAPI = {
   saveReport: (payload: {
     defaultName: string
     content: string
+    /** 저장 대화상자의 파일 형식 — 기본 md/txt */
+    format?: 'md' | 'html' | 'csv'
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:save', payload),
   saveReportPdf: (payload: {

@@ -12,13 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 npm run dev        # vite + Electron 메인/프리로드 번들 + Electron 자동 실행 (한 번으로 전부)
-npm run lint       # tsc --noEmit — 이 저장소의 유일한 자동 검증 수단
+npm run lint       # tsc --noEmit — 타입 검사
+npm run check      # 판정 로직 검사(tests/*.test.ts) — 실제 장비 출력 견본(tests/fixtures)으로 파서·판정을 확인
 npm run build      # tsc --noEmit && vite build
 npm run dist       # Windows 설치본(nsis) + portable → release/
 npm run dist:dir   # 패키징 없이 폴더로만 (빠른 확인용)
 ```
 
-- **테스트 프레임워크가 없다.** vitest/jest 설정도, 테스트 파일도 없다. 변경 검증은 `npm run lint` + 실제 앱 실행이 전부이므로, 판정 로직을 고쳤으면 **앱에서 그 시나리오를 직접 돌려 확인**해야 한다. (`src/lib/portal.ts` 는 "테스트로 확인할 수 있어야 한다"는 의도로 UI·IPC 와 분리돼 있으나 아직 하네스가 없다.)
+- **판정 로직 검사는 `npm run check`** — 프레임워크 없이 [scripts/check.mjs](scripts/check.mjs) 가 `tests/*.test.ts` 를 esbuild 로 묶어 node 로 돌린다(TZ=Asia/Seoul 고정). 대상은 `src/lib` 의 순수 함수(pcs·crm_mon·journal·Nova·k8s 파서, 포털·파드 복구 확정, 응답 측정의 해석·요약·자동 종료, 측정 스크립트 bash 판정)다. 견본 [tests/fixtures](tests/fixtures) 는 **실제 장비에서 받은 출력**만 둔다 — 새 형식을 만나면 그 출력을 더하고 검사를 추가할 것. 화면(React)·IPC 는 검사하지 않으므로 그쪽 변경은 여전히 **앱에서 그 시나리오를 직접 돌려 확인**해야 한다. 설치본(build.files)에는 들어가지 않는다.
 - **macOS 빌드는 로컬에서 하지 않는다** — [.github/workflows/build-mac.yml](.github/workflows/build-mac.yml) 의 `macos-latest` 러너에서 universal `.dmg`/`.zip` 을 미서명(`CSC_IDENTITY_AUTO_DISCOVERY: false`)으로 만든다. 트리거는 Actions 수동 실행 · `main` 푸시 · `v*` 태그(태그면 Release 에 자동 첨부). **`main` 에 푸시하면 Mac 빌드가 돈다는 점을 유의**할 것.
 - `npm run dev` 를 콘솔 없는 백그라운드 프로세스로 띄우면 node-pty 가 `AttachConsole failed` 로 죽는다(Windows ConPTY). 로컬 터미널 탭(PTY)까지 확인해야 하면 **실제 터미널에서** 실행할 것.
 

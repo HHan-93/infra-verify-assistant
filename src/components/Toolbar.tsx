@@ -15,6 +15,7 @@ import {
   SquareTerminal,
   ScrollText,
   Activity,
+  Radar,
 } from 'lucide-react'
 
 interface ToolbarProps {
@@ -44,6 +45,8 @@ interface ToolbarProps {
   onOpenStatusBoard: () => void
   /** 성능 검증(로컬 Locust → 원격 대상 부하) 열기 */
   onOpenPerf: () => void
+  /** 응답 측정(측정 호스트에서 대상 VM 서비스의 끊김·복구 측정) 열기 */
+  onOpenProbe: () => void
   /** 터미널에서 선택한 영역을 AI 분석 */
   onAnalyzeSelection: () => void
 }
@@ -69,6 +72,7 @@ export default function Toolbar({
   onOpenSettings,
   onOpenStatusBoard,
   onOpenPerf,
+  onOpenProbe,
   onAnalyzeSelection,
 }: ToolbarProps) {
   return (
@@ -139,6 +143,14 @@ export default function Toolbar({
         >
           <Gauge size={14} className="text-blue-300" />
           성능 검증
+        </button>
+        <button
+          onClick={onOpenProbe}
+          title="응답 측정 — 클라이언트 VM 에서 대상의 HTTP · TCP 포트 · Ping 응답을 재, 끊긴 순간부터 다시 정상이 될 때까지를 기록"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
+        >
+          <Radar size={14} className="text-blue-300" />
+          응답 측정
         </button>
         <button
           onClick={onAnalyzeSelection}
