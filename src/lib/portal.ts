@@ -90,7 +90,7 @@ function evalCheck(c: PortalCheck, json: unknown | null, rawBody: string): { ok:
   // JSON 이 아니면 본문 문자열을 대상으로 본다 — 로그인 페이지 HTML 같은 대상도 감시할 수 있게.
   const target = json === null ? rawBody : jsonAt(json, c.path)
   const asText = typeof target === 'string' ? target : target === undefined ? '' : JSON.stringify(target)
-  const fail = (why: string) => ({ ok: false, reason: `${describeCheck(c)} — ${why}` })
+  const fail = (why: string) => ({ ok: false, reason: `${describeCheck(c)}: ${why}` })
 
   switch (c.op) {
     case 'nonEmptyArray':
@@ -157,7 +157,7 @@ export interface Judgement {
  */
 export function judgeResponse(target: PortalTarget, r: PortalHttpResult, expiredBodyMatch?: string): Judgement {
   if (!r.ok) {
-    return { ok: false, authExpired: false, reasons: [r.timedOut ? (r.error ?? '응답 시간 초과') : `요청 실패 — ${r.error ?? '알 수 없음'}`] }
+    return { ok: false, authExpired: false, reasons: [r.timedOut ? (r.error ?? '응답 시간 초과') : `요청 실패: ${r.error ?? '알 수 없음'}`] }
   }
   const status = r.status ?? 0
   const want = target.expectStatus?.length ? target.expectStatus : [200]
@@ -166,7 +166,7 @@ export function judgeResponse(target: PortalTarget, r: PortalHttpResult, expired
   // 여기서 안 잡으면 재발급이 안 돌고 전 구간이 비정상으로 남는다.
   const marker = expiredBodyMatch?.trim()
   if (marker && target.auth && (r.body ?? '').includes(marker)) {
-    return { ok: false, authExpired: true, reasons: [`응답에 "${marker}" — 토큰이 유효하지 않습니다 (재발급 후 재시도)`] }
+    return { ok: false, authExpired: true, reasons: [`응답에 "${marker}": 토큰이 유효하지 않습니다 (재발급 후 재시도)`] }
   }
   // 401/403 은 '포털이 죽었다' 와 원인이 다르다. 인증 서비스가 아직 안 떠서 토큰을 못 받는
   // 구간도 "아직 정상이 아니다" 의 일부이므로, 정상으로 세지는 않되 원인은 따로 표시한다.
@@ -180,8 +180,8 @@ export function judgeResponse(target: PortalTarget, r: PortalHttpResult, expired
       ok: false,
       authExpired,
       reasons: [
-        (authExpired ? `HTTP ${status} — 인증 거부 (토큰 만료/인증 서비스 미기동)` : `HTTP ${status} (기대: ${want.join(', ')})`) +
-          (detail ? ` — ${detail}` : ''),
+        (authExpired ? `HTTP ${status}: 인증 거부 (토큰 만료/인증 서비스 미기동)` : `HTTP ${status} (기대: ${want.join(', ')})`) +
+          (detail ? `: ${detail}` : ''),
       ],
     }
   }
@@ -203,7 +203,7 @@ export function judgeResponse(target: PortalTarget, r: PortalHttpResult, expired
       ok: false,
       authExpired: false,
       reasons: [
-        'JSON 이 아니라 HTML 페이지가 왔습니다 — 화면 주소가 아니라 그 화면이 부르는 API 주소를 넣으세요. ' +
+        'JSON 이 아니라 HTML 페이지가 왔습니다. 화면 주소가 아니라 그 화면이 부르는 API 주소를 넣으세요. ' +
           '(개발자도구 Network → Fetch/XHR 에 찍히는 요청의 경로)',
       ],
     }
@@ -477,7 +477,9 @@ export function suggestArrayPaths(body: string | undefined, maxDepth = 3): { pat
  *
  * 값만 보고 판단한다(키 이름은 어차피 message/status 류다). 구분자를 공백으로 바꿔 낱말로
  * 끊고 본다 — `COMMON_BAD_REQUEST` · `TOKEN_NOT_VERIFY` 처럼 붙여 쓰기 때문이다.
- * 숫자만 있는 값은 HTTP 코드로 보고 2xx·0 만 정상으로 친다.
+ * 숫자만 있는 값은 **HTTP 코드 꼴(100~599 세 자리)일 때만** 판단해 2xx 만 정상으로 친다. 처음엔 모든 숫자를 HTTP 코드로 보고
+ * 0 · 2xx 밖이면 오류라 했는데, `data.status: 1`(사용 중 표시) 같은 상태 값까지 오류가 되어 정상인 solution-info 가
+ * '기준 안 정함: data.status = 1' 로 빠졌다(사용자 확인 10-29). 1 · 9 같은 값은 무엇을 뜻하는지 알 수 없으므로 오류로 보지 않는다.
  */
 const ERROR_WORDS =
   /\b(ERROR|ERR|FAIL|FAILED|FAILURE|BAD|INVALID|DENIED|FORBIDDEN|UNAUTHORIZED|UNAUTHENTICATED|EXCEPTION|TIMEOUT|TIMEDOUT|TIMED|UNAVAILABLE|CONFLICT|REJECTED|REFUSED|EXPIRED|MISSING|NOT|NONE|ABORTED|CANCELED|CANCELLED)\b/
@@ -486,7 +488,7 @@ export function looksLikeErrorValue(value: string): boolean {
   if (!v) return false
   if (/^\d+$/.test(v)) {
     const n = Number(v)
-    return !(n === 0 || (n >= 200 && n < 300))
+    return /^[1-5]\d\d$/.test(v) && !(n >= 200 && n < 300)
   }
   return ERROR_WORDS.test(v.toUpperCase().replace(/[^A-Z0-9]+/g, ' '))
 }
@@ -571,45 +573,101 @@ export function suggestStringPaths(body: string | undefined, maxDepth = 3): { pa
  * bash 형식(작은따옴표 · `\` 줄바꿈)과 Windows cmd 형식(큰따옴표 · `^` 줄바꿈)을 모두 받는다.
  */
 export function parseCurl(text: string): { url: string; method: string; headers: Record<string, string>; body?: string } | null {
-  const src = (text ?? '')
+  let src = (text ?? '')
     .replace(/\\\r?\n/g, ' ') // bash 줄바꿈
     .replace(/\^\r?\n/g, ' ') // cmd 줄바꿈
     .trim()
   if (!/^curl\b/i.test(src)) return null
+  /*
+   * 요즘 Chrome 의 cmd 형식은 특수 문자마다 ^ 를 붙인다(`curl ^"https://…^" -H ^"accept: json^"`, 본문 안 따옴표는 `\^"`).
+   * ^ 를 걷어 내면 큰따옴표 + 백슬래시 escape 꼴이 된다. 예전엔 ^" 를 따옴표로 못 읽어 주소가 `^"https…` 가 되어 cmd 로 복사한
+   * 요청이 하나도 안 읽혔다(코드 점검 10-29, 창에는 'cmd 형식이어도 됩니다' 라고 적혀 있었다).
+   */
+  if (/\^"/.test(src)) src = src.replace(/\^(.)/g, '$1')
 
-  // 따옴표를 존중하며 토큰으로 자른다
+  /*
+   * 셸처럼 토큰으로 자른다. 한 토큰 안에 따옴표 꼴이 이어 붙을 수 있다(`--data-raw $'{"a":"it\'s"}'`).
+   *  - '…'  : bash 작은따옴표 — 안에 escape 가 없다(예전엔 \ 를 escape 로 읽어 JSON 본문의 \" 가 깨졌다)
+   *  - $'…' : ANSI-C — Chrome 이 본문에 ' 나 한글이 있으면 이 꼴로 쓴다(\n \t \\ \' \" \xHH \uHHHH). 예전엔 $ 부터 날 글자로 남아
+   *           본문이 `$'{…}'` 그대로 저장돼 POST 가 400 이 됐다
+   *  - "…"  : 백슬래시 escape, cmd 옛 형식의 "" 도 받는다
+   */
   const tokens: string[] = []
   let i = 0
-  while (i < src.length) {
-    const c = src[i]
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
-      i++
-      continue
-    }
-    if (c === "'" || c === '"') {
-      const quote = c
-      let out = ''
-      i++
-      while (i < src.length && src[i] !== quote) {
-        // cmd 형식은 큰따옴표 안의 `""` 를 escape 로 쓴다
-        if (quote === '"' && src[i] === '"' && src[i + 1] === '"') {
-          out += '"'
+  const ansiC = () => {
+    let out = ''
+    i += 2 // $'
+    while (i < src.length && src[i] !== "'") {
+      if (src[i] === '\\' && i + 1 < src.length) {
+        const n = src[i + 1]
+        const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '?': '?', a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v' }
+        if (n in simple) {
+          out += simple[n]
           i += 2
           continue
         }
-        if (src[i] === '\\' && i + 1 < src.length) {
-          out += src[i + 1]
-          i += 2
+        const hex = n === 'x' ? /^[0-9a-fA-F]{1,2}/.exec(src.slice(i + 2)) : n === 'u' ? /^[0-9a-fA-F]{1,4}/.exec(src.slice(i + 2)) : n === 'U' ? /^[0-9a-fA-F]{1,8}/.exec(src.slice(i + 2)) : null
+        if (hex) {
+          out += String.fromCodePoint(parseInt(hex[0], 16))
+          i += 2 + hex[0].length
           continue
         }
-        out += src[i++]
+        out += src[i + 1]
+        i += 2
+        continue
       }
-      i++ // 닫는 따옴표
-      tokens.push(out)
+      out += src[i++]
+    }
+    i++ // 닫는 '
+    return out
+  }
+  while (i < src.length) {
+    if (/\s/.test(src[i])) {
+      i++
       continue
     }
     let out = ''
-    while (i < src.length && !/\s/.test(src[i])) out += src[i++]
+    while (i < src.length && !/\s/.test(src[i])) {
+      const c = src[i]
+      if (c === '$' && src[i + 1] === "'") {
+        out += ansiC()
+        continue
+      }
+      if (c === "'") {
+        i++
+        while (i < src.length && src[i] !== "'") out += src[i++]
+        i++
+        continue
+      }
+      if (c === '"') {
+        i++
+        while (i < src.length) {
+          if (src[i] === '"') {
+            // cmd 옛 형식은 큰따옴표 안의 `""` 를 escape 로 쓴다(닫는 따옴표 바로 뒤에 또 " 가 오면 글자 ")
+            if (src[i + 1] === '"') {
+              out += '"'
+              i += 2
+              continue
+            }
+            i++
+            break
+          }
+          if (src[i] === '\\' && i + 1 < src.length && /["\\$`]/.test(src[i + 1])) {
+            out += src[i + 1]
+            i += 2
+            continue
+          }
+          out += src[i++]
+        }
+        continue
+      }
+      if (c === '\\' && i + 1 < src.length) {
+        out += src[i + 1]
+        i += 2
+        continue
+      }
+      out += src[i++]
+    }
     tokens.push(out)
   }
 
@@ -783,7 +841,7 @@ export function defaultPortalConfig(): PortalConfig {
       // 로그인 페이지는 토큰 없이도 떠야 한다 — 인증 서비스가 살았는지 보는 첫 신호.
       t('로그인 페이지', '로그인', '/', [{ path: '', op: 'notContains', value: '502 Bad Gateway' }], {
         auth: false,
-        note: '정적 페이지라 백엔드가 죽어도 200 이 온다 — 이것만으로 복구를 판단하면 안 된다',
+        note: '정적 페이지라 백엔드가 죽어도 200 이 온다. 이것만으로 복구를 판단하면 안 된다',
       }),
       t('인스턴스 목록', '인스턴스 목록', '/v1/contrabass/admin/compute/servers?size=1&page=0', [
         { path: 'content', op: 'nonEmptyArray' },
@@ -827,5 +885,67 @@ export function normalizeConfig(raw: Partial<PortalConfig> | null): PortalConfig
       expectStatus: t.expectStatus?.length ? t.expectStatus : [200],
       checks: t.checks ?? [],
     })),
+  }
+}
+
+// ── 화면 (API 묶음) ─────────────────────────────────────────────
+
+/**
+ * 화면 단위 판정(사용자 요청 10-28). 감시 API 가 20개를 넘어가면 API 마다 '정상화' 를 세는 것이 읽히지 않는다 —
+ * 타임라인은 '포털 정상화 13/20', 증적 표는 20줄이 된다. 사람이 묻는 것은 "인스턴스 목록 화면을 쓸 수 있나" 이므로
+ * **화면이 판정 단위**다: 화면 정상 = 그 화면의 핵심 API 가 같은 관측 주기에 모두 정상. API 별 상세는 증적에 남긴다.
+ */
+export const screenOf = (t: PortalTarget): string => (t.group ?? '').trim() || t.name
+
+export interface PortalScreen {
+  name: string
+  /** 화면의 API 전부(설정 순서) */
+  targets: PortalTarget[]
+  /** 판정에 쓰는 API — 부가를 뺀 것. 전부 부가면 전부 */
+  core: PortalTarget[]
+}
+
+/** 대상 목록을 화면으로 묶는다 — 순서는 각 화면의 첫 API 가 나온 순서(설정 화면과 같은 순서로 보이게) */
+export function screensOf(targets: PortalTarget[]): PortalScreen[] {
+  const out: PortalScreen[] = []
+  for (const t of targets) {
+    const name = screenOf(t)
+    const s = out.find((x) => x.name === name)
+    if (s) s.targets.push(t)
+    else out.push({ name, targets: [t], core: [] })
+  }
+  for (const s of out) {
+    const core = s.targets.filter((t) => !t.optional)
+    s.core = core.length ? core : s.targets
+  }
+  return out
+}
+
+/** 화면의 연속 기준 — 핵심 API 중 가장 큰 값(가장 엄격한 API 가 확정할 때까지 화면도 확정하지 않는다) */
+export function screenNeeded(s: PortalScreen, cfg: PortalConfig): number {
+  return Math.max(1, ...s.core.map((t) => streakNeeded(t, cfg)))
+}
+
+export type PortalObs = { at: number; ok: boolean; status?: number; latencyMs?: number; upstreamMs?: number; reasons: string[] }
+
+/**
+ * 한 주기의 API 관측들을 화면 관측 하나로 합친다 — 핵심 API 가 **모두** 정상이어야 정상.
+ * 이렇게 만든 관측을 API 와 똑같이 applyObservation 에 넣으므로 '연속 N회', '연속 N회 실패해야 다시 끊김' 규칙이
+ * 화면에도 그대로 선다(화면용 판정 규칙을 따로 만들면 둘이 갈라진다).
+ * 실패 사유에는 어느 API 가 왜 실패했는지를 적는다 — 증적에서 화면 판정의 근거가 된다.
+ *
+ * 시각: 정상이면 **가장 늦게 답한 API** 의 시각(그때 비로소 화면 전체가 정상임을 안다), 비정상이면 **가장 먼저 실패한 API** 의
+ * 시각(그때 이미 화면이 깨져 있었다). 처음엔 늘 가장 늦은 시각을 써서, API 가 많아 한 주기가 길어지면(풀 6개 · 시간 초과 10초)
+ * 끊김 시각이 주기 끝 쪽으로 밀렸다 — 끊김을 늦게 찍으면 정상화까지 걸린 시간이 짧게 나온다(코드 점검 10-29).
+ */
+export function screenObservation(core: { t: PortalTarget; obs: PortalObs }[]): PortalObs {
+  const bad = core.filter((x) => !x.obs.ok)
+  const pick = bad[0] ?? core[0]
+  return {
+    at: bad.length ? Math.min(...bad.map((x) => x.obs.at)) : Math.max(...core.map((x) => x.obs.at)),
+    ok: bad.length === 0,
+    status: pick?.obs.status,
+    latencyMs: core.length ? Math.max(...core.map((x) => x.obs.latencyMs ?? 0)) : undefined,
+    reasons: bad.map((x) => `${x.t.name}: ${x.obs.reasons[0] ?? (x.obs.status != null ? `HTTP ${x.obs.status}` : '응답 없음')}`),
   }
 }

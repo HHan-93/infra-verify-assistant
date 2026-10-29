@@ -209,6 +209,33 @@ export default function App() {
   const [showHlRules, setShowHlRules] = useState(false)
   // 실시간 로그(tail -f) 뷰어 — 파일탐색기의 "실시간 보기"로 열면 prefillPath 가 채워짐
   const [showLiveLog, setShowLiveLog] = useState(false)
+  /**
+   * 실시간 로그 최소화 · 연 세션. 예전엔 key 에 활성 탭(activeId)을 넣어 **탭만 바꿔도** 창이 새로 마운트돼 경로·분할·로그가
+   * 사라졌다. 연 순간의 세션을 따로 들고, 최소화 중에는 창을 떼지 않는다(사용자 요청 — 상태보드·응답 측정과 같게).
+   */
+  const [liveLogMin, setLiveLogMin] = useState(false)
+  const [liveLogSid, setLiveLogSid] = useState('')
+  /** 열린 실시간 로그 창의 두 번째 패널에 넣을 대상 — 상태보드 Masakari 카드의 [로그] */
+  const [liveLogAdd, setLiveLogAdd] = useState<{ nonce: number; sessionId: string; target: LogTailTarget } | undefined>(undefined)
+  /**
+   * 상태보드에서 로그 파일을 바로 연다. 창이 없으면 그 세션 · 경로로 새로 열어 바로 tail, 이미 열려 있으면(접혀 있어도)
+   * **두 번째 패널**에 연다 — 보던 로그를 지우지 않는다(사용자 결정 (a)).
+   */
+  /** 파일 경로 또는 대상(파드 등) — 상태보드의 파드 로그 [실시간 이어 보기] 는 k8s 대상을 넘긴다 */
+  const openLiveLogFor = (sessionId: string, path: string | LogTailTarget) => {
+    const target: LogTailTarget = typeof path === 'string' ? { kind: 'file', path } : path
+    if (showLiveLog) {
+      setLiveLogAdd({ nonce: Date.now(), sessionId, target })
+      setLiveLogMin(false)
+      return
+    }
+    setLiveLogPrefill(typeof path === 'string' ? path : undefined)
+    setLiveLogPrefillTarget(typeof path === 'string' ? undefined : target)
+    setLiveLogAdd(undefined)
+    setLiveLogSid(sessionId)
+    setLiveLogMin(false)
+    setShowLiveLog(true)
+  }
   const [liveLogPrefill, setLiveLogPrefill] = useState<string | undefined>(undefined)
   /** 설정 관리의 '파드 상태' 탭에서 로그 버튼으로 넘어올 때의 네임스페이스/파드 지정 */
   const [liveLogPrefillTarget, setLiveLogPrefillTarget] = useState<LogTailTarget | undefined>(undefined)
@@ -224,6 +251,11 @@ export default function App() {
     recent200: string
     recent500: string
     sessionLabel: string
+    /**
+     * 터미널이 아닌 곳(파드 로그 합친 창)에서 글을 통째로 넘긴 경우 — 무엇을 보내는지 한 줄. 있으면 '드래그한 선택 영역 · 최근
+     * 200줄 · 500줄' 고르기를 보이지 않는다: 셋 다 같은 글이라 무엇을 골라도 같았고 숫자도 같아 헷갈렸다(사용자 지적 10-29)
+     */
+    fixed?: string
   } | null>(null)
   /** 무엇을 보낼 것인가 — 드래그한 선택 영역 / 최근 출력 N줄 */
   const [analysisSource, setAnalysisSource] = useState<'selection' | 'recent200' | 'recent500'>('selection')
@@ -834,7 +866,7 @@ export default function App() {
     const attempt = rc.attempts[id] ?? 0
     const term = terminalRefs.current[id]
     if (attempt >= RECONNECT_BACKOFF_MS.length) {
-      term?.writeNotice(`자동 재연결 ${attempt}회 실패 — 중단했습니다. SSH 정보를 입력해 수동으로 연결하세요.`)
+      term?.writeNotice(`자동 재연결 ${attempt}회 실패: 중단했습니다. SSH 정보를 입력해 수동으로 연결하세요.`)
       return
     }
     // 이 세션의 프로필 찾기 (상태에 보관된 key → 저장 프로필). 못 찾으면 자동 재연결 불가.
@@ -1851,8 +1883,12 @@ export default function App() {
           onOpenMultiRun={() => setShowMultiRun(true)}
           onOpenLogViewer={() => setShowLogViewer(true)}
           onOpenLiveLog={() => {
+            // 접어 둔 창이 있으면 새로 열지 않고 펼친다 — 받던 로그를 그대로 본다
+            if (showLiveLog) return setLiveLogMin(false)
             setLiveLogPrefill(undefined)
             setLiveLogPrefillTarget(undefined)
+            setLiveLogSid(activeId)
+            setLiveLogMin(false)
             setShowLiveLog(true)
           }}
           logging={loggingSessions.has(activeId)}
@@ -1896,9 +1932,9 @@ export default function App() {
         {isSplit && broadcast && (
           <div className="bg-red-600/15 px-3 py-0.5 text-center text-[11px] font-medium text-red-300">
             {effectiveTargets.length > 0
-              ? `⚠ 동시입력 ON — 선택된 ${effectiveTargets.length}개 세션에 동시에 입력됩니다` +
+              ? `⚠ 동시입력 ON: 선택된 ${effectiveTargets.length}개 세션에 동시에 입력됩니다` +
                 (droppedTargetCount > 0 ? ` (연결이 끊긴 ${droppedTargetCount}개는 제외됨)` : '')
-              : '동시입력 ON — 대상 세션을 선택하세요 (셀 헤더의 체크박스)'}
+              : '동시입력 ON: 대상 세션을 선택하세요 (셀 헤더의 체크박스)'}
           </div>
         )}
         {isSplit && tabs.length > new Set(gridIds).size && (
@@ -1976,7 +2012,7 @@ export default function App() {
                 }}
               >
                 {/* 그리드 셀 헤더 바 (터미널을 가리지 않도록 상단에 분리 배치)
-                    — 헤더 자체를 드래그해서 다른 칸으로 끌어다 놓으면 그 칸과 서로 자리를 맞바꿈
+헤더 자체를 드래그해서 다른 칸으로 끌어다 놓으면 그 칸과 서로 자리를 맞바꿈
                     (탭바에서 드래그하는 것과 동일한 draggingTabId/reassignTab 경로 재사용) */}
                 {isSplit && leaf && (
                   <div
@@ -2094,7 +2130,7 @@ export default function App() {
                   </div>
                 )}
                 {/* 사이드바에서 드래그 중일 때 드롭 오버레이 (xterm 위에 덮어 드롭 캡처)
-                    drag가 터미널 위에 올라오기 전까지는 invisible 유지 — 사이드바 폴더 이동 시 딤 방지 */}
+                    drag가 터미널 위에 올라오기 전까지는 invisible 유지: 사이드바 폴더 이동 시 딤 방지 */}
                 {draggingProfile && (!isSplit ? t.id === activeId : !!leaf) && (
                   <div
                     onDragOver={(e) => {
@@ -2340,6 +2376,8 @@ export default function App() {
           onOpenLiveTail={(path) => {
             setLiveLogPrefill(path)
             setLiveLogPrefillTarget(undefined)
+            setLiveLogSid(activeId)
+            setLiveLogMin(false)
             setShowLiveLog(true)
           }}
           otherSessions={tabs
@@ -2351,25 +2389,32 @@ export default function App() {
       {/* 실시간 로그(tail -f) 뷰어 — 활성 세션 대상. key 로 세션/경로가 바뀌면 완전히 새로 시작 */}
       {showLiveLog && (
         <LiveLogViewer
-          key={`${activeId}-${liveLogPrefill ?? ''}-${
+          key={`${liveLogSid}-${liveLogPrefill ?? ''}-${
             liveLogPrefillTarget?.kind === 'k8s'
               ? `${liveLogPrefillTarget.namespace}/${liveLogPrefillTarget.pod}`
               : ''
           }`}
-          sessionId={activeId}
+          sessionId={liveLogSid}
           initialPath={liveLogPrefill}
           initialTarget={liveLogPrefillTarget}
           currentLabel={(() => {
-            const t = tabs.find((t) => t.id === activeId)
+            const t = tabs.find((t) => t.id === liveLogSid)
             return t ? gridCellLabel(t) : undefined
           })()}
           otherSessions={tabs
-            .filter((t) => t.id !== activeId && statuses[t.id]?.status === 'connected')
+            .filter((t) => t.id !== liveLogSid && statuses[t.id]?.status === 'connected')
             .map((t) => ({ id: t.id, label: gridCellLabel(t) }))}
+          minimized={liveLogMin}
+          addPane={liveLogAdd}
+          onMinimize={() => setLiveLogMin(true)}
+          onRestore={() => setLiveLogMin(false)}
           onClose={() => {
+            setLiveLogMin(false)
             setShowLiveLog(false)
             setLiveLogPrefill(undefined)
             setLiveLogPrefillTarget(undefined)
+            // 두 번째 패널 요청도 비운다 — 남겨 두면 다음에 툴바로 열 때 새 창이 그 요청을 받아 옛 masakari 로그를 2분할로 연다
+            setLiveLogAdd(undefined)
           }}
         />
       )}
@@ -2466,6 +2511,15 @@ export default function App() {
             profileKey: statuses[t.id]?.key,
           }))}
           onClose={() => setShowStatusBoard(false)}
+          onOpenLiveLog={openLiveLogFor}
+          /* 파드 로그 합친 창의 [AI 분석] — 터미널 출력과 같은 분석 창으로 넘긴다(보낼 내용을 미리 보고 질문을 붙일 수 있게) */
+          onAnalyzeText={(text, label, part) => {
+            setAnalysisCtx({ selection: text, recent200: text, recent500: text, sessionLabel: label, fixed: part ?? '넘겨받은 글' })
+            setAnalysisSource('selection')
+            setAnalysisPreviewOpen(false)
+            setAnalysisQuestion('')
+            setAnalysisBusyNotice('')
+          }}
           /* IPMI 로 전원을 올린 노드의 22번이 열리면 상태보드가 이 콜백으로 재연결을 요청한다.
              앱 기본 자동 재연결은 약 41초 만에 포기하므로(부팅은 보통 수 분) 여기서 다시 태운다. */
           onReconnect={(id) => {
@@ -2482,7 +2536,7 @@ export default function App() {
               delete rc.timers[id]
             }
             rc.attempts[id] = 0
-            terminalRefs.current[id]?.writeNotice('노드 SSH 포트가 다시 열렸습니다 — 재연결합니다.')
+            terminalRefs.current[id]?.writeNotice('노드 SSH 포트가 다시 열렸습니다. 재연결합니다.')
             setPendingConnects((prev) => (prev.some((pc) => pc.id === id) ? prev : [...prev, { id, p }]))
           }}
         />
@@ -2556,10 +2610,30 @@ export default function App() {
             {/* 제목이 대상을 말한다 — '선택 세션 AI 분석' 은 세션 전체를 보내는 것처럼 읽혔다 */}
             <div className="mb-0.5 text-sm font-semibold text-gray-100">AI 분석</div>
             <div className="mb-2.5 text-[11px] text-gray-500">
-              {analysisCtx.sessionLabel || '활성 세션'} 의 출력을 AI 에게 보냅니다
+              {analysisCtx.fixed
+                ? `${analysisCtx.sessionLabel}: 아래 글을 AI 에게 보냅니다`
+                : `${analysisCtx.sessionLabel || '활성 세션'} 의 출력을 AI 에게 보냅니다`}
             </div>
 
-            {/* 보낼 것 고르기 — 창을 연 순간의 터미널에서 떠 둔 것이다 */}
+            {/* 보낼 것 고르기 — 창을 연 순간의 터미널에서 떠 둔 것이다. 넘겨받은 글이면 고를 것이 없다 */}
+            {analysisCtx.fixed ? (
+              <div className="rounded-md border border-blue-500/50 bg-blue-500/10 px-2.5 py-1.5 text-xs text-gray-100">
+                <div className="flex items-center gap-2">
+                  <span className="flex-1">{analysisCtx.fixed}</span>
+                  <span className="text-[11px] text-gray-500">
+                    {lineCount(analysisCtx.selection)}줄 · {analysisCtx.selection.length.toLocaleString()}자
+                  </span>
+                </div>
+                {/* 넓힐 수 있는 보기만 권한다 — 이미 '앞뒤 5줄' 이면 [전체] 만, '전체' 면 안내가 없다 */}
+                {/^로그 창/.test(analysisCtx.fixed) && !analysisCtx.fixed.includes("'전체'") && (
+                  <div className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                    {analysisCtx.fixed.includes("'앞뒤 5줄'")
+                      ? '더 넓게 보내려면 이 창을 닫고 로그 창에서 [전체] 로 바꾼 뒤 다시 [AI 분석] 을 누르세요.'
+                      : '앞뒤 맥락까지 보내려면 이 창을 닫고 로그 창에서 [앞뒤 5줄] 이나 [전체] 로 바꾼 뒤 다시 [AI 분석] 을 누르세요.'}
+                  </div>
+                )}
+              </div>
+            ) : (
             <div className="space-y-1">
               {([
                 { key: 'selection' as const, text: analysisCtx.selection, label: '드래그한 선택 영역' },
@@ -2595,6 +2669,7 @@ export default function App() {
                 )
               })}
             </div>
+            )}
 
             {/* 보내기 전에 무엇이 나가는지 직접 본다 — 앞뒤만 떼어 보여준다 */}
             {analysisText().trim() && (
@@ -2631,7 +2706,7 @@ export default function App() {
             />
             {/* 목적지가 남의 서버다 — 무엇이 가려져 나가는지 보내기 전에 밝힌다.
                 가리기 스위치가 꺼져 있으면 **원문 그대로** 나가므로 그 사실을 그대로 적는다.
-                (maskForAI 는 그 스위치가 꺼져 있으면 아무것도 가리지 않는다 — mask.ts) */}
+                (maskForAI 는 그 스위치가 꺼져 있으면 아무것도 가리지 않는다. mask.ts) */}
             {maskReport ? (
               <p className="mt-1.5 text-[11px] text-gray-500">
                 비밀번호 · 토큰 · 개인키는 가린 뒤 보냅니다{maskIp ? ' (IP 도 가림)' : ''}.
@@ -3003,7 +3078,7 @@ export default function App() {
                             .notify('Q-Term 알림 시험', '이런 모양으로 알려드립니다. 눌러 보시면 창이 앞으로 나옵니다.')
                             .then((r) =>
                               setNotifyTest(
-                                r.ok ? '알림을 보냈습니다 — 화면 우측 하단을 확인하세요.' : (r.error ?? '실패'),
+                                r.ok ? '알림을 보냈습니다. 화면 우측 하단을 확인하세요.' : (r.error ?? '실패'),
                               ),
                             )
                         }}
@@ -3079,7 +3154,7 @@ export default function App() {
                       <span className="text-gray-400">앱을 다시 설치해도 지워지지 않습니다.</span>
                     </p>
                     <p className="mt-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-2.5 text-[11px] leading-relaxed text-gray-400">
-                      파일을 직접 고치려면 <span className="text-amber-300/80">앱을 먼저 닫으세요</span> — 실행 중에
+                      파일을 직접 고치려면 <span className="text-amber-300/80">앱을 먼저 닫으세요</span>. 실행 중에
                       고치면 앱이 그 변경을 모른 채 다음 저장 때 덮어씁니다.
                     </p>
                   </div>
@@ -3123,6 +3198,8 @@ export default function App() {
           onOpenLiveLog={(namespace, pod) => {
             setLiveLogPrefill(undefined)
             setLiveLogPrefillTarget({ kind: 'k8s', namespace, pod })
+            setLiveLogSid(activeId)
+            setLiveLogMin(false)
             setShowLiveLog(true)
           }}
         />

@@ -94,7 +94,7 @@ export function judgeOutput(
   if (hit) {
     // 어떤 단어가 어느 줄에서 걸렸는지까지 남긴다 — 이게 없으면 긴 출력을 직접 뒤져야 한다.
     const line = hit.line.length > 160 ? hit.line.slice(0, 160) + '…' : hit.line
-    return { verdict: 'fail', reasons: [`출력에 오류 문구 "${hit.word}" — ${line}`] }
+    return { verdict: 'fail', reasons: [`출력에 오류 문구 "${hit.word}": ${line}`] }
   }
   if (typeof code === 'number' && code !== 0) {
     return { verdict: 'fail', reasons: [`명령이 오류로 끝남 (종료 코드 ${code})`] }

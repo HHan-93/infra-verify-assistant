@@ -326,7 +326,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
           <span className="text-[10.5px] text-gray-600">회차 {list.length}개</span>
           <button
             onClick={() => setRetOpen((v) => !v)}
-            title="보관 한도를 바꿉니다 — 둘 중 하나라도 넘으면 오래된 회차부터 지워집니다"
+            title="보관 한도를 바꿉니다. 둘 중 하나라도 넘으면 오래된 회차부터 지워집니다"
             className="rounded border border-white/25 bg-white/[0.08] px-2 py-0.5 text-[10.5px] text-gray-200 hover:border-white/40 hover:bg-white/[0.14]"
           >
             {retention ? `${retention.retentionDays}일 · ${retention.maxRuns}회차까지 보관` : '보관 설정'}
@@ -433,12 +433,12 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
         {error && (
           <div className="flex items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200">
             <span className="min-w-0 flex-1">
-              {error} — 목록 파일이 손상되었을 수 있습니다. 회차 본문은 각자 파일로 남아 있으므로 되살릴 수 있습니다.
+              {error}: 목록 파일이 손상되었을 수 있습니다. 회차 본문은 각자 파일로 남아 있으므로 되살릴 수 있습니다.
             </span>
             <button
               onClick={async () => {
                 const r = await window.electronAPI.scenarioRunsRebuild()
-                setNotice(r.ok ? `목록을 다시 만들었습니다 — 회차 ${r.count}개` : (r.error ?? '되살리지 못했습니다.'))
+                setNotice(r.ok ? `목록을 다시 만들었습니다. 회차 ${r.count}개` : (r.error ?? '되살리지 못했습니다.'))
                 if (r.ok) await load()
               }}
               className="shrink-0 rounded border border-red-300/40 bg-red-500/20 px-2 py-0.5 hover:bg-red-500/30"
@@ -573,7 +573,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
           </div>
 
           {/*
-            고른 것 미리보기 — **고른 개수에 따라 아래가 바뀐다.**
+            고른 것 미리보기: **고른 개수에 따라 아래가 바뀐다.**
 
             하나만 골랐을 때 요약 한 줄만 보여주면 창이 비어 보이는데(사용자 지적), 그때
             정작 보고 싶은 것은 '그 회차에서 무엇이 돌았나' 다. 여러 개를 골랐을 때 보고 싶은
@@ -604,7 +604,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                   <span className="min-w-0 truncate text-[10.5px] text-gray-500">
                     {sameScenario(ordered)
                       ? ordered[0].title
-                      : '서로 다른 시나리오가 섞여 있습니다 — 회차별 요약만 나옵니다'}
+                      : '서로 다른 시나리오가 섞여 있습니다. 회차별 요약만 나옵니다'}
                   </span>
                 </div>
 
@@ -652,7 +652,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                     <div className="mb-1 text-[11.5px] font-medium text-gray-200">
                       스텝 결과
                       <span className="ml-1.5 text-[10.5px] font-normal text-gray-500">
-                        이 회차에서 실제로 무엇이 돌았는지 · 대상 {ordered[0].targets.join(' · ') || '—'}
+                        이 회차에서 실제로 무엇이 돌았는지 · 대상 {ordered[0].targets.join(' · ') || '-'}
                       </span>
                     </div>
                     {ordered[0].steps.length === 0 ? (
@@ -765,7 +765,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                                 {/* 복사 버튼은 pre 바깥에 둔다 — 안에 두면 출력을 스크롤할 때
                                                     같이 밀려 올라가 보이지 않는다. 여는 순간부터 늘 같은 자리다.
                                                     담는 것은 이 칸의 출력뿐이다. 명령·판정 근거까지 섞으면
-                                                    로그 도구에 그대로 붙여 넣을 수 없다 — 그러려고 여는 칸이다. */}
+                                                    로그 도구에 그대로 붙여 넣을 수 없다. 그러려고 여는 칸이다. */}
                                                 <button
                                                   onClick={() => copyOutput(ck, o.text)}
                                                   title="이 출력만 클립보드로"
@@ -853,7 +853,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                                             : 'text-gray-500')
                                     }
                                   >
-                                    {c ? LABEL[c.effective] : '—'}
+                                    {c ? LABEL[c.effective] : '-'}
                                   </td>
                                 ))}
                               </tr>
@@ -864,12 +864,12 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
                     </div>
                     {grid.some((row) => row.cells.every((c) => c && (c.effective === 'fail' || c.effective === 'error'))) && (
                       <p className="mt-1.5 rounded border border-red-500/30 bg-red-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-red-100">
-                        <b>모든 회차에서 실패한 스텝이 있습니다</b> — 회차를 거듭해도 같은 곳에서 실패한다는 뜻입니다.
+                        <b>모든 회차에서 실패한 스텝이 있습니다</b> 회차를 거듭해도 같은 곳에서 실패한다는 뜻입니다.
                         리포트 첫 장에 그대로 올라갑니다.
                       </p>
                     )}
                     <p className="mt-1.5 text-[10px] leading-relaxed text-gray-600">
-                      칸이 <span className="text-gray-500">—</span> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친
+                      칸이 <span className="text-gray-500">-</span> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친
                       뒤 돌렸을 때). 스텝은 번호가 아니라 <span className="text-gray-500">제목</span>으로 맞춥니다.
                     </p>
                   </>
@@ -907,7 +907,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
           <button
             onClick={() => setExportAsk({ kind: 'md', title: defaultBundleTitle(ordered) })}
             disabled={!picked.size || busy}
-            title="Markdown — 붙여넣기·이슈 등록·AI 분석에 쓰기 좋습니다"
+            title="Markdown: 붙여넣기·이슈 등록·AI 분석에 쓰기 좋습니다"
             className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
           >
             <Download size={11} /> Markdown
@@ -915,7 +915,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
           <button
             onClick={() => setExportAsk({ kind: 'html', title: defaultBundleTitle(ordered) })}
             disabled={!picked.size || busy}
-            title="한 파일 HTML — 그대로 첨부해 보낼 수 있습니다(외부 자원 없음, 인쇄용 밝은 배경)"
+            title="한 파일 HTML: 그대로 첨부해 보낼 수 있습니다(외부 자원 없음, 인쇄용 밝은 배경)"
             className="flex items-center gap-1 rounded border border-blue-500/40 bg-blue-600/25 px-2.5 py-1 text-[11px] text-blue-100 hover:bg-blue-600/40 disabled:opacity-40"
           >
             <FileText size={11} /> 리포트 출력 (HTML)
@@ -981,7 +981,7 @@ export default function ScenarioHistoryModal({ onClose }: { onClose: () => void 
               .filter(Boolean)
               .map((r) => `· ${runStamp(r!.startedAt)} ${r!.title}`)
               .join('\n') +
-            '\n\n검증은 대개 다시 돌릴 수 없습니다 — 지우기 전에 리포트로 뽑아 두세요.'
+            '\n\n검증은 대개 다시 돌릴 수 없습니다. 지우기 전에 리포트로 뽑아 두세요.'
           }
           onCancel={() => setConfirmDel(false)}
           onConfirm={() => void del()}

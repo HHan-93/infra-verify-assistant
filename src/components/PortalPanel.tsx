@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import type { PortalEvent, PortalPoll } from '../lib/portalPhases'
 import {
   AlertTriangle,
   Check,
   ChevronDown,
   ChevronUp,
   ClipboardPaste,
+  Download,
+  FileUp,
   ShieldCheck,
   HelpCircle,
   ChevronRight,
@@ -13,6 +16,7 @@ import {
   RefreshCw,
   Settings,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react'
 import {
@@ -42,13 +46,29 @@ import {
   suggestArrayPaths,
   suggestValueChecks,
   phaseOf,
+  screenNeeded,
+  screenObservation,
+  screenOf,
+  screensOf,
   streakNeeded,
   urlOf,
+  type PortalObs,
   type PortalCheck,
   type PortalConfig,
   type PortalTarget,
   type TargetState,
 } from '../lib/portal'
+import {
+  buildCandidates,
+  candidateToTarget,
+  criteriaFrom,
+  exportPortalConfig,
+  mergePortalConfig,
+  parseCurlAll,
+  parseHar,
+  type ImportCandidate,
+  type RawRequest,
+} from '../lib/portalImport'
 
 /**
  * 서비스 포털 응답 감시 패널.
@@ -84,12 +104,17 @@ interface Props {
    * 확정했던 복구가 **다시 깨졌다** — 상위 타임라인에서 그 대상의 줄을 거둔다. 거두지 않으면 끝내 다시
    * 복구되지 않은 채 회차를 멈췄을 때, 실제로는 장애 중인 대상에 이른 '복구' 시각이 기록으로 남는다.
    */
-  onMilestoneRevoked?: (name: string) => void
+  onMilestoneRevoked?: (name: string, downAt: number) => void
   /**
    * 장애 뒤 **끊겼다가 아직 복구되지 않은** 대상 이름 — 조회할 때마다 알린다. 포털은 모든 페이지가 돌아와야 '완료' 다
    * (사용자 기준). 하나라도 남아 있으면 상위가 판정·리포트에서 미복구(Fail)로 다룬다.
    */
   onPending?: (names: string[]) => void
+  /**
+   * 판정이 바뀐 순간(처음 끊김 · 정상화 확정 · 다시 끊김 확정) — 상위가 '포털 응답 기록' 증적으로 남긴다(사용자 요청 10-28).
+   * 모든 폴링을 넘기면 회차마다 수천 줄이라 바뀐 순간만. DOWN 감지 뒤의 것만 보낸다(마일스톤과 같은 원칙).
+   */
+  onEvent?: (ev: PortalEvent) => void
 }
 
 const fmtClock = (ms: number) => {
@@ -102,7 +127,26 @@ const fmtElapsed = (ms: number) => {
   return s < 60 ? `${s}초` : `${Math.floor(s / 60)}분 ${s % 60}초`
 }
 
-export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending }: Props) {
+/**
+ * 한 주기에 동시에 보내는 요청 수. 화면 단위로 바꾸며 API 가 20개를 넘을 수 있게 됐다 — 전부 한꺼번에 쏘면 포털에 부담이 몰리고
+ * (장애 중인 포털이면 더), 내 PC 쪽 연결도 밀려 시간 초과가 '장애' 로 찍힌다(조회 실패 ≠ 장애).
+ */
+const PORTAL_PARALLEL = 6
+async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++
+        out[i] = await fn(items[i])
+      }
+    }),
+  )
+  return out
+}
+
+export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending, onEvent }: Props) {
   const [cfg, setCfg] = useState<PortalConfig | null>(null)
   const [view, setView] = useState<'board' | 'config'>('board')
   const [states, setStates] = useState<Record<string, TargetState>>({})
@@ -160,6 +204,16 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   const cfgRef = useRef<PortalConfig | null>(null)
   cfgRef.current = cfg
   const statesRef = useRef<Record<string, TargetState>>({})
+  /**
+   * 화면 상태(화면 이름 → 상태). 판정 · 타임라인 · 증적은 이것으로 한다 — API 상태(statesRef)는 화면 안을 펼쳐 볼 때의 상세다.
+   * 화면 관측 = 그 주기에 핵심 API 가 모두 정상(screenObservation)이고, API 와 같은 applyObservation 을 거친다.
+   */
+  const screenStatesRef = useRef<Record<string, TargetState>>({})
+  /** 직전 주기의 화면 → API id 들 — 화면 이름이 바뀌어도 판정 상태를 이어 받으려고 */
+  const screenIdsRef = useRef<Record<string, string[]>>({})
+  /** 화면마다 최근 요청들(핵심 API 마다의 응답) — 정상화를 확정할 때 그 연속 N회 + 앞 1회를 증적에 붙인다 */
+  const screenPollsRef = useRef<Record<string, PortalPoll[]>>({})
+  const [screenStates, setScreenStates] = useState<Record<string, TargetState>>({})
   const runningRef = useRef(false)
   const mountedRef = useRef(true)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -177,6 +231,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   onRevokedRef.current = onMilestoneRevoked
   const onPendingRef = useRef(onPending)
   onPendingRef.current = onPending
+  const onEventRef = useRef(onEvent)
+  onEventRef.current = onEvent
 
   // ── 설정 로드/저장 ────────────────────────────────────────────
   useEffect(() => {
@@ -189,7 +245,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         // 파일이 손상된 경우 — 기본값으로 덮어쓰지 않는다. 사용자가 보고 판단하게 알린다.
         if (mountedRef.current) {
           setCfg(defaultPortalConfig())
-          setNotice(`저장된 감시 설정을 읽지 못했습니다 (${e instanceof Error ? e.message : String(e)}). 기본값으로 시작합니다 — 저장하면 덮어씁니다.`)
+          setNotice(`저장된 감시 설정을 읽지 못했습니다 (${e instanceof Error ? e.message : String(e)}). 기본값으로 시작합니다. 저장하면 덮어씁니다.`)
         }
       }
     })()
@@ -232,7 +288,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
     if (a.mode === 'token') return a.token?.trim() ?? ''
 
     if (!a.username || !a.password || !a.loginPath) {
-      setAuthNote('로그인 정보가 비어 있습니다 — 설정에서 계정/경로를 채우세요')
+      setAuthNote('로그인 정보가 비어 있습니다. 설정에서 계정/경로를 채우세요')
       return ''
     }
     const label = '로그인'
@@ -254,7 +310,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       insecure: c.insecureTLS,
     })
     if (!r.ok) {
-      setAuthNote(`${label} 요청 실패 — ${r.error ?? '알 수 없음'}`)
+      setAuthNote(`${label} 요청 실패: ${r.error ?? '알 수 없음'}`)
       return ''
     }
 
@@ -281,11 +337,11 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         return ''
       }
       if ((a.mfaBody ?? '').includes('{{otp}}') && !a.otp?.trim()) {
-        setAuthNote('2차 인증이 켜져 있는데 인증번호가 비어 있습니다 — 설정에서 6자리를 채우세요.')
+        setAuthNote('2차 인증이 켜져 있는데 인증번호가 비어 있습니다. 설정에서 6자리를 채우세요.')
         return ''
       }
       if ((r.status ?? 0) >= 400) {
-        setAuthNote(`로그인 HTTP ${r.status} — 2차 인증까지 가지 못했습니다 (계정·비밀번호를 확인하세요)`)
+        setAuthNote(`로그인 HTTP ${r.status}: 2차 인증까지 가지 못했습니다 (계정·비밀번호를 확인하세요)`)
         return ''
       }
       const mfaToken = String(jsonAt(parseBody(r.body), a.mfaTokenPath ?? '') ?? '')
@@ -311,12 +367,12 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         insecure: c.insecureTLS,
       })
       if (!r.ok) {
-        setAuthNote(`2차 인증 요청 실패 — ${r.error ?? '알 수 없음'}`)
+        setAuthNote(`2차 인증 요청 실패: ${r.error ?? '알 수 없음'}`)
         return ''
       }
       if ((r.status ?? 0) >= 400) {
         setAuthNote(
-          `2차 인증 HTTP ${r.status} — 인증번호나 요청 본문을 확인하세요.\n` +
+          `2차 인증 HTTP ${r.status}: 인증번호나 요청 본문을 확인하세요.\n` +
             `받은 응답\n  ${(r.body ?? '').trim().slice(0, 200)}`,
         )
         return ''
@@ -326,14 +382,14 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       // 404/405 는 '서비스가 안 떴다' 가 아니라 '주소가 틀렸다' 다. 뭉뚱그리면 엉뚱한 데를 뒤지게 된다.
       const misroute =
         r.status === 404
-          ? `${label} HTTP 404 — 그런 경로가 없습니다. 개발자도구 Network 에서 실제 로그인 요청의 경로를 확인해 그대로 넣으세요.`
+          ? `${label} HTTP 404: 그런 경로가 없습니다. 개발자도구 Network 에서 실제 로그인 요청의 경로를 확인해 그대로 넣으세요.`
           : r.status === 405
-            ? `${label} HTTP 405 — 이 경로는 ${method} 를 받지 않습니다. 경로가 틀렸을 가능성이 큽니다 — 개발자도구 Network 에서 로그인 버튼을 눌렀을 때 나가는 요청의 경로·메서드를 그대로 넣으세요.`
+            ? `${label} HTTP 405: 이 경로는 ${method} 를 받지 않습니다. 경로가 틀렸을 가능성이 큽니다. 개발자도구 Network 에서 로그인 버튼을 눌렀을 때 나가는 요청의 경로·메서드를 그대로 넣으세요.`
             : r.status === 401 || r.status === 403
-              ? `${label} HTTP ${r.status} — 계정이나 비밀번호가 거부되었습니다. 비밀번호는 개발자도구 Payload 의 값(암호화된 문자열이면 그대로)이어야 합니다.`
+              ? `${label} HTTP ${r.status}: 계정이나 비밀번호가 거부되었습니다. 비밀번호는 개발자도구 Payload 의 값(암호화된 문자열이면 그대로)이어야 합니다.`
               : ''
       // 검증 중이라면 그 외의 오류는 관측값이기도 하다 — 인증 서비스가 아직 안 떴다는 뜻.
-      setAuthNote(misroute || `${label} HTTP ${r.status} — 인증 서비스가 아직 정상이 아닐 수 있습니다`)
+      setAuthNote(misroute || `${label} HTTP ${r.status}: 인증 서비스가 아직 정상이 아닐 수 있습니다`)
       return ''
     }
     const json = parseBody(r.body)
@@ -353,13 +409,13 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
           `적어 둔 위치: ${c.auth.tokenPath || '(비어 있음)'}\n` +
           pathHint(r.body) +
           (looksStage1
-            ? '\n이 응답은 2차 인증 1단계(세션) 응답처럼 보입니다 — 위 2차 인증을 켜기로 두면\n' +
+            ? '\n이 응답은 2차 인증 1단계(세션) 응답처럼 보입니다. 위 2차 인증을 켜기로 두면\n' +
               '인증번호까지 확인하고 그 응답에서 토큰을 받습니다.'
             : ''),
       )
       return ''
     }
-    setAuthNote(`${label}${mfaEnabledOf(a) ? '·2차 인증' : ''} 성공 — 토큰 갱신 ${fmtClock(Date.now())}`)
+    setAuthNote(`${label}${mfaEnabledOf(a) ? '·2차 인증' : ''} 성공: 토큰 갱신 ${fmtClock(Date.now())}`)
     return tok.trim()
   }
 
@@ -379,7 +435,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         const left = exp ? Math.round((exp - Date.now()) / 60000) : null
         setLoginTest({
           ok: true,
-          text: `토큰을 받았습니다 (${tok.length}자${left === null ? '' : ` · 수명 약 ${left}분`}) — 만료돼도 그 자리에서 다시 받아오므로 감시가 끊기지 않습니다.`,
+          text: `토큰을 받았습니다 (${tok.length}자${left === null ? '' : ` · 수명 약 ${left}분`}): 만료돼도 그 자리에서 다시 받아오므로 감시가 끊기지 않습니다.`,
         })
       } else {
         setLoginTest({ ok: false, text: authNoteRef.current || '토큰을 받지 못했습니다.' })
@@ -452,7 +508,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       // 직접 붙여넣은 토큰은 다시 받아봐야 같은 값이라 계속 401 이다.
       // 사유를 안 짚어주면 사용자는 경로나 조건을 의심하며 엉뚱한 데를 뒤진다.
       if (j.authExpired && c.auth.mode === 'token') {
-        setAuthNote('붙여넣은 access token 이 만료되었습니다 — 아이디/비밀번호 로그인 모드로 바꾸면 자동으로 다시 받아옵니다')
+        setAuthNote('붙여넣은 access token 이 만료되었습니다. 아이디/비밀번호 로그인 모드로 바꾸면 자동으로 다시 받아옵니다')
       }
     }
     return { r, j }
@@ -482,8 +538,10 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       if (!tokenRef.current || stale || nearExp) await refreshToken(c)
     }
 
-    const results = await Promise.all(
-      targets.map(async (t) => {
+    const results = await pool(
+      targets,
+      PORTAL_PARALLEL,
+      async (t) => {
         try {
           const { r, j } = await probe(c, t)
           return {
@@ -503,41 +561,125 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
             obs: { at: Date.now(), ok: false, reasons: [e instanceof Error ? e.message : String(e)], status: undefined, latencyMs: undefined, upstreamMs: undefined },
           }
         }
-      }),
+      },
     )
     if (!mountedRef.current || !runningRef.current || gen !== genRef.current) return
+    // DOWN 이 막 잡혔는데 아래 초기화 effect 가 아직 안 돌았으면 여기서 먼저 — 그 틈에 이 주기가 끝나면 DOWN 전에 쌓인 연속 성공으로
+    // 정상화가 확정돼 장애 전 시각의 마일스톤이 나갔다(코드 검토 10-29)
+    resetStreaks()
 
     const next = { ...statesRef.current }
-    const newlyRecovered: PortalMilestone[] = []
-    const revoked: string[] = []
     for (const { t, obs } of results) {
       const before = next[t.id] ?? emptyTargetState()
-      const needed = streakNeeded(t, c)
-      const raw = applyObservation(before, obs, needed)
+      const raw = applyObservation(before, obs, streakNeeded(t, c))
       // 복구 시각도, '한 번 깨진 적 있음'도 **장애 안에서만** 뜻이 있다.
       // 아무도 안 죽었는데 이 둘을 채우면 화면 곳곳이 평상시에도 '복구' 라고 말한다(실제로 그랬다).
       //   · recoveredAt → 헤더 요약·대상 행의 복구 시각·타임라인
       //   · everFailed  → 대상 배지가 '정상'이 아니라 '복구됨'으로 뜬다 (phaseOf)
       // 여기서 한 번에 막아야 세 곳이 저절로 같은 말을 한다.
+      next[t.id] = downAtRef.current === null ? { ...raw, recoveredAt: null, everFailed: false } : raw
+    }
+    /**
+     * 판정 · 타임라인 · 증적은 **화면 단위**다(10-28). API 마다 세면 감시 API 가 20개일 때 '정상화 13/20' 이 되어 읽히지 않는다.
+     * 화면을 도입하기 전에는 아래가 API 마다 돌았다 — 묶음이 없는 API 는 그 이름이 곧 화면이라 옛 설정은 같은 판정이 나온다.
+     */
+    const byId = new Map(results.map((r) => [r.t.id, r]))
+    const nextScreens = { ...screenStatesRef.current }
+    const newlyRecovered: PortalMilestone[] = []
+    const revoked: { name: string; downAt: number }[] = []
+    const events: PortalEvent[] = []
+    const screens = screensOf(targets)
+    /*
+     * 화면 판정 상태는 화면 이름으로 둔다. 검증 중에 화면 이름을 바꾸거나 API 를 다른 화면으로 옮기면 새 이름의 상태가 비어
+     * '끊겼던 적 없음' 에서 시작해, 미복구였던 화면이 목록에서 사라지고 바꾼 시각에 정상화가 찍혔다(코드 점검 10-29).
+     * 새 이름에 상태가 없으면 직전 주기에 **같은 API 를 갖던 화면**의 상태를 이어 받는다. API 가 같으면 이름만 바뀐 것이고,
+     * 섞였으면 그 API 들이 있던 화면 중 아직 안 돌아온 것(끊김)의 상태를 받는다 — 복구를 이르게 찍는 쪽으로 틀리지 않게.
+     */
+    const prevIds = screenIdsRef.current
+    const live = new Set(screens.map((sc) => sc.name))
+    for (const sc of screens) {
+      if (nextScreens[sc.name]) continue
+      const ids = sc.targets.map((t) => t.id)
+      const key = [...ids].sort().join(',')
+      const from = Object.entries(prevIds).filter(([n, xs]) => n !== sc.name && xs.some((x) => ids.includes(x)))
+      const pick =
+        // 이름만 바뀐 것(같은 API, 옛 이름은 사라짐)
+        from.find(([n, xs]) => !live.has(n) && [...xs].sort().join(',') === key) ??
+        // 옮겨 온 API 가 있던 화면 중 아직 안 돌아온 것
+        from.find(([n]) => nextScreens[n]?.everFailed && nextScreens[n]?.recoveredAt == null)
+      if (pick && nextScreens[pick[0]]) {
+        nextScreens[sc.name] = nextScreens[pick[0]]
+        screenPollsRef.current[sc.name] = [...(screenPollsRef.current[pick[0]] ?? [])]
+      }
+    }
+    /*
+     * 지금 없는 이름의 상태는 버린다(코드 검토 10-29). 남겨 두면 A(정상화됨) → B 로 이름을 바꾼 뒤 B 가 다시 끊기고 A 로 되돌렸을 때,
+     * A 가 위의 이어 받기보다 먼저 묵은 '정상화됨' 상태를 집어 들어 끊긴 화면이 정상으로 보이고 미복구 목록에서 빠졌다.
+     * 버리면 A 는 직전 주기의 B(같은 API)에서 이어 받는다.
+     */
+    for (const n of Object.keys(nextScreens)) if (!live.has(n)) delete nextScreens[n]
+    for (const n of Object.keys(screenPollsRef.current)) if (!live.has(n)) delete screenPollsRef.current[n]
+    screenIdsRef.current = Object.fromEntries(screens.map((sc) => [sc.name, sc.targets.map((t) => t.id)]))
+    for (const sc of screens) {
+      const core: { t: PortalTarget; obs: PortalObs }[] = []
+      for (const t of sc.core) {
+        const r = byId.get(t.id)
+        if (r) core.push(r)
+      }
+      if (!core.length) continue
+      const obs = screenObservation(core)
+      const needed = screenNeeded(sc, c)
+      // 이 주기의 핵심 API 응답을 화면 기록에 쌓는다(연속 기준 + 앞 1회만 있으면 된다)
+      const polls = (screenPollsRef.current[sc.name] ??= [])
+      polls.push({
+        at: obs.at,
+        ok: obs.ok,
+        apis: core.map((x) => ({ name: x.t.name, ok: x.obs.ok, status: x.obs.status, ms: x.obs.latencyMs, why: x.obs.reasons[0] })),
+      })
+      if (polls.length > needed + 1) polls.splice(0, polls.length - (needed + 1))
+      const before = nextScreens[sc.name] ?? emptyTargetState()
+      const raw = applyObservation(before, obs, needed)
       const after = downAtRef.current === null ? { ...raw, recoveredAt: null, everFailed: false } : raw
-      next[t.id] = after
+      nextScreens[sc.name] = after
+      const ev = { status: obs.status, ms: obs.latencyMs, reason: obs.reasons.join(' · ') || undefined }
       // 타임라인에 올리는 건 **노드가 죽은 뒤** 확정된 것만이다(위 downAt 주석 참고).
       // 아무도 안 죽었으면 감시는 계속 돌지만 타임라인은 건드리지 않는다.
       if (downAtRef.current !== null && before.recoveredAt === null && after.recoveredAt !== null) {
-        newlyRecovered.push({ at: after.recoveredAt, name: t.name, group: t.group, streak: needed })
+        newlyRecovered.push({ at: after.recoveredAt, name: sc.name, streak: needed })
+        events.push({ at: after.recoveredAt, name: sc.name, kind: 'up', confirmAt: obs.at, status: obs.status, ms: obs.latencyMs, n: needed, streak: [...polls] })
       }
-      if (downAtRef.current !== null && before.recoveredAt !== null && after.recoveredAt === null) revoked.push(t.name)
+      // 처음 끊김 — DOWN 뒤 첫 실패. 감시는 DOWN 감지 전부터 돌아 그 전 실패는 recent 에만 있으므로, 지금 이어지는 실패 구간의 첫 관측까지 되짚는다
+      if (downAtRef.current !== null && !before.everFailed && after.everFailed && !obs.ok) {
+        let at = obs.at
+        for (let i = after.recent.length - 1; i >= 0 && !after.recent[i].ok; i--) at = after.recent[i].at
+        events.push({ at, name: sc.name, kind: 'fail', ...ev })
+      }
+      if (downAtRef.current !== null && before.recoveredAt !== null && after.recoveredAt === null) {
+        // 다시 끊긴 시각 = 지금 이어지는 연속 실패의 **첫 관측** — 확정한 순간(needed 번째 실패)이 아니다(복구 시각과 같은 원칙)
+        let downAt = obs.at
+        for (let i = after.recent.length - 1; i >= 0 && !after.recent[i].ok; i--) downAt = after.recent[i].at
+        revoked.push({ name: sc.name, downAt })
+        events.push({ at: downAt, name: sc.name, kind: 'down', confirmAt: obs.at, n: needed, ...ev })
+      }
     }
     statesRef.current = next
     setStates(next)
+    screenStatesRef.current = nextScreens
+    setScreenStates(nextScreens)
     if (newlyRecovered.length) onMilestonesRef.current(newlyRecovered)
-    for (const n of revoked) onRevokedRef.current?.(n)
-    // 끊겼다가 아직 돌아오지 않은 대상 — 감시 중인 대상만(설정에서 뺀 대상은 세지 않는다)
+    for (const r of revoked) onRevokedRef.current?.(r.name, r.downAt)
+    // 끊겼다가 아직 돌아오지 않은 화면 — 감시 중인 화면만(설정에서 뺀 대상은 세지 않는다)
     onPendingRef.current?.(
       downAtRef.current === null
         ? []
-        : targets.filter((t) => next[t.id]?.everFailed && next[t.id]?.recoveredAt == null).map((t) => t.name),
+        : screens.filter((sc) => nextScreens[sc.name]?.everFailed && nextScreens[sc.name]?.recoveredAt == null).map((sc) => sc.name),
     )
+    /**
+     * 이벤트는 마일스톤 · 미복구 목록을 **모두** 반영한 뒤 보낸다 — 상위가 이 순간 증적을 만든다.
+     * 예전에는 미복구 목록보다 먼저 보내, 마지막 페이지가 정상화된 순간의 증적에 그 페이지가 '아직 안 돌아온 페이지' ·
+     * 표 '미복구' 로 남고 '최종 정상화' 사실이 빠졌다(10-28 12:46 회차). 마지막 이벤트 뒤에는 다시 저장할 계기가 없어 그대로 굳었다.
+     */
+    for (const e of events) onEventRef.current?.(e)
   }
 
   const loop = async (gen: number) => {
@@ -559,14 +701,26 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
    * 찍히고 복구 시각이 장애 이전으로 되짚어진다. 'N회 연속' 은 장애 이후부터 세어야 뜻이 있다.
    * 막대(recent)는 남겨 둔다 — 장애 전후를 눈으로 비교하는 게 이 그래프의 쓸모다.
    */
+  /** 어느 DOWN 에 대해 초기화했는지 — effect 와 주기(pollOnce) 중 먼저 오는 쪽이 한 번만 한다 */
+  const resetForRef = useRef<number | null>(null)
+  const resetStreaks = () => {
+    const d = downAtRef.current
+    if (d === null || resetForRef.current === d) return
+    resetForRef.current = d
+    const clear = (m: Record<string, TargetState>) => {
+      const reset: Record<string, TargetState> = {}
+      for (const [id, st] of Object.entries(m)) reset[id] = { ...st, streak: 0, recoveredAt: null, everFailed: false }
+      return reset
+    }
+    statesRef.current = clear(statesRef.current)
+    setStates(statesRef.current)
+    screenStatesRef.current = clear(screenStatesRef.current)
+    setScreenStates(screenStatesRef.current)
+  }
   useEffect(() => {
     if (downAt === null) return
-    const reset: Record<string, TargetState> = {}
-    for (const [id, st] of Object.entries(statesRef.current)) {
-      reset[id] = { ...st, streak: 0, recoveredAt: null, everFailed: false }
-    }
-    statesRef.current = reset
-    setStates(reset)
+    resetStreaks()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [downAt])
 
   // 상태보드 검증 시작/중지에 맞춰 켜고 끈다
@@ -575,6 +729,11 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       // 새 회차 — 이전 회차의 연속카운트/복구시각을 들고 가면 안 된다
       statesRef.current = {}
       setStates({})
+      screenStatesRef.current = {}
+      screenIdsRef.current = {}
+      resetForRef.current = null
+      screenPollsRef.current = {}
+      setScreenStates({})
       tokenRef.current = ''
       tokenAtRef.current = 0
       loginRef.current = null
@@ -639,17 +798,18 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       })
   }, [cfg])
 
-  const testTarget = async (t: PortalTarget) => {
+  /** bulk: [전체 시험] 에서 부를 때 — 토큰은 한 번만 새로 받고(대상마다 로그인하면 20번 로그인한다), 줄마다 도는 표시는 안 쓴다 */
+  const testTarget = async (t: PortalTarget, bulk = false) => {
     const c = cfgRef.current
     if (!c) return
     // 시험이 도는 동안 사용자가 그 대상을 고칠 수 있다. 그때 돌아온 결과는 **다른 설정의 결과**이므로
     // 화면에 올리지 않는다 — 올리면 고친 뒤인데 고치기 전 판정이 초록으로 떠 있게 된다.
     const sigAtStart = targetSig(t)
-    setTesting(t.id)
+    if (!bulk) setTesting(t.id)
     try {
       // 시험은 항상 새 토큰으로 — 설정을 고치고 눌렀는데 낡은 토큰으로 나가면
       // 방금 고친 값이 맞는지 알 수 없다.
-      if (t.auth && c.auth.mode !== 'none') await refreshToken(c)
+      if (!bulk && t.auth && c.auth.mode !== 'none') await refreshToken(c)
       const { r, j } = await probe(c, t)
       // 잘 되면 한 줄이면 충분하다. 진단에 필요한 것들(주소·토큰·응답 원문)은 접어 두고,
       // 막혔을 때만 펼쳐 보게 한다 — 성공했는데 화면 가득 코드가 쏟아지면 읽을 게 뭔지 알 수 없다.
@@ -657,7 +817,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       if (r.ok) {
         lines.push(`HTTP ${r.status} · ${r.latencyMs}ms${r.upstreamMs !== undefined ? ` (백엔드 ${r.upstreamMs}ms)` : ''}`)
       } else {
-        lines.push(`요청 실패 — ${r.error ?? '알 수 없음'}`)
+        lines.push(`요청 실패: ${r.error ?? '알 수 없음'}`)
       }
       if (j.reasons.length) lines.push(...j.reasons)
       else if (j.ok) lines.push(`정상 조건 ${(t.checks ?? []).length}개 모두 통과`)
@@ -668,7 +828,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         detail.push(
           tokenRef.current
             ? `토큰: 발급됨 (${tokenRef.current.length}자, 앞 12자 ${tokenRef.current.slice(0, 12)}…)`
-            : '토큰: 발급 실패 — 로그인 경로·본문·토큰 위치를 먼저 고치세요',
+            : '토큰: 발급 실패: 로그인 경로·본문·토큰 위치를 먼저 고치세요',
         )
       }
       // 조건 경로가 안 맞아 실패했을 때, 이 응답에서 배열이 실제로 어디 있는지 짚어준다.
@@ -702,8 +862,29 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
         },
       }))
     } finally {
-      setTesting(null)
+      if (!bulk) setTesting(null)
     }
+  }
+  /** [전체 시험] — 켜 둔 API 를 한 번에. 결과는 각 줄에 그대로 붙고, 실패한 것은 줄에서 펼쳐진 채로 남는다 */
+  const [bulkTesting, setBulkTesting] = useState(false)
+  const testAll = async (ts: PortalTarget[]) => {
+    const c = cfgRef.current
+    if (!c || bulkTesting || !ts.length) return
+    setBulkTesting(true)
+    try {
+      if (c.auth.mode !== 'none' && ts.some((t) => t.auth)) await refreshToken(c)
+      await pool(ts, PORTAL_PARALLEL, (t) => testTarget(t, true).catch(() => undefined))
+    } finally {
+      setBulkTesting(false)
+    }
+  }
+  /** 한꺼번에 가져오기의 일괄 시험 — 아직 등록 전인 후보를 한 번 불러 본다(응답 원문까지 돌려줘 기준을 정한다) */
+  const probeCandidate = async (t: PortalTarget): Promise<{ status?: number; ms?: number; body?: string; error?: string }> => {
+    const c = cfgRef.current
+    if (!c) return { error: '설정을 아직 못 읽었습니다' }
+    if (t.auth && c.auth.mode !== 'none' && !tokenRef.current) await refreshToken(c)
+    const { r } = await probe(c, t)
+    return { status: r.status, ms: r.latencyMs, body: r.body, error: r.ok ? undefined : r.error }
   }
 
   if (!cfg) {
@@ -718,18 +899,20 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   const configured = !!cfg.baseUrl.trim() && active.length > 0
   // 접힌 줄에 담을 요약. 이 패널은 상태보드의 주인공(Host 전원 상태)을 밀어내면 안 되므로,
   // 평소엔 '점 + 몇/몇' 한 줄로 줄이고 봐야 할 때만 펼친다.
-  const okCount = active.filter((t) => states[t.id]?.last?.ok).length
-  const seen = active.filter((t) => states[t.id]?.last).length
-  const bad = active.filter((t) => states[t.id]?.last && !states[t.id].last!.ok)
+  // 요약은 **화면 단위** — API 가 20개면 점 20개 · '13/20 정상' 이 되어 읽히지 않는다(판정도 화면 단위다)
+  const scr = screensOf(active).map((sc) => ({ name: sc.name, id: sc.name, apis: sc.targets.length }))
+  const okCount = scr.filter((x) => screenStates[x.id]?.last?.ok).length
+  const seen = scr.filter((x) => screenStates[x.id]?.last).length
+  const bad = scr.filter((x) => screenStates[x.id]?.last && !screenStates[x.id].last!.ok)
   // 문제가 있으면 그쪽만 보여준다. 정상일 때만 전체를 돌아가며 비춘다 —
   // 깨진 대상이 몇 초 뒤 다른 대상으로 넘어가 버리면 정작 봐야 할 걸 놓친다.
-  const spotlightPool = bad.length > 0 ? bad : active
+  const spotlightPool = bad.length > 0 ? bad : scr
   const spot = spotlightPool[spotIdx % spotlightPool.length]
   /** 접혀 있는데 비정상이 있는 상태 — 패널을 여는 대신 이걸로 알린다 */
   const alert = bad.length > 0 && !open
-  const spotSt = spot ? states[spot.id] : undefined
-  const recovered = active
-    .map((t) => ({ name: t.name, at: states[t.id]?.recoveredAt ?? null }))
+  const spotSt = spot ? screenStates[spot.id] : undefined
+  const recovered = scr
+    .map((x) => ({ name: x.name, at: screenStates[x.id]?.recoveredAt ?? null }))
     .filter((x): x is { name: string; at: number } => x.at !== null)
     .sort((a, b) => b.at - a.at)[0]
 
@@ -754,22 +937,22 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
           <span className="text-[11px] text-amber-300/80">주소와 대상을 설정하면 검증 시작과 함께 감시합니다</span>
         ) : open || seen === 0 ? (
           <span className="text-[11px] text-gray-500">
-            {active.length}개 대상 · {cfg.intervalSec}초 주기 · 연속 {cfg.successStreak}회 정상이면 복구
+            화면 {scr.length}개 · API {active.length}개 · {cfg.intervalSec}초 주기 · 연속 {cfg.successStreak}회 정상이면 복구
           </span>
         ) : (
           // 접힌 상태 — 점(전체) + 몇/몇 + 번갈아 비추는 대상 하나 + 토큰 갱신
           <span className="flex min-w-0 items-center gap-2 text-[11px]">
             <span className="flex items-center gap-1">
-              {active.map((t) => (
+              {scr.map((x) => (
                 <span
-                  key={t.id}
-                  title={`${t.name} — ${states[t.id]?.last?.ok ? '정상' : '비정상'}`}
-                  className={`h-2 w-2 rounded-full ${states[t.id]?.last?.ok ? 'bg-emerald-500' : 'bg-red-500'}`}
+                  key={x.id}
+                  title={`${x.name}: ${screenStates[x.id]?.last?.ok ? '정상' : '비정상'}`}
+                  className={`h-2 w-2 rounded-full ${screenStates[x.id]?.last?.ok ? 'bg-emerald-500' : 'bg-red-500'}`}
                 />
               ))}
             </span>
             <span className={okCount === seen ? 'text-gray-400' : 'text-red-300'}>
-              {okCount}/{active.length} 정상
+              화면 {okCount}/{scr.length} 정상
             </span>
             {/* 자동으로 펼치지 않는 대신 '여기를 누르면 된다' 를 명시한다 — 화면은 사람이 누를 때만 움직인다 */}
             {bad.length > 0 && (
@@ -778,7 +961,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
                 title={bad.map((t) => t.name).join(' · ')}
                 className="flex shrink-0 items-center gap-1 rounded bg-red-500/25 px-1.5 py-0.5 font-medium text-red-200 hover:bg-red-500/40"
               >
-                <AlertTriangle size={10} /> {bad.length}개 비정상 — 펼쳐서 확인
+                <AlertTriangle size={10} /> {bad.length}개 비정상: 펼쳐서 확인
               </button>
             )}
             {spot && spotSt?.last && (
@@ -838,7 +1021,10 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
           <ConfigView
             cfg={cfg}
             onChange={save}
-            onTest={testTarget}
+            onTest={(t) => void testTarget(t)}
+            onTestAll={(ts) => void testAll(ts)}
+            bulkTesting={bulkTesting}
+            onProbe={probeCandidate}
             testing={testing}
             testResult={testResult}
             onClearSuggest={(id) => setTestResult((m) => ({ ...m, [id]: { ...m[id], suggest: undefined } }))}
@@ -847,7 +1033,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
             loginTest={loginTest}
           />
         ) : (
-          <BoardView cfg={cfg} states={states} t0={t0} running={running} />
+          <BoardView cfg={cfg} states={states} screenStates={screenStates} t0={t0} running={running} />
         ))}
     </div>
   )
@@ -857,39 +1043,102 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
 function BoardView({
   cfg,
   states,
+  screenStates,
   t0,
   running,
 }: {
   cfg: PortalConfig
   states: Record<string, TargetState>
+  screenStates: Record<string, TargetState>
   t0: number
   running: boolean
 }) {
+  /** 펼친 화면 — 사람이 누를 때만 바뀐다(문제가 생겨도 저절로 펼치지 않는다: 화면은 가만히) */
+  const [openSc, setOpenSc] = useState<Record<string, boolean>>({})
   const targets = cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim())
   if (!targets.length) {
-    return <div className="px-3 pb-3 text-[11px] text-gray-500">감시할 대상이 없습니다 — 설정에서 추가하세요.</div>
+    return <div className="px-3 pb-3 text-[11px] text-gray-500">감시할 대상이 없습니다. 설정에서 추가하세요.</div>
   }
-  // 페이지(group) 별로 묶어 보여준다 — 사람이 "인스턴스 상세가 언제 열리나" 로 생각하기 때문
-  const groups: { name: string; items: PortalTarget[] }[] = []
-  for (const t of targets) {
-    const g = t.group?.trim() || '기타'
-    const found = groups.find((x) => x.name === g)
-    if (found) found.items.push(t)
-    else groups.push({ name: g, items: [t] })
+  /**
+   * 화면 하나 = 한 줄(10-28). 예전에는 묶음 상자 안에 API 마다 상태·띠·사유가 한 덩어리씩 들어가, API 가 20개를 넘으면
+   * 패널이 몇 화면 분량이 됐다. 줄 안의 작은 칸이 API 하나씩이라 어느 API 가 깨졌는지는 펼치지 않아도 보이고,
+   * 띠는 **화면** 관측(핵심 API 가 모두 정상인가)이다. 순서는 설정 순서 그대로 — 깨진 화면을 위로 올리지 않는다.
+   */
+  const screens = screensOf(targets)
+  const sq = (t: PortalTarget) => {
+    const st = states[t.id]
+    const ph = st ? phaseOf(st, streakNeeded(t, cfg)) : 'waiting'
+    const cls = !st?.last ? 'bg-white/15' : ph === 'fail' ? 'bg-red-500' : ph === 'waiting' ? 'bg-amber-400' : 'bg-emerald-500'
+    return (
+      <span
+        key={t.id}
+        title={`${t.name}${t.optional ? ' (부가: 화면 판정에서 뺌)' : ''}: ${!st?.last ? '아직 관측 없음' : st.last.ok ? `정상 · HTTP ${st.last.status ?? '-'}` : st.last.reasons[0] ?? '비정상'}`}
+        className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${cls} ${t.optional ? 'opacity-40' : ''}`}
+      />
+    )
   }
-
   return (
-    <div className="space-y-2 px-3 pb-3">
-      {groups.map((g) => (
-        <div key={g.name} className="rounded border border-white/10 bg-black/20">
-          <div className="border-b border-white/5 px-2.5 py-1.5 text-[11px] font-medium text-gray-300">{g.name}</div>
-          <div className="divide-y divide-white/5">
-            {g.items.map((t) => (
-              <TargetRow key={t.id} t={t} cfg={cfg} st={states[t.id]} t0={t0} running={running} />
-            ))}
+    <div className="mx-3 mb-3 divide-y divide-white/5 rounded border border-white/10 bg-black/20">
+      {screens.map((sc) => {
+        const st = screenStates[sc.name] ?? emptyTargetState()
+        const needed = screenNeeded(sc, cfg)
+        const phase = phaseOf(st, needed)
+        const style = PHASE_STYLE[phase]
+        const failN = sc.core.filter((t) => states[t.id]?.last && !states[t.id].last!.ok).length
+        const isOpen = !!openSc[sc.name]
+        const runs = mergeRuns(st.recent, cfg.intervalSec)
+        return (
+          <div key={sc.name} className={phase === 'fail' ? 'bg-red-500/[0.06]' : ''}>
+            <button
+              onClick={() => setOpenSc((m) => ({ ...m, [sc.name]: !m[sc.name] }))}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/[0.03]"
+            >
+              <span className={`w-[46px] shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] ${style.cls}`}>{style.label}</span>
+              <span className="flex w-[150px] shrink-0 items-center gap-1 truncate text-[12px] text-gray-200" title={sc.name}>
+                {isOpen ? <ChevronDown size={11} className="shrink-0" /> : <ChevronRight size={11} className="shrink-0" />}
+                <span className="truncate">{sc.name}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1">{sc.targets.map(sq)}</span>
+              {/* 화면 관측의 띠 — 페일오버 중 '돌아왔다 다시 끊김' 이 펼치지 않아도 보이게 */}
+              <span className="flex h-1.5 min-w-[40px] flex-1 overflow-hidden rounded-full bg-white/[0.06]">
+                {runs.map((r, i) => (
+                  <span
+                    key={i}
+                    style={{ flexGrow: r.ms, flexBasis: 0 }}
+                    title={`${fmtClock(r.from)}${r.count > 1 ? ` ~ ${fmtClock(r.to)}` : ''} ${r.ok ? '정상' : '비정상'} (${r.count}회)`}
+                    className={r.ok ? 'bg-emerald-500/60' : 'bg-red-500/80'}
+                  />
+                ))}
+              </span>
+              <span className="w-[150px] shrink-0 truncate text-right text-[11px]">
+                {phase === 'fail' ? (
+                  <span className="text-red-300">
+                    API {failN}/{sc.core.length} 실패
+                  </span>
+                ) : phase === 'waiting' && st.last?.ok ? (
+                  <span className="text-amber-300/90">
+                    연속 {st.streak}/{needed}
+                  </span>
+                ) : st.recoveredAt !== null ? (
+                  <span className="text-emerald-300">
+                    {fmtClock(st.recoveredAt)}
+                    {t0 > 0 && <span className="text-gray-500"> (+{fmtElapsed(st.recoveredAt - t0)})</span>}
+                  </span>
+                ) : (
+                  <span className="text-gray-500">API {sc.targets.length}개</span>
+                )}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="divide-y divide-white/5 border-t border-white/5 bg-black/20 pl-4">
+                {sc.targets.map((t) => (
+                  <TargetRow key={t.id} t={t} cfg={cfg} st={states[t.id]} t0={t0} running={running} />
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -976,7 +1225,7 @@ function TargetRow({
         <span className="text-[12px] text-gray-200">{t.name}</span>
         {last && (
           <span className="text-[11px] text-gray-500">
-            HTTP {last.status ?? '—'}
+            HTTP {last.status ?? '-'}
             {last.latencyMs !== undefined && ` · ${last.latencyMs}ms`}
             {last.upstreamMs !== undefined && ` (백엔드 ${last.upstreamMs}ms)`}
           </span>
@@ -984,7 +1233,7 @@ function TargetRow({
         {/* 연속 카운트 — '왜 아직 복구가 아닌지' 가 여기서 바로 보인다 */}
         {phase === 'waiting' && last?.ok && (
           <span className="text-[11px] text-amber-300/90">
-            연속 {state.streak}/{needed} — 기준을 채우면 복구로 확정
+            연속 {state.streak}/{needed}: 기준을 채우면 복구로 확정
           </span>
         )}
         {state.recoveredAt !== null && (
@@ -999,7 +1248,7 @@ function TargetRow({
       {state.recent.length > 0 && (
         <div className="mt-1.5 flex items-center gap-2">
           {/* 띠는 고정 폭이 아니라 **남는 폭에 맞춰** 늘고 줄어든다. 창 폭 전환(1120/1560px)이나
-              우측 패널이 열릴 때 줄이 넘치지 않게 하려는 것 — 고정 픽셀로 두면 좁아진 순간 잘린다.
+              우측 패널이 열릴 때 줄이 넘치지 않게 하려는 것: 고정 픽셀로 두면 좁아진 순간 잘린다.
 
               높이는 **모든 줄이 같다.** 한때 '깨진 적 없는 줄은 얇게' 로 두었는데, 줄마다 굵기가
               다른 것이 의도된 신호가 아니라 **그리다 만 것처럼** 보였다. 상태는 색과 눈금으로
@@ -1019,7 +1268,7 @@ function TargetRow({
           </div>
           {/*
             **폭을 고정한다.** 예전에는 글자 수만큼 자리를 차지해, 실패한 줄만 라벨이 길어지고
-            그만큼 띠가 짧아졌다 — 줄마다 띠 끝이 어긋나 그리다 만 것처럼 보였다.
+            그만큼 띠가 짧아졌다. 줄마다 띠 끝이 어긋나 그리다 만 것처럼 보였다.
             자리를 고정하면 여러 줄의 띠가 같은 지점에서 끝나 서로 비교된다(원래 목적이 그것이다).
             길어지는 부분(마지막 실패 시각)은 툴팁으로 옮긴다.
           */}
@@ -1028,7 +1277,7 @@ function TargetRow({
             title={
               `${cfg.intervalSec}초마다 확인 · 최근 ${spanLabel(state.recent)}` +
               (failCount > 0
-                ? ` · 실패 ${failCount}회 (마지막 ${lastFailAt !== null ? fmtClock(lastFailAt) : '—'})`
+                ? ` · 실패 ${failCount}회 (마지막 ${lastFailAt !== null ? fmtClock(lastFailAt) : '-'})`
                 : ' · 실패 없음')
             }
           >
@@ -1062,7 +1311,7 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
   const apply = () => {
     const parsed = parseCurl(text)
     if (!parsed) {
-      setMsg('cURL 명령을 읽지 못했습니다 — 개발자도구에서 복사한 내용을 그대로 붙여넣으세요.')
+      setMsg('cURL 명령을 읽지 못했습니다. 개발자도구에서 복사한 내용을 그대로 붙여넣으세요.')
       return
     }
     const headers = headersFromCurl(parsed.headers)
@@ -1074,7 +1323,7 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
     })
     const dropped = Object.keys(parsed.headers).length - Object.keys(headers).length
     setMsg(
-      `적용했습니다 — 헤더 ${Object.keys(headers).length}개 가져옴` +
+      `적용했습니다. 헤더 ${Object.keys(headers).length}개 가져옴` +
         (dropped > 0 ? `, ${dropped}개 제외(토큰·쿠키 등은 감시할 때마다 새로 붙입니다)` : ''),
     )
     setText('')
@@ -1092,7 +1341,7 @@ function CurlImport({ cfg, onApply }: { cfg: PortalConfig; onApply: (p: Partial<
           <p className="text-[10.5px] leading-relaxed text-gray-400">
             개발자도구 <b>Network</b> 에서 그 요청을 <b>우클릭 → Copy → Copy as cURL</b> 한 뒤 아래에 붙여넣고
             적용하세요. 경로·방식·헤더를 브라우저가 보낸 그대로 가져옵니다. 토큰·쿠키와 도메인이 박힌
-            헤더(Origin·Referer)는 빼고 가져오며, 감시할 때마다 지금 설정된 포털 주소로 새로 붙입니다 —
+            헤더(Origin·Referer)는 빼고 가져오며, 감시할 때마다 지금 설정된 포털 주소로 새로 붙입니다. 
             그래야 다른 환경으로 옮겨도 그대로 씁니다.
           </p>
           <p className="rounded border border-white/10 bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
@@ -1156,6 +1405,9 @@ function ConfigView({
   cfg,
   onChange,
   onTest,
+  onTestAll,
+  bulkTesting,
+  onProbe,
   testing,
   testResult,
   onClearSuggest,
@@ -1166,6 +1418,9 @@ function ConfigView({
   cfg: PortalConfig
   onChange: (c: PortalConfig) => void
   onTest: (t: PortalTarget) => void
+  onTestAll: (ts: PortalTarget[]) => void
+  bulkTesting: boolean
+  onProbe: (t: PortalTarget) => Promise<{ status?: number; ms?: number; body?: string; error?: string }>
   testing: string | null
   testResult: Record<
     string,
@@ -1201,6 +1456,44 @@ function ConfigView({
   /** 목록 위의 cURL 붙여넣기 상자 (새 대상을 만드는 가장 확실한 길) */
   const [curlNew, setCurlNew] = useState<string | null>(null)
   const [curlErr, setCurlErr] = useState('')
+  /** 한꺼번에 가져오기 창 */
+  const [importOpen, setImportOpen] = useState(false)
+  /**
+   * 여러 개 골라 한 번에 고치기(옮기기 · 켜고 끄기 · 핵심/부가 · 삭제). null 이면 고르기를 안 하는 중 —
+   * 줄마다 늘 체크칸을 두면 '감시 켜기' 체크칸과 나란히 있어 무엇을 누르는지 헷갈린다. [여러 개 고르기] 를 눌렀을 때만 보인다.
+   */
+  const [sel, setSel] = useState<Set<string> | null>(null)
+  const [moveTo, setMoveTo] = useState('')
+  const [delAsk, setDelAsk] = useState(false)
+  const [fileMsg, setFileMsg] = useState('')
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const screenNames = Array.from(new Set(cfg.targets.map(screenOf)))
+  const renameScreen = (from: string, to: string) => {
+    const name = to.trim()
+    if (!name || name === from) return
+    onChange({ ...cfg, targets: cfg.targets.map((t) => (screenOf(t) === from ? { ...t, group: name } : t)) })
+  }
+  const bulkSet = (p: Partial<PortalTarget>) => {
+    if (!sel?.size) return
+    onChange({ ...cfg, targets: cfg.targets.map((t) => (sel.has(t.id) ? { ...t, ...p } : t)) })
+  }
+  const exportFile = async () => {
+    const d = new Date()
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const res = await window.electronAPI.saveReport({
+      defaultName: `포털감시설정_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}.json`,
+      content: exportPortalConfig(cfg),
+      format: 'json',
+    })
+    setFileMsg(res.saved ? `내보냈습니다(아이디 · 비밀번호 · 토큰은 뺐습니다). ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
+  }
+  const importFile = async (f: File | undefined) => {
+    if (!f) return
+    const r = mergePortalConfig(cfg, await f.text(), newTargetId)
+    if (!r) return setFileMsg('Q-Term 에서 내보낸 포털 감시 설정 파일이 아닙니다')
+    onChange(r.next)
+    setFileMsg(`API ${r.added}개를 더했습니다${r.skipped ? ` · 이미 있는 ${r.skipped}개는 건너뜀` : ''}. 계정은 지금 설정을 그대로 씁니다`)
+  }
   /**
    * 비밀번호를 지금 치고 있는가.
    *
@@ -1229,7 +1522,7 @@ function ConfigView({
     if (!bad.length) return null
     return (
       <div className="mt-1 rounded border border-red-400/50 bg-red-500/15 px-2 py-1.5 text-[10.5px] leading-relaxed text-red-100">
-        <b>오류 문구가 정상 조건에 들어 있습니다</b> — {bad.map(describeCheck).join(' · ')}
+        <b>오류 문구가 정상 조건에 들어 있습니다</b> {bad.map(describeCheck).join(' · ')}
         <br />그 문구가 <b>있어야</b> 정상으로 치므로, 서버가 제대로 답하면 오히려 비정상으로 찍힙니다.
         시험할 때 오류 응답이 왔고 그 문구를 그대로 조건에 넣으면 이렇게 됩니다.
         <div className="mt-1 flex flex-wrap gap-1.5">
@@ -1280,7 +1573,7 @@ function ConfigView({
   const addFromCurl = (text: string) => {
     const parsed = parseCurl(text)
     if (!parsed) {
-      setCurlErr("cURL 로 읽지 못했습니다 — 개발자도구 Network 에서 요청을 우클릭 → 'Copy as cURL' 한 내용을 그대로 붙여넣으세요.")
+      setCurlErr("cURL 로 읽지 못했습니다. 개발자도구 Network 에서 요청을 우클릭 → 'Copy as cURL' 한 내용을 그대로 붙여넣으세요.")
       return
     }
     const headers = headersFromCurl(parsed.headers)
@@ -1391,7 +1684,7 @@ function ConfigView({
         <div className="mb-2 text-[11px] font-medium text-gray-300">포털 주소</div>
         <div className="grid grid-cols-[1fr_auto] gap-2">
           <div>
-            <div className={labelCls}>기본 주소 — 도메인이 바뀌면 여기만 고치면 됩니다</div>
+            <div className={labelCls}>기본 주소: 도메인이 바뀌면 여기만 고치면 됩니다</div>
             <input
               className={
                 inputCls + ' w-full' + (cfg.baseUrl.trim() ? '' : ' border-amber-500/60 bg-amber-500/5')
@@ -1404,7 +1697,7 @@ function ConfigView({
             />
             {!cfg.baseUrl.trim() && (
               <p className="mt-1 text-[10.5px] text-amber-300">
-                주소가 비어 있습니다 — 위 칸의 회색 글씨는 예시일 뿐 입력된 값이 아닙니다. 주소를 넣어야 아래
+                주소가 비어 있습니다. 위 칸의 회색 글씨는 예시일 뿐 입력된 값이 아닙니다. 주소를 넣어야 아래
                 로그인 창·시험 버튼이 동작합니다.
               </p>
             )}
@@ -1442,7 +1735,7 @@ function ConfigView({
           <>
             <div className={labelCls}>
               개발자도구에서 복사한 토큰. 만료되면 감시가 멈추므로, 로그인 API 경로를 아직 모를 때 잠깐
-              확인하는 용도로만 쓰세요 — 긴 검증에는 위 <b className="text-gray-400">아이디/비밀번호 로그인</b> 을 쓰세요.
+              확인하는 용도로만 쓰세요. 긴 검증에는 위 <b className="text-gray-400">아이디/비밀번호 로그인</b> 을 쓰세요.
             </div>
             <input className={`${inputCls} w-full`} value={cfg.auth.token ?? ''} onChange={(e) => setAuth({ token: e.target.value })} />
           </>
@@ -1465,7 +1758,7 @@ function ConfigView({
                 {/* 이 안내는 아직 통과하지 못한 동안에만 값어치가 있다 */}
                 {looksEncrypted(cfg.auth.password ?? '') && !loginTest?.ok && !pwEditing && (
                   <div className="rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-sky-200">
-                    비밀번호 칸의 값이 <b>암호화된 문자열처럼</b> 보입니다 — 개발자도구 Payload 에서 그대로 옮기신
+                    비밀번호 칸의 값이 <b>암호화된 문자열처럼</b> 보입니다. 개발자도구 Payload 에서 그대로 옮기신
                     것이라면 대개 <b>그대로 다시 보내도 통합니다</b>(AES-CBC 는 복호화에 필요한 값을 암호문 안에
                     같이 담아 보내기 때문입니다). 아래 <b>'로그인 시험'</b> 으로 확인하세요.
                   </div>
@@ -1534,7 +1827,7 @@ function ConfigView({
 
             {/* 실패는 접지 않는다 — 사유가 곧 다음에 할 일이다 */}
             {/* 사유가 한 줄로 이어지면 '적어 둔 위치' 와 '응답에 있는 값' 이 한 문단으로
-                뭉쳐 읽히지 않는다 — 문구 쪽에서 넣은 줄바꿈을 그대로 살린다 */}
+                뭉쳐 읽히지 않는다. 문구 쪽에서 넣은 줄바꿈을 그대로 살린다 */}
             {loginTest && !loginTest.ok && (
               <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber-200">
                 <div className="font-medium">로그인 시험 실패</div>
@@ -1555,11 +1848,11 @@ function ConfigView({
                   <div className="col-span-2">
                     {/* MFA 를 쓰는 포털이 있다 — 바꾼 것은 없고, 원래 되는 것을 적어 둔다.
                         본문은 통째로 그대로 나가므로 인증번호 칸을 하나 더 적으면 그만이다.
-                        (한 번에 끝나는 로그인만 해당한다 — 로그인 뒤 인증번호를 다시 물어보는
+                        (한 번에 끝나는 로그인만 해당한다. 로그인 뒤 인증번호를 다시 물어보는
                         2단계 방식은 요청이 두 번이라 지금 구조로는 안 된다) */}
                     <div
                       className={labelCls}
-                      title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다. 그 밖의 칸은 적은 그대로 나갑니다 — MFA 라면 인증번호 칸을 그냥 추가하세요"
+                      title="{{id}} / {{pw}} 가 위 계정·비밀번호로 치환됩니다. 그 밖의 칸은 적은 그대로 나갑니다. MFA 라면 인증번호 칸을 그냥 추가하세요"
                     >
                       로그인 요청 본문 <HelpCircle size={9} className="mb-px inline text-gray-600" />
                     </div>
@@ -1568,7 +1861,7 @@ function ConfigView({
                       <span className="text-gray-500">{'{{id}}'}</span> ·{' '}
                       <span className="text-gray-500">{'{{pw}}'}</span> 만 치환되고 나머지는 적은 그대로 나갑니다.
                       인증번호를 <span className="text-gray-500">한 번에 같이 보내는</span> 포털이면 여기에 칸을 하나
-                      더 적으면 됩니다 —{' '}
+                      더 적으면 됩니다. {' '}
                       <span className="font-mono text-gray-500">{'{"userId":"{{id}}","password":"{{pw}}","otpCode":"123456"}'}</span>
                       <br />
                       로그인한 뒤 인증번호를 <span className="text-gray-500">다시 묻는</span> 포털이면 아래 2차 인증을
@@ -1580,7 +1873,7 @@ function ConfigView({
                     ── 2차 인증 ───────────────────────────────────────
                     로그인 뒤 6자리를 다시 묻는 포털용. **기본은 꺼짐**이라 쓰지 않는 사람에게는
                     흐린 칸 네 개가 늘어날 뿐 동작은 그대로다. 칸의 값은 미리 채워 두므로
-                    켜기만 누르면 된다 — 켜고 나서 네 칸을 처음부터 적게 하지 않는다.
+                    켜기만 누르면 된다. 켜고 나서 네 칸을 처음부터 적게 하지 않는다.
 
                     **고정 인증번호에만 쓸 수 있다** — 30초마다 바뀌는 진짜 OTP 는 비밀키가
                     있어야 만들 수 있고, 우리는 그것을 받지 않는다. 검증 환경에서 코드를
@@ -1617,7 +1910,7 @@ function ConfigView({
                       <span className="text-[10px] text-gray-600">
                         {mfaOn
                           ? '로그인 → 인증번호 확인, 두 번 보냅니다'
-                          : '로그인 한 번으로 끝냅니다 — 아래 값은 그대로 둡니다'}
+                          : '로그인 한 번으로 끝냅니다. 아래 값은 그대로 둡니다'}
                       </span>
                     </div>
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
@@ -1625,7 +1918,7 @@ function ConfigView({
                       <span className="text-gray-500">중간 토큰과 세션 쿠키를 둘 다</span> 2단계로 물려줍니다.
                       <br />
                       <span className="text-amber-300/70">
-                        번호가 30초마다 바뀌거나 메일로 새로 오는 방식에는 쓸 수 없습니다 — 검증 환경에서 고정해
+                        번호가 30초마다 바뀌거나 메일로 새로 오는 방식에는 쓸 수 없습니다. 검증 환경에서 고정해
                         둔 번호만 됩니다. 재발급 주기마다 1·2단계를 다시 밟으므로, 실제 포털이라면 그때마다 인증
                         메일이 나갑니다.
                       </span>
@@ -1638,7 +1931,7 @@ function ConfigView({
                         {[!cfg.auth.mfaPath?.trim() && '2차 인증 경로', !cfg.auth.otp?.trim() && '인증번호']
                           .filter(Boolean)
                           .join(' · ')}{' '}
-                        이(가) 비어 있습니다 — 채워야 로그인이 끝까지 갑니다.
+                        이(가) 비어 있습니다. 채워야 로그인이 끝까지 갑니다.
                       </p>
                     )}
                     <div className="grid grid-cols-2 gap-2">
@@ -1683,7 +1976,7 @@ function ConfigView({
                           onChange={(e) => setAuth({ mfaTokenPath: e.target.value })}
                         />
                         <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
-                          <span className="text-gray-500">1단계가 돌려준 이름</span>으로 적으세요 — 2단계가 받는
+                          <span className="text-gray-500">1단계가 돌려준 이름</span>으로 적으세요. 2단계가 받는
                           칸 이름과 다를 수 있습니다(예: 응답은 sessionUuid, 요청은 otpSessionUuid). 틀리면 아래
                           <span className="text-gray-500"> 로그인 시험</span> 이 실제 응답의 후보 경로를 적어
                           줍니다.
@@ -1704,7 +1997,7 @@ function ConfigView({
                           <span className="text-gray-500">{'{{otp}}'}</span> ·{' '}
                           <span className="text-gray-500">{'{{mfaToken}}'}</span> ·{' '}
                           <span className="text-gray-500">{'{{id}}'}</span> 가 치환됩니다. 토큰은 위{' '}
-                          <span className="text-gray-500">토큰 위치</span> 로 2단계 응답에서 꺼냅니다 — 1단계가
+                          <span className="text-gray-500">토큰 위치</span> 로 2단계 응답에서 꺼냅니다. 1단계가
                           아니라 <span className="text-gray-500">2단계</span> 응답 기준입니다.
                         </p>
                       </div>
@@ -1748,7 +2041,7 @@ function ConfigView({
                 </div>
                 <p className="text-[10.5px] leading-relaxed text-gray-500">
                   401 이 오면 이 설정과 무관하게 항상 자동 재발급하고 한 번 더 시도합니다. 재로그인까지 실패하면
-                  그대로 비정상으로 기록합니다 — 인증 서비스가 안 떠 있는 것도 "아직 정상이 아니다" 의 일부입니다.
+                  그대로 비정상으로 기록합니다. 인증 서비스가 안 떠 있는 것도 "아직 정상이 아니다" 의 일부입니다.
                 </p>
               </div>
             )}
@@ -1813,11 +2106,18 @@ function ConfigView({
             )}
           </span>
           <button
+            onClick={() => setImportOpen(true)}
+            title="개발자도구 Network 에서 '모두 cURL 로 복사' 한 글이나 HAR 파일로 한 화면의 API 를 한 번에 등록합니다"
+            className="ml-auto flex shrink-0 items-center gap-1 rounded border border-blue-500/40 bg-blue-500/10 px-2 py-0.5 text-[11px] text-blue-100 hover:bg-blue-500/20"
+          >
+            <Download size={11} /> 한꺼번에 가져오기
+          </button>
+          <button
             onClick={() => {
               setCurlNew(curlNew === null ? '' : null)
               setCurlErr('')
             }}
-            className="ml-auto flex shrink-0 items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/5"
+            className="flex shrink-0 items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-gray-300 hover:bg-white/5"
           >
             <ClipboardPaste size={11} /> cURL 로 추가
           </button>
@@ -1825,6 +2125,129 @@ function ConfigView({
             <Plus size={11} /> 대상 추가
           </button>
         </div>
+        {/* 목록 전체를 다루는 것들 — 시험 · 여러 개 고르기 · 설정 파일 */}
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+          <button
+            onClick={() => onTestAll(cfg.targets.filter((t) => t.enabled && (t.path ?? '').trim()))}
+            disabled={bulkTesting}
+            className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/5 disabled:opacity-50"
+          >
+            {bulkTesting ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} 전체 시험
+          </button>
+          {(() => {
+            const done = cfg.targets.filter((t) => testResult[t.id])
+            const bad = done.filter((t) => !testResult[t.id].ok)
+            return done.length ? (
+              <span className={bad.length ? 'text-red-300' : 'text-emerald-300/90'}>
+                시험 {done.length}개 중 {bad.length ? `${bad.length}개 비정상(줄에 사유)` : '모두 정상'}
+              </span>
+            ) : null
+          })()}
+          <button
+            onClick={() => {
+              setSel(sel ? null : new Set())
+              setDelAsk(false)
+            }}
+            className={'ml-auto flex items-center gap-1 rounded border px-2 py-0.5 ' + (sel ? 'border-blue-500/50 bg-blue-500/15 text-blue-100' : 'border-white/10 text-gray-300 hover:bg-white/5')}
+          >
+            <Check size={11} /> {sel ? '고르기 끝' : '여러 개 고르기'}
+          </button>
+          <button onClick={() => void exportFile()} title="화면 · API 목록을 파일로(아이디 · 비밀번호 · 토큰은 빼고). 팀원과 나눌 때" className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/5">
+            <Upload size={11} /> 설정 내보내기
+          </button>
+          <button onClick={() => fileRef.current?.click()} title="내보낸 설정 파일의 API 를 지금 목록에 더합니다(같은 API 는 건너뜀, 계정은 그대로)" className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/5">
+            <FileUp size={11} /> 설정 파일 더하기
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              void importFile(e.target.files?.[0])
+              e.target.value = ''
+            }}
+          />
+        </div>
+        {fileMsg && <div className="mb-2 rounded bg-white/[0.04] px-2 py-1 text-[11px] text-gray-300">{fileMsg}</div>}
+        {sel && (
+          <div className="sticky top-0 z-10 mb-2 flex flex-wrap items-center gap-1.5 rounded border border-blue-500/40 bg-panel px-2 py-1.5 text-[11px]">
+            <span className="text-blue-100">{sel.size}개 고름</span>
+            <button onClick={() => setSel(new Set(cfg.targets.map((t) => t.id)))} className="rounded px-1.5 text-gray-400 hover:bg-white/5">
+              모두
+            </button>
+            <button onClick={() => setSel(new Set())} className="rounded px-1.5 text-gray-400 hover:bg-white/5">
+              비우기
+            </button>
+            <span className="mx-1 h-3 w-px bg-white/10" />
+            <input
+              list="portal-screens"
+              value={moveTo}
+              onChange={(e) => setMoveTo(e.target.value)}
+              placeholder="화면 이름"
+              className={`${inputCls} w-32`}
+            />
+            <button
+              disabled={!sel.size || !moveTo.trim()}
+              onClick={() => bulkSet({ group: moveTo.trim() })}
+              className="rounded border border-white/10 px-1.5 py-0.5 text-gray-200 hover:bg-white/5 disabled:opacity-40"
+            >
+              화면으로 옮기기
+            </button>
+            <button disabled={!sel.size} onClick={() => bulkSet({ enabled: true })} className="rounded border border-white/10 px-1.5 py-0.5 text-gray-200 hover:bg-white/5 disabled:opacity-40">
+              켜기
+            </button>
+            <button disabled={!sel.size} onClick={() => bulkSet({ enabled: false })} className="rounded border border-white/10 px-1.5 py-0.5 text-gray-200 hover:bg-white/5 disabled:opacity-40">
+              끄기
+            </button>
+            <button disabled={!sel.size} onClick={() => bulkSet({ optional: undefined })} className="rounded border border-white/10 px-1.5 py-0.5 text-gray-200 hover:bg-white/5 disabled:opacity-40">
+              핵심으로
+            </button>
+            <button disabled={!sel.size} onClick={() => bulkSet({ optional: true })} className="rounded border border-white/10 px-1.5 py-0.5 text-gray-200 hover:bg-white/5 disabled:opacity-40">
+              부가로
+            </button>
+            {delAsk ? (
+              <>
+                <span className="text-red-200">{sel.size}개를 지울까요?</span>
+                <button
+                  onClick={() => {
+                    onChange({ ...cfg, targets: cfg.targets.filter((t) => !sel.has(t.id)) })
+                    setSel(new Set())
+                    setDelAsk(false)
+                  }}
+                  className="rounded border border-red-500/50 bg-red-500/20 px-1.5 py-0.5 text-red-100 hover:bg-red-500/30"
+                >
+                  지우기
+                </button>
+                <button onClick={() => setDelAsk(false)} className="rounded border border-white/10 px-1.5 py-0.5 text-gray-300 hover:bg-white/5">
+                  취소
+                </button>
+              </>
+            ) : (
+              <button disabled={!sel.size} onClick={() => setDelAsk(true)} className="rounded border border-white/10 px-1.5 py-0.5 text-red-300 hover:bg-red-500/10 disabled:opacity-40">
+                삭제
+              </button>
+            )}
+          </div>
+        )}
+        <datalist id="portal-screens">
+          {screenNames.map((n) => (
+            <option key={n} value={n} />
+          ))}
+        </datalist>
+        {importOpen && (
+          <BulkImport
+            cfg={cfg}
+            screens={screenNames}
+            onProbe={onProbe}
+            onClose={() => setImportOpen(false)}
+            onAdd={(ts) => {
+              onChange({ ...cfg, targets: [...cfg.targets, ...ts] })
+              setImportOpen(false)
+              setFileMsg(`API ${ts.length}개를 '${ts[0] ? screenOf(ts[0]) : ''}' 화면에 더했습니다. 아래 [전체 시험] 으로 한 번 더 확인할 수 있습니다`)
+            }}
+          />
+        )}
         {/* 새 대상을 만드는 가장 확실한 길 — 브라우저가 실제로 보낸 요청을 통째로 가져온다 */}
         {curlNew !== null && (
           <div className="mb-2 rounded border border-blue-500/30 bg-blue-500/5 p-2">
@@ -1862,8 +2285,41 @@ function ConfigView({
             </div>
           </div>
         )}
-        <div className="space-y-1.5">
-          {cfg.targets.map((t) => {
+        <div className="space-y-2.5">
+          {screensOf(cfg.targets).map((sc) => (
+            // 묶음 없는 화면은 API 이름이 곧 화면 이름이라, 이름을 key 로 쓰면 이름을 한 글자 칠 때마다 칸이 새로 그려져 입력이 끊겼다
+            // (코드 점검 10-29). 그런 화면은 API id 로, 묶음 화면은 이름으로 key 를 잡는다
+            <div key={sc.targets.every((t) => !t.group?.trim()) ? `id:${sc.targets[0]?.id}` : `g:${sc.name}`}>
+              {/* 화면 머리 — 이름을 고치면 이 화면의 API 가 모두 따라간다 */}
+              <div className="mb-1 flex items-center gap-2 px-0.5">
+                <ScreenNameInput name={sc.name} onRename={(to) => renameScreen(sc.name, to)} />
+                <span className="text-[10.5px] text-gray-500">
+                  API {sc.targets.length}개{sc.targets.some((t) => t.optional) ? ` · 핵심 ${sc.core.length}` : ''}
+                </span>
+                {sel && (
+                  <button
+                    onClick={() => {
+                      const ids = sc.targets.map((t) => t.id)
+                      const all = ids.every((id) => sel.has(id))
+                      const n = new Set(sel)
+                      for (const id of ids) all ? n.delete(id) : n.add(id)
+                      setSel(n)
+                    }}
+                    className="rounded px-1.5 text-[10.5px] text-blue-200 hover:bg-white/5"
+                  >
+                    이 화면 고르기
+                  </button>
+                )}
+                <button
+                  onClick={() => onTestAll(sc.targets.filter((t) => t.enabled && (t.path ?? '').trim()))}
+                  disabled={bulkTesting}
+                  className="ml-auto flex items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[10.5px] text-gray-400 hover:bg-white/5 disabled:opacity-40"
+                >
+                  <RefreshCw size={10} /> 이 화면 시험
+                </button>
+              </div>
+              <div className="space-y-1.5">
+          {sc.targets.map((t) => {
             const isOpen = expanded === t.id
             const res = testResult[t.id]
             return (
@@ -1879,7 +2335,28 @@ function ConfigView({
                 }
               >
                 <div className="flex items-center gap-2 px-2 py-1.5">
+                  {sel && (
+                    <input
+                      type="checkbox"
+                      className="accent-blue-500"
+                      checked={sel.has(t.id)}
+                      onChange={(e) => {
+                        const n = new Set(sel)
+                        if (e.target.checked) n.add(t.id)
+                        else n.delete(t.id)
+                        setSel(n)
+                      }}
+                      title="여러 개 고르기"
+                    />
+                  )}
                   <input type="checkbox" checked={t.enabled} onChange={(e) => setTarget(t.id, { enabled: e.target.checked })} title="감시 켜기/끄기" />
+                  <button
+                    onClick={() => setTarget(t.id, { optional: t.optional ? undefined : true })}
+                    title={t.optional ? '부가: 화면 판정에서 뺍니다(상태만 보여 줌). 누르면 핵심으로' : '핵심: 이 API 가 정상이어야 화면이 정상입니다. 누르면 부가로(늦게 붙는 그래프 등)'}
+                    className={'shrink-0 rounded px-1 text-[10px] ' + (t.optional ? 'bg-white/5 text-gray-500' : 'bg-blue-500/15 text-blue-200')}
+                  >
+                    {t.optional ? '부가' : '핵심'}
+                  </button>
                   <button onClick={() => setExpanded(isOpen ? null : t.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
                     {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                     <span className="shrink-0 text-[11.5px] text-gray-200">{t.name || '(이름 없음)'}</span>
@@ -1939,7 +2416,7 @@ function ConfigView({
                         <div className="mb-1">
                           {(t.checks ?? []).length === 0 ? (
                             <>
-                              이 응답에는 <b>목록</b>이 들어 있습니다. 눌러서 <b>정상 조건</b>으로 추가하세요 — 지금은
+                              이 응답에는 <b>목록</b>이 들어 있습니다. 눌러서 <b>정상 조건</b>으로 추가하세요. 지금은
                               조건이 없어 <b>200 이면 정상</b>으로 칩니다.
                             </>
                           ) : (
@@ -1972,7 +2449,7 @@ function ConfigView({
                     )}
                     {/*
                       목록이 원래 비어 있을 수 있는 응답이다. 경로를 바꿔 봐야 소용없고, 조건 자체를
-                      바꿔야 한다 — 백엔드가 실제로 답을 만들었다는 신호(응답 봉투의 상태 문구)를 본다.
+                      바꿔야 한다. 백엔드가 실제로 답을 만들었다는 신호(응답 봉투의 상태 문구)를 본다.
                     */}
                     {res.suggestValues && (
                       <div className="mb-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-amber-100">
@@ -1980,19 +2457,19 @@ function ConfigView({
                             넣는 버튼이라, 시험 때 오류가 왔다면 '오류여야 정상' 이 굳어 버린다 */}
                         {res.suggestValues.some((v) => looksLikeErrorValue(v.value)) && (
                           <div className="mb-1 rounded border border-red-400/50 bg-red-500/15 px-1.5 py-1 text-red-100">
-                            지금 이 응답은 <b>오류로 보입니다</b> —{' '}
+                            지금 이 응답은 <b>오류로 보입니다</b> {' '}
                             {res.suggestValues
                               .filter((v) => looksLikeErrorValue(v.value))
                               .map((v) => `${v.path} = ${v.value}`)
                               .join(' · ')}
-                            . 이 문구는 정상 조건으로 권하지 않습니다 — 넣으면 서버가 제대로 답할 때 오히려
+                            . 이 문구는 정상 조건으로 권하지 않습니다. 넣으면 서버가 제대로 답할 때 오히려
                             비정상이 됩니다. 경로·질의값을 고쳐 <b>성공 응답</b>을 받은 뒤 다시 시험하세요.
                           </div>
                         )}
                         {res.suggestValues.some((v) => !looksLikeErrorValue(v.value)) && (
                           <div className="mb-1">
                             이 응답에는 <b>항목이 있는 목록이 없습니다</b>. 원래 0건일 수 있는 응답이라면
-                            <b> 항목 1개 이상</b> 대신 아래 조건이 맞습니다 — 백엔드가 답을 만들었을 때만 나오는
+                            <b> 항목 1개 이상</b> 대신 아래 조건이 맞습니다. 백엔드가 답을 만들었을 때만 나오는
                             문구라, 게이트웨이 오류 페이지나 화면 껍데기는 통과하지 못합니다.
                           </div>
                         )}
@@ -2050,8 +2527,22 @@ function ConfigView({
                     {/* ── 1 · 무엇을 부르나 ── */}
                     <div className="text-[10px] uppercase tracking-wide text-gray-500">1 · 무엇을 부르나</div>
                     <div>
-                      <div className={labelCls}>이름 — 화면에 이 이름으로 보입니다</div>
-                      <input className={`${inputCls} w-full`} value={t.name} onChange={(e) => setTarget(t.id, { name: e.target.value })} />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className={labelCls}>이름: 화면 안에서 이 이름으로 보입니다</div>
+                          <CommitInput className={`${inputCls} w-full`} value={t.name} onCommit={(v) => setTarget(t.id, { name: v })} />
+                        </div>
+                        <div>
+                          <div className={labelCls}>화면: 이 API 를 부르는 포털 화면(판정 단위)</div>
+                          <CommitInput
+                            list="portal-screens"
+                            className={`${inputCls} w-full`}
+                            value={t.group ?? ''}
+                            placeholder={`비우면 이름(${t.name || '새 대상'})이 화면`}
+                            onCommit={(v) => setTarget(t.id, { group: v })}
+                          />
+                        </div>
+                      </div>
                     </div>
                     <div className="grid grid-cols-[auto_1fr_auto] gap-2">
                       <div>
@@ -2068,7 +2559,7 @@ function ConfigView({
                       </div>
                       <div>
                         <div className={labelCls}>
-                          <b className="text-amber-300/90">API</b> 경로 — 화면 주소가 아니라 그 화면이 부르는 요청
+                          <b className="text-amber-300/90">API</b> 경로: 화면 주소가 아니라 그 화면이 부르는 요청
                           (개발자도구 Network → Fetch/XHR) · <span className="text-blue-300/90">cURL 을 붙여넣어도 알아서 읽습니다</span>
                         </div>
                         <input
@@ -2094,7 +2585,7 @@ function ConfigView({
                         />
                         {/^\/?(?!v\d|api\b)[a-z-]+\/[a-z-]+/i.test(t.path.trim()) && !/\?|\/v\d|\/api\b/i.test(t.path) && (
                           <p className="mt-0.5 text-[10.5px] text-amber-300/90">
-                            화면 주소처럼 보입니다. 그 화면을 열었을 때 Network 에 찍히는 요청 경로를 넣어야 합니다 —
+                            화면 주소처럼 보입니다. 그 화면을 열었을 때 Network 에 찍히는 요청 경로를 넣어야 합니다. 
                             페이지 주소는 백엔드가 죽어도 200 이 옵니다.
                           </p>
                         )}
@@ -2112,7 +2603,7 @@ function ConfigView({
                     <div>
                       <div className="mb-1 flex items-center gap-2">
                         <span className={labelCls}>
-                          정상 조건 — 전부 통과해야 정상. <b className="text-gray-400">비우면 응답 본문을 보지 않고 200 이면 정상</b>으로 칩니다
+                          정상 조건: 전부 통과해야 정상. <b className="text-gray-400">비우면 응답 본문을 보지 않고 200 이면 정상</b>으로 칩니다
                         </span>
                         <button
                           onClick={() => setTarget(t.id, { checks: [...(t.checks ?? []), { path: '', op: 'nonEmptyArray' }] })}
@@ -2124,10 +2615,10 @@ function ConfigView({
                       {(t.checks ?? []).length === 0 && (
                         <p className="text-[10.5px] text-amber-300/80">
                           지금은 <b>200 이면 정상</b>입니다. 목록을 주는 API 라면{' '}
-                          <span className="text-gray-300">content · 항목 1개 이상</span> 을 넣으세요 — DB 는 붙었는데 백엔드가
+                          <span className="text-gray-300">content · 항목 1개 이상</span> 을 넣으세요. DB 는 붙었는데 백엔드가
                           아직 데이터를 못 읽어 <b>200 인데 빈 목록</b>이 오는 구간이 반드시 있고, 그건 복구가 아닙니다.
                           <br />
-                          어떤 경로를 넣을지 모르겠으면 <b>⟳ 시험</b>을 누르세요 — 이 응답 안의 목록을 찾아 제안합니다.
+                          어떤 경로를 넣을지 모르겠으면 <b>⟳ 시험</b>을 누르세요. 이 응답 안의 목록을 찾아 제안합니다.
                         </p>
                       )}
                       <div className="space-y-1">
@@ -2182,16 +2673,12 @@ function ConfigView({
                       {advTarget === t.id ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                       3 · 고급
                       <span className="normal-case tracking-normal text-gray-600">
-                        — 묶음 · 연속 성공 · 상태 코드 · 본문 · 헤더 · 메모
+연속 성공 · 상태 코드 · 본문 · 헤더 · 메모
                       </span>
                     </button>
                     {advTarget === t.id && (
                       <div className="space-y-2 rounded border border-white/10 bg-black/20 p-2">
                         <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <div className={labelCls}>페이지 묶음 (같은 이름끼리 모아 표시)</div>
-                            <input className={`${inputCls} w-full`} value={t.group ?? ''} placeholder="인스턴스 상세" onChange={(e) => setTarget(t.id, { group: e.target.value })} />
-                          </div>
                           <div>
                             <div className={labelCls}>연속 성공 (비우면 전체 설정값)</div>
                             <input
@@ -2285,6 +2772,370 @@ function ConfigView({
               </div>
             )
           })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 화면 이름 — 그 자리에서 고치고, Enter · 칸 밖 누름에 반영한다(글자마다 반영하면 치는 중에 API 들이 다른 화면으로 흩어진다) */
+function ScreenNameInput({ name, onRename }: { name: string; onRename: (to: string) => void }) {
+  const [v, setV] = useState(name)
+  useEffect(() => setV(name), [name])
+  return (
+    <input
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={() => (v.trim() ? onRename(v) : setV(name))}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') setV(name)
+      }}
+      title="화면 이름: 고치면 이 화면의 API 가 모두 따라갑니다"
+      className="w-48 rounded border border-transparent bg-transparent px-1 py-0.5 text-[12px] font-medium text-gray-100 hover:border-white/10 focus:border-blue-500/50 focus:bg-black/30 focus:outline-none"
+    />
+  )
+}
+
+/**
+ * 다 쓰고 나서(칸을 벗어나거나 Enter) 반영하는 입력 칸. 이름 · 화면은 바꾸는 즉시 그 API 를 다른 화면으로 옮기므로, 칠 때마다 반영하면
+ * 한 글자마다 줄이 다른 화면 아래로 뛰고 입력이 끊겼다(코드 점검 10-29). Esc 는 되돌림
+ */
+function CommitInput({ value, onCommit, ...rest }: { value: string; onCommit: (v: string) => void; className?: string; placeholder?: string; list?: string }) {
+  const [v, setV] = useState(value)
+  useEffect(() => setV(value), [value])
+  return (
+    <input
+      {...rest}
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={() => v !== value && onCommit(v)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') setV(value)
+      }}
+    />
+  )
+}
+
+type ProbeResult = { status?: number; ms?: number; body?: string; error?: string }
+
+/**
+ * API 한꺼번에 가져오기(10-28). 개발자도구 Network 의 '모두 cURL 로 복사' 글이나 HAR 파일 하나로 한 화면의 API 를 등록한다.
+ * 감시할 만한 것만 미리 골라 두고(lib/portalImport), 응답이 없으면(cURL) 정리하는 즉시 한 번씩 불러 기준을 정한다.
+ * 닫기는 X · 취소뿐 — 붙여넣은 글과 고른 체크가 손이 스친 클릭에 사라지면 처음부터 다시 해야 한다.
+ */
+function BulkImport({
+  cfg,
+  screens,
+  onProbe,
+  onClose,
+  onAdd,
+}: {
+  cfg: PortalConfig
+  screens: string[]
+  onProbe: (t: PortalTarget) => Promise<ProbeResult>
+  onClose: () => void
+  onAdd: (ts: PortalTarget[]) => void
+}) {
+  const [text, setText] = useState('')
+  const [cands, setCands] = useState<ImportCandidate[] | null>(null)
+  /** 부가로 고른 후보(key) — 기본은 전부 핵심 */
+  const [opt, setOpt] = useState<Record<string, boolean>>({})
+  const [screen, setScreen] = useState('')
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [showSkipped, setShowSkipped] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  const upd = (key: string, p: Partial<ImportCandidate>) => setCands((cs) => cs && cs.map((c) => (c.key === key ? { ...c, ...p } : c)))
+  /** 고른 후보를 지금 한 번 불러 본다 — 응답으로 기준을 정하고, 오류면 기준을 비우고 체크를 푼다 */
+  /**
+   * 정리한 목록의 세대 — 시험 결과는 **그 세대의 지금 목록**에 하나씩 얹는다(코드 점검 10-29). 예전엔 시험 전 목록을 통째로 돌려받아
+   * 덮어써서, 시험하는 동안 고친 이름 · 끈 체크가 사라졌고, 그 사이 HAR 을 넣으면 늦게 끝난 cURL 결과가 HAR 목록을 덮었다.
+   */
+  const genRef = useRef(0)
+  const testPicked = async (list: ImportCandidate[]) => {
+    const todo = list.filter((c) => c.pick && !c.skip)
+    if (!todo.length) return
+    const gen = genRef.current
+    setBusy(true)
+    try {
+      await pool(todo, 4, async (c) => {
+        const t0 = Date.now()
+        let r: ProbeResult
+        try {
+          r = await onProbe(candidateToTarget(c, '', 'probe'))
+        } catch (e) {
+          r = { error: e instanceof Error ? e.message : String(e) }
+        }
+        if (gen !== genRef.current) return
+        const crit = criteriaFrom(r.status, r.body, c.path)
+        setCands((cs) =>
+          cs && gen === genRef.current
+            ? cs.map((x) =>
+                x.key === c.key
+                  ? {
+                      ...x,
+                      resp: { status: r.status, ms: r.ms ?? Date.now() - t0, error: r.error },
+                      expectStatus: crit.expectStatus,
+                      checks: crit.checks,
+                      respBad: crit.bad || undefined,
+                      respWhy: crit.why,
+                      // 오류면 끄고, 정상이면 사람이 고른 그대로 둔다
+                      pick: crit.bad ? false : x.pick,
+                    }
+                  : x,
+              )
+            : cs,
+        )
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  const organize = async (src: string) => {
+    if (busy) return
+    setMsg('')
+    const trimmed = src.trim()
+    if (!trimmed) return setMsg('붙여넣은 내용이 없습니다')
+    let reqs: RawRequest[] | null
+    let bad = 0
+    if (trimmed.startsWith('{')) {
+      reqs = parseHar(trimmed)
+      if (!reqs) return setMsg('HAR(JSON) 로 읽지 못했습니다. 개발자도구 Network 에서 내보낸 .har 파일을 그대로 넣으세요')
+    } else {
+      const r = parseCurlAll(trimmed)
+      reqs = r.reqs
+      bad = r.bad
+      if (!reqs.length) return setMsg('cURL 로 읽지 못했습니다. Network 목록에서 우클릭 후 Copy all as cURL 한 내용을 붙여넣으세요')
+    }
+    const list = buildCandidates(reqs, cfg)
+    genRef.current++
+    setCands(list)
+    setMsg(bad ? `읽지 못한 요청 ${bad}개는 뺐습니다` : '')
+    // HAR 에는 브라우저가 받은 응답이 있어 그것으로 기준을 정했다. cURL 은 응답이 없으므로 지금 한 번 불러 본다(체크된 것만 — POST 는 처음에 체크하지 않는다)
+    if (!reqs.some((r) => r.resp)) await testPicked(list)
+  }
+  const readFile = (f: File | undefined) => {
+    if (!f || busy) return
+    void f.text().then((t) => {
+      setText(`(${f.name})`)
+      void organize(t)
+    })
+  }
+  const picked = (cands ?? []).filter((c) => c.pick && !c.skip)
+  const shown = (cands ?? []).filter((c) => showSkipped || !c.skip)
+  const skipped = (cands ?? []).filter((c) => c.skip)
+  const skipSummary = Array.from(new Set(skipped.map((c) => c.skip as string)))
+    .map((k) => `${k} ${skipped.filter((c) => c.skip === k).length}`)
+    .join(' · ')
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6">
+      <div className="flex max-h-[88vh] w-[980px] max-w-[96vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <Download size={15} className="text-blue-300" />
+          <span className="text-[13px] font-semibold text-gray-100">API 한꺼번에 가져오기</span>
+          <button onClick={onClose} className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200" title="닫기">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="grid grid-cols-[minmax(0,1fr)_220px] gap-3 border-b border-white/10 px-4 py-3">
+          <div
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault()
+              readFile(e.dataTransfer.files?.[0])
+            }}
+          >
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={'포털 화면 하나를 연 뒤 개발자도구 Network 목록에서 우클릭 > Copy all as cURL 한 내용을 붙여넣거나,\nSave all as HAR 로 저장한 파일을 여기에 끌어 놓으세요'}
+              className={`${inputCls} h-24 w-full font-mono`}
+            />
+            <div className="mt-1 flex items-center gap-2 text-[11px]">
+              <button
+                onClick={() => void organize(text)}
+                disabled={busy}
+                className="rounded border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 text-blue-100 hover:bg-blue-500/25 disabled:opacity-50"
+              >
+                정리하기
+              </button>
+              <button onClick={() => fileRef.current?.click()} className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/5">
+                HAR 파일 고르기
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".har,.json,application/json"
+                className="hidden"
+                onChange={(e) => {
+                  readFile(e.target.files?.[0])
+                  e.target.value = ''
+                }}
+              />
+              <span className="text-gray-500">쿠키 · 토큰은 저장하지 않습니다(감시할 때 로그인으로 새로 붙임)</span>
+            </div>
+          </div>
+          <div className="text-[11px]">
+            <div className={labelCls}>넣을 화면</div>
+            <input list="portal-import-screens" value={screen} onChange={(e) => setScreen(e.target.value)} placeholder="예: 인스턴스 목록" className={`${inputCls} w-full`} />
+            <datalist id="portal-import-screens">
+              {screens.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+            <p className="mt-1 text-[10.5px] leading-relaxed text-gray-500">있는 화면을 고르거나 새 이름을 넣으면 새 화면이 됩니다.</p>
+            {!cfg.baseUrl.trim() && <p className="mt-1 text-[10.5px] text-amber-300/90">포털 주소가 비어 있어 전체 주소로 등록됩니다. 설정에서 먼저 넣기를 권합니다.</p>}
+          </div>
+        </div>
+        {msg && <div className="mx-4 mt-2 rounded bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">{msg}</div>}
+        <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
+          {!cands ? (
+            // 받는 방법을 창 안에 둔다 — 안내문 한 줄로는 Fetch/XHR 거르기 · 새로고침을 빠뜨려
+            // 화면을 연 뒤에 부른 요청만 잡히거나 이미지 · 스크립트가 섞였다(10-29 지적)
+            <div className="mx-auto max-w-[620px] py-4 text-[12px] text-gray-300">
+              <div className="mb-2 font-medium text-gray-200">API 받는 방법 (Chrome · Edge)</div>
+              <ol className="list-decimal space-y-1.5 pl-5 leading-relaxed">
+                <li>브라우저에서 포털에 로그인하고 감시할 화면 하나를 엽니다.</li>
+                <li>
+                  <b>F12</b> 로 개발자도구를 열고 <b>Network</b> 탭에서 필터를 <b>Fetch/XHR</b> 로 고릅니다.
+                </li>
+                <li>
+                  <b>새로고침(F5)</b> 합니다. 화면이 처음 열릴 때 부르는 API 가 모두 잡혀야 합니다.
+                </li>
+                <li>
+                  목록의 아무 줄에서 우클릭 → <b>Copy → Copy all as cURL (bash)</b>. cmd 형식이어도 됩니다.
+                </li>
+                <li>
+                  위 칸에 붙여넣고 오른쪽 <b>넣을 화면</b> 이름을 정한 뒤 <b>[정리하기]</b> 를 누릅니다.
+                </li>
+              </ol>
+              <p className="mt-3 text-[11px] leading-relaxed text-gray-500">
+                파일로 받으려면 4번에서 <b>Save all as HAR</b> 로 저장한 뒤 위 칸에 끌어 놓거나 [HAR 파일 고르기] 를 누르세요. 정리하면 정적 파일 · 외부 주소 · 중복은
+                빼 두고 남은 API 를 한 번씩 불러 정상 기준을 미리 채웁니다. 화면마다 따로 받아 넣으면 화면별로 묶입니다.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="mb-1.5 flex flex-wrap items-center gap-3 text-[11px] text-gray-400">
+                <span>찾은 요청 {cands.length}개</span>
+                <span className="text-gray-200">API {picked.length}개 골라 둠</span>
+                {skipped.length > 0 && (
+                  <button onClick={() => setShowSkipped((v) => !v)} className="text-gray-500 hover:text-gray-300">
+                    빼 둔 것 {skipped.length}개({skipSummary}) {showSkipped ? '숨기기' : '보기'}
+                  </button>
+                )}
+                {busy && (
+                  <span className="flex items-center gap-1 text-blue-300">
+                    <Loader2 size={11} className="animate-spin" /> 한 번씩 불러 보는 중
+                  </span>
+                )}
+                <button
+                  onClick={() => void testPicked(cands)}
+                  disabled={busy || !picked.length}
+                  className="ml-auto flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/5 disabled:opacity-40"
+                >
+                  <RefreshCw size={11} /> 고른 것 다시 시험
+                </button>
+              </div>
+              <table className="w-full border-collapse text-[12px]">
+                <thead className="sticky top-0 bg-panel text-left text-[10.5px] text-gray-500">
+                  <tr>
+                    <th className="w-6 py-1" />
+                    <th className="py-1 pr-2 font-normal">이름 (고칠 수 있음)</th>
+                    <th className="py-1 pr-2 font-normal">요청</th>
+                    <th className="py-1 pr-2 font-normal">시험</th>
+                    <th className="py-1 pr-2 font-normal">정상 기준</th>
+                    <th className="py-1 font-normal" title="끄면 부가: 화면 판정에서 뺌(늦게 붙는 그래프 등)">
+                      핵심
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {shown.map((c) => (
+                    <tr key={c.key} className={c.skip ? 'text-gray-600' : ''}>
+                      <td className="py-1">
+                        <input type="checkbox" disabled={!!c.skip} checked={c.pick && !c.skip} onChange={(e) => upd(c.key, { pick: e.target.checked })} />
+                      </td>
+                      <td className="py-1 pr-2">
+                        <input value={c.name} disabled={!!c.skip} onChange={(e) => upd(c.key, { name: e.target.value })} className={`${inputCls} w-40`} />
+                      </td>
+                      <td className="max-w-[300px] truncate py-1 pr-2 font-mono text-[11px] text-gray-400" title={`${c.method} ${c.path}`}>
+                        {c.method} {c.shape}
+                      </td>
+                      <td className="whitespace-nowrap py-1 pr-2 text-[11px]">
+                        {c.skip ? (
+                          <span className="rounded bg-white/5 px-1.5 text-gray-500">{c.skip}</span>
+                        ) : c.resp ? (
+                          <span
+                            // 색은 HTTP 코드만 본다 — 본문 때문에 기준을 못 정한 200 을 빨갛게 칠하면 '200 인데 왜 빨강' 이 된다(10-29)
+                            className={
+                              'rounded px-1.5 ' +
+                              (c.resp.status != null && c.resp.status >= 200 && c.resp.status < 300
+                                ? 'bg-emerald-500/15 text-emerald-300'
+                                : 'bg-red-500/15 text-red-300')
+                            }
+                            title={c.resp.error}
+                          >
+                            {c.resp.status ?? '응답 없음'}
+                            {c.resp.ms != null ? ` · ${c.resp.ms}ms` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">-</span>
+                        )}
+                      </td>
+                      <td className="py-1 pr-2 text-[11px]">
+                        {c.skip ? (
+                          '-'
+                        ) : c.respBad ? (
+                          <span
+                            className="text-amber-300"
+                            title="오류처럼 보이는 응답을 정상 기준으로 삼으면 서버가 고쳐질수록 비정상이 됩니다. 정상 응답이 맞으면 체크하고 추가하세요(HTTP 코드만 봅니다)"
+                          >
+                            기준 안 정함{c.respWhy ? `: ${c.respWhy}` : ''}
+                          </span>
+                        ) : c.resp ? (
+                          <span className="text-gray-300">
+                            {(c.expectStatus ?? [200]).join(',')}
+                            {(c.checks ?? []).map((k) => ` · ${describeCheck(k)}`).join('')}
+                          </span>
+                        ) : c.caution ? (
+                          <span className="text-amber-300/90" title={c.caution}>
+                            POST: 직접 확인 후 체크
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">시험 전</span>
+                        )}
+                      </td>
+                      <td className="py-1">
+                        {!c.skip && <input type="checkbox" checked={!opt[c.key]} onChange={(e) => setOpt((m) => ({ ...m, [c.key]: !e.target.checked }))} />}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5 text-[12px]">
+          <span className="text-gray-400">{picked.length}개 선택</span>
+          {!screen.trim() && picked.length > 0 && <span className="text-amber-300/90">넣을 화면을 정하세요</span>}
+          <button onClick={onClose} className="ml-auto rounded border border-white/10 px-3 py-1 text-gray-300 hover:bg-white/5">
+            취소
+          </button>
+          <button
+            disabled={!picked.length || !screen.trim() || busy}
+            onClick={() => onAdd(picked.map((c) => ({ ...candidateToTarget(c, screen, newTargetId()), ...(opt[c.key] ? { optional: true } : {}) })))}
+            className="rounded bg-blue-600 px-3 py-1 font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+          >
+            {screen.trim() ? `'${screen.trim()}' 에 ${picked.length}개 추가` : `${picked.length}개 추가`}
+          </button>
         </div>
       </div>
     </div>

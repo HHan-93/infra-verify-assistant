@@ -158,12 +158,12 @@ function Card({
 
         전에는 올리든 누르든 카드 끝에 글을 끼워 넣었다. 그러면 왼쪽 칸의 높이가 늘어나며
         스크롤바가 생겼다 없어졌다 하고, 그때마다 칸이 15px 좁아져 위쪽 문단까지 전부
-        다시 줄바꿈된다 — 물음표가 커서 밑에서 밀려나 mouseleave, 되돌아와 mouseenter 가
+        다시 줄바꿈된다. 물음표가 커서 밑에서 밀려나 mouseleave, 되돌아와 mouseenter 가
         되풀이되며 **화면이 떨렸다**(판정 기준의 물음표에서 사용자가 겪었다).
 
         그래서 올렸을 때는 카드 바로 아래에 **떠 있게** 그린다(자리를 차지하지 않는다).
         `pointer-events-none` 은 이 글이 커서를 가로채 같은 되풀이를 만들지 않게 하는 것이다.
-        눌러 고정한 것은 읽으려고 일부러 한 동작이니 그때는 자리를 차지해도 된다 — 오히려
+        눌러 고정한 것은 읽으려고 일부러 한 동작이니 그때는 자리를 차지해도 된다. 오히려
         아래 내용을 가리지 않는 편이 낫다.
       */}
       {hint &&
@@ -560,8 +560,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     if (tool === 'jmeter') setLoadMode('flat')
     setNote(
       tool === 'jmeter'
-        ? 'JMeter 로 바꿨습니다 — .jmx 계획 파일이 필요합니다.'
-        : 'Locust 로 바꿨습니다 — 폼으로 시나리오를 만들 수 있습니다.',
+        ? 'JMeter 로 바꿨습니다. .jmx 계획 파일이 필요합니다.'
+        : 'Locust 로 바꿨습니다. 폼으로 시나리오를 만들 수 있습니다.',
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool])
@@ -617,7 +617,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       setWaitMax(String(n.waitMaxSec))
     }
     setPresetName(pre.name)
-    setNote(`'${pre.name}' 설정을 불러왔습니다 — 대상 주소는 그대로 둡니다.`)
+    setNote(`'${pre.name}' 설정을 불러왔습니다. 대상 주소는 그대로 둡니다.`)
   }
 
   const savePreset = async () => {
@@ -669,7 +669,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       setRunning(st.running)
       setLog(st.log.length > LOG_MAX_CHARS ? st.log.slice(st.log.length - LOG_MAX_CHARS) : st.log)
       setTab('log')
-      setNote('창을 닫은 동안에도 돌고 있던 회차입니다 — 위의 중지로 멈출 수 있습니다.')
+      setNote('창을 닫은 동안에도 돌고 있던 회차입니다. 위의 중지로 멈출 수 있습니다.')
     })
     return () => {
       alive = false
@@ -704,7 +704,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     })
     const offDone = window.electronAPI.onPerfDone((e) => {
       setRunning(null)
-      setNote(e.canceled ? '중지했습니다.' : '끝났습니다 — 요약과 리포트가 회차로 남았습니다.')
+      setNote(e.canceled ? '중지했습니다.' : '끝났습니다. 요약과 리포트가 회차로 남았습니다.')
       // 검증은 몇 분 걸리는 일이라 창을 보고 있지 않을 때가 많다. 판정까지는 아직 모르므로
       // '끝났다' 만 알린다 — 알림에 결론을 적으려면 통계를 다시 읽어야 하고, 그 사이 알림이
       // 늦어지면 알림의 의미가 없다.
@@ -859,7 +859,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
   const addFromCurl = (text: string) => {
     const parsed = parseCurl(text)
     if (!parsed) {
-      setCurlMsg('cURL 명령을 읽지 못했습니다 — 개발자도구에서 복사한 내용을 그대로 붙여넣으세요.')
+      setCurlMsg('cURL 명령을 읽지 못했습니다. 개발자도구에서 복사한 내용을 그대로 붙여넣으세요.')
       return
     }
     let pathOnly = parsed.url
@@ -1023,7 +1023,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       // 도는 중인 회차는 판정하지 않는다 — Locust 는 실행 중에도 run_stats.csv 를 1초마다 다시 써서,
       // 30초치 중간 수치로 '기준 통과' 가 뜨고 그대로 한 장 리포트·AI 분석까지 만들 수 있었다
       selected && running?.id === selected.meta.id
-        ? { tone: 'info' as const, label: '진행 중 — 끝나면 판정합니다', reasons: [] as string[] }
+        ? { tone: 'info' as const, label: '진행 중: 끝나면 판정합니다', reasons: [] as string[] }
         : selected
         ? perfVerdict(
             selectedSummary,
@@ -1086,7 +1086,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
         setServerNote(
           inWindow.length
             ? ''
-            : '이 시간대에 수집된 서버 지표가 없습니다 — 대시보드에서 수집을 켜 두면 다음 회차부터 같이 보입니다.',
+            : '이 시간대에 수집된 서버 지표가 없습니다. 대시보드에서 수집을 켜 두면 다음 회차부터 같이 보입니다.',
         )
       })
     }
@@ -1134,7 +1134,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
     if (!prevRec || !prev) return null
 
     const pct = (before: number, after: number) =>
-      before > 0 ? `${after >= before ? '+' : ''}${(((after - before) / before) * 100).toFixed(0)}%` : '—'
+      before > 0 ? `${after >= before ? '+' : ''}${(((after - before) / before) * 100).toFixed(0)}%` : '-'
 
     const items: { label: string; before: string; after: string; delta: string; worse: boolean | null }[] = []
     if (prev.p95Ms !== undefined && selectedSummary.p95Ms !== undefined) {
@@ -1206,7 +1206,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       `<div style="font-family:system-ui,'Malgun Gothic',sans-serif;margin:16px;padding:14px 16px;` +
       `border:1px solid #dadce0;border-radius:8px;background:#fff">` +
       `<div style="font-size:13px;color:#5f6368;margin-bottom:6px">Q-Term 성능 검증` +
-      (selected.meta.label ? ` — ${esc(selected.meta.label)}` : '') +
+      (selected.meta.label ? ` · ${esc(selected.meta.label)}` : '') +
       `</div>` +
       `<div style="display:inline-block;padding:4px 10px;border-radius:12px;background:${bg};color:${color};` +
       `font-size:14px;font-weight:600">${esc(verdict.label)}</div>` +
@@ -1262,7 +1262,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           )
         : [cfg.scenario.kind === 'file' ? (cfg.scenario.path ?? '') : ''].filter(Boolean),
       scenarioNote: n
-        ? (n.order === 'weighted' ? '랜덤 — 비율대로 무작위 선택' : '순차 — 한 사용자가 차례로') +
+        ? (n.order === 'weighted' ? '랜덤: 비율대로 무작위 선택' : '순차: 한 사용자가 차례로') +
           (n.waitMaxSec > 0 ? ` · 요청 사이 ${n.waitMinSec}~${n.waitMaxSec}초 대기` : ' · 쉬지 않고 요청')
         : undefined,
       criteriaText:
@@ -1274,7 +1274,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           cfg.warmupSec ? `앞 ${cfg.warmupSec}초는 판정에서 제외` : '',
         ]
           .filter(Boolean)
-          .join(' · ') || '없음 — 측정값만 남깁니다',
+          .join(' · ') || '없음: 측정값만 남깁니다',
       verdict,
       summary: selectedSummary ?? undefined,
       history,
@@ -1578,9 +1578,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   <span className="text-[11px] text-gray-300">이럴 때</span>
                 </div>
                 <ul className="space-y-0.5 text-[11px] leading-relaxed text-gray-400">
-                  <li>· 지금 바로 재보고 싶을 때 — 경로만 적으면 앱이 시나리오를 만듭니다</li>
+                  <li>· 지금 바로 재보고 싶을 때: 경로만 적으면 앱이 시나리오를 만듭니다</li>
                   <li>· 돌아가는 동안 화면으로 지켜보고 싶을 때 (앱 안에 대시보드가 들어옵니다)</li>
-                  <li>· 어디서부터 느려지는지 찾을 때 — 인원을 단계로 올리고 시간 그래프로 봅니다</li>
+                  <li>· 어디서부터 느려지는지 찾을 때: 인원을 단계로 올리고 시간 그래프로 봅니다</li>
                   <li>· 실패한 응답의 본문까지 남겨야 할 때</li>
                   <li className="text-gray-500">필요한 것: Python + pip install locust (앱이 대신 설치해 줍니다)</li>
                 </ul>
@@ -1591,18 +1591,18 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   <span className="text-[11px] text-gray-300">이럴 때</span>
                 </div>
                 <ul className="space-y-0.5 text-[11px] leading-relaxed text-gray-400">
-                  <li>· 팀에 이미 만들어 둔 .jmx 계획이 있을 때 — 그대로 돌립니다</li>
+                  <li>· 팀에 이미 만들어 둔 .jmx 계획이 있을 때: 그대로 돌립니다</li>
                   <li>· 로그인·토큰·CSV 데이터처럼 손이 많이 가는 흐름을 GUI 로 짜 둔 경우</li>
-                  <li>· 제출용 보고서가 필요할 때 — 리포트가 더 상세합니다(APDEX·오류 분류)</li>
-                  <li>· 계획이 없어도 됩니다 — 시나리오에서 JMeter 를 띄워 만들 수 있습니다</li>
-                  <li>· 자체 서명 인증서를 신경 쓸 필요가 없습니다 — JMeter 는 검사하지 않습니다</li>
+                  <li>· 제출용 보고서가 필요할 때: 리포트가 더 상세합니다(APDEX·오류 분류)</li>
+                  <li>· 계획이 없어도 됩니다. 시나리오에서 JMeter 를 띄워 만들 수 있습니다</li>
+                  <li>· 자체 서명 인증서를 신경 쓸 필요가 없습니다. JMeter 는 검사하지 않습니다</li>
                   <li className="text-gray-500">안 되는 것: 실행 중 화면 · 인원 늘리기(계단식)</li>
                   <li className="text-gray-500">필요한 것: Java + JMeter 압축 풀기 (경로를 직접 지정)</li>
                 </ul>
               </div>
             </div>
             <p className="mt-2 text-[10.5px] leading-relaxed text-gray-500">
-              둘 다 같은 방식으로 판정하고 회차로 남습니다 — <span className="text-gray-400">고민되면 Locust</span> 로
+              둘 다 같은 방식으로 판정하고 회차로 남습니다. <span className="text-gray-400">고민되면 Locust</span> 로
               시작하세요. 회차는 도구별로 따로 쌓입니다.
             </p>
           </div>
@@ -1640,7 +1640,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   {env?.problem ?? '부하 도구를 찾을 수 없습니다.'}
                 </p>
                 <p className="mt-1 text-[11.5px] leading-relaxed text-gray-300">
-                  {env?.hint} 설치가 끝나면 <span className="text-gray-100">다시 확인</span> 을 누르세요 — 그때까지
+                  {env?.hint} 설치가 끝나면 <span className="text-gray-100">다시 확인</span> 을 누르세요. 그때까지
                   시작 버튼은 눌리지 않습니다.
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1694,8 +1694,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       else await window.electronAPI.perfSetLocustPath(v || null)
                       setNote(
                         v
-                          ? `경로를 저장했습니다 — ${v}`
-                          : '지정한 경로를 지웠습니다 — 이제 PATH 에서 찾습니다.',
+                          ? `경로를 저장했습니다. ${v}`
+                          : '지정한 경로를 지웠습니다. 이제 PATH 에서 찾습니다.',
                       )
                       await checkEnv()
                     }}
@@ -1744,7 +1744,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               </select>
               <div className="mb-0.5 mt-1.5 flex items-center gap-1 text-[10px] text-gray-500">
                 대상 주소
-                <HintMark text="부하를 받을 곳을 주소 한 줄로 적습니다 (두 도구 모두 이 방식입니다). 포트를 안 적으면 http 는 80, https 는 443 으로 갑니다 — 서비스 포트가 다르면 http://주소:8080 처럼 적으세요. 경로는 아래 시나리오에서 정합니다." />
+                <HintMark text="부하를 받을 곳을 주소 한 줄로 적습니다 (두 도구 모두 이 방식입니다). 포트를 안 적으면 http 는 80, https 는 443 으로 갑니다. 서비스 포트가 다르면 http://주소:8080 처럼 적으세요. 경로는 아래 시나리오에서 정합니다." />
               </div>
               <input
                 value={targetUrl}
@@ -1905,7 +1905,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 </>
               )}
               {/* 숫자들이 실제로 무슨 뜻인지 한 문장으로 되짚는다.
-                  JMeter 에서는 두지 않는다 — 계획이 정한다는 사실은 뱃지와 그 옆 물음표가
+                  JMeter 에서는 두지 않는다. 계획이 정한다는 사실은 뱃지와 그 옆 물음표가
                   이미 말하고, 여기 네 줄이 더 붙으면 정작 칸이 밀려난다. */}
               {tool !== 'jmeter' && (
                 <p className="mt-1.5 rounded bg-black/20 px-2 py-1 text-[10.5px] leading-relaxed text-gray-400">
@@ -2009,7 +2009,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               value={String(st.weight)}
                               onChange={(e) => updateStep(i, { weight: Number(e.target.value) || 1 })}
                               disabled={!!running}
-                              title="상대 비율 — 10 이면 비율 1 인 단계보다 10배 자주 실행됩니다"
+                              title="상대 비율: 10 이면 비율 1 인 단계보다 10배 자주 실행됩니다"
                               className={inputCls + ' w-10 shrink-0 text-center disabled:opacity-50'}
                             />
                           ) : (
@@ -2131,7 +2131,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   ) : (
                     <p className="mb-1.5 text-[10px] leading-relaxed text-gray-600">
                       이미 만들어 둔 <span className="font-mono text-gray-500">locustfile.py</span> 를 그대로 씁니다.
-                      (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다 — 그 파일이 없으면 '여기서 만들기' 를
+                      (Locust 는 무엇을 요청할지 파이썬 파일에 적는 도구입니다. 그 파일이 없으면 '여기서 만들기' 를
                       쓰세요.)
                     </p>
                   )}
@@ -2141,8 +2141,8 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                     <HintMark
                       text={
                         tool === 'jmeter'
-                          ? '이미 있는 파일을 읽어 실행하는 칸입니다 — 이름을 적어 두면 그 자리에 저장되는 것이 아니라, 없는 파일이면 시작이 막힙니다. 실행 결과(리포트·result.jtl)는 회차 폴더에 따로 저장되고 요약의 [폴더 열기] 로 갈 수 있습니다.'
-                          : '이미 있는 파일을 읽어 실행하는 칸입니다 — 없는 파일이면 시작이 막힙니다. 실행 결과는 회차 폴더에 따로 저장됩니다.'
+                          ? '이미 있는 파일을 읽어 실행하는 칸입니다. 이름을 적어 두면 그 자리에 저장되는 것이 아니라, 없는 파일이면 시작이 막힙니다. 실행 결과(리포트·result.jtl)는 회차 폴더에 따로 저장되고 요약의 [폴더 열기] 로 갈 수 있습니다.'
+                          : '이미 있는 파일을 읽어 실행하는 칸입니다. 없는 파일이면 시작이 막힙니다. 실행 결과는 회차 폴더에 따로 저장됩니다.'
                       }
                     />
                   </div>
@@ -2174,7 +2174,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         const r = await window.electronAPI.perfOpenJmeterGui()
                         setNote(
                           r.ok
-                            ? 'JMeter 를 띄웠습니다 — 뜨기까지 10초쯤 걸립니다. 계획을 만들어 저장한 뒤 위에서 그 파일을 고르세요.'
+                            ? 'JMeter 를 띄웠습니다. 뜨기까지 10초쯤 걸립니다. 계획을 만들어 저장한 뒤 위에서 그 파일을 고르세요.'
                             : (r.error ?? 'JMeter 를 띄우지 못했습니다.'),
                         )
                       }}
@@ -2239,7 +2239,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 묶음은 **기능이 아니라 목적**으로 나눈다. 한동안 '연결 · 요청 방식 · 부하
                 발생기' 였는데, 그건 코드를 나눈 기준이지 사람이 무엇을 하려는지가 아니어서
                 어느 것을 열어야 할지 알 수 없었다(사용자 지적). 제목이 '~할 때' 면 열지
-                말지가 제목에서 끝난다. 설명도 물음표 안에 숨기지 않고 회색 한 줄로 늘 둔다 —
+                말지가 제목에서 끝난다. 설명도 물음표 안에 숨기지 않고 회색 한 줄로 늘 둔다. 
                 물음표만 여섯 개였다. */}
             {/* 펼친 내용을 **이 테두리 안에** 담는다 — 전에는 버튼과 카드가 따로 떠 있어
                 어디까지가 고급 설정인지 알 수 없었다(사용자 지적). */}
@@ -2258,7 +2258,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 {/* 접혀 있으면 안을 못 본다 — 건드려 둔 것이 있다는 사실만은 밖에 남긴다 */}
                 {advChanged.length > 0 && (
                   <span
-                    title={'기본값과 다름 — ' + advChanged.join(' · ')}
+                    title={'기본값과 다름: ' + advChanged.join(' · ')}
                     className="rounded bg-blue-500/20 px-1.5 py-0.5 text-[9.5px] text-blue-100"
                   >
                     {advChanged.length}개 바꿈
@@ -2273,7 +2273,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
               <div className="border-t border-white/10 px-2 pb-0.5 pt-2 [&>div:last-child]:mb-0">
                 <div className="mb-2 flex items-start gap-2 px-0.5">
                   <p className="min-w-0 flex-1 text-[10px] leading-relaxed text-gray-600">
-                    대개 그대로 둬도 됩니다 — 아래 <span className="text-gray-400">필요할 때만</span> 여세요.
+                    대개 그대로 둬도 됩니다. 아래 <span className="text-gray-400">필요할 때만</span> 여세요.
                   </p>
                   {/* 되돌리기는 눌린 자리에 두지 않는다 — 머리 단추 안에 단추를 넣을 수 없기도 하고,
                       바꾼 것이 있을 때만 나오는 편이 조용하다 */}
@@ -2348,7 +2348,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       onChange={setP50Th}
                       disabled={!!running}
                       placeholder="비움"
-                      hint="절반의 요청이 이 시간 안에 끝났다는 뜻(중간값)입니다. '보통은 빠른가' 를 봅니다 — p95 는 통과했는데 p50 이 나쁘면 전체가 느린 것입니다."
+                      hint="절반의 요청이 이 시간 안에 끝났다는 뜻(중간값)입니다. '보통은 빠른가' 를 봅니다. p95 는 통과했는데 p50 이 나쁘면 전체가 느린 것입니다."
                     />
                     <Field
                       label={
@@ -2484,7 +2484,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         <span className="block text-[10px] text-gray-600">
                           {scenarioKind === 'file'
                             ? '고른 파일이 정합니다 (앱이 만든 시나리오에만 넣을 수 있습니다)'
-                            : '사내 https 는 대개 필요합니다 — 끄면 인증서가 맞지 않을 때 전부 실패로 셉니다'}
+                            : '사내 https 는 대개 필요합니다. 끄면 인증서가 맞지 않을 때 전부 실패로 셉니다'}
                         </span>
                       </span>
                     </label>
@@ -2506,9 +2506,9 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         disabled={!!running || IS_WINDOWS || Number(expectWorkers) > 0}
                         hint={
                           IS_WINDOWS
-                            ? 'Windows 에서는 쓸 수 없습니다 — Locust 가 여러 갈래(--processes)를 지원하지 않아 시작하자마자 끝납니다. 더 센 부하가 필요하면 오른쪽 "다른 PC 도 함께" 를 쓰세요.'
+                            ? 'Windows 에서는 쓸 수 없습니다. Locust 가 여러 갈래(--processes)를 지원하지 않아 시작하자마자 끝납니다. 더 센 부하가 필요하면 오른쪽 "다른 PC 도 함께" 를 쓰세요.'
                             : Number(expectWorkers) > 0
-                              ? '다른 PC 를 붙이는 모드와 함께 쓸 수 없습니다(Locust 가 거절합니다) — 이 PC 도 워커로 하나 더 붙이세요.'
+                              ? '다른 PC 를 붙이는 모드와 함께 쓸 수 없습니다(Locust 가 거절합니다). 이 PC 도 워커로 하나 더 붙이세요.'
                               : '파이썬 한 갈래(프로세스)는 코어 하나만 씁니다. 갈래를 늘리면 이 PC 가 더 센 부하를 낼 수 있습니다.'
                         }
                       />
@@ -2518,7 +2518,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         value={expectWorkers}
                         onChange={setExpectWorkers}
                         disabled={!!running}
-                        hint="한 대로 부족할 때 다른 PC 를 붙입니다. 1 이상이면 그 수만큼 붙을 때까지 시작을 기다리고, 붙일 명령을 아래에 보여줍니다 — 그 PC 에도 locust 가 설치돼 있어야 합니다."
+                        hint="한 대로 부족할 때 다른 PC 를 붙입니다. 1 이상이면 그 수만큼 붙을 때까지 시작을 기다리고, 붙일 명령을 아래에 보여줍니다. 그 PC 에도 locust 가 설치돼 있어야 합니다."
                       />
                     </div>
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -2562,7 +2562,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 <button
                   onClick={async () => {
                     const r = await window.electronAPI.perfPresetsExport()
-                    setNote(r.saved ? `${r.count}개를 내보냈습니다 — ${r.path}` : (r.error ?? '내보내지 않았습니다.'))
+                    setNote(r.saved ? `${r.count}개를 내보냈습니다. ${r.path}` : (r.error ?? '내보내지 않았습니다.'))
                   }}
                   title="파일로 내보내기"
                   className="ml-auto rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-gray-300"
@@ -2709,15 +2709,15 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                 {tool === 'jmeter'
                   ? // 왜 숫자가 안 채워지는지 적어 둔다 — JMeter 는 30초마다(summariser.interval
                     // 기본값) 콘솔에 한 줄 찍고, 우리는 그 줄을 읽는다. 그 전까지는 '—' 다.
-                    'JMeter 는 콘솔에 찍는 누적 요약을 읽어 옵니다 — 첫 숫자는 30초쯤 뒤에 나오고, 끝나면 결과 파일로 다시 계산합니다.'
-                  : '돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다 — 끝나면 통계 파일로 다시 계산합니다.'}
+                    'JMeter 는 콘솔에 찍는 누적 요약을 읽어 옵니다. 첫 숫자는 30초쯤 뒤에 나오고, 끝나면 결과 파일로 다시 계산합니다.'
+                  : '돌고 있는 동안은 1.5초마다 Locust 통계를 받아 옵니다. 끝나면 통계 파일로 다시 계산합니다.'}
               </p>
             )}
             {/* 닿지도 못한 회차의 응답 시간을 '서버가 느리다' 로 읽지 않게, 타일 바로 아래에서 막는다 */}
             {!running && unreachable >= 0.5 && (
               <p className="mt-1 rounded border border-amber-500/30 bg-amber-500/[0.07] px-2 py-1 text-[10.5px] leading-relaxed text-amber-100">
                 실패의 {Math.round(unreachable * 100)}% 가 <b>서버에 닿지도 못한 것</b>입니다(연결 거부·시간 초과 등).
-                위의 응답 시간은 서버 성능이 아니라 <b>연결이 끊기기까지 걸린 시간</b>입니다 — 주소·포트를 먼저
+                위의 응답 시간은 서버 성능이 아니라 <b>연결이 끊기기까지 걸린 시간</b>입니다. 주소·포트를 먼저
                 확인하세요.
               </p>
             )}
@@ -2749,7 +2749,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             <div className="mt-2 min-h-0 flex-1 overflow-hidden">
               {/*
                 이 탭은 Locust 를 고른 동안에만 있다(showDash). 그래서 'JMeter 는 실행 중
-                대시보드가 없습니다' 안내는 닿을 수 없는 자리가 되어 지웠다 — 남은 세 상태는
+                대시보드가 없습니다' 안내는 닿을 수 없는 자리가 되어 지웠다. 남은 세 상태는
                 띄워 놓은 대시보드 · 뜨기를 기다리는 중 · 아직 돌리지 않았을 때다.
               */}
               {tab === 'dash' &&
@@ -2806,7 +2806,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       <br />
                       {selected ? (
                         <span className="text-[11px] text-gray-600">
-                          끝난 회차는 <span className="text-gray-400">요약</span> 에서 보세요 — 그래프와{' '}
+                          끝난 회차는 <span className="text-gray-400">요약</span> 에서 보세요. 그래프와{' '}
                           <span className="text-gray-400">도구 리포트</span> 가 거기 있습니다.
                         </span>
                       ) : (
@@ -2850,14 +2850,14 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                                 autoFocus
                                 value={labelEdit.label}
                                 onChange={(e) => setLabelEdit({ ...labelEdit, label: e.target.value })}
-                                placeholder="회차 이름 — 예: 게이트웨이 튜닝 후"
+                                placeholder="회차 이름: 예: 게이트웨이 튜닝 후"
                                 className={inputCls + ' w-full'}
                               />
                               <textarea
                                 value={labelEdit.memo}
                                 onChange={(e) => setLabelEdit({ ...labelEdit, memo: e.target.value })}
                                 rows={2}
-                                placeholder="메모 — 무엇을 바꾸고 돌렸는지"
+                                placeholder="메모: 무엇을 바꾸고 돌렸는지"
                                 className={inputCls + ' w-full resize-y'}
                               />
                             </div>
@@ -2974,7 +2974,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
 
                       {/* 시계열 — 평균 한 줄로는 '언제 무너졌나' 를 알 수 없다.
                           돌고 있는 동안의 화면은 끝나면 사라지므로(Locust 웹 UI) 끝난 회차는
-                          여기서 본다. JMeter 회차도 같은 그래프를 그린다 — 원본 JTL 을
+                          여기서 본다. JMeter 회차도 같은 그래프를 그린다. 원본 JTL 을
                           초 단위로 접어 같은 모양으로 받아 온다(electron/jtl.ts). */}
                       {history.length > 1 && (
                         <div className="mt-3">
@@ -3143,7 +3143,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                       )}
 
                       {/* 이력이 없을 수도 있다 — 빈 자리를 그냥 두지 않고 이유를 말한다.
-                          (JMeter 회차도 원본 JTL 을 접어 그래프를 그린다 — 너무 짧게 끝났거나
+                          (JMeter 회차도 원본 JTL 을 접어 그래프를 그린다. 너무 짧게 끝났거나
                           결과 파일이 남지 않은 회차만 여기로 온다) */}
                       {history.length <= 1 && (
                         <p className="mt-2 text-[10px] leading-relaxed text-gray-600">
@@ -3235,7 +3235,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                           {samples.length > 0 && (
                             <div className="mt-2 rounded-md border border-white/10 bg-black/20 p-2">
                               <div className="mb-1 text-[10.5px] text-gray-500">
-                                실패 응답 본문 {samples.length}건 — 눌러서 펼치기
+                                실패 응답 본문 {samples.length}건: 눌러서 펼치기
                               </div>
                               <div className="space-y-0.5">
                                 {samples.slice(0, 8).map((sp, i) => (
@@ -3256,7 +3256,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                                       <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-gray-400">
                                         {sp.name}
                                         {!sp.body && sp.error && (
-                                          <span className="ml-1 text-gray-600">— {sp.error}</span>
+                                          <span className="ml-1 text-gray-600"> {sp.error}</span>
                                         )}
                                       </span>
                                       <span className="shrink-0 text-[10px] text-gray-600">
@@ -3353,7 +3353,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               ],
                               [
                                 '세션',
-                                selected.meta.config.sessionLabel ?? '—',
+                                selected.meta.config.sessionLabel ?? '-',
                               ],
                               [
                                 '시나리오',
@@ -3407,7 +3407,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                               return
                             }
                             const r = await window.electronAPI.perfSaveOnePager(selected.meta.id, html)
-                            if (r.saved) setNote(`검증 리포트를 저장했습니다 — ${r.path}`)
+                            if (r.saved) setNote(`검증 리포트를 저장했습니다. ${r.path}`)
                             else if (r.error) setNote(r.error)
                           }}
                           title="조건·판정·그래프·서버 자원을 한 장에 담은 제출용 문서를 만들어 저장하고 바로 띄웁니다"
@@ -3421,19 +3421,19 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                             const r = await window.electronAPI.perfOpenReport(selected.meta.id)
                             if (!r.ok) setNote(r.error ?? '리포트를 열 수 없습니다.')
                           }}
-                          title="도구(Locust·JMeter)가 만든 원본 리포트 — 맨 앞에 우리 판정이 얹힙니다"
+                          title="도구(Locust·JMeter)가 만든 원본 리포트: 맨 앞에 우리 판정이 얹힙니다"
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
                         >
                           <ExternalLink size={11} /> 도구 리포트
                         </button>
                         {/* JMeter 리포트는 index.html 혼자서는 아무것도 못 그린다(content/·js/
-                            를 참조) — 한 파일로 저장하는 버튼을 두지 않고 [폴더 열기] 로 보낸다 */}
+                            를 참조): 한 파일로 저장하는 버튼을 두지 않고 [폴더 열기] 로 보낸다 */}
                         {(selected.meta.config.tool ?? 'locust') !== 'jmeter' && (
                           <button
                             onClick={async () => {
                               await ensureBranded()
                               const r = await window.electronAPI.perfSaveReport(selected.meta.id)
-                              if (r.saved) setNote(`리포트를 저장했습니다 — ${r.path}`)
+                              if (r.saved) setNote(`리포트를 저장했습니다. ${r.path}`)
                               else if (r.error) setNote(r.error)
                             }}
                             className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
@@ -3444,12 +3444,12 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         <button
                           onClick={async () => {
                             const r = await window.electronAPI.perfSaveCsv(selected.meta.id)
-                            if (r.saved) setNote(`결과를 저장했습니다 — ${r.path}`)
+                            if (r.saved) setNote(`결과를 저장했습니다. ${r.path}`)
                             else if (r.error) setNote(r.error)
                           }}
                           title={
                             (selected.meta.config.tool ?? 'locust') === 'jmeter'
-                              ? '요청 한 건에 한 줄인 원본 결과(result.jtl) — 엑셀에서 CSV 로 열립니다'
+                              ? '요청 한 건에 한 줄인 원본 결과(result.jtl): 엑셀에서 CSV 로 열립니다'
                               : '엑셀로 열어 보고서에 붙이는 용도'
                           }
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
@@ -3468,7 +3468,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                         <button
                           onClick={() => {
                             const ok = onAnalyze(aiText())
-                            setNote(ok ? 'AI 패널로 보냈습니다.' : 'AI 가 이미 답하는 중입니다 — 잠시 뒤에 다시.')
+                            setNote(ok ? 'AI 패널로 보냈습니다.' : 'AI 가 이미 답하는 중입니다. 잠시 뒤에 다시.')
                           }}
                           title="조건·결과·실패 내용을 AI 패널로 보내 해석을 맡깁니다"
                           className="flex items-center gap-1 rounded border border-white/15 bg-panel-light px-2 py-1 text-[11px] text-gray-200 hover:bg-white/10"
@@ -3515,7 +3515,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           message={
             '이 PC 에 파이썬 패키지를 설치합니다. 아래 명령을 그대로 실행합니다.\n\n' +
             'python -m pip install locust\n\n' +
-            '설치되는 곳 — 지금 PATH 에 있는 파이썬의 site-packages\n' +
+            '설치되는 곳: 지금 PATH 에 있는 파이썬의 site-packages\n' +
             '가상환경을 쓰신다면 이 버튼 대신 그 환경에서 직접 설치하고, ' +
             '위의 "직접 지정" 에 경로를 적어 주세요.'
           }
@@ -3523,7 +3523,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           onConfirm={async () => {
             setConfirmInstall(false)
             setInstalling(true)
-            setNote('설치를 시작했습니다 — 진행 상황은 실시간 로그 탭에 나옵니다.')
+            setNote('설치를 시작했습니다. 진행 상황은 실시간 로그 탭에 나옵니다.')
             setTab('log')
             try {
               const r = await window.electronAPI.perfInstallLocust()
@@ -3573,7 +3573,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
             <p className="mb-2 text-[11px] leading-relaxed text-gray-500">
               개발자도구 <span className="text-gray-300">Network</span> 에서 그 요청을{' '}
               <span className="text-gray-300">우클릭 → Copy → Copy as cURL</span> 한 뒤 붙여넣으세요. 인증·컨텐츠
-              헤더만 남기고 나머지는 뺍니다 — 브라우저가 붙이는 헤더를 다 넘기면 요청이 오히려 깨집니다.
+              헤더만 남기고 나머지는 뺍니다. 브라우저가 붙이는 헤더를 다 넘기면 요청이 오히려 깨집니다.
             </p>
             <textarea
               autoFocus
@@ -3609,7 +3609,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           <div className="flex h-full max-h-[560px] w-[720px] max-w-[92vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
             <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
               <FileCode size={13} className="text-blue-300" />
-              <span className="text-[12.5px] font-medium text-gray-100">locustfile.py — 이대로 실행됩니다</span>
+              <span className="text-[12.5px] font-medium text-gray-100">locustfile.py: 이대로 실행됩니다</span>
               <button
                 onClick={() => setPreview(null)}
                 className="ml-auto rounded p-1 text-gray-500 hover:bg-white/10 hover:text-gray-200"
@@ -3636,12 +3636,12 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
       )}
 
       {/*
-        회차 — 창으로 띄운다.
+        회차: 창으로 띄운다.
 
         전에는 왼쪽 칸 아래 절반을 늘 차지했다. 설정을 채우는 동안에는 볼 일이 없는데
         대상·부하·시나리오를 그만큼 좁게 만들었고, 자리가 좁아 '최근 5개만 + 더 보기' 로
         접어야 했다. 창으로 빼면 목록을 다 펼칠 수 있고 설정 칸도 온전히 쓴다.
-        (배경 클릭으로 닫지 않는다 — 이 저장소의 규칙. 닫는 것은 X·닫기뿐)
+        (배경 클릭으로 닫지 않는다. 이 저장소의 규칙. 닫는 것은 X·닫기뿐)
       */}
       {showRuns && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6">
@@ -3705,7 +3705,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                   </div>
                   <p className="mt-1 text-[10px] leading-relaxed text-gray-600">
                     둘 중 하나라도 넘으면 오래된 것부터 지웁니다. <span className="text-gray-500">이름을 붙인
-                    회차와 돌고 있는 회차는 지우지 않습니다</span> — 나중에 비교하려고 이름을 적어 둔 것이니까요.
+                    회차와 돌고 있는 회차는 지우지 않습니다</span> 나중에 비교하려고 이름을 적어 둔 것이니까요.
                     회차 하나가 1MB 남짓입니다.
                   </p>
                   <div className="mt-1.5 flex justify-end gap-1.5">
@@ -3775,7 +3775,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
                             {r.meta.interrupted && (
                               <span
                                 className="shrink-0 text-[10px] text-amber-300/80"
-                                title="앱이 닫혔거나 비정상 종료되어 끝까지 돌지 못한 회차 — 판정·비교 기준에서 뺍니다"
+                                title="앱이 닫혔거나 비정상 종료되어 끝까지 돌지 못한 회차: 판정·비교 기준에서 뺍니다"
                               >
                                 끊김
                               </span>
@@ -3841,7 +3841,7 @@ export default function PerfPanel({ sessions, onClose, onAnalyze }: PerfPanelPro
           title="회차 삭제"
           message={
             `${fmtRunTime(confirmDelete.meta.startedAt)} 회차를 지울까요?\n\n` +
-            '지워지는 것 — 통계·리포트·시나리오 파일이 든 회차 폴더 전체'
+            '지워지는 것: 통계·리포트·시나리오 파일이 든 회차 폴더 전체'
           }
           onCancel={() => setConfirmDelete(null)}
           onConfirm={async () => {

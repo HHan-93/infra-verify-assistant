@@ -303,7 +303,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "먼저 읽을 것",
             "command": "",
-            "desc": "버전 지정은 CLI 옵션 하나면 됩니다 — --os-compute-api-version(Nova), --os-volume-api-version(Cinder). 토큰 발급이나 curl 은 필요 없습니다.\n406 — 이 클라우드가 그 버전을 모릅니다. 아래 \"전 서비스 버전 범위\"로 상한부터 보세요.\n400 — 버전은 받아들여졌는데 값이 거부됐습니다. 메시지에 이유가 있고, 그것이 답입니다.\n마이크로버전이 있는 서비스는 Nova · Cinder · Placement · Manila · Ironic 뿐입니다. Neutron 과 Glance 에는 없습니다(Neutron 은 openstack extension list --network 로 기능 유무를 봅니다).",
+            "desc": "버전 지정은 CLI 옵션 하나면 됩니다. --os-compute-api-version(Nova), --os-volume-api-version(Cinder). 토큰 발급이나 curl 은 필요 없습니다.\n406: 이 클라우드가 그 버전을 모릅니다. 아래 \"전 서비스 버전 범위\"로 상한부터 보세요.\n400: 버전은 받아들여졌는데 값이 거부됐습니다. 메시지에 이유가 있고, 그것이 답입니다.\n마이크로버전이 있는 서비스는 Nova · Cinder · Placement · Manila · Ironic 뿐입니다. Neutron 과 Glance 에는 없습니다(Neutron 은 openstack extension list --network 로 기능 유무를 봅니다).",
             "info": true
           },
           {
@@ -659,7 +659,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "특정 네임스페이스 파드 감시(watch)",
             "command": "watch kubectl get pod -n <NAMESPACE> -o wide",
-            "desc": "지정 네임스페이스의 파드 상태·배치 노드를 주기적으로 갱신하며 관찰 (스스로 끝나지 않습니다 — Ctrl+C 로 중단)"
+            "desc": "지정 네임스페이스의 파드 상태·배치 노드를 주기적으로 갱신하며 관찰 (스스로 끝나지 않습니다. Ctrl+C 로 중단)"
           },
           {
             "label": "라벨 기준 파드 조회",
@@ -679,7 +679,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "파드 로그 조회",
             "command": "kubectl logs -n <NAMESPACE> <POD_NAME>",
-            "desc": "파드(컨테이너) 표준출력 로그 스냅샷 조회 — 애플리케이션 에러 확인 1순위"
+            "desc": "파드(컨테이너) 표준출력 로그 스냅샷 조회: 애플리케이션 에러 확인 1순위"
           },
           {
             "label": "파드 로그 실시간 스트리밍",
@@ -849,7 +849,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "먼저 읽을 것",
             "command": "",
-            "desc": "도커 소켓은 보통 root 전용이라 명령에 sudo 를 붙여 두었습니다. docker 그룹에 들어가 있으면 빼고 쓰세요.\n`-a` 를 붙여야 **멈춘 컨테이너까지** 보입니다 — 왜 죽었는지 보려면 그쪽이 필요합니다.",
+            "desc": "도커 소켓은 보통 root 전용이라 명령에 sudo 를 붙여 두었습니다. docker 그룹에 들어가 있으면 빼고 쓰세요.\n`-a` 를 붙여야 **멈춘 컨테이너까지** 보입니다. 왜 죽었는지 보려면 그쪽이 필요합니다.",
             "info": true
           },
           {
@@ -1235,7 +1235,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "삭제(주의)",
             "command": "rm -ri <대상>",
-            "desc": "확인하며(-i) 폴더 포함(-r) 영구 삭제 — 되돌릴 수 없으니 주의"
+            "desc": "확인하며(-i) 폴더 포함(-r) 영구 삭제: 되돌릴 수 없으니 주의"
           },
           {
             "label": "심볼릭 링크 생성",
@@ -1315,7 +1315,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "디렉토리 동기화(rsync)",
             "command": "rsync -avz /data/ /backup/",
-            "desc": "변경된 파일만 식별해 증분 백업 — 복제 시간 단축"
+            "desc": "변경된 파일만 식별해 증분 백업: 복제 시간 단축"
           }
         ]
       },
@@ -1460,7 +1460,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "[Pacemaker] 클러스터 상태",
             "command": "sudo pcs status",
-            "desc": "OpenStack Internal Server Error 점검 시 가장 먼저 볼 것 — HA 클러스터 전체 상태.\n확인할 것:\n- int_vip, haproxy, openstack_exporter 등 HA 리소스가 Started 상태인지\n- VIP가 의도한 컨트롤러에 올라와 있는지\n- OFFLINE, UNCLEAN, FAILED, not running 리소스가 있는지"
+            "desc": "OpenStack Internal Server Error 점검 시 가장 먼저 볼 것: HA 클러스터 전체 상태.\n확인할 것:\n- int_vip, haproxy, openstack_exporter 등 HA 리소스가 Started 상태인지\n- VIP가 의도한 컨트롤러에 올라와 있는지\n- OFFLINE, UNCLEAN, FAILED, not running 리소스가 있는지"
           },
           {
             "label": "[Pacemaker] 리소스 상태",
@@ -1541,7 +1541,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "dataplatform 파드 상태 확인",
             "command": "kubectl get pods -n dataplatform -o wide",
-            "desc": "DB 관련 네임스페이스 — 가용성 검증 중 문제가 가장 자주 발생하는 영역이라 우선적으로 집중 점검할 것.\ndataplatform 대신 다른 네임스페이스명을 입력하면 해당 네임스페이스의 파드 상태를 확인할 수 있습니다."
+            "desc": "DB 관련 네임스페이스: 가용성 검증 중 문제가 가장 자주 발생하는 영역이라 우선적으로 집중 점검할 것.\ndataplatform 대신 다른 네임스페이스명을 입력하면 해당 네임스페이스의 파드 상태를 확인할 수 있습니다."
           }
         ]
       },
@@ -1551,7 +1551,7 @@ export const PRESETS: PresetGroup[] = [
           {
             "label": "실시간 로그 뷰어 활용 안내",
             "command": "",
-            "desc": "아래 각 경로를 실시간 로그 뷰어의 [파일 경로] 탭에 입력하면 tail -f 로 바로 확인할 수 있습니다.\n여기서 바로 실행하면 tail -f 가 터미널을 계속 붙들고 있습니다 — Ctrl+C 로 중단하세요.",
+            "desc": "아래 각 경로를 실시간 로그 뷰어의 [파일 경로] 탭에 입력하면 tail -f 로 바로 확인할 수 있습니다.\n여기서 바로 실행하면 tail -f 가 터미널을 계속 붙들고 있습니다. Ctrl+C 로 중단하세요.",
             "info": true
           },
           {

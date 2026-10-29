@@ -31,3 +31,16 @@ export function podDisplayStatus(p: PodInfo): { label: string; tone: PodTone } {
   if (p.phase === 'Pending') return { label: 'Pending', tone: 'warn' }
   return { label: p.phase, tone: 'bad' }
 }
+
+/**
+ * kubectl AGE 칸('45s' · '5m30s' · '3h20m' · '6d' · '6d5h' · '2y') → ms. 읽을 수 없으면 null.
+ * 상태보드 파드 표가 '검증 시작 뒤 새로 뜬 파드' 를 가리는 데 쓴다(사용자 요청 — 회색 줄에 묻혀 복구된 파드가 안 보였다).
+ * 분 단위까지만 적히는 칸이라 몇십 초 오차가 있다 — 그래서 '새 파드' 표시에만 쓰고 판정에는 쓰지 않는다.
+ */
+export function parseKubeAge(age: string | undefined): number | null {
+  if (!age || !/^(\d+[ydhms])+$/.test(age)) return null
+  const unit: Record<string, number> = { y: 365 * 86_400_000, d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 }
+  let ms = 0
+  for (const m of age.matchAll(/(\d+)([ydhms])/g)) ms += Number(m[1]) * unit[m[2]]
+  return ms
+}

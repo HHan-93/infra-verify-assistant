@@ -13,21 +13,40 @@ export interface PodCand {
   workloads: Map<string, { at: number; hits: number }>
   /** 네임스페이스 전체가 비정상 0 으로 보이기 시작한 시각, 연속 프레임 수 */
   done: { at: number; hits: number } | null
+  /** 완료로 확정된 뒤 아직 다시 깨지지 않았다 — 이때 비정상이 생기면 '다시 비정상' 후보다 */
+  complete?: boolean
+  /** 완료 뒤 비정상으로 보이기 시작한 시각, 연속 프레임 수 */
+  broken?: { at: number; hits: number } | null
 }
 
-export const newPodCand = (): PodCand => ({ workloads: new Map(), done: null })
-export const podCandPending = (c: PodCand | undefined) => !!c && (c.workloads.size > 0 || !!c.done)
+export const newPodCand = (): PodCand => ({ workloads: new Map(), done: null, complete: false, broken: null })
+export const podCandPending = (c: PodCand | undefined) => !!c && (c.workloads.size > 0 || !!c.done || !!c.broken)
 
 /**
  * 한 프레임 진행. prev = 직전 프레임의 비정상 워크로드(처음 보는 네임스페이스면 undefined), bad = 이번 프레임.
- * 확정된 워크로드 복구와 네임스페이스 완료 시각을 돌려준다. cand 는 제자리에서 바뀐다.
+ * 확정된 워크로드 복구와 네임스페이스 완료 시각, 그리고 **완료 뒤 다시 비정상** 이 된 시각을 돌려준다. cand 는 제자리에서 바뀐다.
+ *
+ * '다시 비정상' 도 들어올 때와 같은 기준 — 연속 2프레임이어야 확정하고 시각은 첫 비정상 프레임이다. 예전에는 완료 뒤에
+ * 깨진 것을 아무 데도 남기지 않아, 서비스가 다 내려간 네임스페이스가 끝까지 '완료' 로 보였다(2026-10-26).
  */
 export function stepPodRecovery(
   cand: PodCand,
   prev: Set<string> | undefined,
   bad: Set<string>,
   now: number,
-): { recovered: { workload: string; at: number }[]; doneAt: number | null } {
+): { recovered: { workload: string; at: number }[]; doneAt: number | null; brokenAt: number | null } {
+  let brokenAt: number | null = null
+  if (cand.complete) {
+    if (bad.size > 0) {
+      if (!cand.broken) cand.broken = { at: now, hits: 0 }
+      cand.broken.hits++
+      if (cand.broken.hits >= POD_CONFIRM_FRAMES) {
+        brokenAt = cand.broken.at
+        cand.broken = null
+        cand.complete = false
+      }
+    } else cand.broken = null
+  }
   const recovered: { workload: string; at: number }[] = []
   for (const w of bad) cand.workloads.delete(w) // 다시 깨졌다 — 후보에서 뺀다
   if (prev) for (const w of prev) if (!bad.has(w) && !cand.workloads.has(w)) cand.workloads.set(w, { at: now, hits: 0 })
@@ -40,14 +59,16 @@ export function stepPodRecovery(
   }
   let doneAt: number | null = null
   if (bad.size > 0) cand.done = null
-  else if (cand.done || (prev && prev.size > 0)) {
+  // 완료 상태에서 한 프레임 튄 비정상은 '다시 비정상' 도 아니고 새 완료도 아니다 — 확정된 완료가 그대로 이어진다
+  else if (!cand.complete && (cand.done || (prev && prev.size > 0))) {
     if (!cand.done) cand.done = { at: now, hits: 0 }
     cand.done.hits++
     // 워크로드 후보가 남아 있으면(아직 확정 전) 네임스페이스 완료도 미룬다
     if (cand.done.hits >= POD_CONFIRM_FRAMES && cand.workloads.size === 0) {
       doneAt = cand.done.at
       cand.done = null
+      cand.complete = true
     }
   }
-  return { recovered, doneAt }
+  return { recovered, doneAt, brokenAt }
 }

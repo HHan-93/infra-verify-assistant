@@ -254,10 +254,10 @@ export function buildOnePager(i: OnePagerInput): string {
         `</ul>`
       : '') +
     (i.canceled
-      ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">사람이 중지한 회차입니다 — 계획한 시간을 채우지 않았습니다.</div>`
+      ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">사람이 중지한 회차입니다. 계획한 시간을 채우지 않았습니다.</div>`
       : '') +
     (i.interrupted
-      ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">앱이 닫혔거나 비정상 종료되어 끊긴 회차입니다 — 계획한 시간을 채우지 않았습니다.</div>`
+      ? `<div style="margin-top:6px;font-size:12px;color:#a1590e">앱이 닫혔거나 비정상 종료되어 끊긴 회차입니다. 계획한 시간을 채우지 않았습니다.</div>`
       : '') +
     `</div>` +
     (i.memo ? `<p style="margin:8px 0 0;font-size:12.5px;color:#3c4043">${esc(i.memo)}</p>` : '')
@@ -346,7 +346,7 @@ export function buildOnePager(i: OnePagerInput): string {
           ].filter((x) => x.points.length > 1),
           { unit: '%', height: 130 },
         ) +
-          `<p style="margin:4px 0 0;font-size:11px;color:#80868b">응답이 느려진 구간과 자원 사용이 겹치는지 보세요 — 겹치지 않으면 병목은 이 서버 밖(게이트웨이·DB·네트워크)입니다.</p>`,
+          `<p style="margin:4px 0 0;font-size:11px;color:#80868b">응답이 느려진 구간과 자원 사용이 겹치는지 보세요. 겹치지 않으면 병목은 이 서버 밖(게이트웨이·DB·네트워크)입니다.</p>`,
       )
     : i.serverNote
       ? section('같은 시간대 대상 서버', `<p style="margin:0;font-size:12px;color:#80868b">${esc(i.serverNote)}</p>`)
@@ -446,7 +446,7 @@ export function buildOnePager(i: OnePagerInput): string {
 
   return (
     `<!doctype html><html lang="ko"><head><meta charset="utf-8">` +
-    `<title>성능 검증 결과 — ${esc(i.runLabel || fmtClock(i.startedAt))}</title>` +
+    `<title>성능 검증 결과: ${esc(i.runLabel || fmtClock(i.startedAt))}</title>` +
     `<style>` +
     `body{margin:0;background:#f1f3f4;font-family:system-ui,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;` +
     `-webkit-print-color-adjust:exact;print-color-adjust:exact}` +

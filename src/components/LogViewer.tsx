@@ -593,8 +593,8 @@ export default function LogViewer({ onClose }: LogViewerProps) {
           // 읽고도 알 수 없었다. 지우는 것과 남는 것을 나란히 적는다.
           message={
             `"${confirmDeleteEntry.label || confirmDeleteEntry.host}" 를 목록에서 지울까요?\n\n` +
-            `지워지는 것 — 목록 항목과 리플레이 기록(재생 불가)\n` +
-            `남는 것 — 원본 로그 파일\n${confirmDeleteEntry.path}`
+            `지워지는 것: 목록 항목과 리플레이 기록(재생 불가)\n` +
+            `남는 것: 원본 로그 파일\n${confirmDeleteEntry.path}`
           }
           onCancel={() => setConfirmDeleteEntry(null)}
           onConfirm={() => {
@@ -609,8 +609,8 @@ export default function LogViewer({ onClose }: LogViewerProps) {
           title={`로그 ${selection.size}개 삭제`}
           message={
             `선택한 ${selection.size}개를 목록에서 지울까요?\n\n` +
-            `지워지는 것 — 목록 항목과 리플레이 기록(재생 불가)\n` +
-            `남는 것 — 원본 로그 파일 (각자 저장한 위치에 그대로)`
+            `지워지는 것: 목록 항목과 리플레이 기록(재생 불가)\n` +
+            `남는 것: 원본 로그 파일 (각자 저장한 위치에 그대로)`
           }
           onCancel={() => setConfirmBulk(false)}
           onConfirm={() => {
@@ -730,7 +730,7 @@ function LogTextView({
                 onClick={onReplay}
                 className="mt-3 rounded-md border border-white/10 bg-panel-light px-2.5 py-1 text-[11.5px] text-gray-200 hover:bg-white/10"
               >
-                리플레이로 보기 — 그때 화면은 남아 있습니다
+                리플레이로 보기: 그때 화면은 남아 있습니다
               </button>
             )}
           </div>

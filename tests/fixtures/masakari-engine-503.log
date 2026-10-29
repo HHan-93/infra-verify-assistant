@@ -1,0 +1,17 @@
+2026-10-26 18:35:00.044 ERROR masakari.engine.manager [req-3a68857a-aa65-4a00-924b-a6573a7f294c None None] Periodic task 'process_unfinished_notifications': Notification 108f509d-7e85-4979-8ecb-078a87698aa1 exits with status: failed.
+2026-10-27 13:51:41.842 INFO masakari.engine.manager [req-343742b6-a7ef-4ee8-9b45-cbe0c94128bf None None] Processing notification a4447d4a-26af-4c83-a9ee-bea734b174bf of type: COMPUTE_HOST
+2026-10-27 13:51:41.852 INFO masakari.engine.manager [req-343742b6-a7ef-4ee8-9b45-cbe0c94128bf None None] Set host contrabass01 on maintenance.
+2026-10-27 13:51:42.302 WARNING masakari.engine.drivers.taskflow.driver [req-04d81c12-4cd7-438f-8532-21638c5b0c6f service None] Task 'DisableComputeServiceTask' (5e158f52-2200-455f-9063-4751485a66f8) transitioned into state 'FAILURE' from state 'RUNNING'
+2 predecessors (most recent first):
+  Flow 'pre_tasks'
+  |__Flow 'instance_evacuate_engine': novaclient.exceptions.ClientException: Unknown Error (HTTP 503)
+2026-10-27 13:51:42.302 TRACE masakari.engine.drivers.taskflow.driver Traceback (most recent call last):
+2026-10-27 13:51:42.302 TRACE masakari.engine.drivers.taskflow.driver   File "/usr/local/lib/python3.9/site-packages/masakari/compute/nova.py", line 157, in enable_disable_service
+2026-10-27 13:51:42.302 TRACE masakari.engine.drivers.taskflow.driver     service = nova.services.list(host=host_name, binary='nova-compute')[0]
+2026-10-27 13:51:42.302 TRACE masakari.engine.drivers.taskflow.driver     raise exceptions.from_response(resp, body, url, method)
+2026-10-27 13:51:42.302 TRACE masakari.engine.drivers.taskflow.driver novaclient.exceptions.ClientException: Unknown Error (HTTP 503)
+2026-10-27 13:51:42.350 WARNING masakari.engine.drivers.taskflow.driver [req-04d81c12-4cd7-438f-8532-21638c5b0c6f service None] Task 'DisableComputeServiceTask' (5e158f52-2200-455f-9063-4751485a66f8) transitioned into state 'REVERTED' from state 'REVERTING'
+2026-10-27 13:51:42.361 WARNING masakari.engine.drivers.taskflow.driver [req-04d81c12-4cd7-438f-8532-21638c5b0c6f service None] Flow 'instance_evacuate_engine' (3ccc6762-8d68-4e38-a61f-3b2789a9de3c) transitioned into state 'REVERTED' from state 'RUNNING'
+2026-10-27 13:51:42.362 ERROR masakari.engine.manager [req-04d81c12-4cd7-438f-8532-21638c5b0c6f service None] Failed to process notification 'a4447d4a-26af-4c83-a9ee-bea734b174bf'. Reason: Failed to execute host failure flow for notification 'a4447d4a-26af-4c83-a9ee-bea734b174bf'.: masakari.exception.MasakariException: Failed to execute host failure flow for notification 'a4447d4a-26af-4c83-a9ee-bea734b174bf'.
+2026-10-27 13:51:42.365 INFO masakari.engine.manager [req-343742b6-a7ef-4ee8-9b45-cbe0c94128bf None None] Notification a4447d4a-26af-4c83-a9ee-bea734b174bf exits with status: error.
+2026-10-27 13:51:42.376 ERROR masakari.engine.manager [req-343742b6-a7ef-4ee8-9b45-cbe0c94128bf None None] Periodic task 'process_unfinished_notifications': Notification a4447d4a-26af-4c83-a9ee-bea734b174bf exits with status: failed.

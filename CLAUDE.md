@@ -47,7 +47,9 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 `src/lib/` 는 "무엇을 정상으로 볼 것인가"를 담는 곳이다. 컴포넌트에 판정을 새로 심지 말고 여기에 둘 것.
 
 - [verdict.ts](src/lib/verdict.ts) — 3-상태(pass/fail/**info**). 기준(`CommandCheck`)이 없으면 초록 PASS 를 띄우지 않는다. `df -h` 에 "통과"를 붙이지 않기 위한 의도적 설계다.
-- [portal.ts](src/lib/portal.ts) — 포털 응답 정상 판정.
+- [portal.ts](src/lib/portal.ts) — 포털 응답 정상 판정. **판정 단위는 화면**이다(`screenOf` · `screensOf` · `screenObservation`): API 의 `group` 이 화면 이름이고, 비우면 API 이름이 곧 화면(옛 설정 = API 하나가 화면 하나). 화면 정상 = 같은 주기에 핵심(부가 `optional` 이 아닌) API 가 모두 정상이며, API 와 같은 `applyObservation` 을 거친다. 타임라인 · 리포트 · 증적의 '포털 n/n' 은 화면 수다.
+- [portalImport.ts](src/lib/portalImport.ts) — 개발자도구 '모두 cURL 로 복사' · HAR 에서 감시할 API 고르기(정적 파일 · 사전 요청 · 외부 주소 · 중복 제외, 오류 응답이면 기준을 정하지 않음), 설정 내보내기(아이디 · 비밀번호 · 토큰 · 토큰류 헤더 뺌)/더하기.
+- [podLogScan.ts](src/lib/podLogScan.ts) — 파드 로그 이상 감시. kubectl 서버에서 Running 파드 로그를 오류 단어로 걸러(stern · Loki 없이) '서명'으로 묶는다. 실패한 kubectl 출력은 거르지 않는다(조회 실패 ≠ 오류). 기준선은 **줄의 시각**으로 가른다(감시를 켠 뒤 5분 · 검증 시작 시각 전 = 평소 오류). 회차의 '새 오류' 는 묶음이 생길 때가 아니라 훑을 때마다 `newInRun`(검증 뒤에 났고 시작 전 5분 안엔 없던 것)으로 가른다 — 롤링 2회차에 같은 오류가 다시 나도 잡히게. 검증 시작은 호스트 시계 차이를 더해 노드 시계로 넘긴다. 파드마다 임시 파일에 쓰고 끝에 차례로 붙인다(xargs -P 출력이 섞이지 않게), NotReady 노드 위 파드는 읽지 않는다(노드가 죽은 동안 훑기 전체가 60초를 넘겼다). 상태보드 폴링과 따로 돈다(PodLogWatch.tsx). 복구 타임라인에는 넣지 않고 그 아래 따로 둔다.
 - [mask.ts](src/lib/mask.ts) — 비밀번호·토큰·키·IP 마스킹. **로그 표시 / 리포트 저장 / AI 외부 전송 세 경로에 공통 적용**된다. 값만 가리고 키 이름은 남긴다.
 - [placeholder.ts](src/lib/placeholder.ts) — 명령어 안 `<입력값>` 규칙. 문자 집합을 좁게 잡은 이유가 주석에 있다(셸 리다이렉션 `>` 오인 방지).
 - [shellSplit.ts](src/lib/shellSplit.ts) — 한 줄 명령을 최상위 `;` `&&` `||` 로 쪼개 단계로 보여주기 위한 분리기. 따옴표·`$( )` 안은 건드리지 않는다(`awk '{print $5; exit}'` 를 반토막 내지 않으려면 정규식 split 으로는 안 된다).

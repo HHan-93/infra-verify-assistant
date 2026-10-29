@@ -279,7 +279,7 @@ const electronAPI = {
     defaultName: string
     content: string
     /** 저장 대화상자의 파일 형식 — 기본 md/txt */
-    format?: 'md' | 'html' | 'csv'
+    format?: 'md' | 'html' | 'csv' | 'json'
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:save', payload),
   saveReportPdf: (payload: {
@@ -287,6 +287,13 @@ const electronAPI = {
     defaultName: string
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:savePdf', payload),
+  /** 리포트 여러 개를 폴더 하나에(저장 창 한 번 — 첫 파일 이름으로 열고 나머지는 같은 폴더에). 같은 이름이 있으면 ' (2)' 를 붙인다 */
+  saveReportMany: (payload: {
+    files: { name: string; html: string }[]
+    format: 'html' | 'pdf'
+  }): Promise<{ saved: boolean; canceled?: boolean; dir?: string; paths?: string[]; error?: string }> => ipcRenderer.invoke('report:saveMany', payload),
+  /** 저장한 리포트 파일을 탐색기에서 보이기 */
+  revealReport: (path: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('report:reveal', path),
 
   /** OS 알림 — 검증 중 장애 감지·복구 완료를 창 밖에서 알려준다 */
   notify: (title: string, body: string): Promise<{ ok: boolean; error?: string }> =>

@@ -197,7 +197,7 @@ function startLocalShell(s: Session) {
       sessionId: s.id,
       data:
         '\x1b[2J\x1b[3J\x1b[H' +
-        '\x1b[1;33m*** 로컬 셸로 전환됨 — 원격 아님. 명령은 내 PC에서 실행됩니다 ***\x1b[0m\r\n',
+        '\x1b[1;33m*** 로컬 셸로 전환됨: 원격 아님. 명령은 내 PC에서 실행됩니다 ***\x1b[0m\r\n',
     })
     s.localPty = pty.spawn(shell, [], {
       name: 'xterm-256color',
@@ -684,7 +684,7 @@ async function attemptReconnect(sessionId: string) {
     if (s.userClosed || superseded()) break
     sendStatus(sessionId, {
       status: 'connecting',
-      message: `연결이 끊겼습니다 — 자동 재접속 ${i}/${RECONNECT_MAX}...`,
+      message: `연결이 끊겼습니다. 자동 재접속 ${i}/${RECONNECT_MAX}...`,
     })
     await delay(RECONNECT_BACKOFF_MS[i - 1])
     // 대기 중에 사용자가 이 칸에 다른 서버를 붙였을 수 있다 → 그 연결을 건드리지 않고 종료
@@ -1385,7 +1385,7 @@ function cleanErrorMessage(err: unknown): string {
 // 분석 리포트를 파일로 저장 (네이티브 저장 다이얼로그)
 ipcMain.handle(
   'report:save',
-  async (_evt, payload: { defaultName: string; content: string; format?: 'md' | 'html' | 'csv' }) => {
+  async (_evt, payload: { defaultName: string; content: string; format?: 'md' | 'html' | 'csv' | 'json' }) => {
     const result = await dialog.showSaveDialog(mainWindow!, {
       title: '분석 리포트 저장',
       defaultPath: payload.defaultName,
@@ -1395,7 +1395,9 @@ ipcMain.handle(
           ? [{ name: 'HTML', extensions: ['html'] }]
           : payload.format === 'csv'
             ? [{ name: 'CSV', extensions: ['csv'] }]
-            : [
+            : payload.format === 'json'
+              ? [{ name: 'JSON', extensions: ['json'] }]
+              : [
               { name: 'Markdown', extensions: ['md'] },
               { name: 'Text', extensions: ['txt'] },
             ],
@@ -1442,6 +1444,96 @@ ipcMain.handle(
     }
   },
 )
+
+/**
+ * 리포트 여러 개를 한 폴더에(10-29 · 검증 이력 '종합 결과 · 회차별 결과 · 증적 원문'). 파일마다 저장 창을 띄우면 증적을
+ * 회차마다 한 파일로 뽑을 때 14번 눌러야 한다 — 폴더를 한 번만 고르게 한다.
+ * 이름은 렌더러가 정하지만 **basename 만** 쓰고 금지 문자를 지운다(경로를 넘겨 폴더 밖에 쓰지 못하게). 같은 이름이 있으면 덮지 않고
+ * ' (2)' 를 붙인다 — 같은 날 두 번 뽑은 리포트가 앞의 것을 지우면 안 된다.
+ */
+ipcMain.handle(
+  'report:saveMany',
+  async (_evt, payload: { files: { name: string; html: string }[]; format: 'html' | 'pdf' }) => {
+    const ext = payload.format === 'pdf' ? '.pdf' : '.html'
+    const clean = (s: string) => path.basename(s).replace(/\.(html|pdf)$/i, '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim() || '리포트'
+    const orig = payload.files.map((f) => clean(f.name))
+    /*
+     * 위치는 **파일 저장 창**으로 고른다(첫 파일 이름으로 열고, 나머지는 같은 폴더에). 처음엔 폴더 고르기 창을 썼는데, 다운로드 안에서
+     * 아래 '폴더:' 칸에 '다운로드' 가 적힌 채 [폴더 선택] 을 누르면 그 안의 '다운로드' 하위 폴더로 읽혀 취소로 돌아왔고, 화면에는
+     * 아무 말이 없어 '골랐는데 저장이 안 된다' 가 됐다(사용자 지적 10-29). 저장 창은 늘 쓰던 것이라 헷갈리지 않는다.
+     */
+    const r = await dialog.showSaveDialog(mainWindow!, {
+      title: `리포트 저장 (같은 폴더에 ${payload.files.length}개)`,
+      defaultPath: path.join(app.getPath('downloads'), `${orig[0]}${ext}`),
+      filters: [payload.format === 'pdf' ? { name: 'PDF', extensions: ['pdf'] } : { name: 'HTML', extensions: ['html'] }],
+    })
+    if (r.canceled || !r.filePath) return { saved: false, canceled: true }
+    const dir = path.dirname(r.filePath)
+    const paths: string[] = []
+    // 첫 파일 이름을 고쳐 저장했으면 그 이름을 쓴다(나머지는 정한 이름 그대로)
+    const bases = orig.map((b, i) => (i === 0 ? clean(r.filePath as string) : b))
+    // 묶음 안에서 같은 이름(증적 파일 이름은 분 단위 시각 + 60자로 잘림)이면 뒤 파일이 앞 파일을 덮는다 — 뒤의 것에 번호를 붙인다
+    const used = new Set<string>()
+    for (let i = 0; i < bases.length; i++) {
+      let b = bases[i]
+      for (let k = 2; used.has(b.toLowerCase()); k++) b = `${bases[i]} (${k})`
+      used.add(b.toLowerCase())
+      bases[i] = b
+    }
+    const exists = (p: string) => stat(p).then(() => true, () => false)
+    /**
+     * 겹치면 **묶음 전체에 같은 꼬리**(' (2)')를 붙인다 — 파일마다 따로 붙이면 종합 결과 안의 회차별 결과 링크(같은 폴더의 파일 이름)가
+     * 어긋난다(코드 점검 10-29). 그래도 링크가 가리키는 이름이 바뀌므로 HTML 안의 옛 이름은 새 이름으로 바꿔 쓴다
+     */
+    let suffix = ''
+    for (let n = 1; ; n++) {
+      if (n >= 1000) return { saved: false, error: '같은 이름의 파일이 너무 많습니다' }
+      const s = n > 1 ? ` (${n})` : ''
+      // 첫 파일은 사용자가 저장 창에서 고른 이름이다 — 이미 있으면 창이 '바꾸시겠습니까' 를 물었고 '예' 를 눌렀으므로 겹침으로 보지 않는다
+      // (예전엔 그래도 묶음 전체가 ' (2)' 로 저장됐다, 코드 검토 10-29). 나머지가 겹칠 때만 꼬리를 붙인다
+      const taken = await Promise.all(bases.map((b, i) => (i === 0 && !s ? false : exists(path.join(dir, `${b}${s}${ext}`)))))
+      if (!taken.some(Boolean)) {
+        suffix = s
+        break
+      }
+    }
+    // 파일 사이 링크(종합 결과 → 회차별 결과)가 가리키는 옛 이름을 실제로 쓴 이름으로
+    const rename = (html: string) =>
+      orig.reduce((t, b, i) => (b === bases[i] && !suffix ? t : t.split(encodeURIComponent(`${b}.html`)).join(encodeURIComponent(`${bases[i]}${suffix}.html`))), html)
+    try {
+      for (const [i, f0] of payload.files.entries()) {
+        const f = { ...f0, html: rename(f0.html) }
+        const out = path.join(dir, `${bases[i]}${suffix}${ext}`)
+        if (payload.format === 'pdf') {
+          const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true } })
+          const tmpHtml = path.join(app.getPath('temp'), `qterm-report-${Date.now()}-${paths.length}.html`)
+          try {
+            await writeFile(tmpHtml, f.html, 'utf-8')
+            await win.loadFile(tmpHtml)
+            await writeFile(out, await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' }))
+          } finally {
+            win.destroy()
+            await rm(tmpHtml, { force: true }).catch(() => {})
+          }
+        } else {
+          await writeFile(out, f.html, 'utf-8')
+        }
+        paths.push(out)
+      }
+      return { saved: true, dir, paths }
+    } catch (err) {
+      // 몇 개는 이미 썼을 수 있다 — 무엇이 저장됐는지 같이 돌려준다
+      return { saved: paths.length > 0, dir, paths, error: err instanceof Error ? err.message : String(err) }
+    }
+  },
+)
+
+/** 저장한 리포트를 탐색기에서 보이기 — 여러 파일을 저장하면 어디에 생겼는지 바로 열어 볼 수 있게(있는 파일만) */
+ipcMain.handle('report:reveal', async (_evt, p: string) => {
+  if (typeof p !== 'string' || !(await stat(p).then((s) => s.isFile(), () => false))) return { ok: false }
+  shell.showItemInFolder(p)
+  return { ok: true }
+})
 
 // 링크를 기본 브라우저로 열기 (앱 창 네비게이션 방지)
 /**
@@ -1763,7 +1855,7 @@ async function csvRowToProfile(
       try {
         privateKey = await readFile(keyPath, 'utf-8')
       } catch {
-        warning = `${rowLabel}: 키 파일을 읽을 수 없습니다 (${keyPath}) — 개인키 없이 가져왔습니다.`
+        warning = `${rowLabel}: 키 파일을 읽을 수 없습니다 (${keyPath}): 개인키 없이 가져왔습니다.`
       }
     }
   }
@@ -1773,7 +1865,7 @@ async function csvRowToProfile(
     try {
       jump = JSON.parse(rec['jump'])
     } catch {
-      warning = `${rowLabel}: 점프호스트 정보를 읽을 수 없습니다 — 점프호스트 없이 가져왔습니다.`
+      warning = `${rowLabel}: 점프호스트 정보를 읽을 수 없습니다. 점프호스트 없이 가져왔습니다.`
     }
   }
   const { profile, error } = normalizeImportedProfile(
@@ -2886,7 +2978,7 @@ ipcMain.handle('customItems:import', async (): Promise<CustomItemsImportResult> 
         if (!item) {
           skipped++
           warn(
-            '프리셋 건너뜀 — 분류·이름·명령어 중 빈 값: ' +
+            '프리셋 건너뜀: 분류·이름·명령어 중 빈 값: ' +
               (cleanStr((rawItem as Record<string, unknown>)?.label) || '(이름 없음)'),
           )
           continue
@@ -2911,7 +3003,7 @@ ipcMain.handle('customItems:import', async (): Promise<CustomItemsImportResult> 
         if (!item) {
           skipped++
           warn(
-            '시나리오 건너뜀 — 분류·제목이 없거나 실행할 스텝이 없음: ' +
+            '시나리오 건너뜀: 분류·제목이 없거나 실행할 스텝이 없음: ' +
               (cleanStr((rawItem as Record<string, unknown>)?.title) || '(이름 없음)'),
           )
           continue
@@ -3029,7 +3121,7 @@ const CSV_IMPORT_TEMPLATE =
 
 // host 가 '#' 로 시작하는 항목은 안내용 예시일 뿐이며 CSV/JSON 가져오기 시 자동으로 건너뛴다.
 const JSON_GUIDE_ENTRY = {
-  host: '#예시 — 실제로 가져오지 않음',
+  host: '#예시: 실제로 가져오지 않음',
   port: '22 (기본 SSH 포트)',
   username: '접속계정',
   authMethod: 'password 또는 key 또는 agent',
@@ -3513,7 +3605,7 @@ function pumpRunner(sh: RunnerShell): void {
       sh.waiter = undefined
       w.resolve({
         code: 253,
-        out: `${body}\n\n[입력 대기 상태로 멈춰 있어 중단했습니다 — 프롬프트: "${prompt}"]`,
+        out: `${body}\n\n[입력 대기 상태로 멈춰 있어 중단했습니다. 프롬프트: "${prompt}"]`,
       })
     }, PROMPT_STUCK_MS)
     return
@@ -3541,7 +3633,7 @@ async function runnerExec(
   // 보고 "종료 코드 255 → 실패" 로 판정해버린다. 노드를 재부팅하는 시나리오에서는 반드시 일어나는
   // 상황이라, 이후 모든 스텝이 '검증 실패' 로 찍혀 리포트를 통째로 못 믿게 된다. 별도 신호로 구분한다.
   if (!sh || sh.closed)
-    return { code: 255, out: '', replied: [], dead: '검증용 셸이 닫혔습니다 — 세션 연결이 끊겼을 수 있습니다.' }
+    return { code: 255, out: '', replied: [], dead: '검증용 셸이 닫혔습니다. 세션 연결이 끊겼을 수 있습니다.' }
   if (sh.waiter) return { code: 255, out: '', replied: [], dead: '이 세션에서 이전 명령이 아직 실행 중입니다.' }
 
   const seq = Math.floor(Math.random() * 1e9)
@@ -4111,7 +4203,7 @@ ipcMain.handle(
               }
             } else {
               // 틀린 비밀번호로 계속 다시 묻게 두면 아무것도 안 흐르는 창만 남는다 — 끊고 사실을 말한다
-              if (settled) forward('\n[sudo 비밀번호가 틀렸습니다 — 창을 닫고 다시 여세요]\n')
+              if (settled) forward('\n[sudo 비밀번호가 틀렸습니다. 창을 닫고 다시 여세요]\n')
               failSudo()
               return
             }
@@ -5111,7 +5203,7 @@ ipcMain.handle(
     const rollbackNote = restored
       ? ' 원본은 백업본으로 되돌렸습니다.'
       : bk.ok || up.ok
-        ? ` 원본 복구에 실패했습니다 — 백업본을 직접 확인하세요: ${backupPath}`
+        ? ` 원본 복구에 실패했습니다. 백업본을 직접 확인하세요: ${backupPath}`
         : ''
     return {
       ok: false,
@@ -5129,7 +5221,7 @@ ipcMain.handle(
 function cleanSudoErr(err: string): string {
   const t = err.trim()
   if (/incorrect password|a password is required|sudo:.*password/i.test(t))
-    return 'sudo 비밀번호 인증 실패 — NOPASSWD가 아니거나 접속 비밀번호와 sudo 비밀번호가 다릅니다.'
+    return 'sudo 비밀번호 인증 실패: NOPASSWD가 아니거나 접속 비밀번호와 sudo 비밀번호가 다릅니다.'
   if (/not allowed|may not run sudo|not in the sudoers/i.test(t))
     return '이 계정은 sudo 권한이 없습니다.'
   return t.split('\n').slice(-1)[0] || '권한 오류'
@@ -6094,9 +6186,9 @@ ipcMain.handle('perf:envJmeter', async (): Promise<PerfEnvStatus> => {
     if (!java) {
       return {
         ok: false,
-        problem: 'Java 를 찾을 수 없습니다 — JMeter 는 Java 로 도는 도구입니다.',
+        problem: 'Java 를 찾을 수 없습니다. JMeter 는 Java 로 도는 도구입니다.',
         hint:
-          'java -version 이 되는지 확인하세요(Java 8 이상). 방금 Java 를 설치했다면 **앱을 껐다 켜세요** — ' +
+          'java -version 이 되는지 확인하세요(Java 8 이상). 방금 Java 를 설치했다면 **앱을 껐다 켜세요**: ' +
           '실행 중인 앱은 설치 전의 환경변수(PATH)를 그대로 들고 있습니다.',
       }
     }
@@ -6188,7 +6280,7 @@ function buildLocustfile(cfg: PerfRunConfig): string {
 
   const out: string[] = [
     '# Q-Term 이 폼 입력으로 만든 파일입니다.',
-    '# 폼에서 다시 만들면 덮어씁니다 — 직접 고친 내용을 지키려면 다른 이름으로 저장한 뒤',
+    '# 폼에서 다시 만들면 덮어씁니다. 직접 고친 내용을 지키려면 다른 이름으로 저장한 뒤',
     "# '파일 고르기' 로 선택하세요.",
     'import json',
     'import os',
@@ -7399,7 +7491,7 @@ ipcMain.handle('perf:openJmeterGui', async () => {
     if (early) {
       return {
         ok: false,
-        error: `${early} — 위에서 jmeter.bat 경로와 Java 설치를 확인해 주세요.`,
+        error: `${early}: 위에서 jmeter.bat 경로와 Java 설치를 확인해 주세요.`,
       }
     }
     return { ok: true }

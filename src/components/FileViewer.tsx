@@ -57,10 +57,10 @@ const APPLY_REQUIRED: {
     desc:
       '저장만으로는 컨테이너에 반영되지 않습니다. 아래 명령으로 재기동해야 적용됩니다.\n' +
       '· 이 스크립트는 이 제품의 컨테이너를 전부 내렸다가 올립니다 (해당 서비스 하나만이 아닙니다)\n' +
-      '· 고칠 값이 더 있으면 다 고친 뒤 한 번만 재기동하세요 — 저장할 때마다 내릴 필요는 없습니다\n' +
+      '· 고칠 값이 더 있으면 다 고친 뒤 한 번만 재기동하세요. 저장할 때마다 내릴 필요는 없습니다\n' +
       '· 올라온 뒤 docker ps -a 의 STATUS 가 초 단위(Up n seconds)로 바뀌면 재기동된 것입니다\n' +
-      '· 저장 직전 원본은 자동으로 백업했습니다 — 따로 cm.env.bak 을 만들지 않아도 됩니다',
-    hint: '저장만으로는 반영되지 않습니다 — 적용하려면 이 제품의 컨테이너를 전부 내렸다 올려야 합니다.',
+      '· 저장 직전 원본은 자동으로 백업했습니다. 따로 cm.env.bak 을 만들지 않아도 됩니다',
+    hint: '저장만으로는 반영되지 않습니다. 적용하려면 이 제품의 컨테이너를 전부 내렸다 올려야 합니다.',
   },
   { pattern: /\/etc\/netplan\//,     command: 'sudo netplan apply',                      desc: '저장만으로는 네트워크 설정이 반영되지 않습니다. 터미널에서 netplan apply를 실행해야 적용됩니다.' },
   { pattern: /\/etc\/sysctl\.conf$/, command: 'sudo sysctl -p',                          desc: '저장만으로는 커널 파라미터가 반영되지 않습니다. 터미널에서 sysctl -p를 실행해야 적용됩니다.' },
@@ -73,14 +73,14 @@ const APPLY_REQUIRED: {
   { pattern: /\/etc\/neutron\//,    command: 'sudo systemctl restart neutron-*',     desc: 'neutron 설정은 저장만으로 반영되지 않습니다. 관련 neutron 에이전트/서비스를 재시작하세요.' },
   { pattern: /\/etc\/cinder\//,     command: 'sudo systemctl restart cinder-*',      desc: 'cinder 설정은 저장만으로 반영되지 않습니다. cinder 서비스를 재시작하세요.' },
   { pattern: /\/etc\/glance\//,     command: 'sudo systemctl restart glance-*',      desc: 'glance 설정은 저장만으로 반영되지 않습니다. glance 서비스를 재시작하세요.' },
-  { pattern: /\/etc\/keystone\//,   command: 'sudo systemctl restart apache2',       desc: 'keystone 은 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
-  { pattern: /\/etc\/placement\//,  command: 'sudo systemctl restart apache2',       desc: 'placement 는 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
+  { pattern: /\/etc\/keystone\//,   command: 'sudo systemctl restart apache2',       desc: 'keystone 은 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다. 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
+  { pattern: /\/etc\/placement\//,  command: 'sudo systemctl restart apache2',       desc: 'placement 는 보통 웹서버(wsgi)로 구동됩니다. 저장 후 웹서버를 재시작하세요. (RHEL: httpd)', hint: '저장만으로는 반영되지 않습니다. 적용하려면 웹서버(apache2 · RHEL httpd)를 재시작해야 합니다.' },
   { pattern: /\/etc\/octavia\//,    command: 'sudo systemctl restart octavia-*',     desc: 'octavia(로드밸런서) 설정은 저장만으로 반영되지 않습니다. octavia 서비스를 재시작하세요.' },
   { pattern: /\/etc\/barbican\//,   command: 'sudo systemctl restart barbican-*',    desc: 'barbican 설정은 저장만으로 반영되지 않습니다. barbican 서비스를 재시작하세요.' },
   { pattern: /\/etc\/heat\//,       command: 'sudo systemctl restart heat-*',        desc: 'heat 설정은 저장만으로 반영되지 않습니다. heat 서비스를 재시작하세요.' },
-  { pattern: /\/etc\/rabbitmq\//,   command: 'sudo systemctl restart rabbitmq-server', desc: 'RabbitMQ 설정은 저장만으로 반영되지 않습니다. rabbitmq-server 를 재시작하세요. (클러스터는 재시작 순서 주의)', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 rabbitmq-server 를 재시작해야 합니다 (클러스터는 노드 순서 주의).' },
-  { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 DB 를 재시작해야 합니다 (Galera 는 순서·부트스트랩 주의).' },
-  { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.', hint: '저장만으로는 반영되지 않습니다 — 적용하려면 클러스터를 재시작해야 합니다. 영향이 크니 노드 순서를 지키세요.' },
+  { pattern: /\/etc\/rabbitmq\//,   command: 'sudo systemctl restart rabbitmq-server', desc: 'RabbitMQ 설정은 저장만으로 반영되지 않습니다. rabbitmq-server 를 재시작하세요. (클러스터는 재시작 순서 주의)', hint: '저장만으로는 반영되지 않습니다. 적용하려면 rabbitmq-server 를 재시작해야 합니다 (클러스터는 노드 순서 주의).' },
+  { pattern: /(my\.cnf|galera\.cnf|-server\.cnf)$/, command: 'sudo systemctl restart mariadb', desc: 'DB 설정은 저장만으로 반영되지 않습니다. mariadb(또는 mysql)를 재시작하세요. Galera 클러스터는 재시작 순서/부트스트랩에 특히 주의하세요.', hint: '저장만으로는 반영되지 않습니다. 적용하려면 DB 를 재시작해야 합니다 (Galera 는 순서·부트스트랩 주의).' },
+  { pattern: /\/etc\/corosync\//,   command: 'sudo systemctl restart corosync pacemaker', desc: 'corosync/pacemaker 설정은 저장만으로 반영되지 않습니다. 클러스터 영향이 크므로 노드별 순서에 주의해 재시작하세요.', hint: '저장만으로는 반영되지 않습니다. 적용하려면 클러스터를 재시작해야 합니다. 영향이 크니 노드 순서를 지키세요.' },
 ]
 
 /** 이 경로에 걸리는 규칙과, 거기서 만들어 낸 적용 명령 (없으면 null) */
@@ -124,7 +124,7 @@ const MODES = [
     key: 'cm' as const,
     label: '파드 ConfigMap',
     Icon: Boxes,
-    hint: '클러스터의 ConfigMap 을 키-값으로 보고 고칩니다 — kubectl 이 설치된 서버에 접속해 있어야 합니다',
+    hint: '클러스터의 ConfigMap 을 키-값으로 보고 고칩니다. kubectl 이 설치된 서버에 접속해 있어야 합니다',
   },
   {
     key: 'pods' as const,
@@ -709,7 +709,7 @@ export default function FileViewer({
     // 입력칸이 불러온 파일과 다르면 저장하지 않는다 — 어느 파일에 쓰려는지 사람이 헷갈린 상태다.
     // 저장 대상은 어차피 불러온 파일(loadedPath)이지만, 다른 경로를 보면서 '저장' 을 누르게 두지 않는다.
     if (path.trim() !== loadedPath) {
-      setMsg(`경로 칸(${path.trim() || '비어 있음'})이 편집 중인 파일(${loadedPath})과 다릅니다 — 경로를 되돌린 뒤 저장하세요.`)
+      setMsg(`경로 칸(${path.trim() || '비어 있음'})이 편집 중인 파일(${loadedPath})과 다릅니다. 경로를 되돌린 뒤 저장하세요.`)
       return
     }
     setConfirmOpen(true)
@@ -717,7 +717,7 @@ export default function FileViewer({
 
   const doSave = async (pw?: string) => {
     if (notUtf8) {
-      setMsg('UTF-8 이 아닌 내용이 있는 파일이라 저장하지 않았습니다 — 저장하면 그 부분이 깨집니다.')
+      setMsg('UTF-8 이 아닌 내용이 있는 파일이라 저장하지 않았습니다. 저장하면 그 부분이 깨집니다.')
       return
     }
     setConfirmOpen(false)
@@ -897,13 +897,13 @@ export default function FileViewer({
           >
             <option value="">빠른 선택…</option>
             {/* 이 서버에서 **실제로 찾은** 설정이 맨 위에 온다.
-                드롭다운을 따로 하나 더 두면 "둘 중 어느 쪽에 있더라" 를 매번 고르게 된다 —
+                드롭다운을 따로 하나 더 두면 "둘 중 어느 쪽에 있더라" 를 매번 고르게 된다. 
                 찾는 목적이 같으니 한 자리에 두고, 아래 내장 목록과 묶음 이름으로 가른다. */}
             {liteConfigs.length > 0 && (
               <optgroup label={`조회된 Lite 환경(docker env) 설정 (${liteConfigs.length})`}>
                 {liteConfigs.map((c) => (
                   <option key={c.path} value={c.path}>
-                    {c.service} — {c.file}
+                    {c.service}: {c.file}
                   </option>
                 ))}
               </optgroup>
@@ -929,11 +929,11 @@ export default function FileViewer({
         </div>
 
         {/* 찾은 것이 있다는 사실을 **모르는 사람에게** 알린다.
-            드롭다운 안에만 있으면 열어 본 사람만 안다 — 정작 경로를 모르는 사람이 안 열어 본다.
+            드롭다운 안에만 있으면 열어 본 사람만 안다. 정작 경로를 모르는 사람이 안 열어 본다.
             파일을 불러오기 전에만 띄운다(불러온 뒤에는 아래 도구막대가 그 자리를 쓴다). */}
         {!loaded && liteConfigs.length > 0 && (
           <div className="border-b border-white/10 bg-blue-500/[0.07] px-4 py-1.5 text-[11.5px] text-blue-200/90">
-            이 서버에서 <b>Lite 환경(docker) 설정 {liteConfigs.length}개</b>를 찾았습니다 —{' '}
+            이 서버에서 <b>Lite 환경(docker) 설정 {liteConfigs.length}개</b>를 찾았습니다. {' '}
             <span className="rounded bg-white/10 px-1 py-0.5">빠른 선택…</span> 맨 위 묶음에 있습니다.
             <span className="ml-1 text-blue-200/60">
               ({liteConfigs
@@ -1210,7 +1210,7 @@ export default function FileViewer({
                 disabled={!loaded || notUtf8}
                 title={
                   notUtf8
-                    ? 'UTF-8 이 아닌 글자(EUC-KR 주석·바이너리 등)가 있어 편집할 수 없습니다 — 저장하면 그 부분이 깨집니다. 서버에서 직접 고치세요.'
+                    ? 'UTF-8 이 아닌 글자(EUC-KR 주석·바이너리 등)가 있어 편집할 수 없습니다. 저장하면 그 부분이 깨집니다. 서버에서 직접 고치세요.'
                     : '편집 모드로 전환'
                 }
                 className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
@@ -1294,7 +1294,7 @@ export default function FileViewer({
               {/* **무엇이 바뀌는지 먼저 보여준다.**
                   파일 저장은 통째로 덮어쓰는 것이라, 이게 없으면 40개 중 셋을 고친 사람도
                   자기가 고친 게 그 셋뿐인지 확인할 길이 없다. ConfigMap 탭은 적용 전에
-                  `키 · 옛값 → 새값` 을 보여주는데 파일 쪽만 빠져 있었다 — 같은 모양으로 맞춘다. */}
+                  `키 · 옛값 → 새값` 을 보여주는데 파일 쪽만 빠져 있었다. 같은 모양으로 맞춘다. */}
               {envChanges.length > 0 ? (
                 <div className="mb-2.5 max-h-48 space-y-1 overflow-y-auto rounded bg-black/30 p-2 font-mono text-[11.5px]">
                   {envChanges.map((c) => {
@@ -1413,7 +1413,7 @@ export default function FileViewer({
             <div className="w-full max-w-2xl rounded-lg border border-amber-500/30 bg-panel p-4 shadow-2xl">
               <div className="mb-3 flex items-center gap-2">
                 <AlertCircle size={16} className="shrink-0 text-amber-400" />
-                <span className="text-sm font-semibold text-amber-200">저장 완료 — 추가 적용 필요</span>
+                <span className="text-sm font-semibold text-amber-200">저장 완료: 추가 적용 필요</span>
               </div>
               {/* 줄바꿈을 살린다 — '전부 내렸다 올린다' 같은 단서를 한 덩어리에 묻으면 안 읽힌다 */}
               <p className="mb-3 whitespace-pre-line text-[12px] leading-relaxed text-amber-300/80">
@@ -1424,7 +1424,7 @@ export default function FileViewer({
                 {applyNotice.command}
               </code>
               {/* **저장과 재기동을 붙이지 않는다.**
-                  재기동은 제품 컨테이너를 전부 내린다 — 저장 버튼이 그것까지 하면 값 하나
+                  재기동은 제품 컨테이너를 전부 내린다. 저장 버튼이 그것까지 하면 값 하나
                   고치려다 서비스를 내리게 된다. 값을 여럿 고칠 때도 매번 내렸다 올리게 된다.
                   대신 **올바른 세션의 터미널에 넣어** 주고, 실행은 사람이 Enter 로 한다. */}
               <div className="mt-4 flex items-center justify-end gap-2">
@@ -1441,7 +1441,7 @@ export default function FileViewer({
                       onInsertCommand(applyNotice.command)
                       setApplyNotice(null)
                     }}
-                    title="이 서버 터미널에 명령만 넣습니다 — 실행은 직접 Enter 를 누르세요"
+                    title="이 서버 터미널에 명령만 넣습니다. 실행은 직접 Enter 를 누르세요"
                     className="flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs text-amber-100 hover:bg-amber-500/25"
                   >
                     <TerminalSquare size={12} /> 이 서버 터미널에 넣기

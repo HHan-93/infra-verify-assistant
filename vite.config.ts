@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron/simple'
+import { readFileSync } from 'node:fs'
+
+// 리포트 머리에 '어느 버전으로 만든 리포트인가' 를 적으려고 렌더러에 버전을 넣는다(렌더러는 app.getVersion 을 못 부른다)
+const appVersion: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8')).version
 
 // vite-plugin-electron 을 사용하면 `vite` (= npm run dev) 한 번으로
 // 1) React 렌더러 dev 서버 기동, 2) Electron 메인/프리로드 번들 빌드,
@@ -12,6 +16,7 @@ export default defineConfig(({ command }) => ({
   // dev 포트 고정 — 렌더러 localStorage(상태보드 이력·응답 측정 이력·UI 설정)는 **origin 별**이라, 5173 이 잡혀 있어
   // vite 가 5174 로 비켜 뜨면 이력이 통째로 빈 것처럼 보인다(지워진 게 아니라 다른 칸에 있다). 조용히 옮기지 말고 실패시킨다.
   server: { port: 5173, strictPort: true },
+  define: { __APP_VERSION__: JSON.stringify(appVersion) },
   plugins: [
     react(),
     electron({

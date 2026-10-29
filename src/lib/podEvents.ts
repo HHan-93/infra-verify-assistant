@@ -152,12 +152,12 @@ export function explainEvent(e: PodEvent): EventExplain {
       const kind = /^Liveness/i.test(m) ? 'liveness' : /^Readiness/i.test(m) ? 'readiness' : /^Startup/i.test(m) ? 'startup' : ''
       const what =
         kind === 'liveness'
-          ? ' — 실패가 이어지면 컨테이너를 죽이고 다시 띄운다'
+          ? '실패가 이어지면 컨테이너를 죽이고 다시 띄운다'
           : kind === 'readiness'
-            ? ' — 실패하는 동안 서비스 트래픽에서 빠진다'
+            ? '실패하는 동안 서비스 트래픽에서 빠진다'
             : ''
       return {
-        title: `상태 검사 실패${kind ? `(${kind})` : ''}${what}`,
+        title: `상태 검사 실패${kind ? `(${kind})` : ''}${what ? `: ${what}` : ''}`,
         hint: '검사 경로·포트가 응답하는지 · 기동 시간보다 검사가 이르지 않은지',
       }
     }
@@ -225,19 +225,19 @@ export interface PodEventAnalysis {
 
 /** 지금 상태(이벤트가 아니라 컨테이너 상태)에서 바로 말할 수 있는 원인과 볼 곳 */
 const STATUS_HINT: Record<string, string> = {
-  CrashLoopBackOff: "컨테이너가 계속 죽고 있음 — 아래 컨테이너 표의 '직전 종료' 사유와 로그를 보세요",
-  ImagePullBackOff: '이미지를 받지 못함 — 이미지 주소·태그·레지스트리 접근',
-  ErrImagePull: '이미지를 받지 못함 — 이미지 주소·태그·레지스트리 접근',
-  CreateContainerConfigError: '설정 참조 오류 — 없는 ConfigMap/Secret 키를 참조하는지 컨테이너 메시지 확인',
-  CreateContainerError: '컨테이너 생성 오류 — 컨테이너 메시지 확인',
+  CrashLoopBackOff: "컨테이너가 계속 죽고 있음: 아래 컨테이너 표의 '직전 종료' 사유와 로그를 보세요",
+  ImagePullBackOff: '이미지를 받지 못함: 이미지 주소·태그·레지스트리 접근',
+  ErrImagePull: '이미지를 받지 못함: 이미지 주소·태그·레지스트리 접근',
+  CreateContainerConfigError: '설정 참조 오류: 없는 ConfigMap/Secret 키를 참조하는지 컨테이너 메시지 확인',
+  CreateContainerError: '컨테이너 생성 오류: 컨테이너 메시지 확인',
   InvalidImageName: '이미지 이름 형식이 잘못됨',
-  OOMKilled: '메모리 한도 초과로 종료 — limits.memory',
-  Error: '컨테이너가 오류로 종료 — 종료 코드와 로그',
-  Evicted: '노드 자원 압박으로 쫓겨남 — 노드 디스크·메모리',
-  ContainerCreating: '컨테이너 만드는 중 — 오래 머물면 볼륨·네트워크 이벤트를 보세요',
+  OOMKilled: '메모리 한도 초과로 종료: limits.memory',
+  Error: '컨테이너가 오류로 종료: 종료 코드와 로그',
+  Evicted: '노드 자원 압박으로 쫓겨남: 노드 디스크·메모리',
+  ContainerCreating: '컨테이너 만드는 중: 오래 머물면 볼륨·네트워크 이벤트를 보세요',
   PodInitializing: 'init 컨테이너가 도는 중',
-  Terminating: '종료 중 — 오래 머물면 finalizer 나 노드 상태를 보세요',
-  Pending: '배치·준비 대기 중 — 아래 배치 단계를 보세요',
+  Terminating: '종료 중: 오래 머물면 finalizer 나 노드 상태를 보세요',
+  Pending: '배치·준비 대기 중: 아래 배치 단계를 보세요',
 }
 
 function fmtCount(e: PodEvent): string {
@@ -309,18 +309,18 @@ export function analyzePodEvents(pod: PodInfo, events: PodEvent[]): PodEventAnal
   const top = current[0]
   const topText = top ? `${top.explain.title}${fmtCount(top.event)}` : undefined
   if (st.tone === 'done') {
-    headline = { tone: 'done', text: `완료됨 — ${st.label}` }
+    headline = { tone: 'done', text: `완료됨: ${st.label}` }
   } else if (healthy) {
     headline = {
       tone: 'ok',
-      text: past.length ? `정상 — 지난 경고 ${past.length}건은 지금은 해결됨` : '정상 — 지금 경고 없음',
+      text: past.length ? `정상: 지난 경고 ${past.length}건은 지금은 해결됨` : '정상: 지금 경고 없음',
     }
   } else if (st.tone === 'bad') {
     const key = pod.waitingReason ?? pod.terminatedReason ?? pod.statusReason ?? st.label
     headline = {
       tone: 'bad',
       text: `지금 문제: ${st.label}${topText ? ` · ${topText}` : ''}`,
-      hint: (st.label.startsWith('Init:') ? 'init 컨테이너 단계에서 멈춤 — 아래 init 컨테이너의 상태 · ' : '') +
+      hint: (st.label.startsWith('Init:') ? 'init 컨테이너 단계에서 멈춤: 아래 init 컨테이너의 상태 · ' : '') +
         (STATUS_HINT[key] ?? top?.explain.hint ?? '아래 경고와 컨테이너 상태'),
     }
   } else {
@@ -329,7 +329,7 @@ export function analyzePodEvents(pod: PodInfo, events: PodEvent[]): PodEventAnal
     headline = {
       tone: 'progress',
       text: `진행 중: ${st.label}${topText ? ` · ${topText}` : ''}`,
-      hint: top?.explain.hint ? `${top.explain.title} — ${top.explain.hint}` : STATUS_HINT[key],
+      hint: top?.explain.hint ? `${top.explain.title}: ${top.explain.hint}` : STATUS_HINT[key],
     }
   }
   return { headline, stages, current, past, ordered }

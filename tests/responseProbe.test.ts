@@ -18,6 +18,7 @@ import {
   httpSpec,
   specValid,
   fmtGapText,
+  fileStem,
   parseNovaServers,
   type ProbeEvent,
   type ProbeLast,
@@ -54,6 +55,12 @@ test('폴링 해석 — 마지막 이벤트 줄을 잃지 않고, 덜 쓴 줄은
   eq([p.events.length, p.alive, p.last.length], [2, true, 1])
   const q = parsePoll('QT_EV\n1792000000000,0,200,rea\nQT_ALIVE\nyes\n')
   eq([q.events.length, q.consumed], [0, 0])
+})
+test('폴링 해석 — 최대 시간으로 끝난 것과 그냥 멈춘 것을 가른다', () => {
+  const x = parsePoll('QT_EV\n\nQT_ALIVE\nno\nQT_EXPIRED 1792000001800\n')
+  eq([x.alive, x.expiredAt], [false, 1792000001800])
+  const y = parsePoll('QT_EV\n\nQT_ALIVE\nno\n')
+  eq([y.alive, y.expiredAt], [false, null])
 })
 
 const T = Date.parse('2026-10-23T14:19:52+09:00')
@@ -109,7 +116,8 @@ test('측정 스크립트 — 문법 · 판정 · 최대 시간', () => {
     )
     const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` }
     spawnSync('chmod', ['+x', path.join(dir, 'curl')])
-    const r = spawnSync('bash', ['./probe.sh', '1', '1', '3', '200,3xx', 'http', '2', '18', '0', '', 'http://x/'], { cwd: dir, env, encoding: 'utf8', timeout: 30000 })
+    // 최대 시간은 넉넉히 — 18초였을 때 Windows bash 가 느린 날(요청 한 번이 1초를 넘김) 13번째 요청 전에 끝나 '복구' 가 빠졌다(3번에 1번꼴)
+    const r = spawnSync('bash', ['./probe.sh', '1', '1', '3', '200,3xx', 'http', '2', '30', '0', '', 'http://x/'], { cwd: dir, env, encoding: 'utf8', timeout: 60000 })
     eq(r.status, 0, '최대 시간이 지나면 스스로 끝난다')
     const ev = spawnSync('cat', ['events.csv'], { cwd: dir, encoding: 'utf8' }).stdout.trim().split('\n').map((l) => l.split(','))
     eq(ev.map((e) => e[3]), ['ready', 'outage', 'recovered'], '튄 실패(4번째)는 무시, 8~10번째에서 끊김')
@@ -118,4 +126,13 @@ test('측정 스크립트 — 문법 · 판정 · 최대 시간', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('저장 파일 이름 — 회차 이름을 넣되 파일 이름에 못 쓰는 글자는 - 로', () => {
+  const run = { startedAt: new Date('2026-10-28T10:51:23').getTime() } as Parameters<typeof fileStem>[1]
+  eq(fileStem('응답측정결과', run), '응답측정결과_20261028_1051')
+  eq(fileStem('응답측정결과', { ...run, label: 'contrabass01 DOWN 1차' }), '응답측정결과_contrabass01-DOWN-1차_20261028_1051')
+  eq(fileStem('응답측정', { ...run, label: 'a/b:c*?"<>| d' }), '응답측정_a-b-c-d_20261028_1051')
+  // 전부 못 쓰는 글자면 날짜만
+  eq(fileStem('응답측정', { ...run, label: '///' }), '응답측정_20261028_1051')
 })

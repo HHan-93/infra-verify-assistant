@@ -53,16 +53,16 @@ export function perfVerdict(
   if (opts.interrupted) {
     return {
       tone: 'info',
-      label: '끊긴 회차 — 판정 안 함',
+      label: '끊긴 회차: 판정 안 함',
       reasons: [
-        '앱이 닫혔거나 비정상 종료되어 예정한 시간을 다 돌지 못했습니다. 중간까지의 수치는 전체 결과로 볼 수 없습니다 — 다시 돌리세요.',
+        '앱이 닫혔거나 비정상 종료되어 예정한 시간을 다 돌지 못했습니다. 중간까지의 수치는 전체 결과로 볼 수 없습니다. 다시 돌리세요.',
       ],
     }
   }
   if (opts.canceled) {
     return {
       tone: 'info',
-      label: '중지됨 — 판정 안 함',
+      label: '중지됨: 판정 안 함',
       reasons: ['예정한 시간을 다 돌지 않았습니다. 중간까지의 수치는 전체 결과로 볼 수 없습니다.'],
     }
   }
@@ -85,7 +85,7 @@ export function perfVerdict(
   if (summary.requests === 0) {
     return {
       tone: 'info',
-      label: '요청이 없었음 — 판정 안 함',
+      label: '요청이 없었음: 판정 안 함',
       reasons: [
         '끝난 요청이 한 건도 없습니다. 대상 주소·경로·인증을 확인하세요.',
         '서버가 연결만 받고 응답하지 않으면(장애 중) 요청이 끝나지 않아 0건으로 남습니다.',
@@ -123,11 +123,11 @@ export function perfVerdict(
   if (cannotReach) {
     return {
       tone: 'info',
-      label: '서비스에 닿지 못했습니다 — 성능을 잰 것이 아닙니다',
+      label: '서비스에 닿지 못했습니다. 성능을 잰 것이 아닙니다',
       reasons: [
         kindLine,
         '요청이 서버에 도달하지 못했습니다. 화면의 응답 시간은 서버 성능이 아니라 연결이 끊기기까지 걸린 시간입니다.',
-        '주소와 포트를 확인하세요 — https:// 는 443, http:// 는 80 이 기본이라 서비스 포트를 직접 적어야 하는 경우가 많습니다.',
+        '주소와 포트를 확인하세요. https:// 는 443, http:// 는 80 이 기본이라 서비스 포트를 직접 적어야 하는 경우가 많습니다.',
         // 가장 흔한 한 가지는 여기서 바로 짚어 준다. nginx·아파치는 TLS 를 따로 설정하지
         // 않으면 80 만 열려 있어서, https:// 로 적으면 443 에서 연결이 거부된다.
         httpsHint,
@@ -137,7 +137,7 @@ export function perfVerdict(
   }
   if (unreachable > 0 && unreachable < 0.9 && fails.length) {
     reasons.push(
-      `실패 중 ${Math.round(unreachable * 100)}% 는 서버에 닿지 못한 것입니다(${kindLine}) — 그만큼은 서버 성능이 아닙니다.`,
+      `실패 중 ${Math.round(unreachable * 100)}% 는 서버에 닿지 못한 것입니다(${kindLine}): 그만큼은 서버 성능이 아닙니다.`,
     )
   } else if (kindLine) {
     reasons.push(`실패 내용: ${kindLine}`)
@@ -156,7 +156,7 @@ export function perfVerdict(
     // 이력이 있는데 못 뺀 것은 '이력 없음' 이 아니라 워밍업 뒤 구간이 없는 것이다(워밍업 ≥ 실행 길이)
     reasons.push(
       opts.history?.length
-        ? `워밍업 ${warmup}초 뒤에 남은 구간이 없어 전체 값으로 판정했습니다 — 워밍업이 실행 시간보다 깁니다.`
+        ? `워밍업 ${warmup}초 뒤에 남은 구간이 없어 전체 값으로 판정했습니다. 워밍업이 실행 시간보다 깁니다.`
         : `워밍업 ${warmup}초를 빼려 했지만 초 단위 이력이 없어 전체 값으로 판정했습니다.`,
     )
   }
@@ -175,13 +175,13 @@ export function perfVerdict(
     }
     const ok = value <= limit
     checks.push(ok)
-    reasons.push(`${label} ${Math.round(value)}ms ${ok ? '≤' : '>'} 기준 ${limit}ms — ${ok ? '통과' : '초과'}`)
+    reasons.push(`${label} ${Math.round(value)}ms ${ok ? '≤' : '>'} 기준 ${limit}ms: ${ok ? '통과' : '초과'}`)
   }
   if (th.errorRateThresholdPct !== undefined) {
     const ok = summary.failRatePct <= th.errorRateThresholdPct
     checks.push(ok)
     reasons.push(
-      `실패율 ${summary.failRatePct.toFixed(2)}% ${ok ? '≤' : '>'} 기준 ${th.errorRateThresholdPct}% — ${
+      `실패율 ${summary.failRatePct.toFixed(2)}% ${ok ? '≤' : '>'} 기준 ${th.errorRateThresholdPct}%: ${
         ok ? '통과' : '초과'
       }`,
     )

@@ -115,7 +115,7 @@ export default function Toolbar({
       <Divider />
 
       {/* 원격 도구 (아이콘) */}
-      <IconBtn onClick={onOpenFiles} title="설정 관리 — 서버 설정파일 · 파드 ConfigMap · 파드 상태/재시작">
+      <IconBtn onClick={onOpenFiles} title="설정 관리: 서버 설정파일 · 파드 ConfigMap · 파드 상태/재시작">
         <FileCode size={15} />
       </IconBtn>
       <IconBtn onClick={onOpenExplorer} title="원격 파일 탐색기 (SFTP)">
@@ -138,7 +138,7 @@ export default function Toolbar({
         </button>
         <button
           onClick={onOpenPerf}
-          title="성능 검증 — 이 PC 에 설치된 Locust 로 원격 세션에 부하 (JMeter 아님)"
+          title="성능 검증: 이 PC 에 설치된 Locust 로 원격 세션에 부하 (JMeter 아님)"
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <Gauge size={14} className="text-blue-300" />
@@ -146,7 +146,7 @@ export default function Toolbar({
         </button>
         <button
           onClick={onOpenProbe}
-          title="응답 측정 — 클라이언트 VM 에서 대상의 HTTP · TCP 포트 · Ping 응답을 재, 끊긴 순간부터 다시 정상이 될 때까지를 기록"
+          title="응답 측정: 클라이언트 VM 에서 대상의 HTTP · TCP 포트 · Ping 응답을 재, 끊긴 순간부터 다시 정상이 될 때까지를 기록"
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <Radar size={14} className="text-blue-300" />
@@ -154,7 +154,7 @@ export default function Toolbar({
         </button>
         <button
           onClick={onAnalyzeSelection}
-          title="활성 세션의 출력을 AI 로 분석 — 드래그한 선택 영역, 또는 최근 출력 중에서 고릅니다"
+          title="활성 세션의 출력을 AI 로 분석: 드래그한 선택 영역, 또는 최근 출력 중에서 고릅니다"
           className="flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-panel-light px-1.5 py-1 text-xs text-gray-200 hover:bg-white/10"
         >
           <ScanText size={14} className="text-blue-300" />

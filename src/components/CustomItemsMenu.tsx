@@ -43,7 +43,7 @@ export default function CustomItemsMenu({ onImported }: { onImported: () => void
     const r = await window.electronAPI.customItemsExport()
     setBusy(false)
     if (r.error) setNote(r.error)
-    else if (r.saved) setNote(`내보냈습니다 — 프리셋 ${r.presets ?? 0}개 · 시나리오 ${r.scenarios ?? 0}개`)
+    else if (r.saved) setNote(`내보냈습니다. 프리셋 ${r.presets ?? 0}개 · 시나리오 ${r.scenarios ?? 0}개`)
     // 취소는 아무 말도 하지 않는다 (사용자가 스스로 닫은 것이다)
   }
 
@@ -110,7 +110,7 @@ export default function CustomItemsMenu({ onImported }: { onImported: () => void
           >
             <p className="text-[13px] leading-relaxed text-gray-200">{note}</p>
             <p className="mt-2 text-[11px] leading-relaxed text-amber-300/80">
-              명령어에 비밀번호가 들어 있으면 그대로 저장됩니다 — 파일 취급에 주의하세요.
+              명령어에 비밀번호가 들어 있으면 그대로 저장됩니다. 파일 취급에 주의하세요.
             </p>
             <div className="mt-3 flex justify-end">
               <button

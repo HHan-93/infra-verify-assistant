@@ -21,10 +21,13 @@ import {
   FileText,
   ChevronsUp,
   Download,
+  Minus,
+  Maximize2,
 } from 'lucide-react'
 import type { LogTailTarget } from '../../electron/shared-types'
 import RemotePathPicker from './RemotePathPicker'
 import { renderLogLine, lineBucket, type LineBucket } from '../lib/logDisplay'
+import { stripAnsi } from '../lib/ansi'
 
 interface OtherSession {
   id: string
@@ -57,6 +60,18 @@ interface LiveLogViewerProps {
   /** 현재(기본) 세션의 표시 라벨 — 로그 세트의 세션 힌트 매칭에 사용 */
   currentLabel?: string
   onClose: () => void
+  /**
+   * 최소화(칩) — 상태보드·응답 측정처럼 접어 두고 다시 펼친다(사용자 요청). 예전엔 닫기만 있어, 검증 중 값 확인하려고 열 때마다
+   * 경로·2분할·쌓인 로그가 처음부터였다. 접혀 있는 동안에도 **창은 그대로 붙어 있어** tail 이 계속 돈다(창마다 MAX_LINES 상한).
+   */
+  minimized?: boolean
+  onMinimize?: () => void
+  onRestore?: () => void
+  /**
+   * 열려 있는 창의 **두 번째 패널**에 이 대상을 열라는 요청(nonce 가 바뀔 때마다 한 번) — 상태보드 Masakari 카드의 [로그] 가 쓴다.
+   * 보던 패널 1 은 건드리지 않는다(사용자 결정 (a) — 교체하면 보던 로그가 사라진다).
+   */
+  addPane?: { nonce: number; sessionId: string; target: LogTailTarget }
 }
 
 const DEFAULT_LOG_PATHS = [
@@ -76,9 +91,7 @@ const MAX_LINES = 5000
 
 // ANSI 이스케이프 시퀀스(색상/커서 등) 제거 — masakari 등 원격 로그가 `\x1b[01;36m` 같은
 // 색코드를 포함해 raw 로 지저분하게 보이던 문제 해소. 제거 후 우리 키워드 색상/검색이 깨끗하게 동작.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g
-const stripAnsi = (s: string) => s.replace(ANSI_RE, '')
+// ESC 가 떨어져 나간 `[01;35m` 조각까지 지운다 — 규칙은 lib/ansi.ts 하나(masakari 판정과 같은 것)
 
 /** 두 로그 대상이 같은지(경로/파드 기준) — '이전 로그 더 보기'는 같은 대상 재시작이므로 히스토리 줄 수를 유지 */
 function sameLogTarget(a: LogTailTarget | null, b: LogTailTarget): boolean {
@@ -702,7 +715,7 @@ function LogTailPane({
     const safe =
       (tailLabel || 'live-log').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'live-log'
     const header = [
-      `# 실시간 로그 — ${tailLabel || '(대상 미상)'}`,
+      `# 실시간 로그: ${tailLabel || '(대상 미상)'}`,
       '',
       `- 저장 시각: ${d.toLocaleString()}`,
       `- 줄 수: ${body.length}${useFiltered ? ` (필터 적용됨 · 전체 버퍼 ${lines.length}줄)` : ''}`,
@@ -1066,7 +1079,7 @@ function LogTailPane({
                 {startError && <p className="mt-1.5 text-[11px] text-red-400">{startError}</p>}
                 {needSudo && (
                   <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2">
-                    <span className="shrink-0 text-[11px] text-amber-200">root 권한 필요 — sudo 비밀번호</span>
+                    <span className="shrink-0 text-[11px] text-amber-200">root 권한 필요. sudo 비밀번호</span>
                     <div className="relative flex-1">
                       <input
                         type={showSudoPw ? 'text' : 'password'}
@@ -1149,7 +1162,7 @@ function LogTailPane({
                       </button>
                     </span>
                   ))}
-                  {presets.length === 0 && <span className="text-[11px] text-gray-600">없음 — "추가"로 등록하세요.</span>}
+                  {presets.length === 0 && <span className="text-[11px] text-gray-600">없음: "추가"로 등록하세요.</span>}
                 </div>
               </div>
 
@@ -1195,7 +1208,7 @@ function LogTailPane({
                   >
                     <RefreshCw size={11} className={dockerLoading ? 'animate-spin' : ''} />
                   </button>
-                  <span className="text-gray-600">docker ps -a — 멈춘 컨테이너도 보여줍니다</span>
+                  <span className="text-gray-600">docker ps -a: 멈춘 컨테이너도 보여줍니다</span>
                 </div>
                 <input
                   value={dockerFilter}
@@ -1259,7 +1272,7 @@ function LogTailPane({
               {startError && <p className="text-[11px] text-red-400">{startError}</p>}
               {needSudo && (
                 <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2">
-                  <span className="shrink-0 text-[11px] text-amber-200">root 권한 필요 — sudo 비밀번호</span>
+                  <span className="shrink-0 text-[11px] text-amber-200">root 권한 필요. sudo 비밀번호</span>
                   <div className="relative flex-1">
                     <input
                       type={showSudoPw ? 'text' : 'password'}
@@ -1673,7 +1686,44 @@ export default function LiveLogViewer({
   otherSessions = [],
   currentLabel,
   onClose,
+  minimized = false,
+  onMinimize,
+  onRestore,
+  addPane,
 }: LiveLogViewerProps) {
+  /** 최소화 칩 위치 — 응답 측정 칩과 같은 방식(드래그로 옮김, 한 번 옮긴 자리는 지킨다) */
+  const [chipPos, setChipPos] = useState<{ x: number; y: number } | null>(null)
+  const chipDrag = useRef<{ dx: number; dy: number } | null>(null)
+  const onChipDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    chipDrag.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top }
+    const move = (ev: MouseEvent) => {
+      if (!chipDrag.current) return
+      const x = Math.max(4, Math.min(window.innerWidth - rect.width - 4, ev.clientX - chipDrag.current.dx))
+      const y = Math.max(4, Math.min(window.innerHeight - rect.height - 4, ev.clientY - chipDrag.current.dy))
+      setChipPos({ x, y })
+    }
+    const up = () => {
+      chipDrag.current = null
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+  const minimize = () => {
+    // 기본 자리는 응답 측정 칩 아래 → 없으면 상태보드 칩 아래 — 검증 중 셋을 같이 띄우는 일이 많아 한곳에 모은다
+    if (!chipPos) {
+      const w = 220
+      const anchor = (document.querySelector('[data-anchor="probe-chip"]') ?? document.querySelector('[data-anchor="board-chip"]')) as HTMLElement | null
+      if (anchor) {
+        const r = anchor.getBoundingClientRect()
+        setChipPos({ x: Math.max(4, Math.min(window.innerWidth - w - 4, r.left)), y: Math.min(window.innerHeight - 48, r.bottom + 6) })
+      }
+    }
+    onMinimize?.()
+  }
   const [showSecondPane, setShowSecondPane] = useState(false)
   const [sets, setSets] = useState<LogSet[]>(() => loadSets())
   // 각 패널이 tail 시작할 때 보고하는 "현재 대상/세션" — '세트로 저장'의 재료
@@ -1690,6 +1740,19 @@ export default function LiveLogViewer({
     { target: LogTailTarget; sessionId: string; autoStart: boolean }[] | null
   >(() => (initialTarget ? [{ target: initialTarget, sessionId, autoStart: true }] : null))
   const [loadNonce, setLoadNonce] = useState(0)
+  /**
+   * 패널 2 만 새로 붙이는 nonce 와 그때 넣을 대상. 예전엔 2분할을 켜고 끌 때도 loadNonce 를 올려 **패널 1 까지** 새로 붙어,
+   * 보던 로그가 처음부터 다시 시작했다. 패널 2 를 여닫는 일은 패널 2 만 건드린다.
+   */
+  const [p2Nonce, setP2Nonce] = useState(0)
+  const [p2Load, setP2Load] = useState<{ target: LogTailTarget; sessionId: string } | null>(null)
+  useEffect(() => {
+    if (!addPane) return
+    setP2Load({ target: addPane.target, sessionId: addPane.sessionId })
+    setP2Nonce((n) => n + 1)
+    setShowSecondPane(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addPane?.nonce])
   const [setNotice, setSetNotice] = useState('')
   const [showSaveInput, setShowSaveInput] = useState(false)
   const [newSetName, setNewSetName] = useState('')
@@ -1765,7 +1828,8 @@ export default function LiveLogViewer({
   const toggleSecondPane = () => {
     setLoadedPanes(null)
     setSetNotice('')
-    setLoadNonce((n) => n + 1)
+    setP2Load(null)
+    setP2Nonce((n) => n + 1)
     setShowSecondPane((v) => !v)
   }
 
@@ -1806,7 +1870,27 @@ export default function LiveLogViewer({
     // 둘 다 z-50 이면 순서가 App.tsx 의 렌더 순서로 정해지는데, 설정 관리 창이 그보다 뒤에 그려져
     // 로그 창이 그 **아래에 깔렸다** — 버튼을 눌러도 아무 일도 안 일어난 것처럼 보인다.
     // 확인 창(z-[70])보다는 아래여야 이 창 안의 확인 창이 가려지지 않는다.
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
+    <>
+    {/* z-[55] — 상태보드 창(z-50)이 열려 있어도 그 위에 보여야 펼칠 수 있다(상태보드의 [로그] 로 열고 접는 흐름) */}
+    {minimized && (
+      <div
+        data-anchor="livelog-chip"
+        onMouseDown={onChipDown}
+        style={chipPos ? { left: chipPos.x, top: chipPos.y } : { right: 16, bottom: 64 }}
+        className="fixed z-[55] flex cursor-move select-none items-center gap-2 rounded-lg border border-white/10 bg-panel px-3 py-2 shadow-2xl"
+      >
+        <Activity size={15} className="text-emerald-400" />
+        <span className="text-xs font-medium text-gray-100">실시간 로그</span>
+        <span className="max-w-[160px] truncate text-[10.5px] text-gray-400">
+          {paneTargets.filter(Boolean).length ? paneTargets.filter((t): t is LogTailTarget => !!t).map(paneSummary).join(' | ') : '대상 없음'}
+        </span>
+        <button onClick={onRestore} title="펼치기: 받던 로그가 그대로 이어집니다" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+          <Maximize2 size={14} />
+        </button>
+      </div>
+    )}
+    {/* 접혀 있어도 창을 떼지 않는다(숨김) — 떼면 패널의 tail 이 끊기고 쌓인 로그가 사라진다 */}
+    <div className={'fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8' + (minimized ? ' hidden' : '')}>
       <div className="flex h-[88vh] w-[1840px] max-w-[98vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <Activity size={16} className="text-emerald-400" />
@@ -1892,7 +1976,16 @@ export default function LiveLogViewer({
           >
             <Save size={12} /> 세트로 저장
           </button>
-          <button onClick={onClose} className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+          {onMinimize && (
+            <button onClick={minimize} title="최소화: 로그는 계속 받습니다" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+              <Minus size={16} />
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            title="닫기: 로그 받기를 멈춥니다"
+            className={(onMinimize ? '' : 'ml-auto ') + 'rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200'}
+          >
             <X size={16} />
           </button>
         </div>
@@ -1960,13 +2053,13 @@ export default function LiveLogViewer({
               />
               <div className="flex min-h-0 min-w-0 flex-1">
                 <LogTailPane
-                  key={`p2-${loadNonce}`}
+                  key={`p2-${loadNonce}-${p2Nonce}`}
                   sessionId={sessionId}
                   otherSessions={otherSessions}
                   currentLabel={currentLabel}
-                  initialTarget={loadedPanes?.[1]?.target}
-                  initialSessionId={loadedPanes?.[1]?.sessionId}
-                  autoStart={loadedPanes?.[1]?.autoStart}
+                  initialTarget={p2Load?.target ?? loadedPanes?.[1]?.target}
+                  initialSessionId={p2Load?.sessionId ?? loadedPanes?.[1]?.sessionId}
+                  autoStart={p2Load ? true : loadedPanes?.[1]?.autoStart}
                   onActiveTarget={(t, sid) => {
                     setPaneTargets((a) => [a[0], t])
                     setPaneSessions((a) => [a[0], sid])
@@ -1980,5 +2073,6 @@ export default function LiveLogViewer({
         </div>
       </div>
     </div>
+    </>
   )
 }

@@ -360,7 +360,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
           <>
             <button
               onClick={() => setHistoryOpen(true)}
-              title="지난 검증 회차 — 골라서 한 리포트로 뽑습니다"
+              title="지난 검증 회차: 골라서 한 리포트로 뽑습니다"
               className="flex shrink-0 items-center gap-1 rounded border border-blue-500/35 bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-200 hover:bg-blue-500/20"
             >
               <History size={12} />
@@ -578,7 +578,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
               title={
                 scenario.custom
                   ? '이 시나리오를 복사해 새로 만듭니다'
-                  : '내장 시나리오는 수정할 수 없습니다 — 복사본을 만들면 판정 기준·원복 명령을 넣을 수 있습니다'
+                  : '내장 시나리오는 수정할 수 없습니다. 복사본을 만들면 판정 기준·원복 명령을 넣을 수 있습니다'
               }
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gray-400 hover:bg-white/10 hover:text-gray-200"
             >
@@ -680,9 +680,9 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                                       : ph
                                         ? '값 입력란 펼치기 (비우면 <이름> 이 치환되지 않고 그대로 남습니다)'
                                         : needsInput
-                                          ? '실행 후 터미널에서 입력(Enter/비밀번호 등)이 필요합니다 — 아래 경고 확인'
+                                          ? '실행 후 터미널에서 입력(Enter/비밀번호 등)이 필요합니다. 아래 경고 확인'
                                           : cautious
-                                            ? '주의 사항이 있는 단계입니다 — 아래 경고를 먼저 읽으세요'
+                                            ? '주의 사항이 있는 단계입니다. 아래 경고를 먼저 읽으세요'
                                             : '터미널에서 실행'
                                   }
                                   className={
@@ -773,7 +773,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                           </div>
                         ))}
                         {/*
-                          비운 칸은 자동으로 채워지지 않는다 — `<이름>` 이 **명령에 그대로 들어간다**.
+                          비운 칸은 자동으로 채워지지 않는다. `<이름>` 이 **명령에 그대로 들어간다**.
                           힌트가 "비워두면 기본 명령어 그대로 실행" 이라 기본값이 들어오는 줄 알고
                           비워 둔 채 실행해, 설정 파일에 리터럴 `<공인IP>` 가 박힌 일이 있었다
                           (사용자 지적). 실행 직전에 몇 개가 비었는지 세어서 보여 준다.
@@ -786,7 +786,7 @@ export default function ScenarioPanel({ connected, onRun, onClose, onRunScenario
                                 <p className="flex items-start gap-1.5 rounded border border-red-500/30 bg-red-500/10 px-1.5 py-1 text-[11px] leading-relaxed text-red-300">
                                   <AlertTriangle size={12} className="mt-0.5 shrink-0" />
                                   <span>
-                                    비운 칸 {blank.length}개 —{' '}
+                                    비운 칸 {blank.length}개: {' '}
                                     <span className="font-mono">
                                       {blank.map((p) => `<${p}>`).join(' ')}
                                     </span>{' '}
@@ -1080,7 +1080,7 @@ function ScenarioEditorModal({
                   <input
                     value={s.command}
                     onChange={(e) => patchStep(i, { command: e.target.value })}
-                    placeholder="명령어 (선택 — 안내만 있는 단계는 비워둘 수 있음)"
+                    placeholder="명령어 (선택: 안내만 있는 단계는 비워둘 수 있음)"
                     className={inputCls + ' w-full mb-1.5 font-mono'}
                   />
                   {/* input 이 아니라 textarea 다 — 설명은 줄을 나눠 적고, 화면도 그대로 보여준다.
@@ -1108,7 +1108,7 @@ function ScenarioEditorModal({
                       {/* 판정 기준 — 이게 없으면 러너는 '실행됨'까지만 판단하고 정상/실패를 확정하지 못한다 */}
                       <div>
                         <label className="mb-1 block text-[10px] text-gray-400">
-                          판정 기준 <span className="text-gray-600">— 비우면 종료 코드·위험 키워드만 보고 '실행됨'으로 표시</span>
+                          판정 기준 <span className="text-gray-600"> 비우면 종료 코드·위험 키워드만 보고 '실행됨'으로 표시</span>
                         </label>
                         <div className="grid grid-cols-2 gap-1.5">
                           <input
@@ -1154,7 +1154,7 @@ function ScenarioEditorModal({
                         <label className="mb-1 block text-[10px] text-gray-400">
                           원복 명령{' '}
                           <span className="text-gray-600">
-                            — 이 단계가 만든 변경을 되돌리는 명령. 비우면 원복 대상에서 제외
+이 단계가 만든 변경을 되돌리는 명령. 비우면 원복 대상에서 제외
                           </span>
                         </label>
                         <input
@@ -1174,7 +1174,7 @@ function ScenarioEditorModal({
                         <label className="mb-1 block text-[10px] text-gray-400">
                           대상 역할{' '}
                           <span className="text-gray-600">
-                            — 비우면 기본 대상에서 실행 · 쉼표로 여러 역할을 적으면 그 세션 모두에서 실행
+비우면 기본 대상에서 실행 · 쉼표로 여러 역할을 적으면 그 세션 모두에서 실행
                           </span>
                         </label>
                         <input
@@ -1189,7 +1189,7 @@ function ScenarioEditorModal({
                       <div>
                         <div className="mb-1 flex items-center justify-between">
                           <label className="text-[10px] text-gray-400">
-                            값 추출 <span className="text-gray-600">— 출력에서 뽑아 다음 단계 &lt;이름&gt; 으로 전달</span>
+                            값 추출 <span className="text-gray-600"> 출력에서 뽑아 다음 단계 &lt;이름&gt; 으로 전달</span>
                           </label>
                           <button
                             onClick={() => patchStep(i, { capture: [...(s.capture ?? []), { name: '', regex: '' }] })}
@@ -1234,7 +1234,7 @@ function ScenarioEditorModal({
                       <div>
                         <div className="mb-1 flex items-center justify-between">
                           <label className="text-[10px] text-gray-400">
-                            자동 응답 <span className="text-gray-600">— 프롬프트가 뜨면 대신 입력</span>
+                            자동 응답 <span className="text-gray-600"> 프롬프트가 뜨면 대신 입력</span>
                           </label>
                           <button
                             onClick={() => patchStep(i, { expect: [...(s.expect ?? []), { match: '', send: '' }] })}
@@ -1314,7 +1314,7 @@ function ScenarioEditorModal({
                             return (
                               <div className="mt-1.5 rounded-md border border-white/10 bg-black/20 p-2">
                                 <div className="mb-1 text-[10px] text-gray-400">
-                                  단계 설명 (선택) — 실행 창에서 이 문구가 명령 조각 앞에 붙습니다
+                                  단계 설명 (선택): 실행 창에서 이 문구가 명령 조각 앞에 붙습니다
                                 </div>
                                 <div className="space-y-1">
                                   {segs.map((sg, k) => (
@@ -1349,7 +1349,7 @@ function ScenarioEditorModal({
                                 장비에서는 점검만 하고(실패 시: 중단) 조치는 사람이 판단하는 편이 안전합니다.
                                 <br />
                                 <span className="text-amber-300/80">
-                                  특히 <code>netplan apply</code> 처럼 네트워크를 재시작하는 명령은 넣지 마세요 — SSH 연결이
+                                  특히 <code>netplan apply</code> 처럼 네트워크를 재시작하는 명령은 넣지 마세요. SSH 연결이
                                   끊겨 그 노드에 다시 못 들어갈 수 있습니다.
                                 </span>
                               </span>

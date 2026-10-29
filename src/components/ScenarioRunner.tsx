@@ -762,7 +762,7 @@ export default function ScenarioRunner({
     if (r.ok) everOpenedRef.current.add(sid)
     if (!r.ok) {
       setNotice(
-        `${nameOfSession(sid)}: 영속 셸을 열지 못해 호환 모드로 실행합니다${r.error ? ` (${r.error})` : ''} — cd 유지·자동응답·타임아웃 중단이 제한됩니다.`,
+        `${nameOfSession(sid)}: 영속 셸을 열지 못해 호환 모드로 실행합니다${r.error ? ` (${r.error})` : ''}: cd 유지·자동응답·타임아웃 중단이 제한됩니다.`,
       )
     }
     return r.ok
@@ -804,7 +804,7 @@ export default function ScenarioRunner({
           () =>
             resolve({
               ok: false,
-              error: `응답 시간 초과(${fmtDur(runMs)}) — 호환 모드에서는 원격 프로세스를 중단시킬 수 없어 서버에서 계속 실행 중일 수 있습니다. 터미널에서 확인 후 수동 판정하세요.`,
+              error: `응답 시간 초과(${fmtDur(runMs)}): 호환 모드에서는 원격 프로세스를 중단시킬 수 없어 서버에서 계속 실행 중일 수 있습니다. 터미널에서 확인 후 수동 판정하세요.`,
             }),
           runMs,
         )
@@ -876,7 +876,7 @@ export default function ScenarioRunner({
           `입력값이 필요합니다: ${missing.map((p) => `<${p}>`).join(', ')}
 ` +
           (missing.some((p) => captureNames.has(p))
-            ? '이 값은 앞 스텝의 출력에서 자동으로 채워집니다 — 앞 스텝을 먼저 실행하세요.'
+            ? '이 값은 앞 스텝의 출력에서 자동으로 채워집니다. 앞 스텝을 먼저 실행하세요.'
             : "상단 '검증 입력값'에 값을 채운 뒤 다시 실행하세요."),
       })
       setExpanded((s) => new Set(s).add(idx))
@@ -907,7 +907,7 @@ export default function ScenarioRunner({
           sessionName: nm,
           out: r.out,
           error:
-            '사용자가 중단했습니다 — 원격 프로세스에 Ctrl+C 를 보냈습니다. ' +
+            '사용자가 중단했습니다. 원격 프로세스에 Ctrl+C 를 보냈습니다. ' +
             '명령이 끝까지 돌지 않았으므로 이 결과로 판정하지 않습니다.',
         })
       } else if (r.timedOut) {
@@ -919,11 +919,11 @@ export default function ScenarioRunner({
           out: r.out,
           timedOut: true,
           error:
-            `제한 시간(${fmtDur(timeoutForCmd(cmd, baseTimeoutMs))}) 초과 — 원격 프로세스에 Ctrl+C 를 보내 중단했습니다. ` +
+            `제한 시간(${fmtDur(timeoutForCmd(cmd, baseTimeoutMs))}) 초과: 원격 프로세스에 Ctrl+C 를 보내 중단했습니다. ` +
             '명령이 끝까지 돌지 않았으므로 이 결과로 판정하면 안 됩니다. 상단에서 제한 시간을 늘려 다시 실행하세요.' +
             (silent
               ? '\n\n출력이 전혀 없었습니다. 명령이 실행되기 전에 멈춘 경우가 대부분입니다:\n' +
-                '  · sudo 가 hostname 을 역조회하다 DNS 응답을 못 받아 대기 — 터미널에서 `time sudo -n true` 로 확인하세요\n' +
+                '  · sudo 가 hostname 을 역조회하다 DNS 응답을 못 받아 대기: 터미널에서 `time sudo -n true` 로 확인하세요\n' +
                 '    (오래 걸리면 /etc/hosts 에 자기 hostname 을 추가하거나 DNS를 먼저 잡아야 합니다)\n' +
                 '  · 네트워크 대기성 명령(curl/nc 등)이 응답을 못 받는 중\n' +
                 '  · 대상 서버가 과부하 상태'
@@ -1055,7 +1055,7 @@ ${primary?.err ?? ''}`)
       }
       // 멈춰 있으면 여기서 기다린다 (스텝 경계)
       if (pauseRef.current) {
-        setNotice(`일시정지 — ${i + 1}번 스텝 앞에서 멈췄습니다. '이어서' 또는 '다음 스텝만' 을 누르세요.`)
+        setNotice(`일시정지: ${i + 1}번 스텝 앞에서 멈췄습니다. '이어서' 또는 '다음 스텝만' 을 누르세요.`)
         await waitIfPaused()
         if (abortRef.current) {
           stoppedAt = i
@@ -1201,20 +1201,20 @@ ${primary?.err ?? ''}`)
     if (stoppedAt >= 0)
       parts.push(
         abortRef.current
-          ? `사용자 중단 — ${stoppedAt + 1}번 이후 미실행`
-          : `${stoppedAt + 1}번 실패로 중단 — 이후 스텝 미실행 (계속 진행하려면 스텝의 '실패 시' 설정을 '계속'으로)`,
+          ? `사용자 중단: ${stoppedAt + 1}번 이후 미실행`
+          : `${stoppedAt + 1}번 실패로 중단: 이후 스텝 미실행 (계속 진행하려면 스텝의 '실패 시' 설정을 '계속'으로)`,
       )
     if (extras.length) parts.push(extras.join(' · '))
     if (interactive.length)
       parts.push(
-        `${interactive.join(', ')}번은 대화형 명령이라 자동 실행에서 제외 — 터미널에서 직접 확인한 뒤 수동으로 판정하세요`,
+        `${interactive.join(', ')}번은 대화형 명령이라 자동 실행에서 제외: 터미널에서 직접 확인한 뒤 수동으로 판정하세요`,
       )
     if (manualOnlySteps.length)
       parts.push(
-        `${manualOnlySteps.join(', ')}번은 사람이 판단해야 하는 스텝이라 자동 실행에서 제외 — 필요하면 그 스텝의 '실행' 을 직접 누르세요`,
+        `${manualOnlySteps.join(', ')}번은 사람이 판단해야 하는 스텝이라 자동 실행에서 제외: 필요하면 그 스텝의 '실행' 을 직접 누르세요`,
       )
     if (manualSkipped) parts.push(`수동 지정 ${manualSkipped}개는 그대로 유지`)
-    if (skipped) parts.push(`입력값 미지정 ${skipped}개 건너뜀 — 상단 '검증 입력값'을 채우고 다시 실행`)
+    if (skipped) parts.push(`입력값 미지정 ${skipped}개 건너뜀: 상단 '검증 입력값'을 채우고 다시 실행`)
     setNotice(parts.join(' · '))
   }
 
@@ -1420,8 +1420,8 @@ ${primary?.err ?? ''}`)
       .map(([k]) => `${Number(k) + 1}번 ${scenario.steps[Number(k)]?.title ?? ""}`)
     setNotice(
       failedSteps.length
-        ? `원복 ${list.length}건 중 ${failedSteps.length}건 실패 — ${failedSteps.join(" · ")}. 아래에서 그 스텝이 펼쳐져 있습니다. 남은 것은 직접 정리하세요.`
-        : `원복 ${list.length}건 완료 — 검증 시작 전 상태로 되돌렸습니다.`,
+        ? `원복 ${list.length}건 중 ${failedSteps.length}건 실패: ${failedSteps.join(" · ")}. 아래에서 그 스텝이 펼쳐져 있습니다. 남은 것은 직접 정리하세요.`
+        : `원복 ${list.length}건 완료: 검증 시작 전 상태로 되돌렸습니다.`,
     )
   }
 
@@ -1433,7 +1433,7 @@ ${primary?.err ?? ''}`)
     stepOnceRef.current = false
     setPaused(false)
     wakeWaiters()
-    setNotice('중단 요청됨 — 실행 중인 명령을 중단합니다…')
+    setNotice('중단 요청됨: 실행 중인 명령을 중단합니다…')
     for (const [sid, ok] of Object.entries(shellOkRef.current)) {
       if (ok) void window.electronAPI.runnerInterrupt(`${runnerBaseId.current}-${sid}`)
     }
@@ -1529,7 +1529,7 @@ ${primary?.err ?? ''}`)
     const shellModes = Object.entries(shellOkRef.current)
     if (shellModes.some(([, ok]) => !ok))
       lines.push(
-        `- ⚠ 실행 모드: 일부 세션에서 영속 셸을 열지 못해 호환 모드(exec)로 실행됨 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다`,
+        `- ⚠ 실행 모드: 일부 세션에서 영속 셸을 열지 못해 호환 모드(exec)로 실행됨: cd 유지·대화형 응답·타임아웃 중단이 제한됩니다`,
       )
     lines.push(
       `- 결과 요약: 정상 ${sum.pass} · 실패 ${sum.fail} · 실행오류 ${sum.error} · 실행됨 ${sum.info} · 건너뜀 ${sum.skip} · 수동대기 ${sum.waiting} · 미실행 ${sum.pending}`,
@@ -1706,7 +1706,7 @@ ${primary?.err ?? ''}`)
       pendingRef.current = null
       void window.electronAPI.scenarioRunsSave(detail).then((r) => {
         // 이력 저장이 실패해도 검증은 끝난 상태다. 조용히 넘기지 않고 사유는 남긴다.
-        if (!r.ok) setNotice(`이력 저장 실패: ${r.error ?? '알 수 없음'} — 리포트는 아래 [저장]으로 남기세요.`)
+        if (!r.ok) setNotice(`이력 저장 실패: ${r.error ?? '알 수 없음'}: 리포트는 아래 [저장]으로 남기세요.`)
       })
     }, 1200)
     return () => clearTimeout(timer)
@@ -1853,7 +1853,7 @@ ${primary?.err ?? ''}`)
                           {t.failed && (
                             <span
                               className="shrink-0 rounded bg-red-500/15 px-1 text-[10px] text-red-300"
-                              title="이 스텝은 실패했습니다 — 이미 있던 자원 때문에 실패했다면, 원복이 원래 있던 것을 지웁니다. 확인한 뒤 고르세요."
+                              title="이 스텝은 실패했습니다. 이미 있던 자원 때문에 실패했다면, 원복이 원래 있던 것을 지웁니다. 확인한 뒤 고르세요."
                             >
                               실패한 스텝 · 기본 꺼짐
                             </span>
@@ -1910,7 +1910,7 @@ ${primary?.err ?? ''}`)
               <span className="font-mono text-amber-200">&lt;{phMenu.name}&gt;</span> 에 넣을 주소
             </div>
             <div className="px-2 pb-1 text-[9.5px] leading-relaxed text-gray-500">
-              아래에서 고르면 그 대상의 접속 주소를 따라갑니다 — 대상을 바꾸면 이 값도 같이 바뀝니다.
+              아래에서 고르면 그 대상의 접속 주소를 따라갑니다. 대상을 바꾸면 이 값도 같이 바뀝니다.
             </div>
             {/* ① 다른 스텝의 대상 — iperf3 서버/클라이언트처럼 '앞 스텝을 돌린 노드' 를 가리키는 경우 */}
             {scenario.steps
@@ -1955,7 +1955,7 @@ ${primary?.err ?? ''}`)
               }}
               className="mt-1 w-full rounded border-t border-white/10 px-2 py-1 text-left text-[10.5px] text-gray-400 hover:bg-white/10"
             >
-              연결 해제 — 직접 입력으로
+              연결 해제: 직접 입력으로
             </button>
           </div>
         </>
@@ -1973,7 +1973,7 @@ ${primary?.err ?? ''}`)
             <span
               title={
                 '원인을 좁히는 시나리오입니다. 무엇이 정상인지는 사람이 출력을 읽고 판단하므로 자동 판정하지 않습니다.\n' +
-                "스텝이 '실패'로 찍혀도 전체 실행은 멈추지 않습니다 — 그 실패가 바로 찾으려던 것이고, 남은 스텝이 그 증거이기 때문입니다."
+                "스텝이 '실패'로 찍혀도 전체 실행은 멈추지 않습니다. 그 실패가 바로 찾으려던 것이고, 남은 스텝이 그 증거이기 때문입니다."
               }
               className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300"
             >
@@ -2176,7 +2176,7 @@ ${primary?.err ?? ''}`)
           <div className="flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-[11px] leading-relaxed text-amber-200">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
             <div className="min-w-0">
-              <strong>이 시나리오는 실패 시 대상 서버의 설정을 변경합니다</strong> — 테스트용으로 만든 인스턴스에서만
+              <strong>이 시나리오는 실패 시 대상 서버의 설정을 변경합니다</strong> 테스트용으로 만든 인스턴스에서만
               실행하세요.
               {/* 되돌리는 방법은 '다 돌리고 난 뒤'가 아니라 실행 전에 알려줘야 한다.
                   원복 명령이 하나라도 있는 시나리오에서만 띄운다. */}
@@ -2184,7 +2184,7 @@ ${primary?.err ?? ''}`)
                 <div className="mt-1 flex items-center gap-1 text-amber-100">
                   <RotateCcw size={11} className="shrink-0" />
                   <span>
-                    테스트 실행 후 되돌리려면 우측 상단의 <strong>&apos;원복 실행&apos;</strong> 버튼을 누르세요 — 실제로
+                    테스트 실행 후 되돌리려면 우측 상단의 <strong>&apos;원복 실행&apos;</strong> 버튼을 누르세요. 실제로
                     실행된 스텝만 역순으로 되돌립니다.
                   </span>
                 </div>
@@ -2225,7 +2225,7 @@ ${primary?.err ?? ''}`)
                       return (
                         <div key={`${m.i}-${m.kind}`}>
                           {head}
-                          <span className="mx-1 text-amber-300/60"> —</span>
+                          <span className="mx-1 text-amber-300/60"> </span>
                           <pre className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-black/20 px-2 py-1 font-mono text-[10.5px] leading-relaxed text-amber-100/90">
                             {formatShell(m.cmd)}
                           </pre>
@@ -2235,7 +2235,7 @@ ${primary?.err ?? ''}`)
                       <div key={`${m.i}-${m.kind}`}>
                         <div>
                           {head}
-                          <span className="ml-1 text-amber-200/70">— {segs.length}단계로 실행합니다</span>
+                          <span className="ml-1 text-amber-200/70"> {segs.length}단계로 실행합니다</span>
                         </div>
                         <ol className="mt-0.5 space-y-0.5">
                           {segs.map((sg, k) => (
@@ -2265,7 +2265,7 @@ ${primary?.err ?? ''}`)
         {/* 저장된 대상 지정이 아직 안 연 서버를 가리키면, 조용히 기본 대상에서 돌지 않도록 알린다 */}
         {unresolvedTargets.length > 0 && (
           <div className="bg-amber-500/10 px-4 py-1 text-[11px] text-amber-200">
-            지난 실행에서 지정했던 대상 중 <strong>아직 접속하지 않은 세션</strong>이 있습니다 ({unresolvedTargets.join(', ')}) — 해당
+            지난 실행에서 지정했던 대상 중 <strong>아직 접속하지 않은 세션</strong>이 있습니다 ({unresolvedTargets.join(', ')}): 해당
             세션을 연결하면 자동으로 복원되고, 그전까지는 기본 대상에서 실행됩니다.
           </div>
         )}
@@ -2431,7 +2431,7 @@ ${primary?.err ?? ''}`)
                           <span
                             title={
                               "돌릴지 말지를 사람이 정해야 하는 스텝입니다.\n" +
-                              "'전체 실행'에서는 건너뜁니다 — 조건을 확인한 뒤 오른쪽 '실행' 을 직접 누르세요."
+                              "'전체 실행'에서는 건너뜁니다. 조건을 확인한 뒤 오른쪽 '실행' 을 직접 누르세요."
                             }
                             className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-200"
                           >
@@ -2454,7 +2454,7 @@ ${primary?.err ?? ''}`)
                         {recovering?.idx === idx && (
                           <span className="flex shrink-0 items-center gap-1 rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-medium text-amber-100">
                             <Loader2 size={9} className="animate-spin" />
-                            {recovering.phase === 'fix' ? '실패 — 원인 조치 중' : '조치 완료 — 재시도 중'}
+                            {recovering.phase === 'fix' ? '실패: 원인 조치 중' : '조치 완료: 재시도 중'}
                           </span>
                         )}
                         {step.onFailure === 'continue' && (
@@ -2462,7 +2462,7 @@ ${primary?.err ?? ''}`)
                         )}
                         {(step.onFailure === 'run' || step.onFailure === 'retry') && (
                           <span
-                            title={`실패 시 이 명령으로 서버 설정을 바꿉니다 — 테스트 인스턴스에서만 사용하세요\n$ ${step.onFailureCommand ?? '(비어 있음)'}`}
+                            title={`실패 시 이 명령으로 서버 설정을 바꿉니다. 테스트 인스턴스에서만 사용하세요\n$ ${step.onFailureCommand ?? '(비어 있음)'}`}
                             className="flex shrink-0 items-center gap-0.5 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200"
                           >
                             <AlertTriangle size={9} />
@@ -2734,7 +2734,7 @@ $ ${formatShell(step.undo ?? "")}`}
                                 }}
                                 className="mt-1 w-full rounded border-t border-white/10 px-2 py-1 text-left text-[10.5px] text-gray-400 hover:bg-white/10"
                               >
-                                지정 해제 — 상단 &apos;대상&apos;을 따름
+                                지정 해제: 상단 &apos;대상&apos;을 따름
                               </button>
                             </div>
                           </>
@@ -2910,7 +2910,7 @@ $ ${formatShell(step.undo ?? "")}`}
                       ) : null}
                       {r?.captureMisses?.length ? (
                         <div className="bg-amber-500/10 px-3 py-1 text-[10px] text-amber-300">
-                          ⚠ 값 추출 실패: {r.captureMisses.join(', ')} — 이후 스텝에서 해당 플레이스홀더가 비어 있게 됩니다.
+                          ⚠ 값 추출 실패: {r.captureMisses.join(', ')}: 이후 스텝에서 해당 플레이스홀더가 비어 있게 됩니다.
                         </div>
                       ) : null}
                       {r?.reasons?.length ? (

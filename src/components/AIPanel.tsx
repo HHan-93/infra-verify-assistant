@@ -873,14 +873,14 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
                                   서버가 아니라 <span className="font-semibold">내 PC의 로컬 셸</span>에서 실행됩니다.
                                 </>
                               )}{' '}
-                              실수 방지를 위해 실행을 막았습니다 — 확인이 필요하면 「입력」으로 붙여넣고 직접 실행하세요.
+                              실수 방지를 위해 실행을 막았습니다. 확인이 필요하면 「입력」으로 붙여넣고 직접 실행하세요.
                             </p>
                           )}
                           <div className="flex gap-2">
                             <button
                               onClick={() => onRunCommand?.(card.command, false)}
                               disabled={!onRunCommand}
-                              title="터미널에 입력만(실행 안 함) — 확인 후 직접 Enter"
+                              title="터미널에 입력만(실행 안 함): 확인 후 직접 Enter"
                               className="flex items-center gap-1 rounded bg-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-white/10 disabled:opacity-40"
                             >
                               <CornerDownLeft size={12} /> 입력
@@ -959,7 +959,7 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
       <div className="border-t border-white/10 p-3">
         {/*
           무엇이 외부로 나가는지 밝힌다. 설정에서 끌 수 있는 것이므로 "꺼져 있다" 도 알려야
-          한다 — 켜져 있다고 착각한 채 비밀번호가 든 로그를 붙여넣는 것이 제일 나쁘다.
+          한다. 켜져 있다고 착각한 채 비밀번호가 든 로그를 붙여넣는 것이 제일 나쁘다.
         */}
         <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] text-gray-500">
           <ShieldCheck size={11} className={maskReportEnabled() ? 'text-emerald-400/80' : 'text-amber-400/80'} />
@@ -969,7 +969,7 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
               {maskedCount > 0 && <span className="text-emerald-300/90"> · 직전 요청에서 {maskedCount}건 가림</span>}
             </span>
           ) : (
-            <span className="text-amber-300/80">마스킹이 꺼져 있습니다 — 붙여넣은 내용이 그대로 외부 API 로 갑니다</span>
+            <span className="text-amber-300/80">마스킹이 꺼져 있습니다. 붙여넣은 내용이 그대로 외부 API 로 갑니다</span>
           )}
         </div>
         <div className="flex items-end gap-2 rounded-lg bg-panel-light px-3 py-2">

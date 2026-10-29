@@ -262,9 +262,9 @@ export default function ConfigMapView({
         resourceVersion: r.resourceVersion ?? detail.resourceVersion,
       })
       setPending({})
-      setMsg(`적용 완료 — ${r.applied}건. 백업: ${r.backupPath ?? '(없음)'}`)
+      setMsg(`적용 완료: ${r.applied}건. 백업: ${r.backupPath ?? '(없음)'}`)
     } else {
-      setMsg((r.conflict ? '적용하지 않았습니다 — ' : '적용 실패: ') + (r.error ?? ''))
+      setMsg((r.conflict ? '적용하지 않았습니다. ' : '적용 실패: ') + (r.error ?? ''))
     }
   }
 
@@ -433,7 +433,7 @@ export default function ConfigMapView({
         ) : yamlOpen ? (
           <>
             <div className="mb-1.5 flex items-center gap-2">
-              <span className="text-[11px] text-gray-400">YAML 전문 — 읽기 전용</span>
+              <span className="text-[11px] text-gray-400">YAML 전문: 읽기 전용</span>
               <button
                 onClick={() => setYamlOpen(false)}
                 className="rounded px-1.5 py-0.5 text-[11px] text-gray-400 hover:bg-white/10"
@@ -452,7 +452,7 @@ export default function ConfigMapView({
           <div className="font-mono" style={mono}>
             {detail.binaryKeys.length > 0 && (
               <p className="mb-2 rounded bg-white/[0.04] px-2 py-1 text-[11px] text-gray-400">
-                binaryData 키 {detail.binaryKeys.length}개는 이 화면에서 수정할 수 없습니다 —{' '}
+                binaryData 키 {detail.binaryKeys.length}개는 이 화면에서 수정할 수 없습니다. {' '}
                 {detail.binaryKeys.join(', ')}
               </p>
             )}
@@ -534,7 +534,7 @@ export default function ConfigMapView({
                       {isMulti(valueOf(k)) && !hidden(k) && (
                         <span
                           className="shrink-0 whitespace-nowrap rounded bg-white/5 px-1.5 text-[10px] text-gray-400"
-                          title="여러 줄 값입니다 — 연필을 누르면 여러 줄 편집기로 열립니다"
+                          title="여러 줄 값입니다. 연필을 누르면 여러 줄 편집기로 열립니다"
                         >
                           {lineCount(valueOf(k))}줄
                         </span>
@@ -733,7 +733,7 @@ export default function ConfigMapView({
                         }}
                         title={
                           foreign
-                            ? '지금 접속한 환경과 다른 클러스터의 백업입니다 — apply 대상을 확인하세요'
+                            ? '지금 접속한 환경과 다른 클러스터의 백업입니다. apply 대상을 확인하세요'
                             : '평문 YAML 로 저장 (kubectl apply -f 로 되돌릴 때 사용)'
                         }
                         className={
@@ -747,7 +747,7 @@ export default function ConfigMapView({
                     {/*
                       어느 환경에서 만든 백업인가. 같은 이름의 ConfigMap 이 환경마다 있어서, 이게
                       없으면 이력에서 개발/운영이 구분되지 않고 내보내 apply 할 때 잘못된 것을 고른다.
-                      v2.6.0 이전 백업에는 기록이 없다 — 그 사실을 감추지 않고 그대로 밝힌다.
+                      v2.6.0 이전 백업에는 기록이 없다. 그 사실을 감추지 않고 그대로 밝힌다.
                     */}
                     <div className="mt-0.5 flex items-center gap-1.5 pl-0.5 text-[10.5px]">
                       {b.origin && (b.origin.host || b.origin.context || b.origin.alias) ? (
@@ -771,7 +771,7 @@ export default function ConfigMapView({
                           )}
                         </>
                       ) : (
-                        <span className="text-gray-600" title="v2.6.0 이전에 만든 백업입니다 — 그때는 환경을 기록하지 않았습니다">
+                        <span className="text-gray-600" title="v2.6.0 이전에 만든 백업입니다. 그때는 환경을 기록하지 않았습니다">
                           환경 미기록
                         </span>
                       )}
@@ -833,7 +833,7 @@ export default function ConfigMapView({
             </div>
 
             <div className="mb-2.5 rounded bg-black/40 px-2.5 py-2">
-              <div className="mb-1 text-[10.5px] text-gray-500">실행될 명령 — 한 번만 나갑니다</div>
+              <div className="mb-1 text-[10.5px] text-gray-500">실행될 명령: 한 번만 나갑니다</div>
               <code className="block max-h-24 overflow-y-auto break-all font-mono text-[11px] leading-relaxed text-green-300/85">
                 {`kubectl patch cm ${detail.name} -n ${detail.namespace} --type merge -p '${JSON.stringify({
                   data: Object.fromEntries(pendingKeys.map((k) => [k, isSecretKey(k) ? '••••' : pending[k]])),
@@ -844,7 +844,7 @@ export default function ConfigMapView({
             <div className="mb-3 flex items-start gap-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-200">
               <AlertTriangle size={12} className="mt-0.5 shrink-0" />
               <span>
-                변경 전 YAML 전문을 <b>내 PC</b>에 암호화해 먼저 남깁니다 — 백업이 실패하면 적용하지 않습니다. 불러온
+                변경 전 YAML 전문을 <b>내 PC</b>에 암호화해 먼저 남깁니다. 백업이 실패하면 적용하지 않습니다. 불러온
                 뒤 이 ConfigMap 이 바뀌었으면(resourceVersion {detail.resourceVersion}) 적용하지 않고 알려드립니다.
               </span>
             </div>

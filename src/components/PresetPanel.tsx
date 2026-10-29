@@ -815,7 +815,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
 
             <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
               {/* 별(즐겨찾기) 식별자는 `솔루션|하위분류|명령어` 다. 지금 보고 있는 위치를 그대로
-                  넘긴다 — 상태(solution/subName)는 하위분류가 사라져 목록이 첫 하위분류로 되돌아간
+                  넘긴다. 상태(solution/subName)는 하위분류가 사라져 목록이 첫 하위분류로 되돌아간
                   뒤에도 옛 이름을 들고 있어, 그대로 쓰면 즐겨찾기 목록과 다른 id 가 만들어진다 */}
               {/*
                 key 에 **순번**을 함께 넣는다. 예전에는 명령어 문자열만 썼는데, 안내 항목은
@@ -1021,7 +1021,7 @@ function PresetEditorModal({
               className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-gray-300 hover:text-gray-100"
             >
               {showCheck ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-              자동 판정 기준 <span className="text-gray-500">(선택 — 비우면 "정보"로만 표시)</span>
+              자동 판정 기준 <span className="text-gray-500">(선택: 비우면 "정보"로만 표시)</span>
             </button>
             {showCheck && (
               <div className="space-y-2 px-2.5 pb-2.5">

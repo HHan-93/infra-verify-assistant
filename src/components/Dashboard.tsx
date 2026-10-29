@@ -391,16 +391,16 @@ export default function Dashboard({ sessionId, connected }: Props) {
 
       {/* KPI 카드 */}
       <div className="grid grid-cols-4 gap-2">
-        <Kpi label="CPU" value={latest ? `${latest.cpu}%` : '—'} pct={latest?.cpu} />
+        <Kpi label="CPU" value={latest ? `${latest.cpu}%` : '-'} pct={latest?.cpu} />
         <Kpi
           label="Memory"
-          value={latest ? `${latest.mem.pct}%` : '—'}
+          value={latest ? `${latest.mem.pct}%` : '-'}
           sub={latest ? `${latest.mem.used} / ${latest.mem.total} MB` : undefined}
           pct={latest?.mem.pct}
         />
         <Kpi
           label="Disk"
-          value={latest ? `${latest.disk.pct}%` : '—'}
+          value={latest ? `${latest.disk.pct}%` : '-'}
           sub={latest ? `루트(/) · ${latest.disk.used}/${latest.disk.total} GB` : '루트(/) 파티션'}
           pct={latest ? diskPct : undefined}
         />
@@ -422,7 +422,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
               </div>
             </div>
           ) : (
-            <div className="text-lg font-semibold">—</div>
+            <div className="text-lg font-semibold">-</div>
           )}
         </div>
       </div>
@@ -632,7 +632,7 @@ export default function Dashboard({ sessionId, connected }: Props) {
               </button>
               <button
                 onClick={savePdfReport}
-                title="정리된 문서 형태(PDF)로 저장 — 공유·인쇄에 적합"
+                title="정리된 문서 형태(PDF)로 저장: 공유·인쇄에 적합"
                 className="flex items-center gap-1 rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
               >
                 <FileDown size={14} /> PDF 저장

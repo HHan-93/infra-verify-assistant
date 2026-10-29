@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Radar, X, Minus, Maximize2, Play, Square, Download, Loader2, History, Trash2, FileText, Plus } from 'lucide-react'
+import { Radar, X, Minus, Maximize2, Play, Square, Download, Loader2, History, Trash2, FileText, Plus, Pencil } from 'lucide-react'
 import ConfirmDialog from './ConfirmDialog'
 import { notifyOs } from '../lib/notify'
 import { maskForExport } from '../lib/mask'
@@ -20,12 +20,14 @@ import {
   type ProbeMode,
   textToRows,
   buildPollCmd,
+  buildExtendCmd,
   buildStartCmd,
   buildStopCmd,
   parsePoll,
   parseTargets,
   probeDir,
   summarize,
+  fileStem,
   type ProbeConfig,
   type ProbeLast,
   type ProbeRun,
@@ -133,10 +135,65 @@ async function runWithTimeout(
   }
 }
 
+/**
+ * 회차 이름 — 보일 때는 이름(없으면 시작 시각), 연필을 누르면 그 자리에서 고친다. Enter · 칸 밖을 누르면 저장, Esc 는 취소,
+ * 비우면 이름을 지워 시작 시각으로 돌아간다. 목록 줄 안에 있으므로 누름이 줄(회차 열기)로 번지지 않게 막는다.
+ */
+function RunName({ run, onRename, className }: { run: ProbeRun; onRename: (name: string) => void; className?: string }) {
+  const [edit, setEdit] = useState<string | null>(null)
+  // 끝낸 뒤 칸이 사라지며 blur 가 한 번 더 올 수 있다 — Esc 로 취소한 것이 그 blur 로 저장되지 않게 한 번만 처리한다
+  const closed = useRef(false)
+  if (edit != null) {
+    const done = (save: boolean) => {
+      if (closed.current) return
+      closed.current = true
+      if (save && edit.trim() !== (run.label ?? '')) onRename(edit.trim())
+      setEdit(null)
+    }
+    return (
+      <input
+        autoFocus
+        value={edit}
+        maxLength={80}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => setEdit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') done(true)
+          else if (e.key === 'Escape') {
+            e.stopPropagation()
+            done(false)
+          }
+        }}
+        onBlur={() => done(true)}
+        placeholder={fmtDateTime(run.startedAt)}
+        className="min-w-0 flex-1 rounded border border-blue-500/50 bg-panel-light px-1.5 py-0.5 text-[12px] text-gray-100 placeholder:text-gray-600"
+      />
+    )
+  }
+  return (
+    <span className={'flex min-w-0 items-center gap-1 ' + (className ?? '')}>
+      <span className="truncate text-gray-200" title={run.label || undefined}>
+        {run.label || fmtDateTime(run.startedAt)}
+      </span>
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          closed.current = false
+          setEdit(run.label ?? '')
+        }}
+        title="회차 이름 바꾸기 (비우면 시작 시각으로 보입니다)"
+        className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+      >
+        <Pencil size={11} />
+      </button>
+    </span>
+  )
+}
+
 function buildMarkdown(run: ProbeRun, sum: ProbeSummary): string {
   const L: string[] = []
   const cell = (v: unknown) => String(v ?? '').replace(/\|/g, '\\|')
-  L.push(`# 응답 측정 — ${run.label || run.host} (${fmtDateTime(run.startedAt)})`, '')
+  L.push(`# 응답 측정: ${run.label || run.host} (${fmtDateTime(run.startedAt)})`, '')
   L.push(
     `- 클라이언트 VM: ${run.host} · 기록 위치: \`${run.dir}\` (events.csv · checks.csv)`,
     `- 방식: ${modeText(run.config)}${run.tcpTool ? ` (${run.tcpTool === 'nc' ? 'nc -z' : 'bash /dev/tcp'})` : ''} · 주기 ${run.config.intervalSec}초 · 타임아웃 ${run.config.timeoutSec}초 · 연속 ${run.config.needOk}회면 복구`,
@@ -204,7 +261,7 @@ function NovaPicker({
     const r = await runWithTimeout(sid, os('hypervisor list'), 30_000)
     const list = r.ok ? parseHypervisors(r.out ?? '') : null
     setBusy(false)
-    if (!list) return setErr(`컴퓨트 호스트 목록을 받지 못했습니다 — openrc·권한을 확인하세요. ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(0, 160)}`)
+    if (!list) return setErr(`컴퓨트 호스트 목록을 받지 못했습니다. openrc·권한을 확인하세요. ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(0, 160)}`)
     setHosts(list)
     if (!host && list.length) setHost(list[0])
   }
@@ -216,7 +273,7 @@ function NovaPicker({
     const r = await runWithTimeout(sid, os(`server list --all-projects --host ${host} --limit -1 -c ID -c Name -c Status -c Networks`), 60_000)
     const list = r.ok ? parseNovaServers(r.out ?? '') : null
     setBusy(false)
-    if (!list) return setErr(`VM 목록을 받지 못했습니다 — ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(0, 200)}`)
+    if (!list) return setErr(`VM 목록을 받지 못했습니다. ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(0, 200)}`)
     setVms(list)
     setPick(new Set())
   }
@@ -325,7 +382,7 @@ function NovaPicker({
           )}
         </div>
         <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5 text-[11.5px] text-gray-500">
-          <span>IP 가 여럿이면 첫 번째를 넣습니다 — 넣은 뒤 수동 입력 칸에서 바꿀 수 있습니다.</span>
+          <span>IP 가 여럿이면 첫 번째를 넣습니다. 넣은 뒤 수동 입력 칸에서 바꿀 수 있습니다.</span>
           <button
             disabled={!pick.size}
             onClick={() => onAdd((vms ?? []).filter((v) => pick.has(v.id)).map((v) => ({ name: v.name, ip: v.ips[0] })))}
@@ -362,6 +419,8 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   const [active, setActive] = useState<ActiveState | null>(() => loadJson<ActiveState | null>(ACTIVE_KEY, null))
   const [last, setLast] = useState<ProbeLast[]>([])
   const [alive, setAlive] = useState<boolean | null>(null)
+  /** 서버가 최대 측정 시간으로 스스로 끝낸 시각 — 있으면 '멈춤' 오류가 아니라 정상 종료다 */
+  const [expiredAt, setExpiredAt] = useState<number | null>(null)
   const [pollErr, setPollErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
@@ -409,6 +468,8 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   }
   const [closeAsk, setCloseAsk] = useState(false)
   const [history, setHistory] = useState<ProbeRun[]>(() => loadJson<ProbeRun[]>(HIST_KEY, []))
+  /** 시작 전에 붙여 둘 회차 이름(선택) — 시작하면 비운다(다음 회차에 같은 이름이 따라가지 않게) */
+  const [runName, setRunName] = useState('')
   const [viewId, setViewId] = useState<string | null>(null)
   const [, tick] = useState(0)
   /**
@@ -439,7 +500,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     } else {
       const r = textToRows(targetsText, mode)
       if (r.rows.length) setRows([...r.rows, emptyRow()])
-      if (r.errors.length) setMsg(`입력 칸으로 옮기지 못한 줄이 있습니다 — ${r.errors[0]}`)
+      if (r.errors.length) setMsg(`입력 칸으로 옮기지 못한 줄이 있습니다. ${r.errors[0]}`)
     }
     setInputTab(to)
   }
@@ -509,10 +570,10 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
       if (stop) return
       if (!r.ok) {
         // 조회 실패는 측정 중단이 아니다 — 서버에서는 계속 돌고 있다. 직전 화면을 두고 사실만 밝힌다
-        setPollErr(`클라이언트 VM 조회 실패 — ${'error' in r ? r.error : ''} (측정은 서버에서 계속됩니다)`)
+        setPollErr(`클라이언트 VM 조회 실패: ${'error' in r ? r.error : ''} (측정은 서버에서 계속됩니다)`)
       } else {
         const p = parsePoll(r.out ?? '')
-        if (p.noDir) setPollErr('측정 디렉터리가 없습니다 — 서버에서 지워졌거나 다른 서버입니다')
+        if (p.noDir) setPollErr('측정 디렉터리가 없습니다. 서버에서 지워졌거나 다른 서버입니다')
         else {
           setPollErr('')
           setLast(p.last)
@@ -522,6 +583,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
             hostLastAtRef.current = hostNow
           }
           setAlive(p.alive)
+          setExpiredAt(p.expiredAt)
           if (p.events.length || p.consumed) {
             setActive((cur) =>
               cur && cur.run.id === a.run.id
@@ -557,7 +619,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
       const out = r.ok ? r.out ?? '' : ''
       const err = out.match(/QT_ERR (.+)/)?.[1]
       if (!r.ok || err || !/QT_STARTED \d+/.test(out)) {
-        setMsg(`시작하지 못했습니다 — ${err || ('error' in r ? r.error : '') || out.trim().slice(0, 200) || '응답 없음'}`)
+        setMsg(`시작하지 못했습니다. ${err || ('error' in r ? r.error : '') || out.trim().slice(0, 200) || '응답 없음'}`)
         return
       }
       const tool = out.match(/QT_TOOL (nc|devtcp)/)?.[1] as 'nc' | 'devtcp' | undefined
@@ -572,9 +634,12 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
         dir: probeDir(id),
         config,
         events: [],
+        label: runName.trim() || undefined,
       }
+      setRunName('')
       setLast([])
       setAlive(true)
+      setExpiredAt(null)
       setViewId(null)
       setActive({ run, profileKey: host?.profileKey, sessionId: hostId, offset: 0 })
     } finally {
@@ -583,7 +648,8 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   }
 
   /** 측정을 끝낸다 — 서버의 프로세스를 내리고, 남은 이벤트를 마저 읽어 회차를 이력에 남긴다 */
-  const stop = async (auto = false) => {
+  const stop = async (reason: 'auto' | 'manual' | 'max_time' = 'manual') => {
+    const auto = reason === 'auto'
     const a = activeRef.current
     if (!a || busy || stoppingRef.current) return
     stoppingRef.current = true
@@ -604,7 +670,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
       } else stopFailed = true
       if (stopFailed)
         setMsg(
-          `클라이언트 VM 의 측정 프로세스를 내리지 못했습니다 — 세션을 다시 연결해 ${a.run.dir} 의 pid 를 정리하세요(최대 ${a.run.config.maxMin ?? 180}분 뒤 스스로 멈춥니다)`,
+          `클라이언트 VM 의 측정 프로세스를 내리지 못했습니다. 세션을 다시 연결해 ${a.run.dir} 의 pid 를 정리하세요(최대 ${a.run.config.maxMin ?? 180}분 뒤 스스로 멈춥니다)`,
         )
       /**
        * 원문(checks.csv)을 받아 이 PC 에 둔다 — 서버 /tmp 에만 있으면 재부팅·정리·VM 삭제로 사라진다(검토 지적).
@@ -626,6 +692,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
         hostEndAt: hostLastAtRef.current ?? undefined,
         stopFailed: stopFailed || undefined,
         rawSaved: rawSaved || undefined,
+        endReason: reason,
       }
       const all = [run, ...history.filter((h) => h.id !== run.id)]
       const seenByMode: Record<string, number> = {}
@@ -646,8 +713,16 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
       if (auto) {
         const s = summarize(run.config, run.events, [])
         const span = s.firstOutage && s.allRecovered ? fmtGap(s.allRecovered - s.firstOutage) : ''
-        setMsg(`끊겼던 대상이 모두 복구돼 측정을 자동으로 끝냈습니다${span ? ` — 첫 끊김부터 모두 복구까지 ${span}` : ''}`)
+        setMsg(`끊겼던 대상이 모두 복구돼 측정을 자동으로 끝냈습니다${span ? `. 첫 끊김부터 모두 복구까지 ${span}` : ''}`)
         notifyOs('응답 측정 종료', `끊겼던 대상 ${s.targets.filter((t) => t.outages.length).length}대 모두 복구${span ? ` · ${span}` : ''}`)
+      }
+      if (reason === 'max_time') {
+        const s = summarize(run.config, run.events, [])
+        const open = s.targets.filter((t) => t.outages.some((o) => o.end == null))
+        setMsg(
+          `최대 측정 시간(${run.config.maxMin ?? 180}분)이 다 돼 측정을 끝내고 저장했습니다${open.length ? `. 그때까지 복구되지 않은 대상 ${open.length}대(${open.map((t) => t.name).join(', ')})` : ''}`,
+        )
+        notifyOs('응답 측정 종료', `최대 측정 시간 도달${open.length ? ` · 미복구 ${open.length}대` : ''}`)
       }
     } finally {
       setBusy(false)
@@ -702,32 +777,69 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   const sum = shown ? summarize(shown.config, shown.events, active ? last : []) : null
   const autoDue = !!active && !!sum && shouldAutoStop(active.run.config, sum, last)
   useEffect(() => {
-    if (autoDue) void stop(true)
+    if (autoDue && !busy) void stop('auto')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoDue])
+  }, [autoDue, busy])
+  /**
+   * 서버가 최대 측정 시간으로 스스로 끝냈다 — 그대로 두면 '측정 중 · 34분 26초 · 멈춤' 으로 시간만 오르고, [측정 중지] 를
+   * 눌러야 저장돼 놓치면 결과가 남지 않았다(2026-10-26). 남은 이벤트를 읽어 바로 저장한다. 미복구 대상은 '시간 안에 복구 안 됨'.
+   */
+  // busy 도 지켜본다 — 끝나는 순간 다른 동작(연장 등)이 돌고 있으면 stop 이 그냥 돌아와, 조건이 그대로라 다시 불리지 않고
+  // '저장 중' 에 멈췄다(코드 검토 지적). busy 가 풀리면 다시 시도한다
+  const maxDue = !!active && alive === false && expiredAt != null
+  useEffect(() => {
+    if (maxDue && !busy) void stop('max_time')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maxDue, busy])
+  /** 최대 측정 시간 연장(+30분) — 서버 스크립트가 maxsec 파일을 매 주기 다시 읽는다 */
+  const extend = async () => {
+    const a = activeRef.current
+    if (!a || !activeSid || busy) return
+    const nextMin = (a.run.config.maxMin ?? 180) + 30
+    setBusy(true)
+    const r = await runWithTimeout(activeSid, buildExtendCmd(a.run.id, nextMin * 60), 10_000).finally(() => setBusy(false))
+    const out = r.ok ? r.out ?? '' : ''
+    if (/QT_OK/.test(out)) {
+      setActive((cur) => (cur && cur.run.id === a.run.id ? { ...cur, run: { ...cur.run, config: { ...cur.run.config, maxMin: nextMin } } } : cur))
+      setMsg(`최대 측정 시간을 ${nextMin}분으로 늘렸습니다`)
+    } else if (/QT_OLD/.test(out)) setMsg('이 측정은 이전 버전 스크립트로 시작돼 연장할 수 없습니다. 새로 시작한 측정부터 됩니다')
+    else setMsg(`연장하지 못했습니다. ${'error' in r ? r.error : out.trim().slice(0, 120) || '응답 없음'}`)
+  }
+
+  /** 회차 이름 바꾸기 — 측정 중인 회차는 active(저장은 ACTIVE_KEY 효과가 한다), 지난 회차는 이력에 바로 쓴다 */
+  const renameRun = (id: string, name: string) => {
+    const label = name || undefined
+    // 둘 다 함수형으로 고친다 — 이름 칸을 쓰는 사이 측정이 끝나 active 에서 이력으로 옮겨 가면, 그린 때의 active · history 로
+    // 판단해 이름이 사라지거나 방금 들어온 회차를 옛 이력으로 덮어썼다(코드 점검 10-29). 저장도 갱신된 값으로 한다(같은 값을 두 번 써도 무해)
+    setActive((cur) => (cur && cur.run.id === id ? { ...cur, run: { ...cur.run, label } } : cur))
+    setHistory((cur) => {
+      if (!cur.some((h) => h.id === id)) return cur
+      const next = cur.map((h) => (h.id === id ? { ...h, label } : h))
+      saveJson(HIST_KEY, next)
+      return next
+    })
+  }
 
   const exportMd = async (run: ProbeRun) => {
     const s = summarize(run.config, run.events, [])
-    const d = new Date(run.startedAt)
-    const name = `응답측정_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.md`
+    const name = `${fileStem('응답측정', run)}.md`
     const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildMarkdown(run, s)) })
-    setMsg(res.saved ? `저장했습니다 — ${res.path ?? ''}` : res.error ? `저장 실패 — ${res.error}` : '')
+    setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   const exportHtml = async (run: ProbeRun) => {
     const s = summarize(run.config, run.events, [])
-    const d = new Date(run.startedAt)
-    const name = `응답측정결과_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.html`
+    const name = `${fileStem('응답측정결과', run)}.html`
     const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeHtml(run, s)), format: 'html' })
-    setMsg(res.saved ? `저장했습니다 — ${res.path ?? ''}` : res.error ? `저장 실패 — ${res.error}` : '')
+    setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   /** 서버에 남은 모든 요청 기록(checks.csv)을 받아 저장 — 원문 증적 */
   const exportCsv = async (run: ProbeRun) => {
-    const header = `# 응답 측정 원문 — ${run.host}:${run.dir}/checks.csv (${modeText(run.config)})\n# epoch_ms,대상번호,결과(HTTP 코드 · OPEN · OK, 실패 000)  (대상: ${run.config.targets.map((t, i) => `${i}=${t.name}`).join(', ')})\n`
+    const header = `# 응답 측정 원문${run.label ? ` (${run.label})` : ''}: ${run.host}:${run.dir}/checks.csv (${modeText(run.config)})\n# epoch_ms,대상번호,결과(HTTP 코드 · OPEN · OK, 실패 000)  (대상: ${run.config.targets.map((t, i) => `${i}=${t.name}`).join(', ')})\n`
     // 이 PC 에 받아 둔 원문이 있으면 그것을 쓴다 — 서버가 꺼져 있어도 된다
     const local = await window.electronAPI.probeRawRead(run.id).catch(() => ({ ok: false as const }))
     if (local.ok && 'content' in local && local.content != null) {
-      const res = await window.electronAPI.saveReport({ defaultName: `응답측정_원문_${run.id}.csv`, content: maskForExport(header + local.content), format: 'csv' })
-      setMsg(res.saved ? `저장했습니다 — ${res.path ?? ''}` : res.error ? `저장 실패 — ${res.error}` : '')
+      const res = await window.electronAPI.saveReport({ defaultName: `${fileStem('응답측정_원문', run)}.csv`, content: maskForExport(header + local.content), format: 'csv' })
+      setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
       return
     }
     const sid =
@@ -739,8 +851,8 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     const out = r.ok ? r.out ?? '' : ''
     if (!r.ok || out.startsWith('QT_NOFILE')) return setMsg('서버에서 checks.csv 를 찾지 못했습니다(/tmp 가 비워졌을 수 있습니다)')
     void window.electronAPI.probeRawSave(run.id, out) // 받은 김에 이 PC 에도 둔다
-    const res = await window.electronAPI.saveReport({ defaultName: `응답측정_원문_${run.id}.csv`, content: maskForExport(header + out), format: 'csv' })
-    setMsg(res.saved ? `저장했습니다 — ${res.path ?? ''}` : res.error ? `저장 실패 — ${res.error}` : '')
+    const res = await window.electronAPI.saveReport({ defaultName: `${fileStem('응답측정_원문', run)}.csv`, content: maskForExport(header + out), format: 'csv' })
+    setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
 
   const requestClose = () => {
@@ -749,6 +861,9 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   }
 
   const elapsed = active ? Date.now() - active.run.startedAt : 0
+  // 남은 측정 시간 — 끝나기 5분 전인데 아직 끊긴 대상이 있으면 [+30분] 을 눈에 띄게 한다(종료 직전 알림)
+  const remainMs = active ? (active.run.config.maxMin ?? 180) * 60_000 - elapsed : 0
+  const openNow = active && sum ? sum.targets.filter((t) => t.outages.some((o) => o.end == null)).length : 0
   const stateCls: Record<string, string> = {
     ok: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
     down: 'border-red-500/40 bg-red-500/15 text-red-200',
@@ -760,9 +875,10 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   if (minimized)
     return (
       <div
+        data-anchor="probe-chip"
         onMouseDown={onChipDown}
         style={chipPos ? { left: chipPos.x, top: chipPos.y } : { right: 16, bottom: 16 }}
-        className="fixed z-50 flex cursor-move select-none items-center gap-2 rounded-lg border border-white/10 bg-panel px-3 py-2 shadow-2xl"
+        className="fixed z-[55] flex cursor-move select-none items-center gap-2 rounded-lg border border-white/10 bg-panel px-3 py-2 shadow-2xl"
       >
         <Radar size={15} className="text-blue-400" />
         <span className="text-xs font-medium text-gray-100">응답 측정</span>
@@ -788,10 +904,36 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
           {active && (
             <span className="ml-2 flex items-center gap-1 rounded bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-200">
               <Loader2 size={11} className="animate-spin" /> 측정 중 · {fmtGap(elapsed)}
-              {alive === false && <span className="text-red-300"> · 서버의 측정이 멈춤</span>}
+              {alive === false ? (
+                expiredAt != null ? (
+                  <span className="text-gray-300"> · 최대 시간 도달: 저장 중</span>
+                ) : (
+                  <span className="text-red-300"> · 서버의 측정이 멈춤</span>
+                )
+              ) : (
+                <span className={remainMs < 5 * 60_000 && openNow > 0 ? 'text-amber-200' : 'text-blue-200/70'}>
+                  {' '}
+                  · 남은 {fmtGap(Math.max(0, remainMs))} / 최대 {active.run.config.maxMin ?? 180}분
+                </span>
+              )}
             </span>
           )}
-          <button onClick={minimize} title="최소화 — 측정은 계속됩니다" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+          {active && alive !== false && (
+            <button
+              onClick={() => void extend()}
+              disabled={busy || !activeSid}
+              title="측정을 끊지 않고 최대 측정 시간을 30분 늘립니다. 복구가 늦어 아직 끊긴 대상이 있을 때"
+              className={
+                'rounded border px-2 py-0.5 text-[11px] disabled:opacity-40 ' +
+                (remainMs < 5 * 60_000 && openNow > 0
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-100 hover:bg-amber-500/25'
+                  : 'border-white/10 text-gray-300 hover:bg-white/10')
+              }
+            >
+              +30분
+            </button>
+          )}
+          <button onClick={minimize} title="최소화: 측정은 계속됩니다" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
             <Minus size={16} />
           </button>
           <button onClick={requestClose} title="닫기" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
@@ -803,7 +945,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
           {/* 왼쪽: 설정 + 이력 */}
           <div className="flex w-[470px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-white/10 p-4 text-[12px] text-gray-300">
             <label className="block">
-              <span className="mb-1 block text-gray-400" title="대상 서버에 요청을 보낼 서버 — 측정 스크립트가 여기서 돈다. 장애를 낼 노드는 고르지 마세요">
+              <span className="mb-1 block text-gray-400" title="대상 서버에 요청을 보낼 서버: 측정 스크립트가 여기서 돈다. 장애를 낼 노드는 고르지 마세요">
                 클라이언트 VM
               </span>
               <select
@@ -825,9 +967,9 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
               <div className="inline-flex overflow-hidden rounded border border-white/15 text-[11.5px]">
                 {(
                   [
-                    ['http', 'HTTP (curl)', '상태 코드가 기대값(기본 200)이면 정상 — 웹 서비스(nginx·apache)'],
-                    ['tcp', 'TCP (포트)', '대상:포트 로 연결이 열리면 정상 — DB·SSH 등 HTTP 가 아닌 서비스. bash /dev/tcp(없으면 nc)'],
-                    ['icmp', 'Ping (ICMP)', 'ping 에 응답하면 정상 — VM 이 네트워크에 살아 있는지'],
+                    ['http', 'HTTP (curl)', '상태 코드가 기대값(기본 200)이면 정상: 웹 서비스(nginx·apache)'],
+                    ['tcp', 'TCP (포트)', '대상:포트 로 연결이 열리면 정상: DB·SSH 등 HTTP 가 아닌 서비스. bash /dev/tcp(없으면 nc)'],
+                    ['icmp', 'Ping (ICMP)', 'ping 에 응답하면 정상: VM 이 네트워크에 살아 있는지'],
                   ] as const
                 ).map(([k, label, tip]) => (
                   <button
@@ -843,14 +985,14 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
               </div>
               <p className="mt-1 text-[10.5px] text-gray-500">
                 {mode === 'http'
-                  ? '웹 서비스 응답 — 상태 코드가 기대값이면 정상입니다.'
+                  ? '웹 서비스 응답: 상태 코드가 기대값이면 정상입니다.'
                   : mode === 'tcp'
-                    ? '포트 연결 — 대상:포트 로 TCP 연결이 열리면 정상입니다(DB · SSH 등). 포트는 필수입니다.'
-                    : 'Ping — ICMP 응답이 오면 정상입니다(VM 이 네트워크에 살아 있는지). 방화벽이 ICMP 를 막으면 늘 끊김으로 나옵니다.'}
+                    ? '포트 연결: 대상:포트 로 TCP 연결이 열리면 정상입니다(DB · SSH 등). 포트는 필수입니다.'
+                    : 'Ping: ICMP 응답이 오면 정상입니다(VM 이 네트워크에 살아 있는지). 방화벽이 ICMP 를 막으면 늘 끊김으로 나옵니다.'}
               </p>
             </div>
             <div className="rounded border border-white/10 bg-white/[0.02] px-2 py-1.5">
-              <div className="mb-1 text-[11px] text-gray-400">대상 세트 — 저장해 두고 불러 씁니다(방식 · 대상 목록)</div>
+              <div className="mb-1 text-[11px] text-gray-400">대상 세트: 저장해 두고 불러 씁니다(방식 · 대상 목록)</div>
               <div className="flex items-center gap-1.5">
                 <select
                   value={setPick}
@@ -1024,7 +1166,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                     className="w-full rounded border border-white/10 bg-panel-light px-2 py-1.5 font-mono text-[11.5px] text-gray-100 placeholder:text-gray-600 disabled:opacity-60"
                   />
                   <p className="text-[10.5px] text-gray-500">
-                    한 줄에 하나 — `이름 주소` 또는 주소만.{' '}
+                    한 줄에 하나: `이름 주소` 또는 주소만.{' '}
                     {mode === 'http' ? 'IP 만 쓰면 http://IP(80번 포트)' : mode === 'tcp' ? '주소는 IP:포트' : '주소는 IP 또는 호스트명'}
                   </p>
                 </>
@@ -1094,7 +1236,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                     onChange={(e) => setCfg((c) => ({ ...c, follow: e.target.checked }))}
                   />
                   <span>리다이렉트 따라가기</span>
-                  <span className="text-[11px] text-gray-500">— 301·302 를 따라가 최종 페이지 코드로 판정</span>
+                  <span className="text-[11px] text-gray-500"> 301·302 를 따라가 최종 페이지 코드로 판정</span>
                 </label>
               </div>
             )}
@@ -1117,9 +1259,22 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
               />
               <span className="text-gray-500">초 더 보고</span>
             </label>
+            {!active && (
+              <label className="block">
+                <span className="mb-0.5 block text-[11px] text-gray-400">회차 이름 (선택)</span>
+                <input
+                  value={runName}
+                  maxLength={80}
+                  onChange={(e) => setRunName(e.target.value)}
+                  placeholder="예: contrabass01 DOWN 1차 (비우면 시작 시각)"
+                  title="지난 측정 목록 · 리포트 제목 · 저장 파일 이름에 쓰입니다. 측정 중이나 끝난 뒤에도 연필로 바꿀 수 있습니다"
+                  className="w-full rounded border border-white/10 bg-panel-light px-2 py-1 text-[12px] text-gray-100 placeholder:text-gray-600"
+                />
+              </label>
+            )}
             <p className="text-[11px] leading-relaxed text-gray-500">
               연속 {cfg.needFail}회 실패해야 끊김으로 셉니다(한 번 튄 실패는 무시, 끊김 시각은 그 첫 실패). 최대 {cfg.maxMin}분이 지나면
-              서버에서 스스로 멈춥니다. 노드를 죽이기 <b className="text-gray-300">전에</b> 시작하세요 — 처음 정상(연속 {cfg.needOk}회)을 확인한 대상만 끊김을 셉니다.
+              서버에서 스스로 멈춥니다. 노드를 죽이기 <b className="text-gray-300">전에</b> 시작하세요. 처음 정상(연속 {cfg.needOk}회)을 확인한 대상만 끊김을 셉니다.
               복구 시각은 연속 정상이 시작된 첫 성공입니다.
             </p>
             {!active ? (
@@ -1162,8 +1317,9 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                       (viewId === h.id && !active ? 'border-blue-500/50 bg-blue-500/10' : 'border-white/10 hover:bg-white/5')
                     }
                   >
-                    <span className="text-gray-200">{fmtDateTime(h.startedAt)}</span>
-                    <span className="text-gray-500">{h.config.targets.length}대</span>
+                    <RunName run={h} onRename={(n) => renameRun(h.id, n)} className="max-w-[45%]" />
+                    {h.label && <span className="shrink-0 text-[10.5px] text-gray-500" title={fmtDateTime(h.startedAt)}>{fmtDateTime(h.startedAt).slice(5, 16)}</span>}
+                    <span className="shrink-0 text-gray-500">{h.config.targets.length}대</span>
                     <span className="text-gray-400">{s.maxGap != null ? `최장 ${fmtGap(s.maxGap)}` : '끊김 없음'}</span>
                     <button
                       onClick={(e) => {
@@ -1174,7 +1330,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                         void window.electronAPI.probeRawDelete([h.id])
                         if (viewId === h.id) setViewId(null)
                       }}
-                      title="이 기록 삭제 — 이 PC 에 받아 둔 원문도 지웁니다(클라이언트 VM 의 /tmp 기록은 남습니다)"
+                      title="이 기록 삭제: 이 PC 에 받아 둔 원문도 지웁니다(클라이언트 VM 의 /tmp 기록은 남습니다)"
                       className="ml-auto rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
                     >
                       <Trash2 size={12} />
@@ -1194,19 +1350,21 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
             ) : (
               <>
                 {pollErr && active && <div className="mb-3 rounded bg-amber-500/10 px-3 py-1.5 text-[11.5px] text-amber-200">{pollErr}</div>}
-                {active && alive === false && (
+                {/* 최대 시간으로 끝난 경우는 위 효과가 곧바로 저장한다 — 이 경고는 그 표식 없이 사라진 경우(재부팅·kill)만 */}
+                {active && alive === false && expiredAt == null && (
                   <div className="mb-3 rounded bg-red-500/10 px-3 py-1.5 text-[11.5px] text-red-200">
-                    클라이언트 VM 의 측정 프로세스가 멈췄습니다 — 최대 측정 시간({active.run.config.maxMin ?? 180}분)이 지났거나 서버가 재부팅됐을 수 있습니다.
-                    이후는 기록되지 않습니다. [측정 중지]로 지금까지의 결과를 저장하세요.
+                    클라이언트 VM 의 측정 프로세스가 최대 측정 시간 전에 멈췄습니다. 서버가 재부팅됐거나 프로세스가 강제로 내려갔을 수
+                    있습니다. 이후는 기록되지 않습니다. [측정 중지]로 지금까지의 결과를 저장하세요.
                   </div>
                 )}
                 {active && !activeSid && (
                   <div className="mb-3 rounded bg-amber-500/10 px-3 py-1.5 text-[11.5px] text-amber-200">
-                    클라이언트 VM({shown.host}) 세션이 연결돼 있지 않습니다 — 측정은 서버에서 계속 돌고 있고, 다시 연결하면 이어서 보여 줍니다.
+                    클라이언트 VM({shown.host}) 세션이 연결돼 있지 않습니다. 측정은 서버에서 계속 돌고 있고, 다시 연결하면 이어서 보여 줍니다.
                   </div>
                 )}
                 <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
-                  <span className="text-gray-300">{fmtDateTime(shown.startedAt)}</span>
+                  <RunName run={shown} onRename={(n) => renameRun(shown.id, n)} className="max-w-[40%] text-[13px] font-medium" />
+                  {shown.label && <span className="text-gray-400">{fmtDateTime(shown.startedAt)}</span>}
                   <span className="text-gray-500">클라이언트 VM {shown.host}</span>
                   <code className="text-[11px] text-gray-500">{shown.dir}</code>
                   {!active && (
@@ -1355,8 +1513,8 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
           title="측정 중입니다"
           message={
             '측정은 클라이언트 VM 에서 돌고 있습니다.\n' +
-            '· 측정 중지하고 닫기 — 서버의 측정을 내리고 이력에 남깁니다\n' +
-            '· 계속 측정하고 닫기 — 서버에서 계속 돌고, 다시 열면 이어서 보여 줍니다'
+            '· 측정 중지하고 닫기: 서버의 측정을 내리고 이력에 남깁니다\n' +
+            '· 계속 측정하고 닫기: 서버에서 계속 돌고, 다시 열면 이어서 보여 줍니다'
           }
           confirmLabel="측정 중지하고 닫기"
           onConfirm={() => {

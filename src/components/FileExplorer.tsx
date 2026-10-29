@@ -103,10 +103,10 @@ const PERM_BITS = [
   { label: '실행', sub: '실행·진입 (x)', bit: 1 },
 ] as const
 const CHMOD_PRESETS = [
-  { mode: 0o644, label: '644', desc: '일반 파일 — 주인만 수정, 나머지는 읽기만' },
-  { mode: 0o755, label: '755', desc: '폴더·실행파일 — 주인은 전체, 나머지는 읽기·실행' },
-  { mode: 0o600, label: '600', desc: '비밀 파일 — 주인만 읽기·쓰기 (키/비밀번호)' },
-  { mode: 0o700, label: '700', desc: '개인 폴더 — 주인만 전체 접근' },
+  { mode: 0o644, label: '644', desc: '일반 파일: 주인만 수정, 나머지는 읽기만' },
+  { mode: 0o755, label: '755', desc: '폴더·실행파일: 주인은 전체, 나머지는 읽기·실행' },
+  { mode: 0o600, label: '600', desc: '비밀 파일: 주인만 읽기·쓰기 (키/비밀번호)' },
+  { mode: 0o700, label: '700', desc: '개인 폴더: 주인만 전체 접근' },
 ] as const
 const bitChar = (bit: number) => (bit === 4 ? 'r' : bit === 2 ? 'w' : 'x')
 /** 8진수 mode → 'rwxr-xr-x' 형태 기호 표기 */
@@ -741,7 +741,7 @@ export default function FileExplorer({
                 isBinaryFile(n.name) ? (
                   <button
                     onClick={(e) => { e.stopPropagation(); setBinaryWarnFile({ path: n.path, name: n.name }) }}
-                    title="텍스트 편집 불가 — 클릭하여 안내 보기"
+                    title="텍스트 편집 불가: 클릭하여 안내 보기"
                     className="rounded p-0.5 text-gray-600 hover:bg-white/10 hover:text-amber-400"
                   >
                     <AlertCircle size={13} />
@@ -926,7 +926,7 @@ export default function FileExplorer({
                           setLeftSessionId(v)
                         }
                       }}
-                      title="좌측 패널에서 볼 대상 — 로컬 또는 다른 연결된 세션"
+                      title="좌측 패널에서 볼 대상: 로컬 또는 다른 연결된 세션"
                       className="rounded border border-white/10 bg-panel-light px-1 py-0.5 text-[11px] font-semibold text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
                       <option value="local">로컬</option>
@@ -1093,7 +1093,7 @@ export default function FileExplorer({
                   <>
                     {searchTruncated && (
                       <div className="bg-amber-500/10 px-3 py-1 text-[10px] text-amber-300">
-                        결과가 많아 일부만 표시합니다 — 검색어를 더 구체적으로 입력해보세요.
+                        결과가 많아 일부만 표시합니다. 검색어를 더 구체적으로 입력해보세요.
                       </div>
                     )}
                     {searchResults.map((r) => (
@@ -1520,7 +1520,7 @@ function FileEditModal({
             <div className="flex items-start gap-2">
               <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-400" />
               <div className="min-w-0 flex-1">
-                <p className="text-[12px] font-medium text-amber-200">저장 완료 — 추가 적용 명령이 필요합니다</p>
+                <p className="text-[12px] font-medium text-amber-200">저장 완료: 추가 적용 명령이 필요합니다</p>
                 <p className="mt-0.5 text-[11px] text-amber-300/80">{applyNotice.desc}</p>
                 <code className="mt-1.5 block rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-amber-100">{applyNotice.command}</code>
               </div>

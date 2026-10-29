@@ -90,7 +90,7 @@ export function tidyFailureText(text: string): string {
   const s = (text ?? '').replace(/\uFFFD/g, '\uFFFD')
   if (!s.includes('\uFFFD')) return s
   const head = s.slice(0, s.indexOf('\uFFFD')).replace(/[\s'"(,]+$/, '')
-  return `${head} … (오류 문구가 깨져 읽을 수 없습니다 — 2.8.0 이전 방식으로 기록된 회차입니다)`
+  return `${head} … (오류 문구가 깨져 읽을 수 없습니다. 2.8.0 이전 방식으로 기록된 회차입니다)`
 }
 
 /** 쉼표 구분 한 줄 — 따옴표 안의 쉼표는 자르지 않는다 (`Name` 에 쿼리스트링이 들어온다) */

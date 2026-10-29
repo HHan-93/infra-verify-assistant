@@ -119,15 +119,15 @@ export const DEFAULT_PROBE: Omit<ProbeConfig, 'targets'> = {
 
 /** 클라이언트 VM 에 올리는 스크립트 — 인자: 주기 타임아웃 연속횟수 기대표식 방식 대상... */
 export const PROBE_SCRIPT = `#!/bin/bash
-# Q-Term 응답 측정 — 대상마다 병렬로 응답(HTTP 코드 · TCP 연결 · ping)을 재고, 끊김·복구를 events.csv 에 남긴다.
+# Q-Term 응답 측정: 대상마다 병렬로 응답(HTTP 코드 · TCP 연결 · ping)을 재고, 끊김·복구를 events.csv 에 남긴다.
 # events.csv : epoch_ms,대상번호,결과,이벤트(ready|outage|recovered),기준시각_ms[,끊김시작_ms]
-# checks.csv : epoch_ms,대상번호,결과   (모든 요청) — 결과: HTTP 코드 / OPEN / OK, 실패는 000
+# checks.csv : epoch_ms,대상번호,결과   (모든 요청): 결과: HTTP 코드 / OPEN / OK, 실패는 000
 D="$(cd "$(dirname "$0")" && pwd)"
 INTERVAL=$1; TIMEOUT=$2; NEED=$3; EXPECT=$4; MODE=$5; NEEDF=$6; MAXSEC=$7; FOLLOW=$8; HOSTHDR=$9; shift 9
 HTTP_ARGS=(-k -s -o /dev/null -w '%{http_code}' --connect-timeout "$TIMEOUT" --max-time "$TIMEOUT")
 [ "$FOLLOW" = 1 ] && HTTP_ARGS+=(-L)
 [ -n "$HOSTHDR" ] && HTTP_ARGS+=(-H "Host: $HOSTHDR")
-# 정상 표식 — EXPECT 는 쉼표로 여러 개, x 는 아무 글자(2xx). glob 을 쓰지 않으려고 한 글자씩 견준다
+# 정상 표식: EXPECT 는 쉼표로 여러 개, x 는 아무 글자(2xx). glob 을 쓰지 않으려고 한 글자씩 견준다
 ok_code() {
   local IFS=, p j m
   for p in $EXPECT; do
@@ -162,7 +162,12 @@ check() {
 }
 watch_one() {
   local i=$1 url=$2 had=0 out=0 out_ms=0 streak=0 sstart=0 fails=0 fstart=0
-  while [ $(( $(date +%s) - START )) -lt "$MAXSEC" ]; do
+  local lim
+  while :; do
+    # 최대 시간은 maxsec 파일에서 매번 다시 읽는다. 측정 중 [+30분] 연장이 끊김 없이 이어지게(파일이 없으면 인자 값).
+    # cat 을 쓰면 주기마다 프로세스가 하나 더 떠 1초 주기가 밀린다(검사에서 걸렸다). 셸 내장 read 로 읽는다
+    read -r lim 2>/dev/null < "$D/maxsec" || lim=$MAXSEC
+    [ $(( $(date +%s) - START )) -lt "\${lim:-$MAXSEC}" ] || break
     local t; t=$(now_ms)
     local code; code=$(check "$url")
     [ -z "$code" ] && code=000
@@ -221,7 +226,7 @@ export function parseTargets(text: string, mode: ProbeMode = 'http'): { targets:
       const host = m?.[1] ?? ''
       const port = m?.[2]
       if (!HOST_RE.test(host)) {
-        errors.push(`${li + 1}번째 줄: 주소로 읽을 수 없습니다 — ${line}`)
+        errors.push(`${li + 1}번째 줄: 주소로 읽을 수 없습니다. ${line}`)
         return
       }
       if (mode === 'tcp' && (!port || +port < 1 || +port > 65535)) {
@@ -237,7 +242,7 @@ export function parseTargets(text: string, mode: ProbeMode = 'http'): { targets:
     }
     if (!/^https?:\/\//i.test(u)) u = `http://${u}`
     if (!URL_RE.test(u)) {
-      errors.push(`${li + 1}번째 줄: 주소로 읽을 수 없습니다 — ${line}`)
+      errors.push(`${li + 1}번째 줄: 주소로 읽을 수 없습니다. ${line}`)
       return
     }
     if (seen.has(u)) return
@@ -331,7 +336,7 @@ export function buildStartCmd(runId: string, cfg: ProbeConfig): string {
       ? [
           `if command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-z'; then QT_TCP=nc`,
           `elif command -v timeout >/dev/null 2>&1; then QT_TCP=devtcp`,
-          `else echo 'QT_ERR -z 를 지원하는 nc 도, timeout 도 없습니다 — TCP 연결을 잴 수 없습니다'; exit 1; fi`,
+          `else echo 'QT_ERR -z 를 지원하는 nc 도, timeout 도 없습니다. TCP 연결을 잴 수 없습니다'; exit 1; fi`,
         ].join('\n')
       : mode === 'icmp'
         ? `command -v ping >/dev/null 2>&1 || { echo 'QT_ERR ping 이 없습니다'; exit 1; }`
@@ -342,7 +347,7 @@ export function buildStartCmd(runId: string, cfg: ProbeConfig): string {
     `mkdir -p ${dir} && cd ${dir} || { echo 'QT_ERR 디렉터리를 만들 수 없습니다'; exit 1; }`,
     `cat > probe.sh <<'QT_PROBE_EOF'\n${PROBE_SCRIPT}QT_PROBE_EOF`,
     `chmod +x probe.sh`,
-    `: > events.csv; : > checks.csv`,
+    `: > events.csv; : > checks.csv; echo ${maxSec} > maxsec`,
     ...(mode === 'tcp' ? [`echo "$QT_TCP" > tcp_tool; echo "QT_TOOL $QT_TCP"`] : []),
     `setsid nohup bash ./probe.sh ${args.join(' ')} ${targetArgs.join(' ')} > run.log 2>&1 < /dev/null &`,
     `echo $! > pid`,
@@ -350,10 +355,23 @@ export function buildStartCmd(runId: string, cfg: ProbeConfig): string {
   ].join('\n')
 }
 
-/** 1초마다 읽는 명령 — 대상별 마지막 상태 + events.csv 의 새 부분 + 살아 있는지 */
+/**
+ * 1초마다 읽는 명령 — 대상별 마지막 상태 + events.csv 의 새 부분 + 살아 있는지 + (끝났다면) 최대 시간으로 끝났는지.
+ * 스크립트는 최대 시간이 다 되면 run.log 에 `QT_EXPIRED <ms>` 를 남기고 스스로 끝난다. 예전에는 이걸 읽지 않아, 설정대로
+ * 30분에 끝난 것을 '프로세스가 멈췄다(재부팅?)' 는 오류로 보여 주고 경과 시간만 계속 올렸다(2026-10-26 사용자 지적).
+ */
 export function buildPollCmd(runId: string, eventsOffset: number): string {
   const dir = probeDir(runId)
-  return `cd ${dir} 2>/dev/null || { echo QT_NODIR; exit 0; }; cat t*.last 2>/dev/null; echo QT_EV; tail -c +${eventsOffset + 1} events.csv 2>/dev/null; echo; echo QT_ALIVE; kill -0 "$(cat pid 2>/dev/null)" 2>/dev/null && echo yes || echo no`
+  return `cd ${dir} 2>/dev/null || { echo QT_NODIR; exit 0; }; cat t*.last 2>/dev/null; echo QT_EV; tail -c +${eventsOffset + 1} events.csv 2>/dev/null; echo; echo QT_ALIVE; kill -0 "$(cat pid 2>/dev/null)" 2>/dev/null && echo yes || echo no; grep -h QT_EXPIRED run.log 2>/dev/null | tail -n 1`
+}
+
+/**
+ * 측정 중 최대 시간을 늘린다 — 스크립트가 maxsec 파일을 매 주기 다시 읽는다. 이 기능 전의 스크립트(2.13.0)는 파일을 읽지 않아
+ * 늘려도 소용이 없으므로 그때는 QT_OLD 로 알린다(조용히 '늘렸다' 고 하면 그 시각에 측정이 끊겨 놀란다).
+ */
+export function buildExtendCmd(runId: string, maxSec: number): string {
+  const dir = probeDir(runId)
+  return `cd ${dir} 2>/dev/null || { echo QT_NODIR; exit 0; }; grep -q maxsec probe.sh || { echo QT_OLD; exit 0; }; echo ${Math.max(60, Math.floor(maxSec))} > maxsec && echo QT_OK`
 }
 
 /** 측정 프로세스 그룹을 내린다 — 대상별 하위 셸까지 함께 */
@@ -392,15 +410,19 @@ export function parsePoll(out: string): {
   events: ProbeEvent[]
   consumed: number
   alive: boolean | null
+  /** 최대 측정 시간이 다 돼 스크립트가 스스로 끝낸 시각(클라이언트 VM 시계) — 비정상 중단과 가른다 */
+  expiredAt: number | null
 } {
-  if (/^QT_NODIR/m.test(out)) return { noDir: true, last: [], events: [], consumed: 0, alive: false }
+  if (/^QT_NODIR/m.test(out)) return { noDir: true, last: [], events: [], consumed: 0, alive: false, expiredAt: null }
   const evAt = out.indexOf('QT_EV\n')
   const aliveAt = out.lastIndexOf('\nQT_ALIVE\n')
   const head = evAt >= 0 ? out.slice(0, evAt) : ''
   // 폴링 명령이 덧붙인 개행(echo)은 바로 아래 '\nQT_ALIVE' 의 앞 개행이라 slice 에서 이미 빠진다.
   // 여기서 끝 개행을 한 번 더 지우면 마지막 이벤트 줄이 '덜 쓰인 줄' 로 보여 버려졌다 — 중지 직전 조회에서는 영영 빠졌다
   const evText = evAt >= 0 ? out.slice(evAt + 'QT_EV\n'.length, aliveAt >= 0 ? aliveAt : undefined) : ''
-  const aliveWord = aliveAt >= 0 ? out.slice(aliveAt + '\nQT_ALIVE\n'.length).trim() : ''
+  const tail = aliveAt >= 0 ? out.slice(aliveAt + '\nQT_ALIVE\n'.length) : ''
+  const aliveWord = tail.trim().split('\n')[0]?.trim() ?? ''
+  const exp = tail.match(/QT_EXPIRED (\d{10,16})/)
   const last: ProbeLast[] = []
   for (const l of head.split('\n')) {
     const m = l.trim().match(/^(\d+) (\d{10,16}) ([A-Za-z0-9]{2,6}) (\d+) ([01]) ([01])$/)
@@ -423,6 +445,7 @@ export function parsePoll(out: string): {
     events,
     consumed: new TextEncoder().encode(complete).length,
     alive: aliveWord === 'yes' ? true : aliveWord === 'no' ? false : null,
+    expiredAt: exp ? +exp[1] : null,
   }
 }
 
@@ -512,6 +535,11 @@ export interface ProbeRun {
   stopFailed?: boolean
   /** 원문(checks.csv)을 이 PC(userData/response-probe-raw)에 받아 뒀다 */
   rawSaved?: boolean
+  /**
+   * 어떻게 끝났나 — auto: 모두 복구돼 자동 종료 · manual: [측정 중지] · max_time: 최대 측정 시간 도달(서버가 스스로 끝냄).
+   * max_time 인데 끊긴 채인 대상은 '그 시간 안에 복구 안 됨' 으로 확정이다 — 리포트가 그 사실을 따로 적는다.
+   */
+  endReason?: 'auto' | 'manual' | 'max_time'
   events: ProbeEvent[]
   label?: string
 }
@@ -531,6 +559,20 @@ export function shouldAutoStop(cfg: ProbeConfig, sum: ProbeSummary, last: ProbeL
 const he = (v: unknown) =>
   String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 const p2 = (n: number) => String(n).padStart(2, '0')
+
+/**
+ * 저장 파일 이름 — 회차 이름이 있으면 넣는다(사용자 요청 10-28: 여러 회차를 받아 두면 날짜만으로는 어느 것인지 몰랐다).
+ * Windows 파일 이름에 못 쓰는 글자 · 공백은 '-' 로, 너무 길면 자른다. 이름을 못 쓰게 되면(전부 금지 글자) 날짜만 쓴다.
+ */
+export const fileStem = (prefix: string, run: ProbeRun) => {
+  const d = new Date(run.startedAt)
+  const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}`
+  const name = (run.label ?? '')
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 40)
+  return name ? `${prefix}_${name}_${stamp}` : `${prefix}_${stamp}`
+}
 const clk = (t: number) => {
   const d = new Date(t)
   return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
@@ -610,7 +652,7 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
 .bad{color:var(--bad)}.okc{color:var(--ok)}
 @media print{body{background:#fff}section,.kpi{box-shadow:none;border:1px solid var(--line)}.pre{max-height:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 </style></head><body>`)
-  H.push(`<header><div class="in"><h1>응답 측정 결과${run.label ? ` — ${he(run.label)}` : ''}</h1><div class="meta">${he(dt(run.startedAt))} ~ ${run.stoppedAt ? he(dt(run.stoppedAt)) : '진행 중'} · 클라이언트 VM ${he(run.host)} · ${he(modeText(run.config))}${run.tcpTool ? ` (${run.tcpTool === 'nc' ? 'nc -z' : 'bash /dev/tcp'})` : ''} · 주기 ${run.config.intervalSec}초 · 연속 ${run.config.needOk}회면 복구</div></div></header><div class="page">`)
+  H.push(`<header><div class="in"><h1>응답 측정 결과${run.label ? `: ${he(run.label)}` : ''}</h1><div class="meta">${he(dt(run.startedAt))} ~ ${run.stoppedAt ? he(dt(run.stoppedAt)) : '진행 중'} · 클라이언트 VM ${he(run.host)} · ${he(modeText(run.config))}${run.tcpTool ? ` (${run.tcpTool === 'nc' ? 'nc -z' : 'bash /dev/tcp'})` : ''} · 주기 ${run.config.intervalSec}초 · 연속 ${run.config.needOk}회면 복구</div></div></header><div class="page">`)
   const k = (cls: string, label: string, v: string) => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b></div>`
   H.push(
     `<div class="kpis">${k('', '대상', `${sum.targets.length}대`)}${k(failed.length ? 'bad' : 'ok', '끊겼던 대상', `${failed.length}대`)}${k('', '첫 끊김', sum.firstOutage ? clk(sum.firstOutage) : '-')}${k('ok', '모두 복구', sum.allRecovered ? clk(sum.allRecovered) : sum.firstOutage ? '복구 안 됨' : '-')}${k('', '첫 끊김 → 모두 복구', span != null ? fmtGapText(span) : '-')}</div>`,
@@ -618,21 +660,28 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
   const S: string[] = []
   if (!failed.length) S.push(`<li class="ok">측정하는 동안 끊긴 대상이 없습니다 (${sum.targets.length}대 모두 정상 유지).</li>`)
   else {
-    S.push(`<li>${sum.targets.length}대 중 <b>${failed.length}대</b>가 끊겼습니다 — 첫 끊김 ${he(dt(sum.firstOutage as number))}.</li>`)
+    S.push(`<li>${sum.targets.length}대 중 <b>${failed.length}대</b>가 끊겼습니다. 첫 끊김 ${he(dt(sum.firstOutage as number))}.</li>`)
     if (span != null)
-      S.push(`<li class="ok">끊겼던 대상이 <b>모두 복구</b>된 시각 ${he(dt(sum.allRecovered as number))} — 첫 끊김부터 <b>${fmtGapText(span)}</b>.</li>`)
-    else S.push(`<li class="warn">측정을 끝낼 때까지 복구되지 않은 대상이 있습니다 — ${he(failed.filter((x) => x.outages.some((o) => o.end == null)).map((x) => x.name).join(', '))}.</li>`)
+      S.push(`<li class="ok">끊겼던 대상이 <b>모두 복구</b>된 시각 ${he(dt(sum.allRecovered as number))}: 첫 끊김부터 <b>${fmtGapText(span)}</b>.</li>`)
+    else {
+      const open = failed.filter((x) => x.outages.some((o) => o.end == null))
+      S.push(
+        run.endReason === 'max_time'
+          ? `<li class="warn"><b>최대 측정 시간(${run.config.maxMin ?? 180}분) 안에 복구되지 않은</b> 대상 ${open.length}대: ${he(open.map((x) => x.name).join(', '))}. 측정은 그 시간에 서버가 스스로 끝냈습니다.</li>`
+          : `<li class="warn">측정을 끝낼 때까지 복구되지 않은 대상이 있습니다. ${he(open.map((x) => x.name).join(', '))}.</li>`,
+      )
+    }
     if (sum.maxGap != null) {
       const worst = failed.reduce((a, b) => (Math.max(...b.outages.map((o) => (o.end ?? end) - o.start)) > Math.max(...a.outages.map((o) => (o.end ?? end) - o.start)) ? b : a))
-      S.push(`<li>가장 긴 순단 <b>${fmtGapText(sum.maxGap)}</b> — ${he(worst.name)}.</li>`)
+      S.push(`<li>가장 긴 순단 <b>${fmtGapText(sum.maxGap)}</b> ${he(worst.name)}.</li>`)
     }
     const multi = failed.filter((x) => x.outages.length > 1)
-    if (multi.length) S.push(`<li class="warn">두 번 이상 끊긴 대상 ${multi.length}대 — ${he(multi.map((x) => `${x.name}(${x.outages.length}회)`).join(', '))}.</li>`)
+    if (multi.length) S.push(`<li class="warn">두 번 이상 끊긴 대상 ${multi.length}대: ${he(multi.map((x) => `${x.name}(${x.outages.length}회)`).join(', '))}.</li>`)
   }
   const never = sum.targets.filter((x) => !x.ready)
   if (run.stopFailed)
-    S.push(`<li class="warn">측정을 끝낼 때 클라이언트 VM 의 측정 프로세스를 내리지 못했습니다 — 서버에서 직접 정리하세요(<code>${he(run.dir)}</code>, 최대 ${run.config.maxMin ?? 180}분 뒤 스스로 멈춤).</li>`)
-  if (never.length) S.push(`<li class="warn">처음부터 정상을 확인하지 못한 대상 ${never.length}대(끊김을 세지 않음) — ${he(never.map((x) => x.name).join(', '))}.</li>`)
+    S.push(`<li class="warn">측정을 끝낼 때 클라이언트 VM 의 측정 프로세스를 내리지 못했습니다. 서버에서 직접 정리하세요(<code>${he(run.dir)}</code>, 최대 ${run.config.maxMin ?? 180}분 뒤 스스로 멈춤).</li>`)
+  if (never.length) S.push(`<li class="warn">처음부터 정상을 확인하지 못한 대상 ${never.length}대(끊김을 세지 않음): ${he(never.map((x) => x.name).join(', '))}.</li>`)
   H.push(`<section><h2>요약</h2><ul class="sum">${S.join('')}</ul></section>`)
 
   /**
@@ -699,7 +748,7 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
   const evText = run.events
     .map((e) => `${dt(e.at)}  ${run.config.targets[e.idx]?.name ?? e.idx}  ${e.kind === 'ready' ? '첫 정상 확인' : e.kind === 'outage' ? `끊김 (${outageReason(e.code, run.config.mode)})` : `복구 첫 성공 시간(${clk(e.base)})${e.outageStart ? ` · 순단 ${fmtGapText(e.base - e.outageStart)}` : ''}`}   # ${e.at},${e.idx},${e.code},${e.kind},${e.base}${e.outageStart ? ',' + e.outageStart : ''}`)
     .join('\n')
-  H.push(`<section><h2>타임라인 (원문)</h2><p class="mut" style="font-size:12px;margin:0 0 6px">클라이언트 VM <code>${he(run.dir)}/events.csv</code> — 모든 요청 기록은 같은 곳의 checks.csv</p><div class="pre">${he(evText) || '(없음)'}</div></section>`)
+  H.push(`<section><h2>타임라인 (원문)</h2><p class="mut" style="font-size:12px;margin:0 0 6px">클라이언트 VM <code>${he(run.dir)}/events.csv</code> 모든 요청 기록은 같은 곳의 checks.csv</p><div class="pre">${he(evText) || '(없음)'}</div></section>`)
   H.push(`<section><h2>읽는 법</h2><ul class="sum"><li>끊김 = 처음 정상(연속 ${run.config.needOk}회)을 확인한 뒤의 첫 실패. 복구 = 다시 연속 ${run.config.needOk}회 정상(${he(modeText(run.config))})이 된 연속의 <b>첫 성공 시각</b>(한 번 튄 성공은 복구로 세지 않음).</li><li>시각은 클라이언트 VM 의 시계이며, 요청을 보내기 직전에 찍었습니다(타임아웃만큼 늦게 찍히지 않음). 응답이 없는 동안은 요청이 타임아웃까지 기다리므로 끊김·복구 시각의 오차는 최대 약 ${Math.max(run.config.intervalSec, run.config.timeoutSec)}초입니다. 끊김은 연속 ${run.config.needFail ?? 1}회 실패부터이고, 시각은 그 첫 실패입니다.</li></ul></section></div></body></html>`)
   return H.join('\n')
 }

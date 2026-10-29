@@ -31,7 +31,7 @@ import ConfirmDialog from './ConfirmDialog'
  * ms 는 서버 시계로 찍힌 시각이라, 지금(이 PC 시계)에 skew(서버 − PC)를 더해 같은 기준으로 맞춘다.
  */
 function fmtAge(ms: number | undefined, skewMs: number): string {
-  if (!ms) return '—'
+  if (!ms) return '-'
   const d = Date.now() + skewMs - ms
   // skew 를 못 잰 호스트(date 가 %3N 을 모름)에서는 시계 차이로 음수가 나올 수 있다 — '방금' 으로 둔다
   if (d < 0) return '방금'
@@ -66,10 +66,10 @@ const TONE_STYLE: Record<PodTone, string> = {
 /** 재시작 확인창 문구 — 지운 뒤 무엇이 일어나는지는 소유 컨트롤러와 상태에 따라 다르다 */
 function restartMessage(p: PodInfo): string {
   if (!p.ownerKind)
-    return `⚠ "${p.name}" 파드는 관리하는 컨트롤러가 없습니다.\n지금 재시작하면 다시 생기지 않고 완전히 삭제됩니다 — 정말 진행할까요?`
+    return `⚠ "${p.name}" 파드는 관리하는 컨트롤러가 없습니다.\n지금 재시작하면 다시 생기지 않고 완전히 삭제됩니다. 정말 진행할까요?`
   // 끝난 Job 의 파드는 Job 이 이미 완료로 기록했으므로 지워도 새로 만들지 않는다
   if (p.ownerKind === 'Job' && (p.phase === 'Succeeded' || p.phase === 'Failed'))
-    return `"${p.name}" 는 이미 끝난 Job 의 파드입니다.\n삭제하면 다시 생기지 않습니다(재실행되지 않음) — 진행할까요?`
+    return `"${p.name}" 는 이미 끝난 Job 의 파드입니다.\n삭제하면 다시 생기지 않습니다(재실행되지 않음): 진행할까요?`
   return `"${p.name}" 파드를 재시작할까요?\n${p.ownerKind}가 관리하는 파드라, 삭제 직후 새 파드로 자동 재생성됩니다.`
 }
 
@@ -245,7 +245,7 @@ export default function PodManagerView({
       setStale(false)
     } else {
       setStale(true)
-      setMsg(`조회 실패 — ${r.error ?? '파드 목록 조회 실패'}`)
+      setMsg(`조회 실패: ${r.error ?? '파드 목록 조회 실패'}`)
     }
   }
 
@@ -368,7 +368,7 @@ export default function PodManagerView({
         </div>
         <button
           onClick={toggleAuto}
-          title={auto ? '1초마다 자동 새로고침 중 — 누르면 끕니다' : '자동 새로고침 꺼짐 — 누르면 1초마다 갱신합니다'}
+          title={auto ? '1초마다 자동 새로고침 중: 누르면 끕니다' : '자동 새로고침 꺼짐: 누르면 1초마다 갱신합니다'}
           className={
             'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1 text-[11px] ' +
             (auto
@@ -438,10 +438,10 @@ export default function PodManagerView({
                       )}
                     </>
                   ) : t.timedOut ? (
-                    <span className="text-amber-300"> — 10분 안에 Ready 가 되지 않았습니다</span>
+                    <span className="text-amber-300"> 10분 안에 Ready 가 되지 않았습니다</span>
                   ) : (
                     <span className="text-gray-400">
-                      {' — '}
+                      {' · '}
                       {t.newName ? (
                         <>
                           새 파드 <span className="font-mono">{t.newName}</span> Ready 기다리는 중
@@ -542,7 +542,7 @@ export default function PodManagerView({
                   <td className="px-2 py-1.5 text-right text-gray-300">{p.restarts}</td>
                   <td className="whitespace-nowrap px-2 py-1.5 text-gray-400">{fmtAge(p.createdAtMs, skewMs)}</td>
                   <td className="max-w-[160px] truncate px-2 py-1.5 text-gray-500" title={p.node}>
-                    {p.node ?? '—'}
+                    {p.node ?? '-'}
                   </td>
                   <td className="px-2 py-1.5 text-right">
                     {/* 아이콘만 두고 마우스를 올려야 보이게 했더니(ProcessListModal 의 종료 버튼과
@@ -565,7 +565,7 @@ export default function PodManagerView({
                         disabled={restarting.has(p.name) || p.terminating || p.ownerKind === 'Node'}
                         title={
                           p.ownerKind === 'Node'
-                            ? `${p.name} 는 정적 파드(노드의 매니페스트로 kubelet 이 직접 띄움)라 여기서 재시작할 수 없습니다 — 지워도 API 의 그림자 객체만 다시 생기고 컨테이너는 그대로입니다. 그 노드에서 매니페스트를 옮기거나 crictl 로 재시작하세요.`
+                            ? `${p.name} 는 정적 파드(노드의 매니페스트로 kubelet 이 직접 띄움)라 여기서 재시작할 수 없습니다. 지워도 API 의 그림자 객체만 다시 생기고 컨테이너는 그대로입니다. 그 노드에서 매니페스트를 옮기거나 crictl 로 재시작하세요.`
                             : `${p.name} 재시작`
                         }
                         className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-white/15 px-2 py-1 text-[11px] text-gray-300 hover:border-blue-400/50 hover:bg-blue-500/10 hover:text-blue-200 disabled:opacity-30"
@@ -784,7 +784,7 @@ function PodDetail({
                           )}
                         </>
                       ) : (
-                        <span className="text-gray-600">—</span>
+                        <span className="text-gray-600">-</span>
                       )}
                     </td>
                   </tr>
@@ -807,9 +807,9 @@ function PodDetail({
             {!events || events.loading
               ? '이벤트 불러오는 중…'
               : events.error
-                ? `이벤트를 받지 못했습니다 — ${events.error}`
+                ? `이벤트를 받지 못했습니다. ${events.error}`
                 : an.ordered.length === 0
-                  ? '이벤트 기록이 없습니다 (클러스터는 이벤트를 보통 1시간 뒤 지웁니다 — 없다고 정상인 것은 아닙니다)'
+                  ? '이벤트 기록이 없습니다 (클러스터는 이벤트를 보통 1시간 뒤 지웁니다. 없다고 정상인 것은 아닙니다)'
                   : `원문 이벤트 ${an.ordered.length}개 ${showRaw ? '접기' : '보기'}`}
           </button>
           <button
@@ -884,7 +884,7 @@ function WarningLine({ w, skewMs }: { w: AnnotatedWarning; skewMs: number }) {
 
 /** 원문 순서를 가르는 시각 — 'N분 전' 만으로는 같은 분에 몰린 이벤트의 순서가 안 보인다 */
 function fmtClock(ms?: number): string {
-  if (!ms) return '—'
+  if (!ms) return '-'
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
@@ -901,5 +901,5 @@ const STAGE_STYLE: Record<StageState, { text: string; mark: string }> = {
   ok: { text: 'text-emerald-300', mark: '✔' },
   past: { text: 'text-emerald-300', mark: '✔' },
   warn: { text: 'text-amber-300', mark: '⚠' },
-  none: { text: 'text-gray-500', mark: '—' },
+  none: { text: 'text-gray-500', mark: '-' },
 }

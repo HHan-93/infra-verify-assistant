@@ -347,7 +347,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
       {/*
-        위험 명령 확인 — 다중 실행은 한 번의 클릭이 노드 수만큼 파급된다.
+        위험 명령 확인: 다중 실행은 한 번의 클릭이 노드 수만큼 파급된다.
         무엇이 걸렸는지·왜 위험한지·**어디로 나가는지**를 함께 보여준다. 대상 목록이 없으면
         "설마 그 노드까지?" 를 실행하고 나서 알게 된다.
       */}
@@ -360,7 +360,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
             <div className="mb-2 space-y-1">
               {confirmRun.hits.map((h) => (
                 <div key={h.what} className="text-[12px] text-amber-100">
-                  <b>{h.what}</b> — <span className="text-amber-200/80">{h.why}</span>
+                  <b>{h.what}</b> <span className="text-amber-200/80">{h.why}</span>
                 </div>
               ))}
             </div>
@@ -450,7 +450,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !busy) requestRun()
                   }}
-                  placeholder="실행할 명령 (예: uptime, df -h, ceph -s) — 또는 왼쪽에서 프리셋 고르기"
+                  placeholder="실행할 명령 (예: uptime, df -h, ceph -s): 또는 왼쪽에서 프리셋 고르기"
                   className="flex-1 rounded-md border border-white/10 bg-panel-light px-2.5 py-1.5 font-mono text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />
                 {pickerOpen && (
@@ -548,7 +548,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                   {check && (
                     <div className="flex items-center gap-1.5 text-[11px] text-emerald-300/90">
                       <ShieldCheck size={12} />
-                      판정 기준이 함께 옵니다 — 기준을 만족한 노드는 <b>초록(정상)</b>으로 표시됩니다
+                      판정 기준이 함께 옵니다. 기준을 만족한 노드는 <b>초록(정상)</b>으로 표시됩니다
                       <button
                         onClick={() => setCheck(null)}
                         className="ml-1 rounded border border-white/10 px-1.5 text-[10px] text-gray-400 hover:bg-white/10"
@@ -581,7 +581,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                     <div className="flex items-start gap-1.5 text-[11px] text-amber-300">
                       <AlertTriangle size={12} className="mt-0.5 shrink-0" />
                       <span>
-                        {riskyCommand(finalCmd).map((h) => h.what).join(' · ')} — 실행 전에 대상과 함께 한 번 더 확인합니다
+                        {riskyCommand(finalCmd).map((h) => h.what).join(' · ')}: 실행 전에 대상과 함께 한 번 더 확인합니다
                       </span>
                     </div>
                   )}
@@ -635,7 +635,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                       <button
                         key={m}
                         onClick={() => setViewMode(m)}
-                        title={m === 'group' ? '같은 출력끼리 묶어서 — 다른 노드가 바로 보입니다' : '노드별로 하나씩'}
+                        title={m === 'group' ? '같은 출력끼리 묶어서: 다른 노드가 바로 보입니다' : '노드별로 하나씩'}
                         className={
                           'whitespace-nowrap rounded px-2 py-0.5 text-[11px] ' +
                           (viewMode === m ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200')
@@ -750,7 +750,7 @@ export default function MultiRun({ sessions, onClose, onAnalyze }: MultiRunProps
                               {diff ? (
                                 <>
                                   <div className="mb-1 text-[10.5px] text-gray-500">
-                                    다수({groups[0].items.length}대)와 다른 줄만 —{' '}
+                                    다수({groups[0].items.length}대)와 다른 줄만: {' '}
                                     <button
                                       onClick={() => toggleWhole(g.key)}
                                       className="underline decoration-dotted underline-offset-2 hover:text-gray-300"

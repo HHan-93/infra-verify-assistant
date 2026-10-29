@@ -201,14 +201,14 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
   L.push(`- 뽑은 시각: ${runStamp(now)}`)
   if (runs.some((r) => r.stopped)) {
     L.push(
-      `- ⚠ 중단된 회차가 있습니다 — ${runs
+      `- ⚠ 중단된 회차가 있습니다. ${runs
         .filter((r) => r.stopped)
         .map((r) => `${runStamp(r.startedAt)}(${r.stoppedAt ? `${r.stoppedAt}번에서` : '중단'})`)
         .join(' · ')}. 그 뒤 스텝은 **미실행**이며 정상도 실패도 아닙니다.`,
     )
   }
   if (runs.some((r) => r.compatShell)) {
-    L.push('- ⚠ 일부 회차는 호환 모드(exec)로 실행됐습니다 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.')
+    L.push('- ⚠ 일부 회차는 호환 모드(exec)로 실행됐습니다. cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.')
   }
   L.push('')
 
@@ -238,7 +238,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
       const mark = bads === runs.length ? ' ← 계속 실패' : bads > 0 ? '' : ''
       L.push(
         `| ${mdCell(row.title)} | ` +
-          row.cells.map((c) => (c ? LABEL[c.effective] + (c.manual ? '(수동)' : '') : '—')).join(' | ') +
+          row.cells.map((c) => (c ? LABEL[c.effective] + (c.manual ? '(수동)' : '') : '-')).join(' | ') +
           ` |${mark} |`,
       )
     }
@@ -253,7 +253,7 @@ export function buildBundleMd(input: ScenarioRunDetail[], opts: BundleOptions = 
   L.push('## 회차 상세')
   L.push('')
   for (const r of runs) {
-    L.push(`### ${runStamp(r.startedAt)} — ${r.title}`)
+    L.push(`### ${runStamp(r.startedAt)}: ${r.title}`)
     L.push('')
     /**
      * 그때 만든 리포트를 그대로 붙인다. 제목 단계만 **세 칸 내린다** —
@@ -289,7 +289,7 @@ const esc = (s: string) =>
 
 /** 판정 한 칸 — 색 + 글자. 색만으로는 흑백 인쇄에서 사라진다 */
 function cell(c: ScenarioRunStep | null): string {
-  if (!c) return '<td class="none">—</td>'
+  if (!c) return '<td class="none">-</td>'
   const cls = BAD.includes(c.effective)
     ? 'bad'
     : c.effective === 'pass'
@@ -555,14 +555,14 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
 
   ${
     always.length
-      ? `<div class="banner k-fail"><b>모든 회차에서 실패한 스텝</b> — ${always
+      ? `<div class="banner k-fail"><b>모든 회차에서 실패한 스텝</b> ${always
           .map((r) => esc(r.title))
           .join(' · ')}<br>회차를 거듭해도 같은 곳에서 실패한다는 뜻입니다. 여기서부터 보십시오.</div>`
       : ''
   }
   ${
     runs.some((r) => r.stopped)
-      ? `<div class="banner"><b>중단된 회차가 있습니다</b> — ${runs
+      ? `<div class="banner"><b>중단된 회차가 있습니다</b> ${runs
           .filter((r) => r.stopped)
           .map((r) => esc(runStamp(r.startedAt)) + (r.stoppedAt ? ` (${r.stoppedAt}번에서)` : ''))
           .join(' · ')}. 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
@@ -570,7 +570,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   }
   ${
     runs.some((r) => r.compatShell)
-      ? '<div class="banner">일부 회차는 <b>호환 모드(exec)</b>로 실행됐습니다 — cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.</div>'
+      ? '<div class="banner">일부 회차는 <b>호환 모드(exec)</b>로 실행됐습니다. cd 유지·대화형 응답·타임아웃 중단이 제한됩니다.</div>'
       : ''
   }
 
@@ -612,7 +612,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   ${
     grid.length
       ? `<div class="card">
-    <h2>스텝별 추이<span class="hint">스텝은 번호가 아니라 제목으로 맞춥니다 — 중간에 스텝을 끼워 넣어도 짝이 밀리지 않게</span></h2>
+    <h2>스텝별 추이<span class="hint">스텝은 번호가 아니라 제목으로 맞춥니다. 중간에 스텝을 끼워 넣어도 짝이 밀리지 않게</span></h2>
     <div class="tw"><table>
       <thead><tr><th>스텝</th>${runs
         .map((r, i) => `<th>${i + 1}. ${esc(runStamp(r.startedAt).slice(5))}</th>`)
@@ -621,7 +621,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
         ${grid.map((row) => `<tr><td>${esc(row.title)}</td>${row.cells.map(cell).join('')}</tr>`).join('')}
       </tbody>
     </table></div>
-    <div class="note">칸이 <b>—</b> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친 뒤 돌렸을 때).</div>
+    <div class="note">칸이 <b>-</b> 인 것은 그 회차에 없던 스텝입니다(시나리오를 고친 뒤 돌렸을 때).</div>
   </div>`
       : ''
   }
@@ -648,7 +648,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
         r.stopped
           ? `<div class="banner">${
               r.stoppedAt ? `${r.stoppedAt}번에서 ` : ''
-            }중단된 회차입니다 — 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
+            }중단된 회차입니다. 그 뒤 스텝은 <b>미실행</b>이며 정상도 실패도 아닙니다.</div>`
           : ''
       }
       <div class="chips">
@@ -660,7 +660,7 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
         <span class="chip">미실행 <b>${r.counts.pending}</b></span>
       </div>
       <input type="checkbox" class="raws" id="raw${i}">
-      <label class="rawbtn" for="raw${i}">리포트 원문 보기 — 명령 · 출력 · 판정 근거</label>
+      <label class="rawbtn" for="raw${i}">리포트 원문 보기: 명령 · 출력 · 판정 근거</label>
       <div class="rawbox"><pre>${esc(r.reportMd.trim())}</pre></div>
       ${
         r.steps.length
@@ -690,8 +690,8 @@ export function buildBundleHtml(input: ScenarioRunDetail[], opts: BundleOptions 
   <footer>
     Q-Term 시나리오 검증 이력에서 뽑았습니다. 회차마다 <b>리포트 원문</b>(명령·출력)을 그대로 실었고,
     비밀번호·토큰은 저장 시점에 가려졌습니다.<br>
-    <b>사람이 볼 스텝</b>은 명령이 없는 안내 단계입니다 — 자동으로 판정할 것이 없어 회차 결과를 좌우하지 않습니다.<br>
-    펼치기는 자바스크립트 없이 동작합니다 — <b>인쇄하면 모든 회차와 원문이 펼쳐집니다.</b>
+    <b>사람이 볼 스텝</b>은 명령이 없는 안내 단계입니다. 자동으로 판정할 것이 없어 회차 결과를 좌우하지 않습니다.<br>
+    펼치기는 자바스크립트 없이 동작합니다. <b>인쇄하면 모든 회차와 원문이 펼쳐집니다.</b>
   </footer>
 </div></div>
 </body></html>`

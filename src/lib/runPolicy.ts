@@ -149,28 +149,28 @@ export const INTERACTIVE_RULES: {
    */
   expectCanAnswer?: boolean
 }[] = [
-  { re: /(^|[|;&]\s*)(sudo\s+)?(htop|iotop|iftop|nmon|atop|glances)\b/i, why: '전체화면 모니터 — q 를 눌러야 끝납니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?top\b(?![^|;&]*\s-b)/i, why: '전체화면 모니터 — 배치 모드(-b)가 아니면 끝나지 않습니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?watch\b/i, why: '주기 반복 실행 — Ctrl+C 를 눌러야 끝납니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?(vi|vim|nano|emacs)\b/i, why: '편집기가 열립니다 — 저장·종료를 사람이 해야 합니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?(less|more)\b/i, why: '페이저가 열립니다 — q 를 눌러야 끝납니다' },
-  { re: /\btail\b[^|;&]*(\s-[a-zA-Z]*[fF]\b|\s--follow\b)/i, why: '로그를 계속 따라갑니다 — 스스로 끝나지 않습니다' },
-  { re: /journalctl[^|;&]*\s-f\b/i, why: '로그를 계속 따라갑니다 — 스스로 끝나지 않습니다' },
-  { re: /(^|[|;&]\s*)(sudo\s+)?nc\s+(-\S+\s+)*-l/i, why: '포트 수신 대기 — 터미널을 점유합니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?(htop|iotop|iftop|nmon|atop|glances)\b/i, why: '전체화면 모니터: q 를 눌러야 끝납니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?top\b(?![^|;&]*\s-b)/i, why: '전체화면 모니터: 배치 모드(-b)가 아니면 끝나지 않습니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?watch\b/i, why: '주기 반복 실행: Ctrl+C 를 눌러야 끝납니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?(vi|vim|nano|emacs)\b/i, why: '편집기가 열립니다. 저장·종료를 사람이 해야 합니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?(less|more)\b/i, why: '페이저가 열립니다. q 를 눌러야 끝납니다' },
+  { re: /\btail\b[^|;&]*(\s-[a-zA-Z]*[fF]\b|\s--follow\b)/i, why: '로그를 계속 따라갑니다. 스스로 끝나지 않습니다' },
+  { re: /journalctl[^|;&]*\s-f\b/i, why: '로그를 계속 따라갑니다. 스스로 끝나지 않습니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?nc\s+(-\S+\s+)*-l/i, why: '포트 수신 대기: 터미널을 점유합니다' },
   {
     re: /kubectl\s+(edit|attach|port-forward)\b|kubectl\s+exec\s+(-\S+\s+)*-\S*it\b/i,
-    why: '대화형 kubectl — 사람이 조작해야 합니다',
+    why: '대화형 kubectl: 사람이 조작해야 합니다',
   },
   // -c3 처럼 붙여 쓴 것, -w 5(시간 제한)도 끝나는 명령이다 — 예전 `-c\s` 는 둘 다 '안 끝남' 으로 뺐다
   { re: /(^|[|;&]\s*)(sudo\s+)?ping\s+(?![^|;&]*-[cw]\s*\d)/i, why: '횟수 제한(-c)이 없어 끝나지 않습니다' },
   // while true; do … done 처럼 사람이 Ctrl+C 로 끊어야 하는 감시 루프
-  { re: /\bwhile\s+(true|:)\b|\buntil\s+false\b|\bfor\s*\(\(\s*;;/i, why: '무한 반복 — Ctrl+C 를 눌러야 끝납니다' },
+  { re: /\bwhile\s+(true|:)\b|\buntil\s+false\b|\bfor\s*\(\(\s*;;/i, why: '무한 반복: Ctrl+C 를 눌러야 끝납니다' },
   // 사용자 전환 — 새 셸이 열려서 이후 스텝이 그 셸 안에서 돌아버린다
-  { re: /(^|[|;&]\s*)(sudo\s+)?su\s+(-|--login|\S)/i, why: '다른 계정 셸로 진입 — 이후 스텝이 그 셸에서 돌게 됩니다' },
+  { re: /(^|[|;&]\s*)(sudo\s+)?su\s+(-|--login|\S)/i, why: '다른 계정 셸로 진입: 이후 스텝이 그 셸에서 돌게 됩니다' },
   // adduser/passwd 는 이름·비밀번호를 되묻는다 (--disabled-password --gecos "" 를 준 경우는 제외)
   {
     re: /(^|[|;&]\s*)(sudo\s+)?adduser\b(?![^|;&]*--disabled-password)|(^|[|;&]\s*)(sudo\s+)?passwd\b/i,
-    why: '이름·비밀번호를 되묻습니다 — 터미널에서 직접 입력해야 합니다',
+    why: '이름·비밀번호를 되묻습니다. 터미널에서 직접 입력해야 합니다',
     expectCanAnswer: true,
   },
 ]

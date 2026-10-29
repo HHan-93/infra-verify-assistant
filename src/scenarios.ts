@@ -130,8 +130,8 @@ const APT_FIX =
  * 조각을 늘리거나 순서를 바꾸면 이 목록도 같이 고쳐야 한다.
  */
 const APT_FIX_DESC = [
-  'DNS 확인 — archive.ubuntu.com 이름 조회가 되는지 본다',
-  'DNS 임시 변경 — 조회가 실패했으면 현재 인터페이스에 8.8.8.8 · 1.1.1.1 을 붙인다',
+  'DNS 확인: archive.ubuntu.com 이름 조회가 되는지 본다',
+  'DNS 임시 변경: 조회가 실패했으면 현재 인터페이스에 8.8.8.8 · 1.1.1.1 을 붙인다',
   'universe 저장소 추가',
   '패키지 목록 갱신 후 재시도',
 ]
@@ -167,7 +167,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/config",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; elif mountpoint -q /mnt/config; then echo '주의 — /mnt/config 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/config '; false; elif [ -n \"$(sudo ls -A /mnt/config 2>/dev/null)\" ]; then echo '주의 — /mnt/config 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/config | head -6; false; else sudo rmdir /mnt/config && echo '/mnt/config 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; elif mountpoint -q /mnt/config; then echo '주의: /mnt/config 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/config '; false; elif [ -n \"$(sudo ls -A /mnt/config 2>/dev/null)\" ]; then echo '주의: /mnt/config 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/config | head -6; false; else sudo rmdir /mnt/config && echo '/mnt/config 를 지웠습니다'; fi",
         "desc": "설정 드라이브를 연결할 디렉토리를 생성합니다."
       },
       {
@@ -178,11 +178,11 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "설정 드라이브 마운트",
-        "command": "DEV=$(lsblk -o NAME,LABEL -nr | awk '$2==\"config-2\"{print \"/dev/\"$1; exit}'); echo \"장치: ${DEV:-못 찾음}\"; if [ -n \"$DEV\" ]; then sudo mount \"$DEV\" /mnt/config && echo '마운트되었습니다'; else echo '주의 — config-2 라벨을 가진 장치를 찾지 못했습니다'; fi",
-        "check": { "passContains": ["마운트되었습니다"], "failContains": ["주의 —", "wrong fs type"] },
-        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/config || break; sudo umount /mnt/config || break; done; if mountpoint -q /mnt/config; then echo '주의 — /mnt/config 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/config '; sudo fuser -vm /mnt/config 2>&1 | head -5; false; else echo '/mnt/config 마운트가 해제되어 있습니다'; fi; fi",
+        "command": "DEV=$(lsblk -o NAME,LABEL -nr | awk '$2==\"config-2\"{print \"/dev/\"$1; exit}'); echo \"장치: ${DEV:-못 찾음}\"; if [ -n \"$DEV\" ]; then sudo mount \"$DEV\" /mnt/config && echo '마운트되었습니다'; else echo '주의: config-2 라벨을 가진 장치를 찾지 못했습니다'; fi",
+        "check": { "passContains": ["마운트되었습니다"], "failContains": ["주의: ", "wrong fs type"] },
+        "undo": "if [ ! -d /mnt/config ]; then echo '/mnt/config 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/config || break; sudo umount /mnt/config || break; done; if mountpoint -q /mnt/config; then echo '주의: /mnt/config 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/config '; sudo fuser -vm /mnt/config 2>&1 | head -5; false; else echo '/mnt/config 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "config-2 라벨이 붙은 장치를 찾아 /mnt/config 에 마운트합니다. 장치명을 자동으로 찾으므로 sr0 가 아니어도 됩니다.",
-        "info": "설정 드라이브의 장치 이름은 환경마다 다릅니다 (/dev/sr0 · /dev/sr1 …).\n그래서 이름을 박아 두지 않고 config-2 라벨로 찾습니다 — 손으로 고쳐 넣을 것이 없습니다."
+        "info": "설정 드라이브의 장치 이름은 환경마다 다릅니다 (/dev/sr0 · /dev/sr1 …).\n그래서 이름을 박아 두지 않고 config-2 라벨로 찾습니다. 손으로 고쳐 넣을 것이 없습니다."
       },
       {
         "title": "마운트 상태 확인",
@@ -247,16 +247,16 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
-        "check": { "failContains": ["주의 —"] },
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의: 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의: "] },
         "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
-        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다. 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
         "target": "하이퍼바이저",
-        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크]'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X > $D; grep -E '<disk |<source |<target dev' $D | head -14; R=$(grep \"device='disk'\" $D | head -1); case \"$R\" in *\"type='file'\"*) echo '  -> 루트가 Ephemeral(로컬 파일)입니다 — 인스턴스 유형 디스크 QoS 대상이 맞습니다';; *) echo '  -> 루트가 볼륨입니다 — 인스턴스 유형의 디스크 QoS 는 여기에 걸리지 않습니다. [스토리지] 볼륨 타입 디스크 QoS 시나리오로 확인하세요';; esac; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의 — iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면 — 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
-        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의 —"] },
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의: 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A: $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크]'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X > $D; grep -E '<disk |<source |<target dev' $D | head -14; R=$(grep \"device='disk'\" $D | head -1); case \"$R\" in *\"type='file'\"*) echo '  -> 루트가 Ephemeral(로컬 파일)입니다. 인스턴스 유형 디스크 QoS 대상이 맞습니다';; *) echo '  -> 루트가 볼륨입니다. 인스턴스 유형의 디스크 QoS 는 여기에 걸리지 않습니다. [스토리지] 볼륨 타입 디스크 QoS 시나리오로 확인하세요';; esac; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의: iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면: 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; fi; else echo \"주의: 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
+        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의: "] },
         "onFailure": "continue",
         "desc": "앞 단계에서 확인한 별칭으로 실행합니다. <iotune> 블록에 read_iops_sec · write_iops_sec 등이 설정값대로 나와야 합니다.\n루트 디스크가 Ephemeral 인지 볼륨인지 먼저 단정해 주고, iotune 이 없으면 왜 없는지도 짚어 줍니다.",
         "info": "이 명령은 인스턴스 안이 아니라 그 인스턴스가 떠 있는 컴퓨트 노드에서 돌려야 합니다.\n\n여기서 실패해도 검증은 멈추지 않습니다.\n제한이 안 걸린 fio 숫자도 증거라서, 뒤 단계까지 재 보고 나서 판단하는 편이 낫습니다."
@@ -291,26 +291,26 @@ export const SCENARIOS: Scenario[] = [
         "title": "IOPS 쓰기 테스트",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 쓰기로 IOPS 를 측정합니다. write_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
+        "desc": "무작위 4K 쓰기로 IOPS 를 측정합니다. write_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것: write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
         "info": "--direct=1: 페이지 캐시를 우회하여 디스크 QoS가 직접 측정됩니다.\n--ioengine=libaio: 비동기 I/O 엔진으로 iodepth=32가 실제로 동작합니다."
       },
       {
         "title": "IOPS 읽기 테스트",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "무작위 4K 읽기로 IOPS 를 측정합니다. read_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 합니다."
+        "desc": "무작위 4K 읽기로 IOPS 를 측정합니다. read_iops_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것: read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 합니다."
       },
       {
         "title": "대역폭 쓰기 테스트",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "순차 1MB 쓰기로 대역폭을 측정합니다. write_bytes_sec 제한값(예: 10MB/s) 부근에서 수렴하면 정상입니다.\n결과에서 볼 것: write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "대역폭 읽기 테스트",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=500M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것 — read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "순차 1MB 읽기로 대역폭을 측정합니다. read_bytes_sec 제한값 부근에서 수렴하면 정상입니다.\n결과에서 볼 것: read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -347,16 +347,16 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
-        "check": { "failContains": ["주의 —"] },
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의: 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의: "] },
         "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
-        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다. 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "하이퍼바이저 호스트에서 적용 확인",
         "target": "하이퍼바이저",
-        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[인터페이스]'; awk 'index($0,\"<interface \")>0{b=1} b{print} index($0,\"</interface>\")>0{b=0}' $X | grep -E '<interface |<mac |<target dev' | head -14; echo '[bandwidth]'; if grep -q bandwidth $X; then grep -A 8 bandwidth $X | grep -E 'bandwidth|inbound|outbound'; else echo '주의 — bandwidth 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면 — 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; echo '  · 포트나 네트워크 쪽 QoS 정책으로 걸었다면 여기가 아니라 neutron QoS 정책에서 확인하세요'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
-        "check": { "passContains": ["bandwidth"], "passRegex": "inbound|outbound", "failContains": ["주의 —"] },
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의: 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A: $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[인터페이스]'; awk 'index($0,\"<interface \")>0{b=1} b{print} index($0,\"</interface>\")>0{b=0}' $X | grep -E '<interface |<mac |<target dev' | head -14; echo '[bandwidth]'; if grep -q bandwidth $X; then grep -A 8 bandwidth $X | grep -E 'bandwidth|inbound|outbound'; else echo '주의: bandwidth 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · 인스턴스 유형에 QoS 를 나중에 넣었다면: 설정은 인스턴스를 만들 때 박힙니다. 이미 떠 있는 것에는 적용되지 않으니 다시 만드세요'; echo '  · 포트나 네트워크 쪽 QoS 정책으로 걸었다면 여기가 아니라 neutron QoS 정책에서 확인하세요'; fi; else echo \"주의: 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
+        "check": { "passContains": ["bandwidth"], "passRegex": "inbound|outbound", "failContains": ["주의: "] },
         "onFailure": "continue",
         "desc": "앞 단계에서 확인한 별칭으로 실행합니다. <interface> 안의 <bandwidth> 블록에 inbound/outbound 의 average · peak · burst 값이 나와야 합니다.\n못 찾으면 왜 못 찾았는지(도메인 없음 · QoS 미적용 · neutron 쪽 정책)를 함께 알려 줍니다.",
         "info": "이 명령은 인스턴스 안이 아니라 그 인스턴스가 떠 있는 컴퓨트 노드에서 돌려야 합니다.\n\n여기서 실패해도 검증은 멈추지 않습니다.\n제한이 안 걸린 iperf3 숫자도 증거라서, 뒤 단계까지 재 보고 나서 판단하는 편이 낫습니다."
@@ -398,15 +398,15 @@ export const SCENARIOS: Scenario[] = [
         "title": "아웃바운드(업로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다. 결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
+        "desc": "인스턴스에서 서버 방향(아웃바운드)으로 30초간 대역폭을 측정합니다. 결과에서 볼 것: 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 설정한 상한 근처에서 멈춰야 정상입니다.",
         "info": "【결과 확인】\n출력 아래 '- - -' 선 밑에 sender 와 receiver 두 줄이 나옵니다.\n실제로 전달된 속도는 receiver 줄입니다 (sender 는 보낸 쪽이 버퍼에 넣은 양이라 조금 크게 나옵니다).\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_outbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: outbound_average=1024 KBps → 약 8 Mbps\n※ QoS 는 KBps, iperf3 는 Mbps 라 × 8 로 환산합니다 (1 Byte = 8 bit).\n\n구간별 Bitrate 가 초반에 높다가 수렴하는 것은 burst 를 다 쓴 뒤 average 제한이 걸린 정상 동작입니다."
       },
       {
         "title": "인바운드(다운로드) 대역폭 테스트",
         "command": "iperf3 -c <iperf3-server-ip> -t 30 -i 5 -R",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "-R 로 방향을 뒤집어(서버 → 이 인스턴스) 인바운드 대역폭을 측정합니다.\n결과에서 볼 것 — 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다.",
-        "info": "【결과 확인】\n출력 아래 '- - -' 선 밑에 sender 와 receiver 두 줄이 나옵니다.\n-R 이라 보내는 쪽이 서버, 받는 쪽이 이 인스턴스입니다 — 인바운드 제한이 걸리는 것은 receiver 줄입니다.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS 는 KBps, iperf3 는 Mbps 라 × 8 로 환산합니다 (1 Byte = 8 bit)."
+        "desc": "-R 로 방향을 뒤집어(서버 → 이 인스턴스) 인바운드 대역폭을 측정합니다.\n결과에서 볼 것: 맨 아래 receiver 줄의 Bitrate. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다.",
+        "info": "【결과 확인】\n출력 아래 '- - -' 선 밑에 sender 와 receiver 두 줄이 나옵니다.\n-R 이라 보내는 쪽이 서버, 받는 쪽이 이 인스턴스입니다. 인바운드 제한이 걸리는 것은 receiver 줄입니다.\n  [5] 0.00-30.01 sec  30.5 MBytes  8.53 Mbits/sec  receiver  ← 이 값\n\nvif_inbound_average(KBps) × 8 = 제한 Mbps 와 근접하면 정상입니다.\n예: inbound_average=1024 KBps → 약 8 Mbps\n※ QoS 는 KBps, iperf3 는 Mbps 라 × 8 로 환산합니다 (1 Byte = 8 bit)."
       }
     ]
   },
@@ -459,8 +459,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "ROUND ROBIN 통신 확인",
-        "command": "for i in $(seq 1 10); do curl -s --max-time 3 http://<VIP>/; done | sort | uniq -c > /tmp/qterm-lb.txt; cat /tmp/qterm-lb.txt; N=$(wc -l < /tmp/qterm-lb.txt); rm -f /tmp/qterm-lb.txt; if [ \"$N\" -ge 2 ]; then echo \"서로 다른 응답 $N 종 — 분산되고 있습니다\"; else echo '주의 — 응답이 한 종류뿐입니다 (분산되지 않음)'; fi",
-        "check": { "passContains": ["분산되고 있습니다"], "failContains": ["주의 —"] },
+        "command": "for i in $(seq 1 10); do curl -s --max-time 3 http://<VIP>/; done | sort | uniq -c > /tmp/qterm-lb.txt; cat /tmp/qterm-lb.txt; N=$(wc -l < /tmp/qterm-lb.txt); rm -f /tmp/qterm-lb.txt; if [ \"$N\" -ge 2 ]; then echo \"서로 다른 응답 $N 종: 분산되고 있습니다\"; else echo '주의: 응답이 한 종류뿐입니다 (분산되지 않음)'; fi",
+        "check": { "passContains": ["분산되고 있습니다"], "failContains": ["주의: "] },
         "desc": "VIP 로 10번 요청해 어느 서버가 몇 번 응답했는지 셉니다. 앞 단계에서 호스트명을 넣어 두었으므로 응답 종류가 2가지로 갈리면 ROUND ROBIN 이 도는 것입니다.",
         "info": "출력의 맨 앞 숫자가 그 응답을 받은 횟수입니다. ROUND ROBIN 이면 10번 중 5:5 에 가깝게 나뉩니다. 한쪽으로 크게 치우치면 풀 멤버 하나가 헬스 체크에서 빠졌는지 확인하세요.",
         "note": "로드밸런서와 통신이 되는 대역의 인스턴스 또는 풀 멤버 인스턴스에서 실행하세요."
@@ -528,7 +528,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "Root CA CSR 생성",
         "check": {"requireExitZero":true},
         "command": "openssl req -new -sha256 -key ca.key -config ca.conf -out ca.csr -batch",
-        "desc": "-batch 옵션으로 ca.conf의 기본값을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
+        "desc": "-batch 옵션으로 ca.conf의 기본값을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요. 검증 실행에서도 자동 처리)"
       },
       {
         "title": "Root CA 인증서 생성",
@@ -565,7 +565,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "서비스 CSR 생성",
         "check": {"requireExitZero":true},
         "command": "openssl req -new -sha256 -key service.key -config service.conf -out service.csr -batch",
-        "desc": "-batch 옵션으로 service.conf의 기본값(VIP 포함)을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요 — 검증 실행에서도 자동 처리)"
+        "desc": "-batch 옵션으로 service.conf의 기본값(VIP 포함)을 그대로 사용해 비대화형으로 생성합니다. (Enter 입력 불필요. 검증 실행에서도 자동 처리)"
       },
       {
         "title": "서비스 인증서 서명 (Root CA로 서명)",
@@ -623,13 +623,13 @@ export const SCENARIOS: Scenario[] = [
         "check": {"requireExitZero":true},
         "command": "sudo cp ca.crt /usr/local/share/ca-certificates/",
         "undo": "sudo rm -f /usr/local/share/ca-certificates/ca.crt && sudo update-ca-certificates --fresh",
-        "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다. (ca.crt 가 있는 디렉토리에서 실행 — 시스템 경로 쓰기라 sudo 필요)"
+        "desc": "Root CA 인증서를 시스템 인증서 저장소에 복사합니다. (ca.crt 가 있는 디렉토리에서 실행: 시스템 경로 쓰기라 sudo 필요)"
       },
       {
         "title": "시스템 인증서 업데이트",
         "command": "sudo update-ca-certificates",
         "check": { "requireExitZero": true },
-        "desc": "시스템 CA 인증서 목록을 갱신합니다. 처음 넣을 때는 '1 added' 가 나오고, 이미 등록돼 있으면 '0 added' 가 나옵니다 — 둘 다 정상입니다.",
+        "desc": "시스템 CA 인증서 목록을 갱신합니다. 처음 넣을 때는 '1 added' 가 나오고, 이미 등록돼 있으면 '0 added' 가 나옵니다. 둘 다 정상입니다.",
         "note": "'0 added' 를 실패로 보지 않습니다. 같은 인증서를 두 번 넣는 것이 오류는 아니기 때문입니다(재실행에서 그렇게 나옵니다)."
       },
       {
@@ -660,7 +660,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 A, B 생성",
         "command": "",
-        "desc": "LNB 에서 컴퓨트 > 인스턴스로 가서 인스턴스를 2대 만듭니다.\n· A — nc 로 포트를 열고 기다리는 쪽\n· B — A 로 연결해 보는 쪽\n두 인스턴스는 같은 네트워크 대역에 있어야 합니다."
+        "desc": "LNB 에서 컴퓨트 > 인스턴스로 가서 인스턴스를 2대 만듭니다.\n· A: nc 로 포트를 열고 기다리는 쪽\n· B: A 로 연결해 보는 쪽\n두 인스턴스는 같은 네트워크 대역에 있어야 합니다."
       },
       {
         "title": "인스턴스 A에 터미널 접속",
@@ -687,12 +687,12 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "포트 수신 대기 시작 (인스턴스 A)",
         "target": "인스턴스 A",
-        "command": "(nohup nc -l -k <포트번호> >/dev/null 2>&1 &); sleep 1; ss -tlnp 2>/dev/null | grep -q ':<포트번호> ' && echo '수신 대기 중입니다' || echo '주의 — 리스너가 뜨지 않았습니다'",
-        "check": { "passContains": ["수신 대기 중입니다"], "failContains": ["주의 —"] },
+        "command": "(nohup nc -l -k <포트번호> >/dev/null 2>&1 &); sleep 1; ss -tlnp 2>/dev/null | grep -q ':<포트번호> ' && echo '수신 대기 중입니다' || echo '주의: 리스너가 뜨지 않았습니다'",
+        "check": { "passContains": ["수신 대기 중입니다"], "failContains": ["주의: "] },
         "undo": "pkill -f 'nc -l -k <포트번호>' || echo '수신 대기 프로세스가 없습니다 (이미 정리됨)'",
         "warn": "이 단계는 포트를 열어 둡니다. 시험이 끝나면 반드시 원복으로 정리하세요.",
         "desc": "인스턴스 A에서 지정한 포트를 백그라운드로 수신 대기시킵니다. 터미널을 점유하지 않으므로 다음 단계로 바로 넘어갈 수 있습니다.",
-        "info": "포트 번호 예시: 9999 (SSH 22 대신 임의 포트 권장). -k 는 연결이 끊겨도 계속 수신하는 옵션이라 반복 시험에 맞습니다.\n끝나면 이 시나리오의 원복으로 정리됩니다 — 남겨 두면 그 포트를 계속 점유합니다."
+        "info": "포트 번호 예시: 9999 (SSH 22 대신 임의 포트 권장). -k 는 연결이 끊겨도 계속 수신하는 옵션이라 반복 시험에 맞습니다.\n끝나면 이 시나리오의 원복으로 정리됩니다. 남겨 두면 그 포트를 계속 점유합니다."
       },
       {
         "title": "포트 연결 일회성 확인 (인스턴스 B 또는 다른 터미널)",
@@ -705,11 +705,11 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "지속 통신 루프 시작",
         "target": "인스턴스 B",
-        "command": "L=/tmp/qterm-loop.txt; : > $L; for i in $(seq 1 120); do T=$(date +%H:%M:%S); if M=$(nc -zv -w 1 <인스턴스A_IP> <포트번호> 2>&1); then R=OK; else R=\"FAIL  $(echo \"$M\" | tail -1)\"; fi; echo \"$T $R\" | tee -a $L; sleep 1; done; awk '{n++; if($2==\"OK\"){s++; c=0} else {f++; c++; if(c>mx)mx=c; if(first==\"\")first=$1}} END{print \"--- 관찰 종료: \" n \"회 시도 · 성공 \" s+0 \" · 끊김 \" f+0; if(f+0==0) print \"끊김 없음 — 통신이 유지되었습니다\"; else print \"주의 — 통신이 끊긴 구간이 있습니다 (가장 긴 끊김 \" mx \"초, 첫 끊김 \" first \")\"}' $L; rm -f $L",
-        "check": { "passContains": ["끊김 없음"], "failContains": ["주의 —"] },
+        "command": "L=/tmp/qterm-loop.txt; : > $L; for i in $(seq 1 120); do T=$(date +%H:%M:%S); if M=$(nc -zv -w 1 <인스턴스A_IP> <포트번호> 2>&1); then R=OK; else R=\"FAIL  $(echo \"$M\" | tail -1)\"; fi; echo \"$T $R\" | tee -a $L; sleep 1; done; awk '{n++; if($2==\"OK\"){s++; c=0} else {f++; c++; if(c>mx)mx=c; if(first==\"\")first=$1}} END{print \"--- 관찰 종료: \" n \"회 시도 · 성공 \" s+0 \" · 끊김 \" f+0; if(f+0==0) print \"끊김 없음: 통신이 유지되었습니다\"; else print \"주의: 통신이 끊긴 구간이 있습니다 (가장 긴 끊김 \" mx \"초, 첫 끊김 \" first \")\"}' $L; rm -f $L",
+        "check": { "passContains": ["끊김 없음"], "failContains": ["주의: "] },
         "desc": "1초 간격으로 120초 동안 포트 연결을 반복합니다. 끝나면 끊긴 횟수와 가장 긴 끊김 길이를 스스로 세어 알려 줍니다.",
         "warn": "이 루프는 2분 동안 돕니다. 시작하자마자 포털에서 다음 단계(마이그레이션)를 거세요.\n루프가 끝난 뒤에 걸면 아무것도 관찰되지 않습니다.",
-        "info": "결과에서 볼 것 — 맨 아래 두 줄입니다.\n· 관찰 종료: 120회 시도 · 성공 N · 끊김 M\n· 끊김 없음(무중단) 이거나, 주의 — … (가장 긴 끊김 N초, 첫 끊김 시각)\n\n위의 시각별 줄은 그대로 남습니다. 어느 구간에서 끊겼는지 리포트에서 짚을 때 씁니다.\n마이그레이션이 2분보다 오래 걸리면 이 단계를 이어서 다시 실행하세요.\n끝나지 않는 while 루프를 쓰지 않는 이유는, 그러면 검증 실행이 제한 시간까지 멈춘 채 아무 기록도 남기지 못하기 때문입니다."
+        "info": "결과에서 볼 것: 맨 아래 두 줄입니다.\n· 관찰 종료: 120회 시도 · 성공 N · 끊김 M\n· 끊김 없음(무중단) 이거나, 주의: … (가장 긴 끊김 N초, 첫 끊김 시각)\n\n위의 시각별 줄은 그대로 남습니다. 어느 구간에서 끊겼는지 리포트에서 짚을 때 씁니다.\n마이그레이션이 2분보다 오래 걸리면 이 단계를 이어서 다시 실행하세요.\n끝나지 않는 while 루프를 쓰지 않는 이유는, 그러면 검증 실행이 제한 시간까지 멈춘 채 아무 기록도 남기지 못하기 때문입니다."
       },
       {
         "title": "[Live] 인스턴스 A Live 마이그레이션 실행",
@@ -805,7 +805,7 @@ export const SCENARIOS: Scenario[] = [
           ]
         },
         "desc": "DNS 이름 해석과 외부 인터넷 도달 여부를 한 번에 확인합니다.",
-        "note": "이름 해석 실패와 도달 실패를 따로 짚습니다 — 'Name or service not known' 은 DNS 문제, '100% packet loss' 는 경로·방화벽 문제입니다."
+        "note": "이름 해석 실패와 도달 실패를 따로 짚습니다. 'Name or service not known' 은 DNS 문제, '100% packet loss' 는 경로·방화벽 문제입니다."
       }
     ]
   },
@@ -841,14 +841,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo ss -tunlp 2>/dev/null | grep -E ':15001|:15002|:18080' || ss -tunlp | grep -E ':15001|:15002|:18080'",
         "target": "서버",
         "check": { "passContains": ["15001", "15002", "18080"] },
-        "desc": "결과에서 볼 것 — 세 줄이 모두 보여야 합니다.\ntcp LISTEN 15001 / udp UNCONN 15002 / tcp LISTEN 18080\n하나라도 없으면 앞 단계에서 리스너가 못 뜬 것입니다.",
+        "desc": "결과에서 볼 것: 세 줄이 모두 보여야 합니다.\ntcp LISTEN 15001 / udp UNCONN 15002 / tcp LISTEN 18080\n하나라도 없으면 앞 단계에서 리스너가 못 뜬 것입니다.",
         "note": "UDP 는 LISTEN 이 아니라 UNCONN 으로 표시되는 것이 정상입니다."
       },
       {
         "title": "[서버] 방화벽 상태 확인",
         "command": "sudo ufw status",
         "target": "서버",
-        "desc": "결과에서 볼 것 — Status 가 inactive 면 방화벽은 통과입니다.\nactive 인데 15001/15002/18080 허용 규칙이 없으면 다음 단계가 실패합니다 — sudo ufw allow 15001 처럼 열어 주세요.",
+        "desc": "결과에서 볼 것: Status 가 inactive 면 방화벽은 통과입니다.\nactive 인데 15001/15002/18080 허용 규칙이 없으면 다음 단계가 실패합니다. sudo ufw allow 15001 처럼 열어 주세요.",
         "note": "iptables 기반 환경은 sudo iptables -L -n --line-numbers"
       },
       {
@@ -856,7 +856,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "nc -zv -w 5 <Target_IP> 15001",
         "target": "클라이언트",
         "check": { "passContains": ["succeeded"] },
-        "desc": "결과에서 볼 것 — 'Connection to ... succeeded!' 문구입니다.\n<Target_IP> 는 서버 스텝의 대상 주소와 같으니, 아래 입력칸의 서버 아이콘을 눌러 '2번 대상'을 고르세요.",
+        "desc": "결과에서 볼 것: 'Connection to ... succeeded!' 문구입니다.\n<Target_IP> 는 서버 스텝의 대상 주소와 같으니, 아래 입력칸의 서버 아이콘을 눌러 '2번 대상'을 고르세요.",
         "note": "Connection refused 면 리스너가 죽은 것이고, timed out 이면 방화벽/보안그룹이 막고 있는 것입니다."
       },
       {
@@ -864,7 +864,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "nc -uzv -w 5 <Target_IP> 15002",
         "target": "클라이언트",
         "check": { "passContains": ["succeeded"] },
-        "desc": "결과에서 볼 것 — TCP 와 같은 'succeeded' 문구입니다.",
+        "desc": "결과에서 볼 것: TCP 와 같은 'succeeded' 문구입니다.",
         "note": "UDP 는 응답이 없어도 succeeded 로 보일 수 있습니다. 확실히 하려면 앞 단계에서 리스너가 UNCONN 으로 떠 있는지 먼저 확인하세요."
       },
       {
@@ -872,7 +872,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "nmap -p 15001,18080 <Target_IP>",
         "target": "클라이언트",
         "check": { "passContains": ["open"] },
-        "desc": "결과에서 볼 것 — 두 포트가 모두 open 이어야 합니다. closed 는 리스너가 없는 것, filtered 는 방화벽이 막은 것입니다.",
+        "desc": "결과에서 볼 것: 두 포트가 모두 open 이어야 합니다. closed 는 리스너가 없는 것, filtered 는 방화벽이 막은 것입니다.",
         "note": "UDP 스캔(-sU)은 root 권한이 필요하고 느려서 여기서는 TCP 만 봅니다."
       },
       {
@@ -881,14 +881,14 @@ export const SCENARIOS: Scenario[] = [
         "target": "클라이언트",
         // '200' 만 찾으면 Content-Length: 1200 같은 숫자에도 통과한다 — 응답 줄에서 본다
         "check": { "passRegex": "HTTP/[0-9.]+ 200" },
-        "desc": "결과에서 볼 것 — 'HTTP/1.0 200 OK' 응답 코드입니다. 포트가 열린 것을 넘어 실제로 서비스가 응답하는지까지 확인하는 단계입니다."
+        "desc": "결과에서 볼 것: 'HTTP/1.0 200 OK' 응답 코드입니다. 포트가 열린 것을 넘어 실제로 서비스가 응답하는지까지 확인하는 단계입니다."
       },
       {
         "title": "[서버] 테스트 포트 정리",
         "command": "pkill -f 'nc -l -k 15001'; pkill -f 'nc -u -l 15002'; pkill -f 'http.server 18080'; sleep 1; ss -tunlp 2>/dev/null | grep -E ':15001|:15002|:18080' || echo '테스트 리스너가 모두 정리되었습니다'",
         "target": "서버",
         "check": { "passContains": ["정리되었습니다"] },
-        "desc": "결과에서 볼 것 — '모두 정리되었습니다' 문구입니다. 포트 목록이 대신 보이면 아직 남은 리스너가 있는 것이니 다시 실행하세요.",
+        "desc": "결과에서 볼 것: '모두 정리되었습니다' 문구입니다. 포트 목록이 대신 보이면 아직 남은 리스너가 있는 것이니 다시 실행하세요.",
         "note": "이 단계를 건너뛰었다면 상단 '원복 실행' 버튼으로도 정리됩니다."
       }
     ]
@@ -954,7 +954,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의: /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "CephFS를 마운트할 디렉토리를 생성합니다."
       },
       {
@@ -967,7 +967,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "CephFS 마운트",
         "command": "sudo mount -t ceph <추출위치> /mnt/data -o name=<액세스 경로>,secret=<액세스 키>,mds_namespace=cephfs && mountpoint -q /mnt/data && echo '마운트되었습니다' && df -h /mnt/data",
         "check": { "requireExitZero": true, "passContains": ["마운트되었습니다"] },
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "공유파일 상세에서 확인한 추출위치를 입력해 CephFS를 마운트합니다. name은 액세스 경로(예: meta), secret은 액세스 키 값을 입력하세요."
       },
       {
@@ -981,7 +981,7 @@ export const SCENARIOS: Scenario[] = [
         "check": {"passContains":["Test"],"requireExitZero":true},
         "command": "echo \"Test\" | sudo tee /mnt/data/test.txt",
         "desc": "read-write 규칙이면 정상 쓰기됩니다. read-only 규칙이면 'Read-only file system' 오류가 출력되어 RO 정책이 정상 동작함을 확인할 수 있습니다.",
-        "note": "자동 판정하지 않습니다 — 이 시나리오는 RW·RO 두 규칙을 모두 다루므로, 쓰기 성공과 쓰기 거부가 **둘 다 정상**일 수 있습니다. 어느 규칙으로 걸었는지 보고 사람이 판정하세요."
+        "note": "자동 판정하지 않습니다. 이 시나리오는 RW·RO 두 규칙을 모두 다루므로, 쓰기 성공과 쓰기 거부가 **둘 다 정상**일 수 있습니다. 어느 규칙으로 걸었는지 보고 사람이 판정하세요."
       },
       {
         "title": "파일 읽기 테스트",
@@ -1000,7 +1000,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "df -h",
         "check": { "requireExitZero": true, "failContains": ["/mnt/data"] },
         "desc": "/mnt/data 항목이 사라졌으면 정상적으로 해제된 것입니다.",
-        "note": "여기서는 목록에 남아 있는 것이 실패입니다 — 앞의 마운트 확인과 정반대 기준입니다."
+        "note": "여기서는 목록에 남아 있는 것이 실패입니다. 앞의 마운트 확인과 정반대 기준입니다."
       }
     ]
   },
@@ -1029,7 +1029,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의: /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -1042,7 +1042,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "디스크 마운트",
         "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "파티션을 마운트 포인트에 연결합니다. <DISK>에는 파티션 장치명을 입력하세요. (예: vdb1)"
       },
       {
@@ -1050,7 +1050,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "df -h /mnt/data",
         "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
         "desc": "용량이 표시되면 정상적으로 마운트된 것입니다.",
-        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다 — 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
+        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다. 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
       },
       {
         "title": "데이터 쓰기 및 보존 확인 (공통 적용 구간)",
@@ -1114,7 +1114,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅 전 부팅 표식 기록",
-        "command": "ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"$ID\" > /var/tmp/qterm-boot-before && echo \"재부팅 전 부팅 표식을 기록했습니다 — $ID\"; echo '기록 위치: /var/tmp/qterm-boot-before'",
+        "command": "ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"$ID\" > /var/tmp/qterm-boot-before && echo \"재부팅 전 부팅 표식을 기록했습니다. $ID\"; echo '기록 위치: /var/tmp/qterm-boot-before'",
         "check": { "requireExitZero": true, "passContains": ["재부팅 전 부팅 표식을 기록했습니다"] },
         "undo": "rm -f /var/tmp/qterm-boot-before && echo '부팅 표식 파일을 지웠습니다'",
         "desc": "지금의 부팅 표식(boot_id)을 서버에 적어 둡니다. 재부팅 뒤 이 값과 비교해 실제로 재부팅됐는지 가립니다.",
@@ -1122,19 +1122,19 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다 — 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐 — 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다 — 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
+        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다. 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐: 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다. 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
         "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
         "title": "마운트 유지 확인",
         "manualOnly": true,
-        "command": "B=$(cat /var/tmp/qterm-boot-before 2>/dev/null); N=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"부팅 표식 — 재부팅 전 $B / 지금 $N\"; echo \"부팅 시각 — $(uptime -s)\"; if [ -z \"$B\" ]; then echo '주의 — 재부팅 전 기록이 없습니다 (앞의 「재부팅 전 부팅 표식 기록」 단계부터 다시 하세요)'; elif [ \"$B\" = \"$N\" ]; then echo '주의 — 재부팅되지 않았습니다 (부팅 표식이 그대로입니다)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
-        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의 —"] },
+        "command": "B=$(cat /var/tmp/qterm-boot-before 2>/dev/null); N=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"부팅 표식: 재부팅 전 $B / 지금 $N\"; echo \"부팅 시각: $(uptime -s)\"; if [ -z \"$B\" ]; then echo '주의: 재부팅 전 기록이 없습니다 (앞의 「재부팅 전 부팅 표식 기록」 단계부터 다시 하세요)'; elif [ \"$B\" = \"$N\" ]; then echo '주의: 재부팅되지 않았습니다 (부팅 표식이 그대로입니다)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
+        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의: "] },
         "desc": "재부팅 뒤 자동 마운트가 살아 있는지 봅니다. 앞 단계에서 서버에 적어 둔 부팅 표식과 비교하므로, 재부팅을 건너뛰면 통과하지 않습니다.",
-        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라오고 세션이 다시 연결된 뒤 오른쪽 실행을 누르세요.\n\n비교 기준은 앞 단계에서 서버에 적어 둔 부팅 표식입니다 — 앱을 껐다 켜도, 창을 닫았다 열어도, 이 단계만 따로 실행하면 됩니다.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다 — 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
+        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라오고 세션이 다시 연결된 뒤 오른쪽 실행을 누르세요.\n\n비교 기준은 앞 단계에서 서버에 적어 둔 부팅 표식입니다. 앱을 껐다 켜도, 창을 닫았다 열어도, 이 단계만 따로 실행하면 됩니다.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다. 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
       }
     ]
   },
@@ -1157,7 +1157,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "볼륨 확인",
         "command": "lsblk",
-        "desc": "연결된 볼륨을 확인합니다. 파티션 없이 디스크 장치 자체만 표시되는 항목을 확인하세요. (예: vdb — 하위 파티션 없음)"
+        "desc": "연결된 볼륨을 확인합니다. 파티션 없이 디스크 장치 자체만 표시되는 항목을 확인하세요. (예: vdb: 하위 파티션 없음)"
       },
       {
         "title": "파일시스템 생성",
@@ -1179,7 +1179,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 폴더 생성",
         "command": "sudo mkdir -p /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의: /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "디스크를 연결할 마운트 포인트를 생성합니다."
       },
       {
@@ -1192,7 +1192,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "디스크 마운트",
         "check": {"requireExitZero":true},
         "command": "sudo mount /dev/<DISK> /mnt/data",
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "볼륨을 마운트 포인트에 연결합니다."
       },
       {
@@ -1200,7 +1200,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "df -h /mnt/data",
         "check": { "requireExitZero": true, "passContains": ["/mnt/data"] },
         "desc": "용량이 표시되면 정상적으로 마운트된 것입니다.",
-        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다 — 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
+        "note": "마운트되지 않았으면 df 는 그 경로를 품은 파일시스템(대개 /)을 대신 보여 줍니다. 출력에 /mnt/data 가 없으면 마운트가 안 된 것입니다."
       },
       {
         "title": "데이터 쓰기 및 보존 확인 (공통 적용 구간)",
@@ -1258,7 +1258,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅 전 부팅 표식 기록",
-        "command": "ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"$ID\" > /var/tmp/qterm-boot-before && echo \"재부팅 전 부팅 표식을 기록했습니다 — $ID\"; echo '기록 위치: /var/tmp/qterm-boot-before'",
+        "command": "ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"$ID\" > /var/tmp/qterm-boot-before && echo \"재부팅 전 부팅 표식을 기록했습니다. $ID\"; echo '기록 위치: /var/tmp/qterm-boot-before'",
         "check": { "requireExitZero": true, "passContains": ["재부팅 전 부팅 표식을 기록했습니다"] },
         "undo": "rm -f /var/tmp/qterm-boot-before && echo '부팅 표식 파일을 지웠습니다'",
         "desc": "지금의 부팅 표식(boot_id)을 서버에 적어 둡니다. 재부팅 뒤 이 값과 비교해 실제로 재부팅됐는지 가립니다.",
@@ -1266,19 +1266,19 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다 — 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐 — 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다 — 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
+        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다. 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐: 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다. 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
         "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
         "desc": "재부팅 후 자동 마운트 여부를 확인합니다."
       },
       {
         "title": "마운트 유지 확인",
         "manualOnly": true,
-        "command": "B=$(cat /var/tmp/qterm-boot-before 2>/dev/null); N=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"부팅 표식 — 재부팅 전 $B / 지금 $N\"; echo \"부팅 시각 — $(uptime -s)\"; if [ -z \"$B\" ]; then echo '주의 — 재부팅 전 기록이 없습니다 (앞의 「재부팅 전 부팅 표식 기록」 단계부터 다시 하세요)'; elif [ \"$B\" = \"$N\" ]; then echo '주의 — 재부팅되지 않았습니다 (부팅 표식이 그대로입니다)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
-        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의 —"] },
+        "command": "B=$(cat /var/tmp/qterm-boot-before 2>/dev/null); N=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s); echo \"부팅 표식: 재부팅 전 $B / 지금 $N\"; echo \"부팅 시각: $(uptime -s)\"; if [ -z \"$B\" ]; then echo '주의: 재부팅 전 기록이 없습니다 (앞의 「재부팅 전 부팅 표식 기록」 단계부터 다시 하세요)'; elif [ \"$B\" = \"$N\" ]; then echo '주의: 재부팅되지 않았습니다 (부팅 표식이 그대로입니다)'; else echo '재부팅이 확인되었습니다'; fi; echo '--- 마운트 상태'; df -h",
+        "check": { "requireExitZero": true, "passContains": ["재부팅이 확인되었습니다", "/mnt/data"], "failContains": ["주의: "] },
         "desc": "재부팅 뒤 자동 마운트가 살아 있는지 봅니다. 앞 단계에서 서버에 적어 둔 부팅 표식과 비교하므로, 재부팅을 건너뛰면 통과하지 않습니다.",
-        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라오고 세션이 다시 연결된 뒤 오른쪽 실행을 누르세요.\n\n비교 기준은 앞 단계에서 서버에 적어 둔 부팅 표식입니다 — 앱을 껐다 켜도, 창을 닫았다 열어도, 이 단계만 따로 실행하면 됩니다.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다 — 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
+        "info": "재부팅으로 세션이 끊기므로 이 단계는 자동 실행에서 빠집니다.\n서버가 올라오고 세션이 다시 연결된 뒤 오른쪽 실행을 누르세요.\n\n비교 기준은 앞 단계에서 서버에 적어 둔 부팅 표식입니다. 앱을 껐다 켜도, 창을 닫았다 열어도, 이 단계만 따로 실행하면 됩니다.\n\n예전에는 df -h 만 봤습니다. 그러면 재부팅을 안 해도 앞 단계의 mount -a 때문에 /mnt/data 가 보여 정상으로 찍혔습니다. 확인한 적 없는 것이 확인된 것으로 남던 자리입니다."
       }
     ]
   },
@@ -1390,7 +1390,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "논리 볼륨(LV) 생성",
         "command": "sudo lvcreate -l 100%FREE -n data_lv data_vg",
-        "note": "두 번째 실행부터 \"xfs signature detected … Wipe it? [y/n]\" 을 되묻습니다.\nlvremove·pvremove 는 LVM 표식만 지우고 그 안에 있던 파일시스템 서명은 남기기 때문입니다.\n그 물음에는 자동으로 y 를 보냅니다 — 방금 만든 논리 볼륨이므로 지워도 되는 자리입니다.",
+        "note": "두 번째 실행부터 \"xfs signature detected … Wipe it? [y/n]\" 을 되묻습니다.\nlvremove·pvremove 는 LVM 표식만 지우고 그 안에 있던 파일시스템 서명은 남기기 때문입니다.\n그 물음에는 자동으로 y 를 보냅니다. 방금 만든 논리 볼륨이므로 지워도 되는 자리입니다.",
         "expect": [
           { "match": "Wipe it", "send": "y" },
           { "match": "Really INITIALIZE", "send": "y" }
@@ -1408,7 +1408,7 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "파일시스템 생성",
         "command": "sudo mkfs.xfs /dev/data_vg/data_lv",
-        "note": "mkfs.xfs 는 되묻지 않고 오류로 끝납니다 — \"appears to contain an existing filesystem\".\n앞 단계(7번 lvcreate)가 옛 서명을 지우므로 순서대로 오면 걸리지 않습니다.\n이 단계만 따로 돌리다 그 오류를 만나면, 정말 지워도 되는 LV 인지 확인한 뒤 -f 를 붙이세요.\n시나리오에 -f 를 박아 두지 않은 이유가 그것입니다 — 남의 데이터를 말없이 덮는 마지막 문턱입니다.",
+        "note": "mkfs.xfs 는 되묻지 않고 오류로 끝납니다. \"appears to contain an existing filesystem\".\n앞 단계(7번 lvcreate)가 옛 서명을 지우므로 순서대로 오면 걸리지 않습니다.\n이 단계만 따로 돌리다 그 오류를 만나면, 정말 지워도 되는 LV 인지 확인한 뒤 -f 를 붙이세요.\n시나리오에 -f 를 박아 두지 않은 이유가 그것입니다. 남의 데이터를 말없이 덮는 마지막 문턱입니다.",
         "warn": "방금 만든 논리 볼륨을 포맷합니다. 기존 데이터가 있는 LV 를 지정하지 않았는지 확인하세요.",
         "check": { "requireExitZero": true },
         "desc": "LV 에 xfs 파일시스템을 만듭니다. (ext4 를 쓰려면 mkfs.ext4)"
@@ -1423,7 +1423,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트",
         "command": "sudo mkdir -p /mnt/data && sudo mount /dev/data_vg/data_lv /mnt/data",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi; if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의 — /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의 — /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/data || break; sudo umount /mnt/data || break; done; if mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/data '; sudo fuser -vm /mnt/data 2>&1 | head -5; false; else echo '/mnt/data 마운트가 해제되어 있습니다'; fi; fi; if [ ! -d /mnt/data ]; then echo '/mnt/data 가 이미 없습니다'; elif mountpoint -q /mnt/data; then echo '주의: /mnt/data 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/data '; false; elif [ -n \"$(sudo ls -A /mnt/data 2>/dev/null)\" ]; then echo '주의: /mnt/data 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/data | head -6; false; else sudo rmdir /mnt/data && echo '/mnt/data 를 지웠습니다'; fi",
         "desc": "마운트 디렉토리를 만들고 LV 를 마운트합니다."
       },
       {
@@ -1512,19 +1512,19 @@ export const SCENARIOS: Scenario[] = [
       {
         "title": "인스턴스 별칭 확인",
         "target": "하이퍼바이저",
-        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
-        "check": { "failContains": ["주의 —"] },
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의: 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의: "] },
         "desc": "하이퍼바이저 호스트에서 실행합니다. 별칭(instance-xxxx) 옆에 포털의 인스턴스 이름을 함께 보여주므로, 어느 것이 내 인스턴스인지 바로 가릅니다.",
-        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다 — 위 역할별 대상에서 그 노드를 고르세요."
+        "info": "virsh 는 OpenStack UUID 가 아니라 libvirt 도메인 별칭으로 조회합니다.\n별칭만 늘어놓으면 어느 것이 내 것인지 알 수 없어서, nova 가 도메인 XML 에 심어 둔 이름을 함께 읽어 붙였습니다.\n\n찾는 이름이 안 보이면 그 인스턴스는 다른 컴퓨트 노드에 있습니다. 위 역할별 대상에서 그 노드를 고르세요."
       },
       {
         "title": "QoS 적용 여부 확인 (인스턴스 배치 호스트)",
         "target": "하이퍼바이저",
-        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의 — 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A  —  $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크]'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X > $D; grep -E '<disk |<source |<target dev' $D | head -14; R=$(grep \"device='disk'\" $D | head -1); case \"$R\" in *\"type='file'\"*) echo '  -> 루트가 Ephemeral(로컬 파일)입니다 — 볼륨 타입 QoS 대상이 아닙니다. [컴퓨트] 인스턴스 유형 디스크 QoS 시나리오로 확인하세요';; *) echo '  -> 루트가 볼륨입니다 — 볼륨 타입 QoS 대상이 맞습니다';; esac; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의 — iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · QoS 를 볼륨 타입에 연결(Associate)했는지 확인하세요'; echo '  · 연결하기 전에 만든 볼륨에는 적용되지 않습니다 — 볼륨을 다시 만들어 인스턴스를 생성하세요'; echo '  · QoS Specs 의 consumer 가 front-end(또는 both)여야 여기 iotune 으로 보입니다. back-end 면 스토리지가 직접 거는 것이라 도메인 XML 에는 안 나옵니다'; fi; else echo \"주의 — 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
-        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의 —"] },
+        "command": "A='<instance_alias>'; X=/tmp/qterm-dom.xml; D=/tmp/qterm-disk.txt; if ! command -v virsh > /dev/null; then echo '주의: 이 서버에 virsh 가 없습니다 (컴퓨트 노드가 아닙니다)'; elif sudo virsh dumpxml \"$A\" > $X 2>/dev/null; then echo \"[대상] $A: $(grep -o 'nova:name>[^<]*' $X | head -1 | cut -c11-)\"; echo '[루트 디스크]'; awk 'index($0,\"<disk \")>0{b=1} b{print} index($0,\"</disk>\")>0{b=0}' $X > $D; grep -E '<disk |<source |<target dev' $D | head -14; R=$(grep \"device='disk'\" $D | head -1); case \"$R\" in *\"type='file'\"*) echo '  -> 루트가 Ephemeral(로컬 파일)입니다. 볼륨 타입 QoS 대상이 아닙니다. [컴퓨트] 인스턴스 유형 디스크 QoS 시나리오로 확인하세요';; *) echo '  -> 루트가 볼륨입니다. 볼륨 타입 QoS 대상이 맞습니다';; esac; echo '[iotune]'; if grep -q iotune $X; then grep -A 8 iotune $X | grep -E 'iotune|_sec'; else echo '주의: iotune 블록이 없습니다 (QoS 가 이 인스턴스에 걸려 있지 않습니다)'; echo '  · QoS 를 볼륨 타입에 연결(Associate)했는지 확인하세요'; echo '  · 연결하기 전에 만든 볼륨에는 적용되지 않습니다. 볼륨을 다시 만들어 인스턴스를 생성하세요'; echo '  · QoS Specs 의 consumer 가 front-end(또는 both)여야 여기 iotune 으로 보입니다. back-end 면 스토리지가 직접 거는 것이라 도메인 XML 에는 안 나옵니다'; fi; else echo \"주의: 이 호스트에 $A 도메인이 없습니다 (인스턴스가 다른 컴퓨트 노드에 있을 수 있습니다)\"; fi; rm -f $X $D",
+        "check": { "passContains": ["iotune"], "passRegex": "(read|write)_(iops|bytes)_sec", "failContains": ["주의: "] },
         "onFailure": "continue",
         "desc": "앞 단계에서 확인한 별칭으로 실행합니다. 인스턴스가 배치된 컴퓨트 호스트에서 실행해야 합니다.\n루트가 볼륨이 맞는지 먼저 단정해 주고, iotune 이 없으면 왜 없는지(볼륨 타입 미연결 · consumer 가 back-end · 연결 전에 만든 볼륨)도 짚어 줍니다.",
-        "info": "정상 적용 시 iotune 블록에 설정값이 나옵니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>\n\n여기서 실패해도 검증은 멈추지 않습니다 — 제한이 안 걸린 fio 숫자도 증거입니다."
+        "info": "정상 적용 시 iotune 블록에 설정값이 나옵니다:\n  <read_bytes_sec>10485760</read_bytes_sec>\n  <write_bytes_sec>10485760</write_bytes_sec>\n  <read_iops_sec>50</read_iops_sec>\n  <write_iops_sec>50</write_iops_sec>\n\n여기서 실패해도 검증은 멈추지 않습니다. 제한이 안 걸린 fio 숫자도 증거입니다."
       },
       {
         "title": "인스턴스 터미널 접속",
@@ -1557,26 +1557,26 @@ export const SCENARIOS: Scenario[] = [
         "title": "쓰기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randwrite --rw=randwrite --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기 30초. IOPS 가 QoS 설정치(50)에 근접하면 정상입니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
+        "desc": "4k 블록 랜덤 쓰기 30초. IOPS 가 QoS 설정치(50)에 근접하면 정상입니다.\n결과에서 볼 것: write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다.",
         "info": "--direct=1 로 OS 캐시를 건너뜁니다.\n--ioengine=libaio --iodepth=32 로 I/O 를 동시에 충분히 보내야 QoS 제한치(50 IOPS)까지 실제로 닿습니다."
       },
       {
         "title": "읽기 IOPS 제한 확인",
         "command": "sudo fio --name=qos-randread --rw=randread --bs=4k --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기 30초. IOPS 가 50 근처로 제한되면 read_iops_sec 이 걸린 것입니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
+        "desc": "4k 블록 랜덤 읽기 30초. IOPS 가 50 근처로 제한되면 read_iops_sec 이 걸린 것입니다.\n결과에서 볼 것: read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "쓰기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-write-bw --rw=write --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 쓰기 30초. BW 가 약 10 MiB/s 로 제한되면 write_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것 — write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 쓰기 30초. BW 가 약 10 MiB/s 로 제한되면 write_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것: write: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "읽기 대역폭 제한 확인",
         "command": "sudo fio --name=qos-read-bw --rw=read --bs=1m --direct=1 --ioengine=libaio --iodepth=32 --size=100M --runtime=30 --filename=/tmp/fio-test --group_reporting",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 읽기 30초. BW 가 약 10 MiB/s 로 제한되면 read_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것 — read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 읽기 30초. BW 가 약 10 MiB/s 로 제한되면 read_bytes_sec 이 걸린 것입니다.\n결과에서 볼 것: read: 줄의 BW= 값. 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1634,10 +1634,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다 — 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐 — 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다 — 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
+        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다. 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐: 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다. 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
         "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
         "desc": "드라이버 로드를 위해 재부팅합니다."
       },
       {
@@ -1675,10 +1675,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "재부팅",
-        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다 — 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐 — 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다 — 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
+        "info": "앱이 자동으로 다시 붙지만, 조건이 있습니다. 돌아오지 않을 수도 있다고 보고 확인하세요.\n· 설정 → 세션의 ‘끊기면 자동 재연결’ 이 켜져 있어야 합니다 (기본 켜짐: 끈 적이 있으면 확인하세요)\n· 약 2분 동안 간격을 늘려가며 시도합니다. 부팅이 그보다 길면 포기합니다\n· 저장된 접속 프로필로 연결한 세션만 됩니다 (주소를 직접 입력해 붙은 세션은 안 됩니다)\n\n부팅이 끝난 뒤 상단에 ‘연결됨’ 이 보이지 않으면 그 세션을 다시 연결하고 다음 단계를 실행하세요.",
         "manualOnly": true,
         "command": "sudo reboot",
-        "warn": "재부팅하면 SSH 세션이 끊깁니다 — 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
+        "warn": "재부팅하면 SSH 세션이 끊깁니다. 그래서 이 단계는 전체 실행에서 빠집니다.\n지금 이 서버를 내려도 되는지 확인한 뒤 오른쪽 실행을 직접 누르세요. 부팅이 끝나면 세션이 다시 연결됐는지 보고 다음 단계를 실행하세요.",
         "desc": "MIG 모드 변경 사항을 적용하기 위해 재부팅합니다."
       },
       {
@@ -1749,14 +1749,14 @@ export const SCENARIOS: Scenario[] = [
   {
     "id": "perf-stress-cpu",
     "solution": "성능 · 부하",
-    "title": "[부하] stress-ng — CPU",
+    "title": "[부하] stress-ng: CPU",
     "summary": "부하 전 기준값을 기록하고, CPU에 부하를 준 뒤 실제로 사용률이 올랐는지 수치로 확인합니다.",
     "steps": [
       {
         "title": "부하 전 CPU 사용률 확인",
         "command": "echo \"코어 수: $(nproc)개\"; echo \"모델: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')\"; echo; echo '지금 CPU 사용률 (1초 간격 3회):'; vmstat 1 3 | awk 'NR>3{ printf(\"  %d%%\\n\", $13+0) }'",
         "check": { "requireExitZero": true },
-        "desc": "결과에서 볼 것 — 맨 아래 'CPU 사용률' 숫자입니다. 보통 아무것도 안 돌면 0~5% 입니다. 이 값이 부하를 준 뒤와 비교할 출발점입니다.",
+        "desc": "결과에서 볼 것: 맨 아래 'CPU 사용률' 숫자입니다. 보통 아무것도 안 돌면 0~5% 입니다. 이 값이 부하를 준 뒤와 비교할 출발점입니다.",
         "note": "여기서부터 이미 사용률이 높다면 다른 작업이 돌고 있는 것이니, 부하 검증 결과가 부정확해집니다."
       },
       {
@@ -1787,7 +1787,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo 'CPU 사용률 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ v=$13+0; n++; if(n==1) first=v; last=v; if(v>mx) mx=v; b=\"\"; for(i=0;i<int(v/5);i++) b=b \"#\"; printf(\"  %3d%%  %s\\n\", v, b) } END{ printf(\"\\n부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n판정: CPU %s\\n\", first, mx, last, (mx>=50 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: CPU 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 한 줄입니다.\n'부하 중 최고'가 50% 이상이면 부하가 실제로 걸린 것으로 판정합니다.\n위 막대는 시간에 따른 CPU 사용률이라, 올랐다 내려온 모양이 눈으로도 보입니다.",
+        "desc": "결과에서 볼 것: 맨 아래 한 줄입니다.\n'부하 중 최고'가 50% 이상이면 부하가 실제로 걸린 것으로 판정합니다.\n위 막대는 시간에 따른 CPU 사용률이라, 올랐다 내려온 모양이 눈으로도 보입니다.",
         "note": "부하 전과 부하 후가 비슷하게 낮고 가운데만 높으면 정상입니다."
       }
     ]
@@ -1795,14 +1795,14 @@ export const SCENARIOS: Scenario[] = [
   {
     "id": "perf-stress-mem",
     "solution": "성능 · 부하",
-    "title": "[부하] stress-ng — 메모리",
+    "title": "[부하] stress-ng: 메모리",
     "summary": "부하 전 여유 메모리를 기록하고, 메모리를 점유시킨 뒤 실제로 줄었다가 회수되는지 확인합니다.",
     "steps": [
       {
         "title": "부하 전 메모리 확인",
         "command": "awk '/MemTotal/{ t=$2 } /MemAvailable/{ a=$2 } END{ printf(\"전체 메모리      %.2f GB\\n지금 쓸 수 있는  %.2f GB\\n\", t/1048576, a/1048576) }' /proc/meminfo; echo; free -h",
         "check": { "requireExitZero": true },
-        "desc": "결과에서 볼 것 — '지금 쓸 수 있는' 메모리 숫자입니다. 다음 단계에서 2GB 를 점유시키므로 이 값이 2GB 보다 커야 합니다.",
+        "desc": "결과에서 볼 것: '지금 쓸 수 있는' 메모리 숫자입니다. 다음 단계에서 2GB 를 점유시키므로 이 값이 2GB 보다 커야 합니다.",
         "note": "2GB 보다 작으면 다음 단계의 --vm-bytes 값을 낮춰 진행하세요. 그냥 진행하면 다른 프로세스가 강제 종료될 수 있습니다."
       },
       {
@@ -1833,7 +1833,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo '메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순 · 막대 1칸 = 0.1GB)'; echo; awk 'NR>3{ m=$4/1048576; n++; if(n==1) fm=m; lm=m; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(d*10);i++) b=b \"#\"; printf(\"  %+6.2f GB  %s\\n\", d, b) } END{ printf(\"\\n쓸 수 있는 메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: 메모리 %s\\n\", fm, mn, lm, fm-mn, (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: 메모리 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 '판정: 메모리' 한 줄입니다. 점유량이 1GB 이상이면 정상입니다.\n위 막대는 부하 전 대비 얼마나 더 쓰는지라, 부하 구간에서 길어졌다가 끝나면 사라져야 합니다.",
+        "desc": "결과에서 볼 것: 맨 아래 '판정: 메모리' 한 줄입니다. 점유량이 1GB 이상이면 정상입니다.\n위 막대는 부하 전 대비 얼마나 더 쓰는지라, 부하 구간에서 길어졌다가 끝나면 사라져야 합니다.",
         "note": "'부하 후' 값이 '부하 전'과 비슷하게 돌아왔으면 메모리가 정상 회수된 것입니다. 안 돌아왔다면 누수를 의심할 수 있습니다."
       }
     ]
@@ -1841,14 +1841,14 @@ export const SCENARIOS: Scenario[] = [
   {
     "id": "perf-stress-cpumem",
     "solution": "성능 · 부하",
-    "title": "[부하] stress-ng — CPU & 메모리",
+    "title": "[부하] stress-ng: CPU & 메모리",
     "summary": "부하 전 CPU·메모리를 함께 기록하고, 동시에 부하를 준 뒤 두 값이 모두 움직였는지 확인합니다(알람/스케일링 검증).",
     "steps": [
       {
         "title": "부하 전 CPU·메모리 확인",
         "command": "echo \"코어 수: $(nproc)개\"; awk '/MemTotal/{ t=$2 } /MemAvailable/{ a=$2 } END{ printf(\"전체 메모리      %.2f GB\\n지금 쓸 수 있는  %.2f GB\\n\", t/1048576, a/1048576) }' /proc/meminfo; echo; echo '지금 CPU 사용률 (1초 간격 3회):'; vmstat 1 3 | awk 'NR>3{ printf(\"  %d%%\\n\", $13+0) }'",
         "check": { "requireExitZero": true },
-        "desc": "결과에서 볼 것 — 'CPU 사용률'과 '지금 쓸 수 있는' 메모리 두 숫자입니다. 부하를 준 뒤 이 둘과 비교합니다. 알람 임계치를 검증한다면 이 값이 출발점입니다.",
+        "desc": "결과에서 볼 것: 'CPU 사용률'과 '지금 쓸 수 있는' 메모리 두 숫자입니다. 부하를 준 뒤 이 둘과 비교합니다. 알람 임계치를 검증한다면 이 값이 출발점입니다.",
         "note": "쓸 수 있는 메모리가 2GB 보다 작으면 다음 단계의 --vm-bytes 값을 낮춰 진행하세요."
       },
       {
@@ -1879,7 +1879,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "부하 결과 확인 (전 → 중 → 후)",
         "command": "sleep 16; echo 'CPU 사용률 / 메모리 사용 증가량 (5초 간격, 위에서 아래로 시간 순)'; echo; awk 'NR>3{ c=$13+0; m=$4/1048576; n++; if(n==1){ fc=c; fm=m } lc=c; lm=m; if(c>mx) mx=c; if(mn==0 || mn>m) mn=m; d=fm-m; b=\"\"; for(i=0;i<int(c/5);i++) b=b \"#\"; printf(\"  CPU %3d%%  %-20s  메모리 %+6.2f GB\\n\", c, b, d) } END{ printf(\"\\nCPU      부하 전 %d%%  ->  부하 중 최고 %d%%  ->  부하 후 %d%%\\n메모리   부하 전 %.2fGB  ->  부하 중 최저 %.2fGB  ->  부하 후 %.2fGB\\n점유된 메모리 최대 %.2fGB\\n판정: CPU %s / 메모리 %s\\n\", fc, mx, lc, fm, mn, lm, fm-mn, (mx>=50 ? \"정상\" : \"미달\"), (fm-mn>=1 ? \"정상\" : \"미달\")) }' /tmp/qterm-stress.log; rm -f /tmp/qterm-stress.log",
         "check": { "passContains": ["판정: CPU 정상 / 메모리 정상"] },
-        "desc": "결과에서 볼 것 — 맨 아래 '판정' 한 줄입니다.\nCPU 50% 이상 · 메모리 1GB 이상 점유, 둘 다 만족해야 통과입니다.\n막대는 CPU, 오른쪽 숫자는 부하 전 대비 메모리 증가량입니다.",
+        "desc": "결과에서 볼 것: 맨 아래 '판정' 한 줄입니다.\nCPU 50% 이상 · 메모리 1GB 이상 점유, 둘 다 만족해야 통과입니다.\n막대는 CPU, 오른쪽 숫자는 부하 전 대비 메모리 증가량입니다.",
         "note": "부하 전과 부하 후가 비슷하게 돌아왔으면 자원이 정상 회수된 것입니다."
       }
     ]
@@ -1887,7 +1887,7 @@ export const SCENARIOS: Scenario[] = [
   {
     "id": "perf-iperf3-bw",
     "solution": "성능 · 부하",
-    "title": "[부하] iperf3 — 네트워크 대역폭(BW)",
+    "title": "[부하] iperf3: 네트워크 대역폭(BW)",
     "summary": "두 노드 간 TCP 실효 대역폭을 측정합니다. 역할별 대상에서 서버·클라이언트 세션을 고르면 접속 주소는 자동으로 채워집니다.",
     "roleValues": { "SERVER_IP": "서버" },
     "steps": [
@@ -1908,7 +1908,7 @@ export const SCENARIOS: Scenario[] = [
         "target": "서버",
         "check": { "passContains": ["5201"], "failContains": ["뜨지 않았습니다"] },
         "undo": "pkill -f 'iperf3 -s'; true",
-        "desc": "결과에서 볼 것 — 5201 포트가 LISTEN 으로 보여야 합니다. -D 는 백그라운드 실행이라 터미널을 점유하지 않습니다.",
+        "desc": "결과에서 볼 것: 5201 포트가 LISTEN 으로 보여야 합니다. -D 는 백그라운드 실행이라 터미널을 점유하지 않습니다.",
         "note": "이미 떠 있으면 'Address already in use' 가 나올 수 있는데, 5201 이 보이면 정상입니다."
       },
       {
@@ -1916,7 +1916,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "iperf3 -c <SERVER_IP> -t 60 -P 4",
         "target": "클라이언트",
         "check": { "failContains": ["unable to connect", "Connection refused", "No route to host"], "passContains": ["iperf Done"] },
-        "desc": "60초간 4개 병렬 스트림으로 TCP 실효 대역폭을 잽니다.\n결과에서 볼 것 — 맨 아래 [SUM] … receiver 줄의 Bitrate. sender 가 아니라 receiver 줄입니다.",
+        "desc": "60초간 4개 병렬 스트림으로 TCP 실효 대역폭을 잽니다.\n결과에서 볼 것: 맨 아래 [SUM] … receiver 줄의 Bitrate. sender 가 아니라 receiver 줄입니다.",
         "note": "<SERVER_IP> 는 '서버' 역할로 고른 세션의 주소가 자동으로 들어갑니다."
       },
       {
@@ -1924,14 +1924,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "pkill -f 'iperf3 -s'; sleep 1; ss -tlnp 2>/dev/null | grep :5201 || echo 'iperf3 서버를 정리했습니다'",
         "target": "서버",
         "check": { "passContains": ["정리했습니다"] },
-        "desc": "결과에서 볼 것 — '정리했습니다' 문구입니다. 측정이 끝난 뒤 서버를 남겨두면 5201 포트를 계속 점유합니다."
+        "desc": "결과에서 볼 것: '정리했습니다' 문구입니다. 측정이 끝난 뒤 서버를 남겨두면 5201 포트를 계속 점유합니다."
       }
     ]
   },
   {
     "id": "perf-fio-iops",
     "solution": "성능 · 부하",
-    "title": "[부하] fio — IOPS",
+    "title": "[부하] fio: IOPS",
     "summary": "4k 랜덤 읽기/쓰기로 디스크 IOPS와 지연(Latency)을 측정합니다.",
     "steps": [
       {
@@ -1946,7 +1946,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의 — /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의: /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
         "undo": "mountpoint -q /mnt/data && echo '마운트된 볼륨이라 폴더를 지우지 않습니다' || sudo rmdir /mnt/data",
         "check": {
           "requireExitZero": true,
@@ -1954,21 +1954,21 @@ export const SCENARIOS: Scenario[] = [
           "failContains": ["별도 마운트가 아닙니다"]
         },
         "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
       },
       {
         "title": "랜덤 쓰기 IOPS",
         "command": "sudo fio --name=randwrite --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/randwrite.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 쓰기의 IOPS·지연을 잽니다.\n결과에서 볼 것 — write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다."
+        "desc": "4k 블록 랜덤 쓰기의 IOPS·지연을 잽니다.\n결과에서 볼 것: write: 줄의 IOPS=(초당 처리 횟수)와 BW=(대역폭). 아래 lat 은 지연 시간이라 작을수록 좋습니다."
       },
       {
         "title": "랜덤 읽기 IOPS",
         "command": "sudo fio --name=randread --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/randread.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "4k 블록 랜덤 읽기의 IOPS·지연을 잽니다.\n결과에서 볼 것 — read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
+        "desc": "4k 블록 랜덤 읽기의 IOPS·지연을 잽니다.\n결과에서 볼 것: read: 줄의 IOPS= 와 BW=. QoS 를 걸었다면 상한 근처에서 멈춰야 정상입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -1980,7 +1980,7 @@ export const SCENARIOS: Scenario[] = [
   {
     "id": "perf-fio-bw",
     "solution": "성능 · 부하",
-    "title": "[부하] fio — 대역폭(BW)",
+    "title": "[부하] fio: 대역폭(BW)",
     "summary": "1M 순차 읽기/쓰기로 디스크 처리량(Throughput)을 측정합니다.",
     "steps": [
       {
@@ -1995,7 +1995,7 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "대상 볼륨으로 이동",
-        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의 — /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
+        "command": "sudo mkdir -p /mnt/data && cd /mnt/data && df -h /mnt/data && { mountpoint -q /mnt/data && echo '별도 볼륨이 마운트되어 있습니다' || echo '주의: /mnt/data 는 별도 마운트가 아닙니다 (루트 디스크의 폴더)'; }",
         "undo": "mountpoint -q /mnt/data && echo '마운트된 볼륨이라 폴더를 지우지 않습니다' || sudo rmdir /mnt/data",
         "check": {
           "requireExitZero": true,
@@ -2003,21 +2003,21 @@ export const SCENARIOS: Scenario[] = [
           "failContains": ["별도 마운트가 아닙니다"]
         },
         "desc": "테스트할 마운트 볼륨 경로로 이동하고, 그 경로가 정말 별도 볼륨인지 확인합니다.",
-        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요 — 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
+        "note": "⚠️ 운영 데이터가 있는 경로는 피하세요. 테스트 파일이 생깁니다.\n\n여기서 실패하면 fio 가 루트 디스크를 재게 됩니다.\n그 숫자를 볼륨 성능으로 적으면 값 자체가 틀린 것이라 여기서 멈춥니다.\n· 볼륨을 먼저 마운트하거나 (디스크 마운트 시나리오)\n· 정말 루트 디스크를 재려는 것이면 이 스텝을 '정상'으로 직접 지정하고 진행하세요"
       },
       {
         "title": "순차 읽기 대역폭",
         "command": "sudo fio --name=seqread --ioengine=libaio --iodepth=32 --rw=read --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/seqread.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 읽기 처리량 측정. 결과에서 볼 것 — read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 읽기 처리량 측정. 결과에서 볼 것: read: 줄의 BW= 값(초당 몇 MB 를 읽는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "순차 쓰기 대역폭",
         "command": "sudo fio --name=seqwrite --ioengine=libaio --iodepth=32 --rw=write --bs=1m --direct=1 --size=1G --numjobs=1 --runtime=60 --group_reporting",
         "undo": "sudo rm -f /mnt/data/seqwrite.*",
         "check": { "passContains": ["Run status group"] },
-        "desc": "1M 블록 순차 쓰기 처리량 측정. 결과에서 볼 것 — write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
+        "desc": "1M 블록 순차 쓰기 처리량 측정. 결과에서 볼 것: write: 줄의 BW= 값(초당 몇 MB 를 쓰는지). 큰 블록이라 IOPS 보다 BW 가 핵심입니다."
       },
       {
         "title": "테스트 파일 정리",
@@ -2040,7 +2040,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "클러스터 상태 확인",
         "command": "sudo ceph -s",
         "desc": "지금 클러스터가 어떤 상태인지 한눈에 봅니다. 이 시나리오를 여는 상황이면 대개 HEALTH_WARN 이고, 그것이 여기서 확인할 내용입니다.",
-        "info": "결과에서 볼 것 — 위에서 아래로 세 가지입니다.\n· health — HEALTH_OK / WARN / ERR 과 그 아래 딸린 사유 줄\n· osd: N osds: M up — up 숫자가 전체보다 적으면 그 차이가 down 된 개수입니다\n· pgs — degraded · misplaced 가 보이면 데이터 복제가 아직 안 끝난 것입니다\n\nHEALTH_OK 로 돌아왔는데 pgs 에 degraded/misplaced 가 남아 있으면 아직 복구 중입니다.\n마지막 단계에서 그 숫자가 줄어드는지 봅니다.",
+        "info": "결과에서 볼 것: 위에서 아래로 세 가지입니다.\n· health: HEALTH_OK / WARN / ERR 과 그 아래 딸린 사유 줄\n· osd: N osds: M up: up 숫자가 전체보다 적으면 그 차이가 down 된 개수입니다\n· pgs: degraded · misplaced 가 보이면 데이터 복제가 아직 안 끝난 것입니다\n\nHEALTH_OK 로 돌아왔는데 pgs 에 degraded/misplaced 가 남아 있으면 아직 복구 중입니다.\n마지막 단계에서 그 숫자가 줄어드는지 봅니다.",
         "note": "여기에 '정상 조건' 을 붙이지 않는다.\n예전에는 passContains: HEALTH_OK 였는데, OSD 가 down 이라서 여는 시나리오에 대고 \"HEALTH_OK 가 아니면 실패\" 라고 한 셈이었다.\n그 실패가 전체 실행을 1번에서 끊어, 정작 봐야 할 2~5번 증거를 한 번도 못 모으게 했다.\n지금 상태를 보여 주는 것이 이 스텝의 일이고, 정상인지는 아래 6~8번(조치와 그 결과)에서 가린다."
       },
       {
@@ -2207,10 +2207,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "클라이언트가 접속할 주소 정하기",
-        "command": "echo '[이 VM 에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[밖으로 나갈 때 보이는 주소 — 참고용, 그대로 쓰지 말 것]'; curl -s --max-time 5 ifconfig.me && echo || echo '   (조회 실패 — 폐쇄망이면 정상)'",
-        "desc": "다음 단계 INIT_HOST 에 넣을 주소를 정합니다. 기준은 하나 — 밖에 있는 클라이언트가 실제로 닿는 주소입니다.",
-        "info": "대부분 이런 구성입니다\n· VM 은 사설 IP 를 갖고, 거기에 유동(floating) IP 가 붙어 있습니다\n· 그러면 엔드포인트는 그 유동 IP 입니다\n· 유동 IP 는 VM 안에서 보이지 않습니다 — 포털이나 openstack server show 로 확인하세요\n\n그 밖의 경우\n· 앞단 공유기·방화벽에서 포트포워딩한다면 → 그 장비의 주소\n· 클라이언트가 같은 사내망 안에만 있다면 → VM 의 사설 IP 그대로\n\n[밖으로 나갈 때 보이는 주소] 는 쓰지 마세요\n이 VM 이 인터넷으로 나갈 때 쓰는 출발지 주소(SNAT)일 뿐입니다.\n들어오는 연결이 그 주소로 닿는다는 보장이 없습니다.\n\n같이 적어 둘 것 — 접근하려는 VM 들의 사설 대역 (예: 192.168.50.0/24)\n뒤에서 '터널로 보낼 대역' 으로 씁니다. 이 서버가 붙어 있는 대역과 달라도 됩니다.",
-        "warn": "주소가 틀려도 설정 파일은 멀쩡히 만들어지고 컨테이너도 잘 뜹니다.\n클라이언트에서 handshake 만 안 돼서 원인을 찾기 어렵습니다 — 여기서 확실히 정하세요."
+        "command": "echo '[이 VM 에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[밖으로 나갈 때 보이는 주소: 참고용, 그대로 쓰지 말 것]'; curl -s --max-time 5 ifconfig.me && echo || echo '   (조회 실패: 폐쇄망이면 정상)'",
+        "desc": "다음 단계 INIT_HOST 에 넣을 주소를 정합니다. 기준은 하나: 밖에 있는 클라이언트가 실제로 닿는 주소입니다.",
+        "info": "대부분 이런 구성입니다\n· VM 은 사설 IP 를 갖고, 거기에 유동(floating) IP 가 붙어 있습니다\n· 그러면 엔드포인트는 그 유동 IP 입니다\n· 유동 IP 는 VM 안에서 보이지 않습니다. 포털이나 openstack server show 로 확인하세요\n\n그 밖의 경우\n· 앞단 공유기·방화벽에서 포트포워딩한다면 → 그 장비의 주소\n· 클라이언트가 같은 사내망 안에만 있다면 → VM 의 사설 IP 그대로\n\n[밖으로 나갈 때 보이는 주소] 는 쓰지 마세요\n이 VM 이 인터넷으로 나갈 때 쓰는 출발지 주소(SNAT)일 뿐입니다.\n들어오는 연결이 그 주소로 닿는다는 보장이 없습니다.\n\n같이 적어 둘 것: 접근하려는 VM 들의 사설 대역 (예: 192.168.50.0/24)\n뒤에서 '터널로 보낼 대역' 으로 씁니다. 이 서버가 붙어 있는 대역과 달라도 됩니다.",
+        "warn": "주소가 틀려도 설정 파일은 멀쩡히 만들어지고 컨테이너도 잘 뜹니다.\n클라이언트에서 handshake 만 안 돼서 원인을 찾기 어렵습니다. 여기서 확실히 정하세요."
       },
       {
         "title": "패키지 저장소 업데이트",
@@ -2237,11 +2237,11 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Docker 설치",
-        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단 — Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
+        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단: Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
-        "check": { "requireExitZero": true, "failContains": ["중단 —", "Unable to locate package", "has no installation candidate"] },
+        "check": { "requireExitZero": true, "failContains": ["중단: ", "Unable to locate package", "has no installation candidate"] },
         "desc": "Docker 엔진과 compose 플러그인을 설치합니다.",
         "undo": "sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && sudo apt-get autoremove -y"
       },
@@ -2253,10 +2253,10 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "wg-easy 설정 파일 작성",
-        "command": "sudo mkdir -p /opt/wg-easy && cd /opt/wg-easy && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  wg-easy:\n    image: ghcr.io/wg-easy/wg-easy:15\n    container_name: wg-easy\n    restart: unless-stopped\n    cap_add:\n      - NET_ADMIN\n      - SYS_MODULE\n    sysctls:\n      - net.ipv4.ip_forward=1\n      - net.ipv4.conf.all.src_valid_mark=1\n    environment:\n      - INIT_ENABLED=true\n      - INIT_USERNAME=<관리자ID>\n      - INIT_PASSWORD=<관리자비밀번호>\n      - INIT_HOST=<접속주소>\n      - INIT_PORT=51820\n      - INIT_DNS=1.1.1.1,8.8.8.8\n      - INIT_IPV4_CIDR=10.8.0.0/24\n      - PORT=51821\n      - HOST=0.0.0.0\n      - INSECURE=true\n    ports:\n      - \"51820:51820/udp\"\n      - \"51821:51821/tcp\"\n    volumes:\n      - ./wireguard-config:/etc/wireguard\n      - /lib/modules:/lib/modules:ro\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; sudo grep -n 'image:\\|INIT_HOST\\|INIT_USERNAME' docker-compose.yml; fi",
-        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
+        "command": "sudo mkdir -p /opt/wg-easy && cd /opt/wg-easy && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  wg-easy:\n    image: ghcr.io/wg-easy/wg-easy:15\n    container_name: wg-easy\n    restart: unless-stopped\n    cap_add:\n      - NET_ADMIN\n      - SYS_MODULE\n    sysctls:\n      - net.ipv4.ip_forward=1\n      - net.ipv4.conf.all.src_valid_mark=1\n    environment:\n      - INIT_ENABLED=true\n      - INIT_USERNAME=<관리자ID>\n      - INIT_PASSWORD=<관리자비밀번호>\n      - INIT_HOST=<접속주소>\n      - INIT_PORT=51820\n      - INIT_DNS=1.1.1.1,8.8.8.8\n      - INIT_IPV4_CIDR=10.8.0.0/24\n      - PORT=51821\n      - HOST=0.0.0.0\n      - INSECURE=true\n    ports:\n      - \"51820:51820/udp\"\n      - \"51821:51821/tcp\"\n    volumes:\n      - ./wireguard-config:/etc/wireguard\n      - /lib/modules:/lib/modules:ro\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단: 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; sudo grep -n 'image:\\|INIT_HOST\\|INIT_USERNAME' docker-compose.yml; fi",
+        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단: "] },
         "desc": "wg-easy 15 버전 설정을 만듭니다. 원 문서는 저장소를 clone 한 뒤 이 파일을 덮어쓰지만, 실제로 쓰이는 것은 이 파일 하나입니다.",
-        "info": "채울 값\n· 관리자ID · 관리자비밀번호 — WebUI 로그인 계정 (비밀번호는 12자 이상)\n· 접속주소 — 앞 단계에서 정한, 클라이언트가 닿는 주소\n\nINIT_IPV4_CIDR (10.8.0.0/24) 은 클라이언트에게 나눠 줄 VPN 전용 대역입니다.\n접속할 사설 대역이나 클라이언트의 집·사무실 대역과 겹치면 경로가 꼬이니 다른 대역으로 바꾸세요.\n\n원 문서와 다른 점\n· WG_ALLOWED_IPS 줄을 뺐습니다 — 14 버전 변수라 15 에서는 무시됩니다(실측).\n  터널로 보낼 대역은 뒤의 '터널로 보낼 대역 정하기' 단계에서 정합니다.\n· IPv6 설정을 뺐습니다 — 테넌트 네트워크에 IPv6 가 없으면 컨테이너가 기동하지 못합니다.",
+        "info": "채울 값\n· 관리자ID · 관리자비밀번호: WebUI 로그인 계정 (비밀번호는 12자 이상)\n· 접속주소: 앞 단계에서 정한, 클라이언트가 닿는 주소\n\nINIT_IPV4_CIDR (10.8.0.0/24) 은 클라이언트에게 나눠 줄 VPN 전용 대역입니다.\n접속할 사설 대역이나 클라이언트의 집·사무실 대역과 겹치면 경로가 꼬이니 다른 대역으로 바꾸세요.\n\n원 문서와 다른 점\n· WG_ALLOWED_IPS 줄을 뺐습니다. 14 버전 변수라 15 에서는 무시됩니다(실측).\n  터널로 보낼 대역은 뒤의 '터널로 보낼 대역 정하기' 단계에서 정합니다.\n· IPv6 설정을 뺐습니다. 테넌트 네트워크에 IPv6 가 없으면 컨테이너가 기동하지 못합니다.",
         "warn": "비밀번호가 이 설정 파일에 평문으로 들어갑니다.\n검증 리포트에서는 가려지지만 서버의 /opt/wg-easy/docker-compose.yml 에는 그대로 남습니다.",
         "undo": "sudo rm -rf /opt/wg-easy"
       },
@@ -2279,14 +2279,14 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo docker logs --tail 40 wg-easy",
         "check": { "failContains": ["EADDRINUSE", "permission denied", "operation not permitted"] },
         "desc": "기동 과정에서 막힌 것이 없는지 봅니다.",
-        "info": "자주 나오는 실패\n· EADDRINUSE — 51820/51821 을 다른 프로세스가 이미 쓰고 있음\n· operation not permitted — 커널 모듈 접근 실패. cap_add 의 SYS_MODULE 이나 /lib/modules 마운트가 빠졌는지 확인"
+        "info": "자주 나오는 실패\n· EADDRINUSE: 51820/51821 을 다른 프로세스가 이미 쓰고 있음\n· operation not permitted: 커널 모듈 접근 실패. cap_add 의 SYS_MODULE 이나 /lib/modules 마운트가 빠졌는지 확인"
       },
       {
         "title": "포트 리스닝 확인",
-        "command": "sudo ss -lntup | grep -E '51820|51821' || echo '주의 — 51820/51821 리스닝이 없습니다'",
-        "check": { "passContains": ["51821"], "failContains": ["주의 —"] },
+        "command": "sudo ss -lntup | grep -E '51820|51821' || echo '주의: 51820/51821 리스닝이 없습니다'",
+        "check": { "passContains": ["51821"], "failContains": ["주의: "] },
         "desc": "서버 자신이 두 포트를 열고 있는지 확인합니다.",
-        "note": "여기까지는 인스턴스 안쪽입니다. 클라이언트가 붙으려면 보안그룹·방화벽에서도 열려 있어야 합니다.\n\n51820/UDP — VPN 터널 (필수). TCP 로 열면 WebUI 는 보이는데 터널만 안 붙어, 원인을 찾기 어려워집니다.\n51821/TCP — 관리 WebUI. 구축이 끝나면 관리자 대역으로 좁히는 것을 권합니다."
+        "note": "여기까지는 인스턴스 안쪽입니다. 클라이언트가 붙으려면 보안그룹·방화벽에서도 열려 있어야 합니다.\n\n51820/UDP: VPN 터널 (필수). TCP 로 열면 WebUI 는 보이는데 터널만 안 붙어, 원인을 찾기 어려워집니다.\n51821/TCP: 관리 WebUI. 구축이 끝나면 관리자 대역으로 좁히는 것을 권합니다."
       },
       {
         "title": "WebUI 응답 확인",
@@ -2297,8 +2297,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "서버가 목표 사설 대역에 닿는지 확인",
-        "command": "echo '[이 서버에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[대상 VM 으로 가는 경로]'; ip route get <대상VM_IP> 2>&1 | head -2; echo; echo '[도달 확인]'; ping -c 2 -W 2 <대상VM_IP> > /dev/null 2>&1 && echo '   닿습니다' || echo '   주의 — 닿지 않습니다'",
-        "check": { "passContains": ["닿습니다"], "failContains": ["주의 —"] },
+        "command": "echo '[이 서버에 붙은 주소]'; ip -4 addr show scope global | awk '/inet /{print \"   \", $2, \"(\" $NF \")\"}'; echo; echo '[대상 VM 으로 가는 경로]'; ip route get <대상VM_IP> 2>&1 | head -2; echo; echo '[도달 확인]'; ping -c 2 -W 2 <대상VM_IP> > /dev/null 2>&1 && echo '   닿습니다' || echo '   주의: 닿지 않습니다'",
+        "check": { "passContains": ["닿습니다"], "failContains": ["주의: "] },
         "desc": "접근할 사설 대역의 VM 을 하나 골라, 이 서버에서 거기로 갈 수 있는지 봅니다.",
         "info": "닿는 길은 둘입니다.\n· 그 네트워크의 포트를 이 VM 에 직접 붙이기 (openstack server add port)\n  [이 서버에 붙은 주소] 에 그 대역이 함께 보이면 된 것입니다.\n· 라우터를 통해 가기\n  [대상 VM 으로 가는 경로] 출력의 via 주소가 그 라우터입니다.\n\n닿기만 하면 전달은 wg-easy 가 합니다.\n클라이언트 트래픽을 이 서버 주소로 NAT 해서 내보내므로,\n대상 VM 쪽에 10.8.0.0/24 로 돌아오는 경로를 따로 넣지 않아도 됩니다.",
         "warn": "여기서 닿지 않는데 그냥 진행하면, 클라이언트는 핸드셰이크까지 잘 되고 나서\n'연결은 됐는데 아무 데도 안 되는' 상태가 됩니다.\n원인을 찾기 가장 어려운 모양이니 이 단계에서 해결하고 넘어가세요.",
@@ -2308,21 +2308,21 @@ export const SCENARIOS: Scenario[] = [
         "title": "터널로 보낼 대역 정하기 (관리 패널 → 구성)",
         "command": "",
         "desc": "관리 패널 → 구성 에서 두 값을 확인합니다. 건너뛰면 기본값이 전체 터널이라 클라이언트의 인터넷과 기존 VPN 이 끊깁니다.",
-        "info": "한국어 UI 기준입니다 (영문이면 Admin Panel → Config).\n\n볼 값 두 개\n· 호스트 — 앞에서 정한 엔드포인트(보통 유동 IP)가 들어가 있어야 합니다\n· 허용된 IP — 클라이언트가 이 터널로 보낼 대역. 기본값은 0.0.0.0/0 과 ::/0 입니다\n\n사설망 접근이 목적이라면\n그 두 줄을 지우고 접근하려는 대역만 넣으세요 (예: 192.168.50.0/24).\n앞 단계에서 닿는 것을 확인한 그 대역입니다.\n여러 대역이면 추가 버튼으로 줄을 늘리고, 맨 아래 저장을 누릅니다.\n\n· 사설 대역만 적음(스플릿 터널) — 그 대역만 VPN 으로. 인터넷과 회사 VPN 은 그대로\n· 0.0.0.0/0(전체 터널) — 모든 트래픽이 VPN 서버를 거침. 출발지 IP 를 바꾸려는 경우만\nIPv6 를 쓰지 않으면 ::/0 도 지우는 편이 안전합니다.",
+        "info": "한국어 UI 기준입니다 (영문이면 Admin Panel → Config).\n\n볼 값 두 개\n· 호스트: 앞에서 정한 엔드포인트(보통 유동 IP)가 들어가 있어야 합니다\n· 허용된 IP: 클라이언트가 이 터널로 보낼 대역. 기본값은 0.0.0.0/0 과 ::/0 입니다\n\n사설망 접근이 목적이라면\n그 두 줄을 지우고 접근하려는 대역만 넣으세요 (예: 192.168.50.0/24).\n앞 단계에서 닿는 것을 확인한 그 대역입니다.\n여러 대역이면 추가 버튼으로 줄을 늘리고, 맨 아래 저장을 누릅니다.\n\n· 사설 대역만 적음(스플릿 터널): 그 대역만 VPN 으로. 인터넷과 회사 VPN 은 그대로\n· 0.0.0.0/0(전체 터널): 모든 트래픽이 VPN 서버를 거침. 출발지 IP 를 바꾸려는 경우만\nIPv6 를 쓰지 않으면 ::/0 도 지우는 편이 안전합니다.",
         "warn": "0.0.0.0/0 은 엔드포인트로 가는 경로까지 터널 안에 넣습니다.\n그 경로가 다른 VPN(예: FortiClient) 위에 얹혀 있었다면 그 VPN 이 끊기면서\n서버에 닿을 길 자체가 사라져 핸드셰이크가 영영 안 됩니다. 실제로 겪은 사고입니다."
       },
       {
         "title": "사용자(클라이언트) 계정 발급",
         "command": "",
         "desc": "클라이언트 화면에서 새로 만들기를 눌러 사용자를 추가합니다. 10.8.0.x 주소가 하나 배정됩니다.",
-        "info": "추가한 줄의 오른쪽 아이콘 — QR 코드 · 설정 파일(.conf) 내려받기 · 비활성화 · 삭제\n\n사람마다, 또는 기기마다 하나씩 만드는 것이 원칙입니다.\n하나를 여러 기기에 나눠 쓰면 접속이 서로 밀어내고, 누가 무엇을 썼는지도 구분되지 않습니다.\n기기별 송수신 통계와 마지막 접속 시각도 이 목록에서 봅니다."
+        "info": "추가한 줄의 오른쪽 아이콘: QR 코드 · 설정 파일(.conf) 내려받기 · 비활성화 · 삭제\n\n사람마다, 또는 기기마다 하나씩 만드는 것이 원칙입니다.\n하나를 여러 기기에 나눠 쓰면 접속이 서로 밀어내고, 누가 무엇을 썼는지도 구분되지 않습니다.\n기기별 송수신 통계와 마지막 접속 시각도 이 목록에서 봅니다."
       },
       {
         "title": "클라이언트 프로그램 설치·등록·활성화",
         "command": "",
         "desc": "설정 파일을 받는 것만으로는 연결되지 않습니다. 단말에 WireGuard 클라이언트를 깔고, 받은 파일을 등록한 뒤, 활성화를 눌러야 붙습니다.",
-        "note": "1) 설치 — https://www.wireguard.com/install 에서 단말에 맞는 것을 받습니다 (Windows · macOS · Linux · Android · iOS)\n2) 등록\n   · PC — 터널 추가 → 파일에서 추가 → 내려받은 .conf 선택\n   · 휴대폰 — 앱에서 + → QR 코드 스캔\n3) 활성화 — 터널을 고르고 활성화를 누릅니다. 이걸 눌러야 실제로 연결됩니다.",
-        "info": "활성화한 뒤 클라이언트 화면에서 볼 것\n· 주소 — 10.8.0.x/32 가 잡혀 있는지\n· 엔드포인트 — 앞에서 정한 엔드포인트:51820 인지\n· 허용된 IP — 앞 단계에서 정한 대역이 들어와 있는지 (0.0.0.0/0 이면 전체 터널입니다)\n· 전송 — 보내기와 받기가 **둘 다** 올라가야 정상입니다"
+        "note": "1) 설치: https://www.wireguard.com/install 에서 단말에 맞는 것을 받습니다 (Windows · macOS · Linux · Android · iOS)\n2) 등록\n   · PC: 터널 추가 → 파일에서 추가 → 내려받은 .conf 선택\n   · 휴대폰: 앱에서 + → QR 코드 스캔\n3) 활성화: 터널을 고르고 활성화를 누릅니다. 이걸 눌러야 실제로 연결됩니다.",
+        "info": "활성화한 뒤 클라이언트 화면에서 볼 것\n· 주소: 10.8.0.x/32 가 잡혀 있는지\n· 엔드포인트: 앞에서 정한 엔드포인트:51820 인지\n· 허용된 IP: 앞 단계에서 정한 대역이 들어와 있는지 (0.0.0.0/0 이면 전체 터널입니다)\n· 전송: 보내기와 받기가 **둘 다** 올라가야 정상입니다"
       },
       {
         "title": "서버에서 연결 상태 확인",
@@ -2335,16 +2335,16 @@ export const SCENARIOS: Scenario[] = [
         "title": "클라이언트에서 통신 확인",
         "command": "",
         "desc": "활성화한 단말에서 확인합니다. 여기까지 되면 구축이 끝난 것입니다.",
-        "note": "1) 배정 주소 — 10.8.0.x 를 받았는지 (ipconfig / ip addr)\n2) 사설망 접근 — 목표였던 사설 대역의 VM 에 ping 또는 ssh 가 되는지. 이게 이 VPN 의 본래 목적입니다\n3) 기존 경로 유지 — 인터넷과 회사 VPN 이 그대로인지. 스플릿 터널이면 그대로여야 합니다\n4) 전체 터널로 만든 경우에만 — VPN 끄고 curl ifconfig.me, 켜고 다시 재어 값이 서버 쪽 주소로 바뀌는지",
-        "info": "'외부 통신' 은 방향에 따라 담당이 다릅니다 — 헷갈리기 쉬운 부분입니다.\n· 클라이언트 → 사설 VM 접근 — 이 VPN 이 하는 일입니다\n· 사설 VM → 인터넷 — 이 VPN 과 무관합니다.\n  OpenStack 라우터의 SNAT 이나 그 VM 에 붙인 유동 IP 가 해 줍니다.\n  터널을 뚫는다고 사설 VM 이 인터넷에 나갈 수 있게 되지는 않습니다.\n\n2) 가 안 될 때 볼 곳\n· 사설 대역이 '허용된 IP' 에 들어 있는지\n· 앞의 '서버가 목표 사설 대역에 닿는지 확인' 이 통과했는지\n· 대상 VM 의 보안그룹이 VPN 서버 주소에서 오는 접속을 허용하는지"
+        "note": "1) 배정 주소: 10.8.0.x 를 받았는지 (ipconfig / ip addr)\n2) 사설망 접근: 목표였던 사설 대역의 VM 에 ping 또는 ssh 가 되는지. 이게 이 VPN 의 본래 목적입니다\n3) 기존 경로 유지: 인터넷과 회사 VPN 이 그대로인지. 스플릿 터널이면 그대로여야 합니다\n4) 전체 터널로 만든 경우에만: VPN 끄고 curl ifconfig.me, 켜고 다시 재어 값이 서버 쪽 주소로 바뀌는지",
+        "info": "'외부 통신' 은 방향에 따라 담당이 다릅니다. 헷갈리기 쉬운 부분입니다.\n· 클라이언트 → 사설 VM 접근: 이 VPN 이 하는 일입니다\n· 사설 VM → 인터넷: 이 VPN 과 무관합니다.\n  OpenStack 라우터의 SNAT 이나 그 VM 에 붙인 유동 IP 가 해 줍니다.\n  터널을 뚫는다고 사설 VM 이 인터넷에 나갈 수 있게 되지는 않습니다.\n\n2) 가 안 될 때 볼 곳\n· 사설 대역이 '허용된 IP' 에 들어 있는지\n· 앞의 '서버가 목표 사설 대역에 닿는지 확인' 이 통과했는지\n· 대상 VM 의 보안그룹이 VPN 서버 주소에서 오는 접속을 허용하는지"
       },
       {
-        "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "title": "Docker 제거 (선택: 검증 후 정리)",
         "manualOnly": true,
-        "command": `if [ -d /opt/wg-easy ]; then (cd /opt/wg-easy && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/wg-easy /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
-        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
+        "command": `if [ -d /opt/wg-easy ]; then (cd /opt/wg-easy && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/wg-easy /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의: docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의: /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
+        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의: "] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 컨테이너를 내리고 Docker 패키지·데이터·저장소 등록까지 한 번에 걷어냅니다.",
-        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요. VPN 도 끊깁니다.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다. /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요. VPN 도 끊깁니다.",
         "info": "하는 일 순서\n1) wg-easy 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/wg-easy · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제 후 apt 갱신\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\nVPN 만 내리고 Docker 는 남기려면 이 단계 대신 아래만 실행하세요.\ncd /opt/wg-easy && sudo docker compose down -v"
       }
     ]
@@ -2387,11 +2387,11 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "Docker 설치",
-        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단 — Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
+        "command": `if [ ! -f /etc/apt/sources.list.d/docker.list ]; then echo '중단: Docker 저장소가 등록되지 않았습니다. 앞 단계 "Docker 저장소 추가" 를 먼저 실행하세요'; else ${APT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi`,
         "onFailure": "retry",
         "onFailureCommand": APT_FIX,
         "onFailureDesc": APT_FIX_DESC,
-        "check": { "requireExitZero": true, "failContains": ["중단 —", "Unable to locate package", "has no installation candidate"] },
+        "check": { "requireExitZero": true, "failContains": ["중단: ", "Unable to locate package", "has no installation candidate"] },
         "desc": "Docker 엔진과 compose 플러그인을 설치합니다.",
         "undo": "sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && sudo apt-get autoremove -y"
       },
@@ -2408,16 +2408,16 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo usermod -aG docker $USER && echo \"$USER 를 docker 그룹에 넣었습니다\"",
         "check": { "requireExitZero": true, "passContains": ["docker 그룹에 넣었습니다"] },
         "desc": "sudo 없이 docker 를 쓰려면 docker 그룹에 들어가야 합니다.",
-        "info": "지금 접속에는 반영되지 않습니다 — 다시 로그인해야 적용됩니다.\n그래서 이 시나리오의 나머지 단계는 계속 sudo 를 붙입니다.",
-        "warn": "docker 그룹은 사실상 root 권한입니다 — 호스트 파일시스템을 컨테이너로 마운트할 수 있습니다.\n필요한 사람에게만 주세요.",
+        "info": "지금 접속에는 반영되지 않습니다. 다시 로그인해야 적용됩니다.\n그래서 이 시나리오의 나머지 단계는 계속 sudo 를 붙입니다.",
+        "warn": "docker 그룹은 사실상 root 권한입니다. 호스트 파일시스템을 컨테이너로 마운트할 수 있습니다.\n필요한 사람에게만 주세요.",
         "undo": "sudo gpasswd -d $USER docker"
       },
       {
         "title": "배포할 애플리케이션 준비",
-        "command": "sudo mkdir -p /opt/qterm-app/html && cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v1' | sudo tee html/index.html > /dev/null && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  app:\n    image: nginx:1.27-alpine\n    container_name: qterm-app\n    restart: unless-stopped\n    ports:\n      - \"<서비스포트>:80\"\n    volumes:\n      - ./html:/usr/share/nginx/html:ro\n    healthcheck:\n      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost/\"]\n      interval: 10s\n      timeout: 3s\n      retries: 3\n      start_period: 5s\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단 — 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; ls -l /opt/qterm-app /opt/qterm-app/html; fi",
-        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단 —"] },
+        "command": "sudo mkdir -p /opt/qterm-app/html && cd /opt/qterm-app && echo 'QTerm 배포 확인 / 배포 버전: v1' | sudo tee html/index.html > /dev/null && sudo tee docker-compose.yml > /dev/null << 'EOF'\nservices:\n  app:\n    image: nginx:1.27-alpine\n    container_name: qterm-app\n    restart: unless-stopped\n    ports:\n      - \"<서비스포트>:80\"\n    volumes:\n      - ./html:/usr/share/nginx/html:ro\n    healthcheck:\n      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost/\"]\n      interval: 10s\n      timeout: 3s\n      retries: 3\n      start_period: 5s\nEOF\nif sudo grep -q '<[^>]*>' docker-compose.yml; then echo '중단: 채우지 않은 입력값이 남아 있습니다'; sudo grep -n '<[^>]*>' docker-compose.yml; else echo '설정 파일 작성 완료'; ls -l /opt/qterm-app /opt/qterm-app/html; fi",
+        "check": { "passContains": ["설정 파일 작성 완료"], "failContains": ["중단: "] },
         "desc": "nginx 컨테이너와 그 안에 띄울 index.html 을 만듭니다. 내용에 버전 문자열을 넣어, 뒤에서 새 배포가 반영됐는지 눈으로 확인합니다.",
-        "info": "· 서비스포트 — 호스트에서 쓸 포트 (예: 8080). 이미 쓰는 포트를 넣으면 기동이 실패합니다\n· healthcheck 를 붙여 두어 docker ps 의 Status 에 (healthy) 가 표시됩니다",
+        "info": "· 서비스포트: 호스트에서 쓸 포트 (예: 8080). 이미 쓰는 포트를 넣으면 기동이 실패합니다\n· healthcheck 를 붙여 두어 docker ps 의 Status 에 (healthy) 가 표시됩니다",
         "undo": "sudo rm -rf /opt/qterm-app"
       },
       {
@@ -2446,7 +2446,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "sudo docker logs --tail 30 qterm-app",
         "check": { "failContains": ["emerg", "cannot load", "bind() to"] },
         "desc": "접근 로그와 오류 로그를 봅니다. 앞 단계의 curl 요청이 접근 로그에 남아 있어야 합니다.",
-        "info": "bind() to 0.0.0.0:80 failed — 컨테이너 안 포트 충돌\nemerg — nginx 설정 오류"
+        "info": "bind() to 0.0.0.0:80 failed: 컨테이너 안 포트 충돌\nemerg: nginx 설정 오류"
       },
       {
         "title": "자원 사용 확인",
@@ -2467,7 +2467,7 @@ export const SCENARIOS: Scenario[] = [
         "check": { "passContains": ["복구 후 응답 코드: 200"], "failContains": ["Exited"] },
         "desc": "계획되지 않은 종료입니다. 컨테이너 안에서 주 프로세스를 죽여, 서비스가 저절로 돌아오는지 봅니다.",
         "warn": "운영 중인 컨테이너에는 하지 마세요. 이 단계는 시험용 qterm-app 만 대상으로 합니다.",
-        "info": "왜 docker kill 이 아닌가\n밖에서 docker kill · docker stop 으로 죽이면 Docker 는 '사람이 일부러 내린 것' 으로 보고\nrestart 정책을 건너뜁니다(공식 문서). 컨테이너는 죽은 채 남고 응답 코드가 000 이 됩니다.\n장애를 흉내 내려면 컨테이너 안에서 프로세스가 죽어야 합니다.\nPID 1 에 SIGKILL 은 커널이 무시하므로(네임스페이스 init 보호), nginx 가 처리하는 SIGTERM 을 씁니다.\n\n복구가 안 되면\n· 정책 확인 — sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' qterm-app\n· 되살리기 — sudo docker start qterm-app",
+        "info": "왜 docker kill 이 아닌가\n밖에서 docker kill · docker stop 으로 죽이면 Docker 는 '사람이 일부러 내린 것' 으로 보고\nrestart 정책을 건너뜁니다(공식 문서). 컨테이너는 죽은 채 남고 응답 코드가 000 이 됩니다.\n장애를 흉내 내려면 컨테이너 안에서 프로세스가 죽어야 합니다.\nPID 1 에 SIGKILL 은 커널이 무시하므로(네임스페이스 init 보호), nginx 가 처리하는 SIGTERM 을 씁니다.\n\n복구가 안 되면\n· 정책 확인: sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' qterm-app\n· 되살리기: sudo docker start qterm-app",
         "note": "restart 정책은 컨테이너가 10초 이상 정상으로 떠 있어야 무장됩니다.\n기동 직후 바로 돌리면 복구되지 않을 수 있으니, 앞 단계를 순서대로 거친 뒤 실행하세요."
       },
       {
@@ -2485,18 +2485,18 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "시험 컨테이너 정리",
-        "command": "if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down); fi; echo '--- 남은 컨테이너 확인'; N=$(sudo docker ps -a --filter name=qterm-app --format '{{.Names}}' | wc -l); if [ \"$N\" = \"0\" ]; then echo '정리 완료 — 남은 컨테이너 없음'; else echo \"주의 — 아직 $N 개 남아 있습니다\"; sudo docker ps -a --filter name=qterm-app; fi",
-        "check": { "passContains": ["정리 완료 — 남은 컨테이너 없음"], "failContains": ["주의 —"] },
+        "command": "if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down); fi; echo '--- 남은 컨테이너 확인'; N=$(sudo docker ps -a --filter name=qterm-app --format '{{.Names}}' | wc -l); if [ \"$N\" = \"0\" ]; then echo '정리 완료: 남은 컨테이너 없음'; else echo \"주의: 아직 $N 개 남아 있습니다\"; sudo docker ps -a --filter name=qterm-app; fi",
+        "check": { "passContains": ["정리 완료: 남은 컨테이너 없음"], "failContains": ["주의: "] },
         "desc": "시험 컨테이너를 내립니다. 목록에 qterm-app 이 남지 않아야 정상입니다.",
-        "info": "· 이미지까지 지우기 — sudo docker image rm nginx:1.27-alpine\n· 안 쓰는 것을 한 번에 치우기 — sudo docker system prune -a (다른 이미지도 지우니 주의)"
+        "info": "· 이미지까지 지우기: sudo docker image rm nginx:1.27-alpine\n· 안 쓰는 것을 한 번에 치우기: sudo docker system prune -a (다른 이미지도 지우니 주의)"
       },
       {
-        "title": "Docker 제거 (선택 — 검증 후 정리)",
+        "title": "Docker 제거 (선택: 검증 후 정리)",
         "manualOnly": true,
-        "command": `if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/qterm-app /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; sudo gpasswd -d $USER docker 2>/dev/null || true; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의 — docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의 — /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
-        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의 —"] },
+        "command": `if [ -d /opt/qterm-app ]; then (cd /opt/qterm-app && sudo docker compose down -v) || true; fi; cd /; ${APT} purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; ${APT} autoremove -y; sudo rm -rf /opt/qterm-app /var/lib/docker /var/lib/containerd; sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc; sudo gpasswd -d $USER docker 2>/dev/null || true; ${APT} update; echo '--- 정리 결과'; command -v docker > /dev/null && echo '주의: docker 명령이 아직 있습니다' || echo 'docker 명령 없음'; [ -d /var/lib/docker ] && echo '주의: /var/lib/docker 가 남아 있습니다' || echo '/var/lib/docker 없음'`,
+        "check": { "passContains": ["docker 명령 없음", "/var/lib/docker 없음"], "failContains": ["주의: "] },
         "desc": "검증이 끝나고 이 VM 을 원래대로 돌릴 때만 실행합니다. 앞 단계가 컨테이너만 내렸다면, 여기서 Docker 패키지·데이터·저장소 등록까지 걷어냅니다.",
-        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다 — /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요.",
+        "warn": "이 VM 의 모든 컨테이너와 이미지가 사라집니다. /var/lib/docker 를 통째로 지웁니다.\n이 시나리오로 만든 것 말고 다른 컨테이너가 돌고 있다면 실행하지 마세요.",
         "info": "하는 일 순서\n1) qterm-app 컨테이너·볼륨 내리기 (compose down -v)\n2) Docker 패키지 purge + autoremove\n3) /opt/qterm-app · /var/lib/docker · /var/lib/containerd 삭제\n4) Docker apt 저장소와 GPG 키 삭제, docker 그룹에서 현재 사용자 빼기\n5) docker 명령과 /var/lib/docker 가 정말 없어졌는지 확인\n\n컨테이너만 내리고 Docker 는 남기려면 이 단계 대신 앞의 '시험 컨테이너 정리' 까지만 하세요."
       }
     ]
@@ -2536,8 +2536,8 @@ export const SCENARIOS: Scenario[] = [
       },
       {
         "title": "컴퓨트 노드에서 직접 확인",
-        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의 — 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
-        "check": { "failContains": ["주의 —"] },
+        "command": "echo '별칭  |  인스턴스 이름  |  상태'; sudo virsh list --all | tail -n +3 | while read -r id d state rest; do [ -n \"$d\" ] || continue; n=$(sudo virsh dumpxml \"$d\" 2>/dev/null | grep -o 'nova:name>[^<]*' | head -1 | cut -c11-); echo \"$d  |  ${n:-(이름 없음)}  |  $state $rest\"; done | tee /tmp/qterm-doms.txt; [ -s /tmp/qterm-doms.txt ] || echo '주의: 이 호스트에 libvirt 도메인이 없습니다 (컴퓨트 노드가 맞는지 확인하세요)'; rm -f /tmp/qterm-doms.txt",
+        "check": { "failContains": ["주의: "] },
         "desc": "컴퓨트 노드에 접속해 KVM/QEMU 레벨에서 도메인(VM) 상태를 직접 확인합니다. 별칭 옆에 포털의 인스턴스 이름을 함께 보여줍니다.",
         "info": "포털에서는 ACTIVE 인데 여기서 shut off 면 하이퍼바이저 쪽에서 죽은 것입니다.\n아예 목록에 없으면 이 노드에 스케줄링되지 않았거나 다른 노드로 옮겨간 것입니다."
       }
@@ -2568,7 +2568,7 @@ export const SCENARIOS: Scenario[] = [
         "check": {"requireExitZero":true},
         "command": "sudo sysctl -p",
         "desc": "sysctl.conf 의 변경분을 즉시 커널에 적용합니다.",
-        "note": "원복 대상이 아닙니다 — 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다.\n되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
+        "note": "원복 대상이 아닙니다. 무엇을 어떻게 바꿨는지는 앞 단계에서 사람이 편집한 내용이라 도구가 알 수 없습니다.\n되돌리려면 /etc/sysctl.conf 에서 추가한 줄을 지우고 이 명령을 다시 실행하세요."
       },
       {
         "title": "반영 확인",
@@ -2649,7 +2649,7 @@ export const SCENARIOS: Scenario[] = [
         "command": "lsblk",
         "check": { "requireExitZero": true, "passContains": ["vdb"] },
         "desc": "볼륨이 정상 연결됐는지 확인합니다. vda(OS 디스크) 외에 vdb 등 추가 디스크가 표시되면 정상입니다. 이후 단계에서 해당 디스크명을 사용합니다.",
-        "note": "이 시나리오는 뒤에서 /dev/vdb 를 그대로 포맷합니다 — 여기서 vdb 가 안 보이면 더 진행하면 안 됩니다."
+        "note": "이 시나리오는 뒤에서 /dev/vdb 를 그대로 포맷합니다. 여기서 vdb 가 안 보이면 더 진행하면 안 됩니다."
       },
       {
         "title": "저장용 디스크 포맷",
@@ -2670,7 +2670,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "마운트 포인트 생성",
         "command": "sudo mkdir -p /mnt/backup",
         "check": { "requireExitZero": true },
-        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; elif mountpoint -q /mnt/backup; then echo '주의 — /mnt/backup 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/backup '; false; elif [ -n \"$(sudo ls -A /mnt/backup 2>/dev/null)\" ]; then echo '주의 — /mnt/backup 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/backup | head -6; false; else sudo rmdir /mnt/backup && echo '/mnt/backup 를 지웠습니다'; fi",
+        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; elif mountpoint -q /mnt/backup; then echo '주의: /mnt/backup 가 아직 마운트되어 있어 지우지 않았습니다 (앞 단계의 마운트 해제 원복을 먼저 확인하세요)'; mount | grep ' /mnt/backup '; false; elif [ -n \"$(sudo ls -A /mnt/backup 2>/dev/null)\" ]; then echo '주의: /mnt/backup 가 비어 있지 않아 지우지 않았습니다 (안에 든 것을 확인하고 직접 지우세요)'; sudo ls -la /mnt/backup | head -6; false; else sudo rmdir /mnt/backup && echo '/mnt/backup 를 지웠습니다'; fi",
         "desc": "저장용 디스크를 마운트할 디렉토리를 생성합니다."
       },
       {
@@ -2683,7 +2683,7 @@ export const SCENARIOS: Scenario[] = [
         "title": "저장용 디스크 마운트",
         "command": "sudo mount /dev/vdb /mnt/backup",
         "check": { "requireExitZero": true, "failContains": ["wrong fs type", "does not exist"] },
-        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/backup || break; sudo umount /mnt/backup || break; done; if mountpoint -q /mnt/backup; then echo '주의 — /mnt/backup 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/backup '; sudo fuser -vm /mnt/backup 2>&1 | head -5; false; else echo '/mnt/backup 마운트가 해제되어 있습니다'; fi; fi",
+        "undo": "if [ ! -d /mnt/backup ]; then echo '/mnt/backup 가 이미 없습니다'; else for i in 1 2 3 4 5; do mountpoint -q /mnt/backup || break; sudo umount /mnt/backup || break; done; if mountpoint -q /mnt/backup; then echo '주의: /mnt/backup 가 아직 마운트되어 있습니다'; mount | grep ' /mnt/backup '; sudo fuser -vm /mnt/backup 2>&1 | head -5; false; else echo '/mnt/backup 마운트가 해제되어 있습니다'; fi; fi",
         "desc": "/mnt/backup에 저장용 디스크를 마운트합니다. 이후 생성되는 이미지 파일이 이 경로에 저장됩니다."
       },
       {

@@ -1,0 +1,8 @@
+2026-10-28T05:52:51.623Z  WARN 1 --- [bootfactory] [llEventLoop-4-3] i.l.core.protocol.ConnectionWatchdog     : Cannot reconnect to [valkey-cluster-0.valkey-cluster.dataplatform.svc.cluster.local/<unresolved>:6379]: Failed to resolve 'valkey-cluster-0.valkey-cluster.dataplatform.svc.cluster.local' [A(1)] and search domain query for configured domains failed as well: [boot-factory.svc.cluster.local, svc.cluster.local, cluster.local, default.svc.cluster.local, openstacklocal]
+
+io.netty.resolver.dns.DnsResolveContext$SearchDomainUnknownHostException: Failed to resolve 'valkey-cluster-0.valkey-cluster.dataplatform.svc.cluster.local' [A(1)] and search domain query for configured domains failed as well: [boot-factory.svc.cluster.local, svc.cluster.local, cluster.local, default.svc.cluster.local, openstacklocal]
+	at io.netty.resolver.dns.DnsResolveContext.finishResolve(DnsResolveContext.java:1150) ~[netty-resolver-dns-4.1.131.Final.jar!/:4.1.131.Final]
+	at io.netty.resolver.dns.DnsResolveContext.tryToFinishResolve(DnsResolveContext.java:1097) ~[netty-resolver-dns-4.1.131.Final.jar!/:4.1.131.Final]
+	at io.netty.resolver.dns.DnsResolveContext.query(DnsResolveContext.java:455) ~[netty-resolver-dns-4.1.131.Final.jar!/:4.1.131.Final]
+	at java.base/java.lang.Thread.run(Unknown Source) ~[na:na]
+Caused by: io.netty.resolver.dns.DnsNameResolverTimeoutException: [7053: /10.0.0.10:53] DefaultDnsQuestion(valkey-cluster-0.valkey-cluster.dataplatform.svc.cluster.local. IN A) query '7053' via UDP timed out after 5000 milliseconds (no stack trace available)
