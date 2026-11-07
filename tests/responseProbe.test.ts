@@ -111,6 +111,12 @@ test('측정 스크립트 — 문법 · 판정 · 최대 시간', () => {
   try {
     writeFileSync(path.join(dir, 'probe.sh'), PROBE_SCRIPT)
     eq(spawnSync('bash', ['-n', path.join(dir, 'probe.sh')]).status, 0, 'bash -n')
+    /*
+     * 동작 검사는 GNU date(밀리초 %3N)가 있는 곳에서만 — 스크립트는 리눅스 클라이언트 VM 에서만 돌고, 앱도 %3N 을 못 쓰는 호스트에서는
+     * 측정을 시작하지 않는다(buildStartCmd 의 QT_ERR). macOS 러너의 BSD date 는 %N 을 몰라 시각을 못 찍어 이벤트가 하나도 안 남았다
+     * (2.15.0 첫 Mac 빌드에서 이 검사만 실패). 문법 검사(bash -n)는 어디서나 한다.
+     */
+    if (/N/.test(spawnSync('date', ['+%s%3N'], { encoding: 'utf8' }).stdout ?? 'N')) return
     writeFileSync(path.join(dir, 'codes'), ['302', '302', '302', '000', '302', '302', '302', '000', '000', '000', '302', '302', '302', '302'].join('\n') + '\n')
     writeFileSync(
       path.join(dir, 'curl'),
