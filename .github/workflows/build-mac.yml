@@ -33,8 +33,14 @@ jobs:
         with:
           node-version: '20'
 
+      # npm ci — 잠금 파일(package-lock.json) 그대로 설치한다. npm install 은 범위 안에서 새 버전을 받아 Windows 로컬 빌드와 다른
+      # 의존성으로 Mac 판이 나올 수 있었다(코드 점검 10-30)
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      # 판정 로직 검사 — main 에 푸시하면 이 워크플로가 곧 배포본을 만든다. 검사가 깨진 채 Mac 판이 나가지 않게(코드 점검 10-30)
+      - name: Check (판정 로직 검사)
+        run: npm run check
 
       - name: Build (Universal .dmg / .zip)
         # CSC_IDENTITY_AUTO_DISCOVERY=false → 서명 없이 빌드 (Apple Developer 인증서 불필요)

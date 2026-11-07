@@ -657,7 +657,9 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
         /* 일반 탐색 모드 */
         <div ref={bodyRef} className="flex min-w-0 flex-1 overflow-hidden">
           {/* 1단계: 카테고리 */}
-          <div style={{ width: catWidth }} className="flex min-h-0 shrink-0 flex-col py-2">
+          {/* 폭은 사용자가 끌어 정하지만 가장 긴 카테고리 이름보다 좁아지지는 않는다. 'OpenStack 정합성 점검' 이
+              128px 에서 두 줄로 꺾여 목록이 들쭉날쭉해졌다(2026-11-06) */}
+          <div style={{ width: catWidth, minWidth: 'max-content' }} className="flex min-h-0 shrink-0 flex-col py-2">
             <div className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
               카테고리
             </div>
@@ -698,7 +700,7 @@ export default function PresetPanel({ connected, onRun, onClose }: PresetPanelPr
                   }}
                   title={draggingId ? `"${g.solution}" 카테고리로 이동` : undefined}
                   className={
-                    'mx-1 shrink-0 rounded-md px-2.5 py-1.5 text-left text-[13px] transition ' +
+                    'mx-1 shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-left text-[13px] transition ' +
                     (overKey === 'cat-' + g.solution
                       ? 'bg-blue-500/40 ring-1 ring-blue-400'
                       : g.solution === solution

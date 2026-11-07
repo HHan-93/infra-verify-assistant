@@ -568,6 +568,13 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
     // 정상화가 확정돼 장애 전 시각의 마일스톤이 나갔다(코드 검토 10-29)
     resetStreaks()
 
+    /**
+     * 복구 시각도, '한 번 깨진 적 있음'도 **장애 안에서만** 뜻이 있다(아래 주석). 그리고 장애 뒤라도 **끊긴 적이 없으면 복구가 아니다**
+     * (코드 점검 10-30): DOWN 순간 연속 카운트를 비운 뒤 계속 정상인 화면이 N회를 채우면 '정상화' 로 확정됐다. 포털이 DOWN 뒤 몇십 초
+     * 버티다 끊기는 회차에서 1차 정상화가 실제 끊김보다 **앞** 에 찍히고, 그 뒤 끊김은 '다시 끊김' 으로 기록됐다 — 이른 복구 시각이다.
+     */
+    const sinceDown = (raw: TargetState): TargetState =>
+      downAtRef.current === null ? { ...raw, recoveredAt: null, everFailed: false } : raw.everFailed ? raw : { ...raw, recoveredAt: null }
     const next = { ...statesRef.current }
     for (const { t, obs } of results) {
       const before = next[t.id] ?? emptyTargetState()
@@ -577,7 +584,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       //   · recoveredAt → 헤더 요약·대상 행의 복구 시각·타임라인
       //   · everFailed  → 대상 배지가 '정상'이 아니라 '복구됨'으로 뜬다 (phaseOf)
       // 여기서 한 번에 막아야 세 곳이 저절로 같은 말을 한다.
-      next[t.id] = downAtRef.current === null ? { ...raw, recoveredAt: null, everFailed: false } : raw
+      next[t.id] = sinceDown(raw)
     }
     /**
      * 판정 · 타임라인 · 증적은 **화면 단위**다(10-28). API 마다 세면 감시 API 가 20개일 때 '정상화 13/20' 이 되어 읽히지 않는다.
@@ -639,7 +646,7 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
       if (polls.length > needed + 1) polls.splice(0, polls.length - (needed + 1))
       const before = nextScreens[sc.name] ?? emptyTargetState()
       const raw = applyObservation(before, obs, needed)
-      const after = downAtRef.current === null ? { ...raw, recoveredAt: null, everFailed: false } : raw
+      const after = sinceDown(raw)
       nextScreens[sc.name] = after
       const ev = { status: obs.status, ms: obs.latencyMs, reason: obs.reasons.join(' · ') || undefined }
       // 타임라인에 올리는 건 **노드가 죽은 뒤** 확정된 것만이다(위 downAt 주석 참고).

@@ -28,6 +28,7 @@ import type { LogTailTarget } from '../../electron/shared-types'
 import RemotePathPicker from './RemotePathPicker'
 import { renderLogLine, lineBucket, type LineBucket } from '../lib/logDisplay'
 import { stripAnsi } from '../lib/ansi'
+import { maskForExport } from '../lib/mask'
 
 interface OtherSession {
   id: string
@@ -722,7 +723,8 @@ function LogTailPane({
       '',
       '```log',
     ].join('\n')
-    const content = `${header}\n${body.join('\n')}\n\`\`\`\n`
+    // 저장도 마스킹 설정을 거친다 — 화면은 renderLogLine 으로 가리는데 파일에는 원문이 그대로 들어갔다(코드 점검 10-30, CLAUDE.md 세 경로 공통)
+    const content = `${header}\n${maskForExport(body.join('\n'))}\n\`\`\`\n`
     const r = await window.electronAPI.saveReport({ defaultName: `livelog_${safe}_${stamp}.md`, content })
     if (r.saved) {
       setDownloadNote('저장됨')

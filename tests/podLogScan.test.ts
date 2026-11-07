@@ -39,6 +39,21 @@ test('서명 — 시각 · 숫자 · IP 를 지워 다른 시각 · 다른 스�
   ok(!/\d/.test(a), '숫자가 남으면 안 됨')
 })
 
+test('서명 — Spring Boot 가 15자로 자른 스레드 이름이 달라도 같은 오류(11-07 boot-factory-auth)', () => {
+  // 상태보드 '파드 로그 이상' 창에 실제로 둘로 갈려 나온 대표 줄(대표 줄 뒤쪽은 화면에서 잘린 그대로)
+  const a = signature('2026-11-07T13:26:29.669Z ERROR 1 --- [bootfactory] [io-8080-exec-10] c.o.b.a.c.e.handler.ApiExceptionHandler')
+  const b = signature('2026-11-07T13:26:28.523Z ERROR 1 --- [bootfactory] [nio-8080-exec-4] c.o.b.a.c.e.handler.ApiExceptionHandler')
+  eq(a, b)
+  ok(a.includes('[bootfactory]'), '앱 이름 칸은 남는다')
+  // 옛 형식(앱 칸 없음)도 스레드 칸만 지운다
+  eq(
+    signature('2026-11-07 13:26:29.669 ERROR 1 --- [io-8080-exec-10] c.o.b.Api : failed'),
+    signature('2026-11-07 13:26:28.523 ERROR 1 --- [nio-8080-exec-4] c.o.b.Api : failed'),
+  )
+  // Spring 형식이 아닌 줄의 대괄호는 건드리지 않는다
+  ok(signature('Cannot reconnect to [valkey-0:6379]').includes('[valkey-#:#]'))
+})
+
 test('연결 대상 — svc DNS 이름은 ns/서비스, 종류는 DNS 조회 실패', () => {
   eq(extractTarget(splitTs(raw[0]).text), { target: 'dataplatform/valkey-cluster', kind: 'DNS 조회 실패' })
   eq(extractTarget('dial tcp 10.0.0.5:5432: connect: connection refused'), { target: '10.0.0.5:5432', kind: '연결 거부' })

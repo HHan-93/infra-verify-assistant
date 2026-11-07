@@ -29,10 +29,10 @@ npm run dist:dir   # 패키징 없이 폴더로만 (빠른 확인용)
 
 | | 역할 |
 |---|---|
-| [electron/main.ts](electron/main.ts) (~3.8k줄) | ssh2 SSH·SFTP, node-pty 로컬 셸, 파일 영속화, AI API 호출, 포트포워딩, 메트릭 수집. IPC 핸들러 약 80개 |
+| [electron/main.ts](electron/main.ts) (~7.7k줄) | ssh2 SSH·SFTP, node-pty 로컬 셸, 파일 영속화, AI API 호출, 포트포워딩, 메트릭 수집. IPC 핸들러 약 150개 |
 | [electron/shared-types.ts](electron/shared-types.ts) | **메인↔렌더러 계약.** 새 기능은 대개 여기 타입부터 추가한다. 타입 위의 주석이 설계 근거를 담고 있어 읽을 값이 있다 |
 | [electron/preload.ts](electron/preload.ts) | contextBridge — 렌더러는 여기 노출된 API 로만 메인에 접근 |
-| [src/App.tsx](src/App.tsx) (~2.7k줄) | 세션(탭)·레이아웃·전역 상태의 단일 소유자. 모든 패널이 그 자식 |
+| [src/App.tsx](src/App.tsx) (~3.2k줄) | 세션(탭)·레이아웃·전역 상태의 단일 소유자. 모든 패널이 그 자식 |
 
 IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/`local:*` `tunnel:*` `monitor:*` `logtail:*`/`k8s:*`(파드 로그 탐색 + ConfigMap 조회·patch + 파드 상세 조회·이벤트·재시작) `log:*`/`logs:*` `profiles:*` `customPresets:*`/`customScenarios:*` `runner:*` `portal:*` `customItems:*`(내보내기·가져오기) `app:*`(userData 경로·폴더 열기) `ai:start`. 스트리밍은 요청(`handle`) + 이벤트(`ai:delta`/`ai:done`/`ai:error`, `monitor:sample`, `terminal:data`) 조합.
 
@@ -73,7 +73,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 
 ### 프리셋 / 시나리오 데이터
 
-[src/presets.ts](src/presets.ts)(231개 단일 명령어) · [src/scenarios.ts](src/scenarios.ts)(다단계 시나리오)가 **내장 목록**이고, 사용자가 앱에서 추가한 것은 userData JSON 에 따로 저장돼 **런타임에 병합**된다(빌드 없이 추가 가능하게 하려는 설계).
+[src/presets.ts](src/presets.ts)(약 270개 단일 명령어) · [src/scenarios.ts](src/scenarios.ts)(다단계 시나리오)가 **내장 목록**이고, 사용자가 앱에서 추가한 것은 userData JSON 에 따로 저장돼 **런타임에 병합**된다(빌드 없이 추가 가능하게 하려는 설계).
 
 **단일 명령어는 [명령어_프리셋.md](명령어_프리셋.md) 가 원본이다.** 거기서 고치고 `npm run presets:ts` 를 돌리면 presets.ts 에 반영되고, 반대 방향은 `npm run presets:md`, 어긋났는지 확인은 `npm run presets:check` 다([scripts/presets-md.mjs](scripts/presets-md.mjs)). 왕복이 무손실인 것을 확인하고 넣었다 — 한쪽만 고쳐 두 벌이 갈라지던 문제를 막으려는 것이다.
 
@@ -91,6 +91,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 - **모달은 배경 클릭으로 닫지 않는다.** 닫는 것은 X · 닫기 · 취소 버튼뿐이다. 불러온 파일·입력 중인 값이 손이 스친 클릭에 사라지면 처음부터 다시 해야 한다(상태보드는 원래 이 규칙이었고, 2026-08 에 나머지 모달 23곳을 여기에 맞췄다). **예외는 작은 드롭다운 메뉴** — 닫기 버튼이 없으므로 바깥 클릭이 유일한 취소 수단이다.
 - **화면이 저절로 움직이지 않게 한다.** 장애 감지 시 패널을 자동으로 펼치는 기능은 넣었다가 제거했다(롤링 검증 중 열고 접히기를 반복해 장애 정보보다 방해됐다). 알림은 눈에 띄게, 화면은 가만히 — 여는 것은 사람만.
 - **오류 응답을 정상 기준으로 삼지 않는다.** 시험 때 받은 응답의 상태 문구를 그대로 정상 조건에 넣는 추천 버튼이 있는데, 그때 온 것이 오류면 `returnMessage 에 COMMON_BAD_REQUEST 포함` 이 '정상' 이 되어 **서버가 고쳐질수록 빨개진다**(실제로 200·37ms 인 대상이 계속 비정상이었다). `looksLikeErrorValue` 로 오류 문구는 권하지 않고, 이미 굳은 조건은 화면에서 짚어 사람이 뒤집게 한다.
+- **리포트의 복구 시간 기준(2026-10-30 사용자 결정)** — StatusBoard `runTotals` 주석이 원본. 기준(0) = 장애 주입 시각(DOWN 을 잡은 회차만, 없으면 DOWN 감지) · 포털 = **1차 정상화**(처음 모든 화면 동시 정상) · 전체 복구 = Masakari 완료(VM 모두 이동)와 포털 1차 중 늦은 쪽. Ceph · 파드 · 포털 최종은 노드를 올린 시각에 따라 바뀌어 전체 복구에 넣지 않는다(예전 정의: 포털 = 최종, 전체 = Ceph HEALTH_OK — 되돌리지 말 것).
 - **비슷한 두 상태를 한 이름으로 묶지 않는다.** 예: Ceph 는 `ceph`(degraded·misplaced 0 = 데이터 복제 완료)와 `cephHealthy`(HEALTH_OK)를 분리한다. 복제와 무관한 경고(clock skew 등)가 남으면 전자만 만족해도 클러스터는 정상이 아니다.
 - **정규식으로 CLI 출력을 파싱할 때는 서식 변화를 가정한다.** `pcs status` 의 `Started con02` / `Started: [ con02 ]` 처럼 형태가 바뀌며 `[` 를 노드명으로 잡아 가짜 이벤트를 찍은 전례가 있다. 뽑은 값이 **알려진 목록에 있는지 교차 검증**할 것.
 - **파괴적 동작에는 대상 확인을 붙인다.** 세션 id 를 재사용하지 않는 이유(재시작 후 '이전 실행의 다른 서버'를 같은 세션으로 착각), 원복(`undo`)은 실제로 실행된 스텝만 역순으로 되돌리는 것 등이 같은 맥락이다.

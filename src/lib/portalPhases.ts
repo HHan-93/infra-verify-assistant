@@ -18,6 +18,8 @@ export interface PortalPhaseInput {
   portalFlaps?: { name: string; upAt: number; downAt: number }[]
   /** 끊긴 뒤 아직 안 돌아온 대상 */
   portalPending?: string[]
+  /** 판정이 바뀐 순간(증적 원문) — 화면마다 첫 끊김 시각을 알려고. 없으면(옛 회차) 첫 끊김 전 구간을 모른다 */
+  portalLog?: { name: string; kind: string; at: number }[]
 }
 
 export interface PortalPhases {
@@ -38,8 +40,8 @@ export interface PortalPhases {
 
 /** 같은 사건으로 묶는 폭 — 상태보드 타임라인(SAME_EVENT_MS)과 같은 값. 포털 페이지들은 같은 폴링에서 끊겨도 ms 가 조금씩 다르다 */
 export const SAME_MS = 2000
-/** 시각들을 SAME_MS 안에 이어진 것끼리 묶었을 때의 묶음 수 */
-function episodes(ts: number[]): number {
+/** 시각들을 SAME_MS 안에 이어진 것끼리 묶었을 때의 묶음 수(포털 증적의 '다시 끊김' 카드도 같은 셈 — portalEvidence.ts) */
+export function episodes(ts: number[]): number {
   const a = [...ts].sort((x, y) => x - y)
   let n = 0
   for (let i = 0; i < a.length; i++) if (i === 0 || a[i] - a[i - 1] > SAME_MS) n++
@@ -54,9 +56,27 @@ export function portalPhases(m: PortalPhaseInput): PortalPhases {
   for (const n of names) spans.set(n, [])
   for (const f of flaps) spans.get(f.name)?.push([f.upAt, f.downAt])
   for (const p of m.portal) spans.get(p.name)?.push([p.at, Infinity])
+  /*
+   * 처음 끊기기 **전** 도 정상 구간이다(코드 점검 10-30). 이 구간이 없으면, A 가 돌아와 모든 화면이 정상이던 순간 뒤에 B 가 failback 때
+   * 처음 끊기면 그 순간 B 를 '정상 아님' 으로 봐서 1차 정상화가 B 가 돌아온 때로 늦게 찍혔다 — 1차가 리포트의 포털 서비스 정상화가 되면서
+   * (10-30) 최종과 같아져 버리는 일이었다. 첫 끊김은 증적 원문(portalLog)의 첫 'fail' 이고, 기록이 없는 옛 회차는 예전처럼 계산한다.
+   */
+  for (const n of names) {
+    const firstFail = Math.min(...(m.portalLog ?? []).filter((e) => e.name === n && e.kind === 'fail').map((e) => e.at))
+    if (!Number.isFinite(firstFail)) continue
+    /*
+     * 첫 끊김보다 **앞에서 시작한** 정상 구간은 정상화가 아니다 — 끊긴 적 없는 화면이 DOWN 뒤 N회 정상으로 '정상화' 가 찍히던 버그
+     * (PortalPanel sinceDown 주석, 10-30)로 저장된 옛 회차를 바로잡는다. 그 구간은 위의 '첫 끊김 전' 구간과 같은 뜻이라 버린다.
+     */
+    const kept = (spans.get(n) ?? []).filter(([a]) => a >= firstFail)
+    spans.set(n, [...kept, [-Infinity, firstFail]])
+  }
   const upAt = (n: string, t: number) => (spans.get(n) ?? []).some(([a, b]) => a <= t && t < b)
   // 모두 정상인 순간은 반드시 어느 페이지가 돌아온 순간에 시작한다 — 그 후보들만 보면 된다
-  const starts = Array.from(new Set([...spans.values()].flat().map(([a]) => a))).sort((a, b) => a - b)
+  // 첫 끊김 전 구간(-∞ 부터)은 후보에서 뺀다 — 아무것도 안 끊긴 때가 '정상화' 일 수는 없다
+  const starts = Array.from(new Set([...spans.values()].flat().map(([a]) => a)))
+    .filter((a) => Number.isFinite(a))
+    .sort((a, b) => a - b)
   const firstAll = names.length ? (starts.find((t) => names.every((n) => upAt(n, t))) ?? null) : null
   const finalAll = names.length && !pending.length && m.portal.length ? Math.max(...m.portal.map((p) => p.at)) : null
   return {

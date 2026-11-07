@@ -596,41 +596,23 @@ export const fmtGapText = (ms: number) => {
   return `${Math.floor(r / 60)}분 ${p2(r % 60)}초`
 }
 
-/**
- * 측정 한 회차의 HTML 리포트 — 인터넷 없이 열리는 한 파일(CSS 내장, 스크립트 없음). 가용성 검증 리포트와 같은 모양.
- * 구성: 머리 → 주요 수치 → 요약 문장 → 대상별 끊김 구간(막대) → 대상별 표 → 이벤트 원문 → 읽는 법.
- */
-export function buildProbeHtml(run: ProbeRun, sum: ProbeSummary): string {
-  const failed = sum.targets.filter((x) => x.outages.length)
-  const span = sum.firstOutage && sum.allRecovered ? sum.allRecovered - sum.firstOutage : null
-  // 범위는 모두 **클라이언트 VM 시계**로 — 끊김·복구 시각이 그 시계라 PC 시계(startedAt·stoppedAt)와 섞으면 시계 차이만큼
-  // 막대가 밀리거나 한쪽으로 몰렸다(검토 지적)
-  const evTimes = run.events.flatMap((e) => [e.at, e.base])
-  const hostStart = evTimes.length ? Math.min(...evTimes) : run.startedAt
-  const end = run.hostEndAt ?? (evTimes.length ? Math.max(...evTimes) : run.stoppedAt ?? Date.now())
-  // 막대 범위 — 첫 끊김 30초 전부터 마지막 복구 30초 뒤까지(끊김이 없으면 측정 전체)
-  const lo = sum.firstOutage ? Math.max(hostStart, sum.firstOutage - 30_000) : hostStart
-  const hi = sum.allRecovered ? Math.min(end, sum.allRecovered + 30_000) : end
-  const W = Math.max(1, hi - lo)
-  const pct = (x: number) => (((Math.min(hi, Math.max(lo, x)) - lo) / W) * 100).toFixed(2)
-  const H: string[] = []
-  H.push(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>응답 측정 결과</title>
-<style>
-:root{--fg:#1b2430;--mut:#5b6675;--line:#dfe3ea;--soft:#f5f7fa;--brand:#1f3a68;--acc:#2f6fdc;--ok:#13804b;--okbg:#e3f6ec;--warn:#a15c00;--warnbg:#fff4dd;--bad:#c62f2f;--badbg:#fdeaea}
-*{box-sizing:border-box}body{font-family:"Pretendard","Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:var(--fg);margin:0;background:#eef1f5;font-size:13px;line-height:1.6}
+/** 응답 측정 리포트 공통 꾸밈 — 한 회차 · 종합 리포트가 같이 쓴다(가용성 검증 리포트와 같은 모양) */
+const PROBE_CSS = `:root{--fg:#1b2430;--mut:#5b6675;--line:#dfe3ea;--soft:#f5f7fa;--brand:#1f3a68;--acc:#2f6fdc;--ok:#13804b;--okbg:#e3f6ec;--warn:#a15c00;--warnbg:#fff4dd;--bad:#c62f2f;--badbg:#fdeaea}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{font-family:"Pretendard","Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:var(--fg);margin:0;background:#eef1f5;font-size:13px;line-height:1.6}
 .page{max-width:1120px;margin:0 auto;padding:0 24px 48px}
 header{background:linear-gradient(135deg,#1f3a68,#2f6fdc);color:#fff;padding:28px 24px 26px}header .in{max-width:1072px;margin:0 auto}
 header h1{margin:0;font-size:24px}header .meta{opacity:.85;margin-top:6px}
 .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:-18px 0 8px}
 .kpi{background:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 1px 3px rgba(20,30,50,.08);border-top:3px solid var(--acc)}
-.kpi span{display:block;color:var(--mut);font-size:12px}.kpi b{display:block;font-size:21px;font-variant-numeric:tabular-nums}.kpi.ok{border-top-color:var(--ok)}.kpi.bad{border-top-color:var(--bad)}
+.kpi span{display:block;color:var(--mut);font-size:12px}.kpi b{display:block;font-size:21px;font-variant-numeric:tabular-nums}.kpi small{display:block;color:var(--mut);font-size:11.5px}.kpi.ok{border-top-color:var(--ok)}.kpi.bad{border-top-color:var(--bad)}.kpi.warn{border-top-color:var(--warn)}
 section{background:#fff;border-radius:14px;box-shadow:0 1px 3px rgba(20,30,50,.08);padding:18px 20px;margin-top:16px}
 h2{font-size:16px;margin:0 0 12px;padding-bottom:8px;border-bottom:2px solid var(--soft);color:var(--brand)}
+h3{font-size:13.5px;margin:16px 0 6px;color:var(--brand)}
 ul.sum{list-style:none;margin:0;padding:0;display:grid;gap:6px}ul.sum li{padding:8px 12px;border-radius:8px;background:var(--soft);border-left:4px solid var(--acc)}ul.sum li.ok{background:var(--okbg);border-left-color:var(--ok)}ul.sum li.warn{background:var(--warnbg);border-left-color:var(--warn)}
 table{border-collapse:separate;border-spacing:0;width:100%;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 th{background:#eef2f8;font-weight:600;font-size:12px;padding:8px;text-align:center;border-bottom:1px solid var(--line)}td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
 tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) td{background:#fafbfd}
+tr.avg td{background:#eef2f8!important;font-weight:700}
 .lead{font-size:12.5px;color:var(--mut);margin:0 0 12px}.lead b{color:var(--fg)}
 .flow{display:grid;grid-template-columns:120px 1fr 190px;gap:8px 14px;align-items:center;font-size:12px}
 .fh{color:var(--mut);font-size:11.5px;font-weight:600}
@@ -649,14 +631,35 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
 .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--mut);margin-top:12px}
 .legend i{display:inline-block;width:18px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
 .mut{color:var(--mut)}code,.pre{font-family:Consolas,"D2Coding",monospace;font-size:11.5px}.pre{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre-wrap;max-height:420px;overflow:auto}
-.bad{color:var(--bad)}.okc{color:var(--ok)}
-@media print{body{background:#fff}section,.kpi{box-shadow:none;border:1px solid var(--line)}.pre{max-height:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-</style></head><body>`)
-  H.push(`<header><div class="in"><h1>응답 측정 결과${run.label ? `: ${he(run.label)}` : ''}</h1><div class="meta">${he(dt(run.startedAt))} ~ ${run.stoppedAt ? he(dt(run.stoppedAt)) : '진행 중'} · 클라이언트 VM ${he(run.host)} · ${he(modeText(run.config))}${run.tcpTool ? ` (${run.tcpTool === 'nc' ? 'nc -z' : 'bash /dev/tcp'})` : ''} · 주기 ${run.config.intervalSec}초 · 연속 ${run.config.needOk}회면 복구</div></div></header><div class="page">`)
-  const k = (cls: string, label: string, v: string) => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b></div>`
-  H.push(
-    `<div class="kpis">${k('', '대상', `${sum.targets.length}대`)}${k(failed.length ? 'bad' : 'ok', '끊겼던 대상', `${failed.length}대`)}${k('', '첫 끊김', sum.firstOutage ? clk(sum.firstOutage) : '-')}${k('ok', '모두 복구', sum.allRecovered ? clk(sum.allRecovered) : sum.firstOutage ? '복구 안 됨' : '-')}${k('', '첫 끊김 → 모두 복구', span != null ? fmtGapText(span) : '-')}</div>`,
-  )
+.bad{color:var(--bad)}.okc{color:var(--ok)}.best{color:var(--ok);font-weight:700}.worst{color:var(--warn);font-weight:700}
+.cmpbar{display:grid;grid-template-columns:170px 1fr 92px;gap:6px 12px;align-items:center;font-size:12px}
+.cb{position:relative;height:22px;background:var(--soft);border-radius:6px}.cb .f{position:absolute;left:0;top:5px;height:12px;border-radius:4px;background:#2f6fdc}.cb .f.worst{background:#e08a1e}.cb .f.open{background:repeating-linear-gradient(45deg,#e5534b 0 6px,#f19a95 6px 12px)}
+.cb .g{position:absolute;top:1px;bottom:1px;width:0;border-left:2px solid #c62f2f}
+table.heat td.h{font-weight:600}table.heat td.h0{color:#a0a8b5}
+details.run{border:1px solid var(--line);border-radius:12px;margin:8px 0;background:#fff;scroll-margin-top:12px}
+details.run>summary{list-style:none;cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
+details.run>summary::-webkit-details-marker{display:none}details.run>summary:before{content:'▸';color:var(--mut)}details.run[open]>summary:before{content:'▾'}
+details.run[open]>summary{border-bottom:1px solid var(--line);background:var(--soft);border-radius:12px 12px 0 0}
+.rb{padding:12px 16px 16px}.pill{border-radius:999px;padding:1px 9px;font-size:11.5px;background:var(--soft);color:var(--mut)}.pill.ok{background:var(--okbg);color:var(--ok)}.pill.bad{background:var(--badbg);color:var(--bad)}.pill.warn{background:var(--warnbg);color:var(--warn)}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+@media print{body{background:#fff}section,.kpi{box-shadow:none;border:1px solid var(--line)}.pre{max-height:none}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}details.run{break-inside:auto}}
+@media (max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.flow{grid-template-columns:90px 1fr 120px}.cmpbar{grid-template-columns:110px 1fr 70px}}`
+
+/** 한 회차의 그림 범위 · 요약 · 끊김 구간 그림 · 대상별 표 — 한 회차 리포트와 종합 리포트의 회차별 상세가 같이 쓴다 */
+function probeParts(run: ProbeRun, sum: ProbeSummary) {
+  const failed = sum.targets.filter((x) => x.outages.length)
+  const span = sum.firstOutage && sum.allRecovered ? sum.allRecovered - sum.firstOutage : null
+  // 범위는 모두 **클라이언트 VM 시계**로 — 끊김·복구 시각이 그 시계라 PC 시계(startedAt·stoppedAt)와 섞으면 시계 차이만큼
+  // 막대가 밀리거나 한쪽으로 몰렸다(검토 지적)
+  const evTimes = run.events.flatMap((e) => [e.at, e.base])
+  const hostStart = evTimes.length ? Math.min(...evTimes) : run.startedAt
+  const end = run.hostEndAt ?? (evTimes.length ? Math.max(...evTimes) : run.stoppedAt ?? Date.now())
+  // 막대 범위 — 첫 끊김 30초 전부터 마지막 복구 30초 뒤까지(끊김이 없으면 측정 전체)
+  const lo = sum.firstOutage ? Math.max(hostStart, sum.firstOutage - 30_000) : hostStart
+  const hi = sum.allRecovered ? Math.min(end, sum.allRecovered + 30_000) : end
+  const W = Math.max(1, hi - lo)
+  const pct = (x: number) => (((Math.min(hi, Math.max(lo, x)) - lo) / W) * 100).toFixed(2)
+
   const S: string[] = []
   if (!failed.length) S.push(`<li class="ok">측정하는 동안 끊긴 대상이 없습니다 (${sum.targets.length}대 모두 정상 유지).</li>`)
   else {
@@ -682,13 +685,13 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
   if (run.stopFailed)
     S.push(`<li class="warn">측정을 끝낼 때 클라이언트 VM 의 측정 프로세스를 내리지 못했습니다. 서버에서 직접 정리하세요(<code>${he(run.dir)}</code>, 최대 ${run.config.maxMin ?? 180}분 뒤 스스로 멈춤).</li>`)
   if (never.length) S.push(`<li class="warn">처음부터 정상을 확인하지 못한 대상 ${never.length}대(끊김을 세지 않음): ${he(never.map((x) => x.name).join(', '))}.</li>`)
-  H.push(`<section><h2>요약</h2><ul class="sum">${S.join('')}</ul></section>`)
 
   /**
    * 대상별 끊김 구간 — 처음엔 막대와 시각 셋만 있어 무엇을 보라는 건지 알기 어려웠다(사용자 지적).
    * 왼쪽→오른쪽이 시간 흐름이라는 것, 빨간 구간이 '응답이 없던 시간' 이라는 것, 첫 끊김·모두 복구가 언제인지를
    * 그림 위에 직접 적는다. 막대 안에 그 구간의 순단을, 오른쪽에 끊김 → 복구 시각을 같이 둔다.
    */
+  const F: string[] = []
   const STEPS = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].map((x) => x * 1000)
   const step = STEPS.find((x) => W / x <= 8) ?? 3_600_000
   const ticks: number[] = []
@@ -697,18 +700,17 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
   const markLines =
     (sum.firstOutage ? `<span class="mark first" style="left:${pct(sum.firstOutage)}%"></span>` : '') +
     (sum.allRecovered ? `<span class="mark done" style="left:${pct(sum.allRecovered)}%"></span>` : '')
-  H.push(`<section><h2>대상별 끊김 구간</h2>`)
-  H.push(
+  F.push(
     `<p class="lead">왼쪽에서 오른쪽으로 시간이 흐릅니다. <b>빨간 구간</b>이 그 대상이 응답하지 않은 시간이고, 막대 안 숫자가 그 길이(순단)입니다.` +
       (sum.firstOutage && sum.allRecovered
         ? ` <b>첫 끊김 ${clk(sum.firstOutage)}</b> 부터 <b>모두 복구 ${clk(sum.allRecovered)}</b> 까지 <b>${fmtGapText(sum.allRecovered - sum.firstOutage)}</b> 걸렸습니다.`
         : '') +
       `</p>`,
   )
-  H.push(`<div class="flow"><div class="fh">대상</div><div class="marks">`)
-  if (sum.firstOutage) H.push(`<span class="mlab first" style="left:${pct(sum.firstOutage)}%">첫 끊김 ${clk(sum.firstOutage)}</span>`)
-  if (sum.allRecovered) H.push(`<span class="mlab done" style="left:${pct(sum.allRecovered)}%">모두 복구 ${clk(sum.allRecovered)}</span>`)
-  H.push(`</div><div class="fh">끊김 → 복구 · 순단</div>`)
+  F.push(`<div class="flow"><div class="fh">대상</div><div class="marks">`)
+  if (sum.firstOutage) F.push(`<span class="mlab first" style="left:${pct(sum.firstOutage)}%">첫 끊김 ${clk(sum.firstOutage)}</span>`)
+  if (sum.allRecovered) F.push(`<span class="mlab done" style="left:${pct(sum.allRecovered)}%">모두 복구 ${clk(sum.allRecovered)}</span>`)
+  F.push(`</div><div class="fh">끊김 → 복구 · 순단</div>`)
   for (const x of sum.targets) {
     const bars = x.outages
       .map((o) => {
@@ -725,31 +727,197 @@ tr:last-child td{border-bottom:0}td.l{text-align:left}tbody tr:nth-child(even) t
           )
           .join('')
       : `<div class="rt"><b class="okc">${x.ready ? '끊김 없음' : '응답 없음'}</b></div>`
-    H.push(`<div>${he(x.name)}</div><div class="lane"><div class="track"></div>${gridLines}${bars}${markLines}</div><div>${right}</div>`)
+    F.push(`<div>${he(x.name)}</div><div class="lane"><div class="track"></div>${gridLines}${bars}${markLines}</div><div>${right}</div>`)
   }
-  H.push(`<div></div><div class="axis">${ticks.map((t) => `<span class="tick" style="left:${pct(t)}%">${clk(t)}</span>`).join('')}</div><div></div></div>`)
-  H.push(
-    `<div class="legend"><span><i style="background:var(--okbg);border:1px solid #bfe3cc"></i>정상 응답</span><span><i style="background:#e5534b"></i>응답 없음(끊김)</span><span><i style="border-left:2px dashed #c62f2f;width:2px;border-radius:0"></i>첫 끊김</span><span><i style="border-left:2px dashed #13804b;width:2px;border-radius:0"></i>모두 복구</span><span>그림 범위: 첫 끊김 30초 전 ~ 마지막 복구 30초 뒤</span></div></section>`,
+  F.push(`<div></div><div class="axis">${ticks.map((t) => `<span class="tick" style="left:${pct(t)}%">${clk(t)}</span>`).join('')}</div><div></div></div>`)
+  F.push(
+    `<div class="legend"><span><i style="background:var(--okbg);border:1px solid #bfe3cc"></i>정상 응답</span><span><i style="background:#e5534b"></i>응답 없음(끊김)</span><span><i style="border-left:2px dashed #c62f2f;width:2px;border-radius:0"></i>첫 끊김</span><span><i style="border-left:2px dashed #13804b;width:2px;border-radius:0"></i>모두 복구</span><span>그림 범위: 첫 끊김 30초 전 ~ 마지막 복구 30초 뒤</span></div>`,
   )
 
-  H.push(`<section><h2>대상별 기록</h2><table><thead><tr><th>대상</th><th>주소</th><th>끊김</th><th>복구 첫 성공 시간</th><th>순단</th><th>끊김 횟수</th></tr></thead><tbody>`)
+  const T: string[] = [`<table><thead><tr><th>대상</th><th>주소</th><th>끊김</th><th>복구 첫 성공 시간</th><th>순단</th><th>끊김 횟수</th></tr></thead><tbody>`]
   for (const x of sum.targets) {
     if (!x.outages.length) {
-      H.push(`<tr><td class="l">${he(x.name)}</td><td class="l"><code>${he(displayAddr(x.url))}</code></td><td>-</td><td>-</td><td class="okc">${x.ready ? '끊김 없음' : '응답 없음'}</td><td>0</td></tr>`)
+      T.push(`<tr><td class="l">${he(x.name)}</td><td class="l"><code>${he(displayAddr(x.url))}</code></td><td>-</td><td>-</td><td class="okc">${x.ready ? '끊김 없음' : '응답 없음'}</td><td>0</td></tr>`)
       continue
     }
     x.outages.forEach((o, i) =>
-      H.push(
+      T.push(
         `<tr><td class="l">${i ? '' : he(x.name)}</td><td class="l">${i ? '' : `<code>${he(displayAddr(x.url))}</code>`}</td><td>${clk(o.start)}</td><td>${o.end ? clk(o.end) : '<span class="bad">복구 안 됨</span>'}</td><td class="bad">${o.end ? fmtGapText(o.end - o.start) : '-'}</td><td>${i ? '' : x.outages.length}</td></tr>`,
       ),
     )
   }
-  H.push(`</tbody></table></section>`)
+  T.push(`</tbody></table>`)
+  return { failed, span, end, summary: S.join(''), flow: F.join('\n'), table: T.join('\n') }
+}
+
+const probeNotes = (run: ProbeRun) =>
+  `<section><h2>참고사항</h2><ul class="sum"><li>끊김 = 처음 정상(연속 ${run.config.needOk}회)을 확인한 뒤의 첫 실패. 복구 = 다시 연속 ${run.config.needOk}회 정상(${he(modeText(run.config))})이 된 연속의 <b>첫 성공 시각</b>(한 번 튄 성공은 복구로 세지 않음).</li><li>시각은 클라이언트 VM 의 시계이며, 요청을 보내기 직전에 찍었습니다(타임아웃만큼 늦게 찍히지 않음). 응답이 없는 동안은 요청이 타임아웃까지 기다리므로 끊김·복구 시각의 오차는 최대 약 ${Math.max(run.config.intervalSec, run.config.timeoutSec)}초입니다. 끊김은 연속 ${run.config.needFail ?? 1}회 실패부터이고, 시각은 그 첫 실패입니다.</li></ul></section>`
+
+/**
+ * 측정 한 회차의 HTML 리포트 — 인터넷 없이 열리는 한 파일(CSS 내장, 스크립트 없음). 가용성 검증 리포트와 같은 모양.
+ * 구성: 머리 → 주요 수치 → 요약 문장 → 대상별 끊김 구간(막대) → 대상별 표 → 이벤트 원문 → 참고사항.
+ */
+export function buildProbeHtml(run: ProbeRun, sum: ProbeSummary): string {
+  const P = probeParts(run, sum)
+  const H: string[] = []
+  H.push(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>응답 측정 결과</title>
+<style>
+${PROBE_CSS}
+</style></head><body>`)
+  H.push(`<header><div class="in"><h1>응답 측정 결과${run.label ? `: ${he(run.label)}` : ''}</h1><div class="meta">${he(dt(run.startedAt))} ~ ${run.stoppedAt ? he(dt(run.stoppedAt)) : '진행 중'} · 클라이언트 VM ${he(run.host)} · ${he(modeText(run.config))}${run.tcpTool ? ` (${run.tcpTool === 'nc' ? 'nc -z' : 'bash /dev/tcp'})` : ''} · 주기 ${run.config.intervalSec}초 · 연속 ${run.config.needOk}회면 복구</div></div></header><div class="page">`)
+  const k = (cls: string, label: string, v: string) => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b></div>`
+  H.push(
+    `<div class="kpis">${k('', '대상', `${sum.targets.length}대`)}${k(P.failed.length ? 'bad' : 'ok', '끊겼던 대상', `${P.failed.length}대`)}${k('', '첫 끊김', sum.firstOutage ? clk(sum.firstOutage) : '-')}${k('ok', '모두 복구', sum.allRecovered ? clk(sum.allRecovered) : sum.firstOutage ? '복구 안 됨' : '-')}${k('', '첫 끊김 → 모두 복구', P.span != null ? fmtGapText(P.span) : '-')}</div>`,
+  )
+  H.push(`<section><h2>요약</h2><ul class="sum">${P.summary}</ul></section>`)
+  H.push(`<section><h2>대상별 끊김 구간</h2>${P.flow}</section>`)
+  H.push(`<section><h2>대상별 기록</h2>${P.table}</section>`)
   const evText = run.events
     .map((e) => `${dt(e.at)}  ${run.config.targets[e.idx]?.name ?? e.idx}  ${e.kind === 'ready' ? '첫 정상 확인' : e.kind === 'outage' ? `끊김 (${outageReason(e.code, run.config.mode)})` : `복구 첫 성공 시간(${clk(e.base)})${e.outageStart ? ` · 순단 ${fmtGapText(e.base - e.outageStart)}` : ''}`}   # ${e.at},${e.idx},${e.code},${e.kind},${e.base}${e.outageStart ? ',' + e.outageStart : ''}`)
     .join('\n')
   H.push(`<section><h2>타임라인 (원문)</h2><p class="mut" style="font-size:12px;margin:0 0 6px">클라이언트 VM <code>${he(run.dir)}/events.csv</code> 모든 요청 기록은 같은 곳의 checks.csv</p><div class="pre">${he(evText) || '(없음)'}</div></section>`)
-  H.push(`<section><h2>읽는 법</h2><ul class="sum"><li>끊김 = 처음 정상(연속 ${run.config.needOk}회)을 확인한 뒤의 첫 실패. 복구 = 다시 연속 ${run.config.needOk}회 정상(${he(modeText(run.config))})이 된 연속의 <b>첫 성공 시각</b>(한 번 튄 성공은 복구로 세지 않음).</li><li>시각은 클라이언트 VM 의 시계이며, 요청을 보내기 직전에 찍었습니다(타임아웃만큼 늦게 찍히지 않음). 응답이 없는 동안은 요청이 타임아웃까지 기다리므로 끊김·복구 시각의 오차는 최대 약 ${Math.max(run.config.intervalSec, run.config.timeoutSec)}초입니다. 끊김은 연속 ${run.config.needFail ?? 1}회 실패부터이고, 시각은 그 첫 실패입니다.</li></ul></section></div></body></html>`)
+  H.push(`${probeNotes(run)}</div></body></html>`)
+  return H.join('\n')
+}
+
+/** 회차 이름 — 이름이 없으면 시작 시각(목록과 같은 꼴) */
+const runName = (r: ProbeRun) => r.label?.trim() || dt(r.startedAt).slice(5, 16)
+
+/**
+ * 여러 회차를 한 리포트로(2026-11-08 사용자 요청: 가용성 검증 리포트처럼 회차를 골라 · 전체로 통합해 뽑기).
+ * 같은 방식(HTTP · TCP · Ping)으로 잰 회차만 받는다 — 목록이 방식별이라 섞이지 않는다.
+ *
+ * 구성: 머리 → 주요 수치(평균 · 가장 빠름 · 가장 느림 · 미복구) → ① 회차 비교 표 → ② 회차별 복구 시간 막대 → ③ 대상별 순단 표(대상 × 회차)
+ * → ④ 회차별 상세(접힘, 한 회차 리포트의 요약 · 끊김 구간 · 표와 같은 것) → 참고사항.
+ * 복구 시간 = 첫 끊김부터 끊겼던 대상이 모두 복구될 때까지(한 회차 리포트의 '첫 끊김 → 모두 복구' 와 같은 값). 평균 · 빠름 · 느림은
+ * 끝까지 복구된 회차만으로 낸다 — 미복구 회차의 '지금까지' 는 복구 시간이 아니다.
+ * 스크립트는 회차 이름을 누르면 상세를 펼치는 것 하나뿐이고, 꺼져 있어도 이동은 된다.
+ */
+export function buildProbeMultiHtml(runsIn: ProbeRun[]): string {
+  const runs = [...runsIn].sort((a, b) => a.startedAt - b.startedAt)
+  const rows = runs.map((r) => {
+    const sum = summarize(r.config, r.events, [])
+    return { r, sum, P: probeParts(r, sum) }
+  })
+  const done = rows.filter((x) => x.P.span != null)
+  const spans = done.map((x) => x.P.span as number)
+  const avg = spans.length ? spans.reduce((a, b) => a + b, 0) / spans.length : null
+  const best = spans.length > 1 ? Math.min(...spans) : null
+  const worst = spans.length > 1 ? Math.max(...spans) : null
+  const bestRow = best != null ? done.find((x) => x.P.span === best) : undefined
+  const worstRow = worst != null ? done.find((x) => x.P.span === worst) : undefined
+  const open = rows.filter((x) => x.P.failed.length && x.P.span == null)
+  const first = runs[0]
+  const last = runs[runs.length - 1]
+  const cfg = first.config
+  const setText = (c: ProbeConfig) => `${modeText(c)} · 주기 ${c.intervalSec}초 · 연속 ${c.needOk}회면 복구`
+  // 회차마다 설정이 다르면 머리에 하나로 적지 않는다 — 각 회차 상세 머리에 그 회차 설정이 있다
+  const sameSet = runs.every((r) => setText(r.config) === setText(cfg) && (r.config.needFail ?? 1) === (cfg.needFail ?? 1) && r.config.timeoutSec === cfg.timeoutSec)
+  const H: string[] = []
+  H.push(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>응답 측정 종합 결과</title>
+<style>
+${PROBE_CSS}
+</style></head><body>`)
+  H.push(
+    `<header id="top"><div class="in"><h1>응답 측정 종합 결과</h1><div class="meta">${he(dt(first.startedAt))} ~ ${he(dt(last.stoppedAt ?? last.startedAt))} · ${runs.length}회차 · ${sameSet ? he(setText(cfg)) : '회차마다 측정 설정이 다름(각 회차 상세 참고)'}</div></div></header><div class="page">`,
+  )
+  const k = (cls: string, label: string, v: string, sub = '') => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`
+  H.push(
+    `<div class="kpis">${k('', '회차', `${runs.length}회`, `대상 ${Math.max(...runs.map((r) => r.config.targets.length))}대`)}${k('', '평균 복구 시간', avg != null ? fmtGapText(avg) : '-', `첫 끊김 → 모두 복구 · ${done.length}회 평균`)}${k('ok', '가장 빠름', best != null ? fmtGapText(best) : '-', bestRow ? he(runName(bestRow.r)) : '')}${k('warn', '가장 느림', worst != null ? fmtGapText(worst) : '-', worstRow ? he(runName(worstRow.r)) : '')}${k(open.length ? 'bad' : 'ok', '복구 안 된 회차', `${open.length}회`, open.length ? he(open.map((x) => runName(x.r)).join(', ')) : '모두 복구')}</div>`,
+  )
+
+  // ① 회차 비교
+  const cls = (v: number | null) => (v == null ? '' : v === best ? ' best' : v === worst ? ' worst' : '')
+  H.push(
+    `<section><h2>① 회차 비교</h2><p class="lead">복구 시간은 <b>첫 끊김부터 끊겼던 대상이 모두 복구될 때까지</b>입니다. <span class="best">초록</span>이 가장 빠른 회차, <span class="worst">주황</span>이 가장 느린 회차입니다. 회차 이름을 누르면 아래 상세로 갑니다.</p>`,
+  )
+  H.push(
+    `<table><thead><tr><th>회차</th><th>시작</th><th>대상</th><th>끊긴 대상</th><th>첫 끊김</th><th>모두 복구</th><th>복구 시간</th><th>가장 긴 순단</th><th>두 번 이상 끊김</th></tr></thead><tbody>`,
+  )
+  rows.forEach(({ r, sum, P }, i) => {
+    const longest = P.failed
+      .flatMap((x) => x.outages.map((o) => ({ name: x.name, gap: (o.end ?? P.end) - o.start, open: o.end == null })))
+      .sort((a, b) => b.gap - a.gap)[0]
+    const multi = P.failed.filter((x) => x.outages.length > 1).length
+    H.push(
+      `<tr><td class="l"><a href="#run-${i + 1}" data-open="run-${i + 1}">${he(runName(r))}</a></td><td>${he(dt(r.startedAt).slice(5, 16))}</td><td>${sum.targets.length}</td><td${P.failed.length ? ' class="bad"' : ''}>${P.failed.length}</td><td>${sum.firstOutage ? clk(sum.firstOutage) : '-'}</td><td>${sum.allRecovered ? clk(sum.allRecovered) : sum.firstOutage ? '<span class="bad">복구 안 됨</span>' : '-'}</td><td class="${cls(P.span).trim()}">${P.span != null ? fmtGapText(P.span) : sum.firstOutage ? '<span class="bad">미복구</span>' : '끊김 없음'}</td><td>${longest ? `${longest.open ? '<span class="bad">복구 안 됨</span>' : fmtGapText(longest.gap)} <span class="mut">${he(longest.name)}</span>` : '-'}</td><td${multi ? ' class="worst"' : ''}>${multi ? `${multi}대` : '-'}</td></tr>`,
+    )
+  })
+  if (done.length > 1) H.push(`<tr class="avg"><td class="l">평균 (복구된 ${done.length}회)</td><td></td><td></td><td></td><td></td><td></td><td>${fmtGapText(avg as number)}</td><td></td><td></td></tr>`)
+  H.push(`</tbody></table></section>`)
+
+  // ② 회차별 복구 시간 막대
+  const maxBar = Math.max(1, ...rows.map((x) => (x.P.span ?? (x.sum.firstOutage ? x.P.end - x.sum.firstOutage : 0))))
+  H.push(
+    `<section><h2>② 회차별 복구 시간</h2><p class="lead">막대 길이가 그 회차의 복구 시간(첫 끊김 → 모두 복구)입니다. 막대 안 <span class="bad">빨간 세로선</span>은 그 회차에서 가장 긴 순단입니다. 빗금 막대는 끝까지 복구되지 않은 회차(측정을 끝낸 때까지)입니다.</p><div class="cmpbar">`,
+  )
+  for (const { r, sum, P } of rows) {
+    const v = P.span ?? (sum.firstOutage ? P.end - sum.firstOutage : 0)
+    const w = ((v / maxBar) * 100).toFixed(1)
+    const g = sum.maxGap != null ? ((sum.maxGap / maxBar) * 100).toFixed(1) : null
+    const fc = P.span == null && sum.firstOutage ? 'open' : P.span != null && P.span === worst ? 'worst' : ''
+    H.push(
+      `<div>${he(runName(r))}</div><div class="cb">${v ? `<span class="f ${fc}" style="width:${w}%"></span>` : ''}${g ? `<span class="g" style="left:${g}%" title="가장 긴 순단 ${fmtGapText(sum.maxGap as number)}"></span>` : ''}</div><div style="text-align:right"><b>${P.span != null ? fmtGapText(P.span) : sum.firstOutage ? '미복구' : '끊김 없음'}</b></div>`,
+    )
+  }
+  H.push(`</div></section>`)
+
+  // ③ 대상별 순단 표 — 이름이 같은 대상끼리 회차를 가로로. 늘 늦는 대상이 한눈에 보이게 칸을 진하기로 칠한다
+  const names: string[] = []
+  for (const { sum } of rows) for (const t of sum.targets) if (!names.includes(t.name)) names.push(t.name)
+  const gapOf = (sum: ProbeSummary, P: ReturnType<typeof probeParts>, name: string) => {
+    const t = sum.targets.find((x) => x.name === name)
+    if (!t) return { kind: 'none' as const }
+    if (!t.outages.length) return { kind: 'ok' as const, ready: t.ready }
+    const g = Math.max(...t.outages.map((o) => (o.end ?? P.end) - o.start))
+    return { kind: 'gap' as const, g, n: t.outages.length, open: t.outages.some((o) => o.end == null) }
+  }
+  const allGaps = rows.flatMap(({ sum, P }) => names.map((n) => gapOf(sum, P, n))).flatMap((x) => (x.kind === 'gap' ? [x.g] : []))
+  // 진하기는 가장 짧은 순단 ~ 가장 긴 순단 사이로 — 0 부터 재면 순단이 모두 5~9분인 회차들(10-28)은 칸이 다 비슷하게 진해 늦는 대상이 안 보였다
+  const gmax = allGaps.length ? Math.max(...allGaps) : 1
+  const gmin = allGaps.length ? Math.min(...allGaps) : 0
+  H.push(
+    `<section><h2>③ 대상별 순단</h2><p class="lead">대상마다 회차별 가장 긴 순단입니다. <b>진할수록 길게</b> 끊긴 것이라(이 리포트에서 가장 짧은 순단이 가장 옅고 가장 긴 순단이 가장 진함), 회차마다 늘 늦게 돌아오는 대상이 한 줄로 보입니다. ×2 는 그 회차에 두 번 끊긴 것입니다.</p><div style="overflow:auto"><table class="heat"><thead><tr><th>대상</th>${rows
+      .map(({ r }, i) => `<th><a href="#run-${i + 1}" data-open="run-${i + 1}">${he(runName(r))}</a></th>`)
+      .join('')}<th>평균</th></tr></thead><tbody>`,
+  )
+  for (const n of names) {
+    const cells = rows.map(({ sum, P }) => gapOf(sum, P, n))
+    const gs = cells.flatMap((c) => (c.kind === 'gap' && !c.open ? [c.g] : []))
+    H.push(
+      `<tr><td class="l">${he(n)}</td>${cells
+        .map((c) => {
+          if (c.kind === 'none') return `<td class="h0">-</td>`
+          if (c.kind === 'ok') return `<td class="h0">${c.ready ? '끊김 없음' : '응답 없음'}</td>`
+          const a = gmax > gmin ? Math.min(1, Math.max(0, (c.g - gmin) / (gmax - gmin))) : 0.5
+          // 빨강 진하기 = 순단 길이 · 글자색은 배경이 진하면 흰색
+          return `<td class="h" style="background:rgba(229,83,75,${(0.08 + a * 0.62).toFixed(2)})!important;color:${a > 0.55 ? '#fff' : '#7a1d1d'}">${c.open ? '복구 안 됨' : fmtGapText(c.g)}${c.n > 1 ? ` ×${c.n}` : ''}</td>`
+        })
+        .join('')}<td>${gs.length ? fmtGapText(gs.reduce((a, b) => a + b, 0) / gs.length) : '-'}</td></tr>`,
+    )
+  }
+  H.push(`</tbody></table></div></section>`)
+
+  // ④ 회차별 상세
+  H.push(`<section><h2>④ 회차별 상세</h2><p class="lead">회차를 누르면 펼칩니다. 한 회차 리포트의 요약 · 끊김 구간 · 대상별 기록과 같은 내용입니다(이벤트 원문은 한 회차 리포트 · CSV 에 있습니다).</p>`)
+  rows.forEach(({ r, sum, P }, i) => {
+    const pills = [
+      P.failed.length ? `<span class="pill bad">끊긴 대상 ${P.failed.length}대</span>` : `<span class="pill ok">끊김 없음</span>`,
+      P.span != null ? `<span class="pill ok">복구 ${fmtGapText(P.span)}</span>` : sum.firstOutage ? `<span class="pill bad">미복구</span>` : '',
+      sum.maxGap != null ? `<span class="pill">최장 순단 ${fmtGapText(sum.maxGap)}</span>` : '',
+    ].join('')
+    H.push(
+      `<details class="run" id="run-${i + 1}"><summary><b>${i + 1}. ${he(runName(r))}</b><span class="mut">${he(dt(r.startedAt))} · 클라이언트 VM ${he(r.host)}${sameSet ? '' : ` · ${he(setText(r.config))}`}</span>${pills}</summary><div class="rb"><ul class="sum">${P.summary}</ul><h3>대상별 끊김 구간</h3>${P.flow}<h3>대상별 기록</h3>${P.table}<p class="mut" style="font-size:12px;margin:8px 0 0">원문: 클라이언트 VM <code>${he(r.dir)}</code> (events.csv · checks.csv)</p></div></details>`,
+    )
+  })
+  H.push(`<a href="#top" style="font-size:12px">↑ 맨 위로</a></section>`)
+  H.push(`${sameSet ? probeNotes(first) : ''}</div>
+<script>
+// 비교표 · 대상별 표의 회차 이름을 누르면 그 상세를 펼치고 이동한다(스크립트가 꺼져 있어도 이동은 된다)
+document.querySelectorAll('[data-open]').forEach(function(a){a.addEventListener('click',function(){var d=document.getElementById(a.getAttribute('data-open'));if(d)d.open=true})});
+</script></body></html>`)
   return H.join('\n')
 }
 

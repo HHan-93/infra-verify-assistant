@@ -183,6 +183,10 @@ export function classify(text: string): 'error' | 'warn' | 'attach' | 'drop' {
 export function signature(text: string): string {
   return (
     text
+      // Spring Boot 의 스레드 칸(`--- [앱] [스레드]`, 옛 형식은 `--- [스레드]`)은 지운다 — 스레드 이름을 15자로 잘라 찍어
+      // 같은 풀(http-nio-8080-exec-N)이 `[io-8080-exec-10]` · `[nio-8080-exec-4]` 로 달라 보여, 같은 오류가 둘로 갈렸다
+      // (2026-11-07 boot-factory-auth AccountLockedException). 숫자만 지워서는 앞 글자가 남는다
+      .replace(/(\s---\s+(?:\[[^\]]*\]\s+)?)\[[^\]]*\]/, '$1[thread]')
       .replace(/\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?/g, '')
       .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<id>')
       .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, '<ip>')

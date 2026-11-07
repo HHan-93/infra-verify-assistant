@@ -20,7 +20,9 @@ import {
   fmtGapText,
   fileStem,
   parseNovaServers,
+  buildProbeMultiHtml,
   type ProbeEvent,
+  type ProbeRun,
   type ProbeLast,
 } from '../src/lib/responseProbe'
 
@@ -135,4 +137,35 @@ test('저장 파일 이름 — 회차 이름을 넣되 파일 이름에 못 쓰�
   eq(fileStem('응답측정', { ...run, label: 'a/b:c*?"<>| d' }), '응답측정_a-b-c-d_20261028_1051')
   // 전부 못 쓰는 글자면 날짜만
   eq(fileStem('응답측정', { ...run, label: '///' }), '응답측정_20261028_1051')
+})
+
+test('종합 리포트 — 평균 · 빠름 · 느림은 끝까지 복구된 회차로만, 미복구 회차는 따로 센다', () => {
+  const t0 = Date.UTC(2026, 9, 28, 1, 0, 0)
+  const cfg2 = { ...DEFAULT_PROBE, targets: [{ name: 'vm01', url: 'http://10.0.0.1' }, { name: 'vm02', url: 'http://10.0.0.2' }] }
+  const ready = (b: number): ProbeEvent[] => [0, 1].map((i) => ({ at: b, idx: i, code: '200', kind: 'ready' as const, base: b }))
+  const run = (id: string, label: string, b: number, gaps: (number | null)[]): ProbeRun => ({
+    id,
+    label,
+    startedAt: b,
+    stoppedAt: b + 3_600_000,
+    host: 'client',
+    dir: '/tmp/qterm-probe/' + id,
+    config: cfg2,
+    endReason: 'auto',
+    events: [
+      ...ready(b),
+      ...gaps.flatMap((g, i): ProbeEvent[] => [
+        { at: b + 60_000, idx: i, code: '000', kind: 'outage', base: b + 60_000 },
+        ...(g == null ? [] : [{ at: b + 60_000 + g + 2000, idx: i, code: '200', kind: 'recovered' as const, base: b + 60_000 + g, outageStart: b + 60_000 }]),
+      ]),
+    ],
+  })
+  const html = buildProbeMultiHtml([run('b', '2회차', t0 + 7_200_000, [300_000, 400_000]), run('a', '1회차', t0, [200_000, 500_000]), run('c', '3회차', t0 + 9_000_000, [100_000, null])])
+  // 1회차 8분 20초 · 2회차 6분 40초 → 평균 7분 30초, 3회차(vm02 미복구)는 평균에 넣지 않고 '복구 안 된 회차' 로
+  ok(html.includes('평균 복구 시간</span><b>7분 30초</b>'), '평균')
+  ok(html.includes('가장 빠름</span><b>6분 40초</b><small>2회차</small>'), '빠름')
+  ok(html.includes('가장 느림</span><b>8분 20초</b><small>1회차</small>'), '느림')
+  ok(html.includes('복구 안 된 회차</span><b>1회</b><small>3회차</small>'), '미복구')
+  // 회차는 시작 순(1 → 2 → 3)
+  ok(html.indexOf('1. 1회차') < html.indexOf('2. 2회차') && html.indexOf('2. 2회차') < html.indexOf('3. 3회차'), '순서')
 })

@@ -9,6 +9,7 @@ import {
   rowsToText,
   shouldAutoStop,
   buildProbeHtml,
+  buildProbeMultiHtml,
   outageReason,
   modeText,
   codeText,
@@ -772,6 +773,10 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
 
   /** 지난 측정 — 지금 고른 방식의 회차만(사용자 요청). 옛 기록은 방식이 없으면 HTTP 로 본다 */
   const modeHistory = history.filter((h) => (h.config.mode ?? 'http') === mode)
+  /** 종합 리포트에 담을 회차 — 지금 보이는(이 방식의) 회차 중에서만 센다(방식을 바꾸면 다른 방식의 선택은 빠진다) */
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const pickedRuns = modeHistory.filter((h) => picked.has(h.id))
+  const allPicked = modeHistory.length > 0 && pickedRuns.length === modeHistory.length
   const shown: ProbeRun | null =
     active?.run ?? modeHistory.find((h) => h.id === viewId) ?? null
   const sum = shown ? summarize(shown.config, shown.events, active ? last : []) : null
@@ -824,6 +829,19 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     const s = summarize(run.config, run.events, [])
     const name = `${fileStem('응답측정', run)}.md`
     const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildMarkdown(run, s)) })
+    setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
+  }
+  /**
+   * 고른 회차를 한 리포트로(2026-11-08 사용자 요청: 가용성 검증 리포트처럼 전체 · 선택 회차를 통합해 뽑기). 목록이 방식별이라
+   * 같은 방식의 회차만 묶인다. 하나만 골랐으면 한 회차 리포트와 같다(종합의 비교 · 평균은 뜻이 없다).
+   */
+  const exportMulti = async (runs: ProbeRun[]) => {
+    if (!runs.length) return
+    if (runs.length === 1) return exportHtml(runs[0])
+    const d = new Date()
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const name = `응답측정_종합_${runs.length}회차_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.html`
+    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeMultiHtml(runs)), format: 'html' })
     setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   const exportHtml = async (run: ProbeRun) => {
@@ -1306,6 +1324,33 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                 삭제해도 클라이언트 VM 의 /tmp/qterm-probe 기록은 남습니다.
               </p>
               {modeHistory.length === 0 && <div className="text-[11px] text-gray-500">아직 없습니다.</div>}
+              {modeHistory.length > 0 && (
+                // 여러 회차를 한 리포트로 — 가용성 검증 이력과 같은 꼴(전체 선택 + 고른 회차 리포트)
+                <div className="mb-1.5 flex items-center gap-2 text-[11px]">
+                  <label className="flex cursor-pointer items-center gap-1 text-gray-400">
+                    <input
+                      type="checkbox"
+                      checked={allPicked}
+                      onChange={(e) => setPicked(e.target.checked ? new Set(modeHistory.map((h) => h.id)) : new Set())}
+                      className="h-3 w-3 accent-blue-500"
+                    />
+                    전체 선택
+                  </label>
+                  <span className="text-gray-500">{pickedRuns.length ? `${pickedRuns.length}회 고름` : '리포트에 담을 회차를 고르세요'}</span>
+                  <button
+                    onClick={() => void exportMulti(pickedRuns)}
+                    disabled={!pickedRuns.length || !!active}
+                    title={
+                      active
+                        ? '측정 중에는 뽑을 수 없습니다. 측정을 끝낸 뒤 뽑으세요'
+                        : '고른 회차를 비교표 · 회차별 복구 시간 · 대상별 순단 표 · 회차별 상세로 묶은 HTML 한 파일(하나만 고르면 한 회차 리포트)'
+                    }
+                    className="ml-auto flex items-center gap-1 rounded border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-100 hover:bg-blue-500/25 disabled:border-white/10 disabled:bg-transparent disabled:text-gray-500"
+                  >
+                    <FileText size={11} /> 종합 리포트{pickedRuns.length ? ` (${pickedRuns.length})` : ''}
+                  </button>
+                </div>
+              )}
               {modeHistory.map((h) => {
                 const s = summarize(h.config, h.events, [])
                 return (
@@ -1317,6 +1362,21 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                       (viewId === h.id && !active ? 'border-blue-500/50 bg-blue-500/10' : 'border-white/10 hover:bg-white/5')
                     }
                   >
+                    <input
+                      type="checkbox"
+                      checked={picked.has(h.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) =>
+                        setPicked((cur) => {
+                          const n = new Set(cur)
+                          if (e.target.checked) n.add(h.id)
+                          else n.delete(h.id)
+                          return n
+                        })
+                      }
+                      title="종합 리포트에 담기"
+                      className="h-3 w-3 shrink-0 accent-blue-500"
+                    />
                     <RunName run={h} onRename={(n) => renameRun(h.id, n)} className="max-w-[45%]" />
                     {h.label && <span className="shrink-0 text-[10.5px] text-gray-500" title={fmtDateTime(h.startedAt)}>{fmtDateTime(h.startedAt).slice(5, 16)}</span>}
                     <span className="shrink-0 text-gray-500">{h.config.targets.length}대</span>

@@ -84,8 +84,10 @@ const electronAPI = {
   sessionRun: (
     sessionId: string,
     cmd: string,
+    /** 기다릴 시간 — 주면 메인이 줄 대기 · 실행을 그 안에서 끝낸다(손 뗀 요청이 슬롯을 쥐지 않게) */
+    timeoutMs?: number,
   ): Promise<{ ok: boolean; code?: number; out?: string; err?: string; error?: string }> =>
-    ipcRenderer.invoke('session:run', { sessionId, cmd }),
+    ipcRenderer.invoke('session:run', { sessionId, cmd, timeoutMs }),
 
   // 세션 로그 기록 시작/중지 (host/label 은 로그 목록 표시용 메타데이터)
   logStart: (

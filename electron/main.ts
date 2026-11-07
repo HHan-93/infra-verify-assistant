@@ -249,6 +249,22 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 
+  /**
+   * 앱 안에서 새 창을 열지 않는다(코드 점검 10-30). AI 창의 target="_blank" 링크가 Electron 자식 창으로 열리면 그 창은 이 창의
+   * preload(electronAPI)를 물려받는다 — 바깥 사이트가 SSH · 파일 API 를 가진 창에서 열리는 셈이다. http(s) 는 기본 브라우저로 넘긴다.
+   * 같은 이유로 이 창 자체가 다른 주소로 이동하는 것도 막는다(개발 서버 · 앱 파일만).
+   */
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    const devUrl = process.env.VITE_DEV_SERVER_URL
+    if ((devUrl && url.startsWith(devUrl)) || url.startsWith('file://')) return
+    e.preventDefault()
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -1904,11 +1920,11 @@ function jsonElementToProfile(raw: unknown, rowLabel: string): { profile?: Saved
 ipcMain.handle('clipboard:read', () => clipboard.readText())
 
 // 다중 호스트 실행 — 별도 exec 채널로 명령 1회 실행 후 결과 캡처 (인터랙티브 셸 비오염)
-ipcMain.handle('session:run', async (_evt, { sessionId, cmd }: { sessionId: string; cmd: string }) => {
+ipcMain.handle('session:run', async (_evt, { sessionId, cmd, timeoutMs }: { sessionId: string; cmd: string; timeoutMs?: number }) => {
   const s = getSession(sessionId)
   if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
   try {
-    const r = await execCapture(s.client, cmd)
+    const r = await execCapture(s.client, cmd, undefined, typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : undefined)
     return { ok: true, code: r.code, out: r.out, err: r.err }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -3274,7 +3290,12 @@ const EXEC_LIMIT = 4
  */
 const EXEC_HARD_MS = 60_000
 const execSlots = new WeakMap<Client, { active: number; queue: (() => void)[] }>()
-function acquireExecSlot(client: Client): Promise<() => void> {
+/**
+ * waitMs: 줄에서 이만큼 기다렸으면 **실행하지 않고 버린다**(코드 점검 10-30). 상태보드는 12초에 손을 떼고 다음 프레임에 같은 조회를
+ * 다시 보내는데, 메인 쪽 줄에는 만료가 없어 손 뗀 요청이 차례가 오면 그대로 실행됐다 — `ceph -s` 가 매달리면 같은 노드에 버려진 실행이
+ * 쌓여 슬롯 넷을 다 쥐고, 그 노드의 pcs 조회가 뒤로 밀려 DOWN 을 늦게 봤다.
+ */
+function acquireExecSlot(client: Client, waitMs?: number): Promise<() => void> {
   let s = execSlots.get(client)
   if (!s) {
     s = { active: 0, queue: [] }
@@ -3289,11 +3310,20 @@ function acquireExecSlot(client: Client): Promise<() => void> {
     slot.active++
     return Promise.resolve(release)
   }
-  return new Promise((resolve) => {
-    slot.queue.push(() => {
+  return new Promise((resolve, reject) => {
+    const take = () => {
+      if (tid) clearTimeout(tid)
       slot.active++
       resolve(release)
-    })
+    }
+    const tid = waitMs
+      ? setTimeout(() => {
+          const i = slot.queue.indexOf(take)
+          if (i >= 0) slot.queue.splice(i, 1)
+          reject(new Error(`실행 대기 ${Math.round(waitMs / 1000)}초 초과: 같은 서버의 앞 명령이 끝나지 않아 실행하지 않았습니다`))
+        }, waitMs)
+      : undefined
+    slot.queue.push(take)
   })
 }
 
@@ -3302,6 +3332,7 @@ function execCaptureRaw(
   client: Client,
   cmd: string,
   stdin?: string,
+  hardMs = EXEC_HARD_MS,
 ): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve, reject) => {
     client.exec(cmd, (err, stream) => {
@@ -3318,8 +3349,8 @@ function execCaptureRaw(
         } catch {
           /* 이미 닫혔으면 무시 */
         }
-        reject(new Error(`명령이 ${EXEC_HARD_MS / 1000}초 안에 끝나지 않아 채널을 닫았습니다`))
-      }, EXEC_HARD_MS)
+        reject(new Error(`명령이 ${Math.round(hardMs / 1000)}초 안에 끝나지 않아 채널을 닫았습니다`))
+      }, hardMs)
       stream.on('data', (d: Buffer) => (out += oDec.write(d)))
       stream.stderr.on('data', (d: Buffer) => (errOut += eDec.write(d)))
       // 시그널로 죽거나 채널이 강제로 끊기면 ssh2 는 code=null 을 준다. 이걸 0(성공)으로
@@ -3342,10 +3373,15 @@ async function execCapture(
   client: Client,
   cmd: string,
   stdin?: string,
+  /** 부르는 쪽이 기다리는 시간 — 주면 줄 대기 · 실행 상한을 거기에 맞춘다(acquireExecSlot 주석). 안 주면 예전처럼 60초 */
+  timeoutMs?: number,
 ): Promise<{ code: number; out: string; err: string }> {
-  const release = await acquireExecSlot(client)
+  const started = Date.now()
+  const release = await acquireExecSlot(client, timeoutMs)
   try {
-    return await execCaptureRaw(client, cmd, stdin)
+    // 남은 시간 + 여유 3초 — 부르는 쪽이 이미 손 뗀 뒤에도 슬롯을 오래 쥐지 않게. 상한은 그대로 60초
+    const hard = timeoutMs ? Math.min(EXEC_HARD_MS, Math.max(5_000, timeoutMs - (Date.now() - started) + 3_000)) : EXEC_HARD_MS
+    return await execCaptureRaw(client, cmd, stdin, hard)
   } finally {
     release()
   }

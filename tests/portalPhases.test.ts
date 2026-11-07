@@ -89,3 +89,29 @@ test('연속 통과 기록 — 앞(실패) 1회 + 연속 N회, 핵심 API 마다
   eq(u.columns, ['핵심 API', '1', '2', '3'])
   eq(u.rows[0].length, 4)
 })
+
+test('코드 점검 10-30 — 처음 끊기기 전도 정상: 늦게 처음 끊긴 화면 때문에 1차 정상화가 늦게 잡히지 않음', () => {
+  // 로그인 10:55 끊김 → 11:00 정상(이때 대시보드는 아직 한 번도 안 끊김 = 정상) → 대시보드 11:02 처음 끊김 → 11:05 정상
+  const m = {
+    portal: [{ at: T('11:00:00'), name: '로그인' }, { at: T('11:05:00'), name: '대시보드' }],
+    portalLog: [
+      { name: '로그인', kind: 'fail', at: T('10:55:00') },
+      { name: '대시보드', kind: 'fail', at: T('11:02:00') },
+    ],
+  }
+  eq(portalPhases(m).firstAll, T('11:00:00'))
+  // 기록(portalLog)이 없는 옛 회차는 예전처럼(대시보드가 돌아온 때)
+  eq(portalPhases({ portal: m.portal }).firstAll, T('11:05:00'))
+  // 모두 같은 순간 처음 끊긴 경우 -∞ 가 1차 정상화가 되지 않는다
+  eq(portalPhases({ portal: [{ at: T('11:01:00'), name: 'a' }, { at: T('11:02:00'), name: 'b' }], portalLog: [{ name: 'a', kind: 'fail', at: T('10:55:00') }, { name: 'b', kind: 'fail', at: T('10:55:00') }] }).firstAll, T('11:02:00'))
+})
+
+test('코드 점검 10-30 — 끊기기 전에 찍힌 정상화(옛 버그로 저장된 것)는 1차 정상화가 아님', () => {
+  // DOWN 10:54:10 뒤 포털이 버티다 10:54:30 '정상화' 로 잘못 찍히고(끊긴 적 없음) 10:55:00 처음 끊김 → 10:59:00 실제 복구
+  const m = {
+    portal: [{ at: T('10:59:00'), name: '로그인' }],
+    portalFlaps: [{ name: '로그인', upAt: T('10:54:30'), downAt: T('10:55:10') }],
+    portalLog: [{ name: '로그인', kind: 'fail', at: T('10:55:00') }],
+  }
+  eq(portalPhases(m).firstAll, T('10:59:00'))
+})
