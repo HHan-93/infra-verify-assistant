@@ -47,17 +47,18 @@ import { alignTabBlocks } from '../lib/textAlign'
 import { arrangeEvidence, mergeSameCeph, resolveEvKey, strongFocusCount, tocEntries, tocLabel, podLogLabel, EV_GROUP_LABEL, type ArrangedEv } from '../lib/evidenceToc'
 import { mergeLogIssues, recordDropped } from '../lib/podLogList'
 import { cephHints, cephLineHot, cephLogLocal, cephLogTone, cephNote } from '../lib/cephView'
-import { applyRunTruth, portalEvidenceView, portalStartAt, type PortalEvView, type PortalStreak } from '../lib/portalEvidence'
+import { applyRunTruth, hasFinalBasis, hasFirstBasis, portalEvidenceView, portalStartAt, type PortalBasisRow, type PortalEvView, type PortalStreak } from '../lib/portalEvidence'
 import { parseKubeAge } from '../lib/podStatus'
 import { downBaseOf as downBaseLib, vipAtOf as vipAtLib } from '../lib/serverTime'
 import { parseSpread, splitSpreadOutput, SPREAD_CMD, type SpreadWorkload, type SpreadVerdict } from '../lib/podSpread'
 import { parseMasakari, UUID, MASAKARI_GREP, type MasakariState } from '../lib/masakariLog'
 import { stripAnsi } from '../lib/ansi'
-import { portalPhases, portalLogText, portalPageRows, portalStreakTable, SAME_MS as PORTAL_SAME_MS, type PortalEvent } from '../lib/portalPhases'
+import { episodes, portalFromLog, portalPhases, portalLogText, portalPageRows, portalStreakTable, SAME_MS as PORTAL_SAME_MS, type PortalEvent } from '../lib/portalPhases'
 import ConfirmDialog from './ConfirmDialog'
-import type { BoardEvidenceItem, BoardEvidenceTable, LogTailTarget } from '../../electron/shared-types'
+import type { BoardEvidenceItem, BoardEvidenceTable, BoardHistoryRecord, LogTailTarget } from '../../electron/shared-types'
 import { groupHeadline, newInRun, type LogGroup } from '../lib/podLogScan'
 import { usePodLogWatch, LogIssuesModal, MergedLogModal, type LogWatchInfo } from './PodLogWatch'
+import { buildEnvMap, renderEnvMapHtml, renderEnvDiffHtml, roleText, NODE_SCRIPT, CTRL_SCRIPT, OS_CMDS, segHostsCmd, CEPH_SCRIPT, K8S_SCRIPT, jsonOf, type EnvMapRaw, type EnvMapSnapshot } from '../lib/envMap'
 
 interface BoardSession {
   id: string
@@ -127,19 +128,26 @@ function mapCfgSessions(cfg: BoardConfig, convert: (v: string) => string): Board
   return out
 }
 // 노드별 서비스 데몬 프리셋 — 역할별 기본 유닛 목록(편집 가능). .service 는 생략.
-// systemd 로 실제 관리되는 데몬만 기본값에 둔다. nova/glance/cinder/mariadb 처럼
-// 컨테이너·WSGI·OpenStack API 로 도는 서비스는 systemctl 로 안 잡혀 오탐이 나므로 제외
-// (그런 서비스는 `openstack ... service/agent list` 로 확인 — 별도 방식).
+// systemd 로 실제 관리되는 데몬만 기본값에 둔다. glance/cinder/mariadb 처럼 컨테이너·WSGI 로 도는 서비스는
+// systemctl 로 안 잡혀 오탐이 나므로 제외(그런 서비스는 `openstack ... service/agent list` 로 확인 — 별도 방식).
+//
+// **Rocky(RDO 패키지) 이름 기준**(2026-11-09, 표준이 Ubuntu → Rocky 로 바뀜 · contrabass01 의 systemctl list-units 로 확인):
+//  - nova 는 Rocky 에서 systemd 서비스로 돈다 → `openstack-nova-*` 로 감시에 넣었다(예전엔 컨테이너라 뺐다)
+//  - Ubuntu 이름 `nova-compute` · `masakari-hostmonitor` 는 `openstack-nova-compute` · `masakari-host-monitor` 로
+//  - `masakari-instancemonitor` · `masakari-processmonitor` 는 이 환경에 설치돼 있지 않아 뺐다
+//  - libvirt 는 Rocky 9 기본이 분리형(virtqemud)이지만 이 환경은 `libvirtd`(legacy)가 돈다 — 그대로 둔다
+// 이름이 맞지 않는 유닛은 '없음' 으로 보일 뿐 '중지' 로 오탐하지는 않는다(LoadState=not-found).
 const SVC_PRESETS = {
   controller: [
     'rabbitmq-server', 'memcached',
     'neutron-server', 'httpd',
+    'openstack-nova-api', 'openstack-nova-conductor', 'openstack-nova-scheduler',
     'masakari-api', 'masakari-engine',
     'pacemaker', 'corosync', 'pcsd',
   ],
   compute: [
-    'libvirtd', 'nova-compute', 'neutron-openvswitch-agent',
-    'masakari-instancemonitor', 'masakari-processmonitor', 'masakari-hostmonitor',
+    'libvirtd', 'openstack-nova-compute', 'neutron-openvswitch-agent',
+    'masakari-host-monitor',
   ],
 }
 // 유닛 목록 정규화(공백/빈 줄 제거) — 텍스트에어리어 편집 중 빈 줄을 허용하려고 소비 시점에만 적용
@@ -328,7 +336,7 @@ interface Milestones {
      * Nova 의 VM 별 evacuation 기록 요약(증적) — 첫 VM 시작 · 마지막 VM 완료 · 대수 · 실패.
      * masakari 의 'finished' 는 알림 하나가 끝났다는 뜻이라, 20대를 옮길 때 각 VM 이 언제 끝났는지는 Nova 에 있다.
      */
-    vms?: { count: number; failed: number; firstAt: number; lastAt: number; pending?: number }
+    vms?: { count: number; failed: number; firstAt: number; lastAt: number; pending?: number; /** 옮기지 못한 VM 이름(Nova, 2026-11-11 부터) — 리포트 '실패 원인' */ failedNames?: string[] }
     /**
      * Nova 기록을 끝내 읽지 못함(다섯 번 다시 물어도 조회 실패) — 'VM 모두 옮김' 으로 보면 안 된다(코드 점검 10-30: 조회 실패 ≠ 성공).
      * pending 은 다시 물은 뒤에도 끝나지 않은 VM 수 — 사용자 기준(VM 이 모두 옮겨져야 성공)으로 실패에 넣는다.
@@ -340,7 +348,7 @@ interface Milestones {
    * 으로 error → con03 이 이어받아 evacuate → 끝내 failed 였는데, 예전에는 finished 만 기록해 타임라인에 아무 흔적이 없었다.
    * error 는 masakari 가 다시 집어 가므로 끝이 아니고, failed 는 확정이다. 총 소요(lastMilestoneAt)에는 넣지 않는다 — 복구가 아니다.
    */
-  masakariFail?: { at: number; by: string; status: string; evac: number; /** 로그에서 읽은 실패 이유 요약 */ reason?: string; /** 그 짧은 꼴(타임라인 요약 한 줄용, 이 필드 전 회차엔 없다) */ brief?: string; /** 옮기지 못한 VM 수 */ failedVms?: number }[]
+  masakariFail?: { at: number; by: string; status: string; evac: number; /** 로그에서 읽은 실패 이유 요약 */ reason?: string; /** 그 짧은 꼴(타임라인 요약 한 줄용, 이 필드 전 회차엔 없다) */ brief?: string; /** 옮기지 못한 VM 수 */ failedVms?: number; /** 옮기지 못한 VM 이름(Nova 에서 찾음, 2026-11-11 부터 · 못 찾으면 없음) — 리포트 '실패 원인' */ failedVmNames?: string[] }[]
   /** 워크로드(Deployment/StatefulSet) 단위 파드 정상화 */
   pods: { at: number; ns: string; workload: string }[]
   /**
@@ -403,6 +411,8 @@ interface Milestones {
    * 포털은 미복구(Fail) — '포털 서비스 정상화' 를 돌아온 대상만으로 계산하지 않는다(사용자 기준: 모두 돌아와야 완료).
    */
   portalPending?: string[]
+  /** 장애 뒤 감시한 포털 화면 전체(끊기지 않은 화면 포함) — 리포트 · 타임라인의 'n/n 화면' 분모(lib/portalPhases total 주석) */
+  portalWatched?: string[]
   /**
    * 포털 감시의 판정이 바뀐 순간(처음 끊김 · 정상화 확정 · 다시 끊김 확정) — '포털 응답 기록' 증적의 원문(lib/portalPhases).
    * 대상별 '최초 끊김' 은 여기에만 있다. 이 필드 전의 회차에는 없다(1차 · 최종 정상화는 portal · portalFlaps 로 계산된다).
@@ -913,8 +923,13 @@ function workloadOf(pod: string): string {
 }
 
 // ── 검증 이력 (마일스톤만) ─────────────────────────────────────
+/** 예전 이력 저장 위치(localStorage) — 지금은 파일(statusboard-history/)로 옮긴 뒤 읽기만 한다(처음 한 번 옮기기 · 리포트 하네스) */
 const HIST_KEY = 'statusboard_history_v1'
-const HIST_MAX = 50
+/**
+ * 이력 보관 한도 — 그룹에 들지 않은 회차만 센다(2026-11-13: 파일 저장으로 옮기며 50 → 500).
+ * 검증 그룹에 넣은 회차는 버전별 기록이라 자동으로 지우지 않는다. 지우는 것은 사람이 이력 창에서만.
+ */
+const HIST_MAX = 500
 /**
  * 회차당 '파드 로그 이상' 을 자세히 남기는 종류(묶음) 수 — 로그 줄 수가 아니다(같은 오류는 횟수만 오른다).
  * 이력은 localStorage 에 최근 50회차를 통째로 저장한다. 10-30 회차는 25종류에 12.6KB 였고, 시끄러운 클러스터에서 오래 검증해
@@ -939,18 +954,431 @@ interface HistoryRecord {
    */
   label?: string
   milestones: Milestones
+  /** 세부 원인 및 조치(RunNote 주석) — 검증이 끝난 뒤 이력 창에서 사람이 적는다 */
+  notes?: RunNote[]
+  /** 속한 검증 그룹 · 차수(VerifyGroup 주석). 없으면 그룹 없음 */
+  groupId?: string
+  phaseId?: string
+}
+/**
+ * 회차의 세부 원인 및 조치(2026-11-11 사용자 결정 · 목업 cause-mock · total-mock6). 앱은 '무엇이 실패했나(Masakari · 포털)' 까지만 안다.
+ * 그 안에서 무엇이 원인이었는지 · 누가 무엇을 조치했는지는 담당자가 분석한 뒤에 알게 되므로 이력 창에서 적고, 리포트 '실패 원인' 표의
+ * 오른쪽 칸 · 회차별 상세에 그대로 싣는다. 이름 · 장애 주입 시각처럼 회차 기록에 같이 둔다(이력이 있는 곳에 같이 있어야 한다).
+ *
+ * 'manual'(수동 조치)은 앱이 성공으로 본 회차에 사람이 손댄 것 — 11-11 회차: coredns 파드 2개가 한 노드에 있어 포털이 돌아오지 않았는데,
+ * 담당자가 파드를 강제로 지워 정상화됐다. 앱이 보기엔 성공이다. 누가 지웠는지 앱이 알 수 없고(다른 터미널), 노드가 죽으면 k8s 도 파드를
+ * 지우므로 앱이 짐작해 실패로 바꾸지 않는다 — 사람이 recovered 를 켜면 그 회차는 **실패**로 센다(사용자 결정: 판정 이름은 실패).
+ */
+interface RunNote {
+  step: 'masakari' | 'portal' | 'manual'
+  /** 세부 원인 — 필수(비면 저장하지 않는다) */
+  cause: string
+  action?: string
+  /** 담당자 — 'XX팀 이름' */
+  owner?: string
+  /** 조치 시각(epoch ms) — 적으면 회차별 상세 타임라인에 '사람 조치' 줄로 들어간다 */
+  at?: number
+  /** manual 만: 이 조치가 없었으면 복구되지 않았음 → 회차는 실패, 잰 시간은 표에 남기고 평균에서 뺀다 */
+  recovered?: boolean
+}
+const NOTE_STEP_LABEL: Record<RunNote['step'], string> = { masakari: 'Masakari', portal: '포털', manual: '수동 조치' }
+/** 사람이 '조치로 복구됨' 을 켠 회차 — 앱 판정과 상관없이 실패로 센다(RunNote 주석) */
+const manualFailOf = (h: { notes?: RunNote[] }) => !!h.notes?.some((n) => n.step === 'manual' && n.recovered && n.cause.trim())
+/**
+ * 검증 그룹(2026-11-13 사용자 결정 · 목업 group-mock1~6). 버전 · 환경마다 회차를 묶는다(예: CONTRABASS V4.0.0 PoC #3).
+ * 그룹은 차수(사전 점검 · 1회차 · 2회차 …)와 환경(노드 · VM 배치, 다음 단계)을 갖고, 회차는 groupId · phaseId 로 속한다.
+ * 리포트를 그룹으로 만들면 맨 앞에 검증 환경 · 시나리오 흐름 · 차수별 요약(이슈 → 팀별 조치)이 붙는다.
+ *
+ * 회차 이름 '1회차 2세트(…)' 의 앞 'n회차' 가 차수이고, 세트는 차수 안의 이름이다(사용자 설명). 차수를 이름에서 매번 읽지 않고
+ * 따로 기록한다 — 이름을 고치면 차수가 바뀌어 버리고, '사전 점검' 처럼 꼴이 다른 차수도 있다.
+ * 이름 앞부분으로 차수를 나눠 주던 '회차 이름으로 나누기' 는 2026-11-14 사용자 결정으로 뺐다(결과를 미리 알기 어려워 헷갈렸다). 차수는 사람이 고른다.
+ * 이력과 같은 곳(statusboard-history/groups.json)에 둔다: 그룹이 가리키는 회차와 같은 저장소에 있어야 지우기 · 되살리기가 어긋나지 않는다.
+ */
+interface PhaseIssue {
+  id: string
+  text: string
+  /** 관련 회차 id — 비면 '공통' */
+  runIds: string[]
+}
+interface PhaseAction {
+  id: string
+  team: string
+  text: string
+  /**
+   * 조치 결과: 조치 완료 · 확인 중 · 재현 안 됨 · 재현됨 · 표시 안 함(none).
+   * 처음엔 재현 안 됨 · 재현됨 · 확인 중 셋이었는데(주신 문서의 '적용 후 재현되지 않음 / 재현 됨'), '조치는 했고 재검증 전' 을 고를 수
+   * 없었다(2026-11-14 사용자 지적). 조치 완료를 더하고 기본값으로, 결과를 밝히지 않을 때는 표시 안 함
+   */
+  result: 'done' | 'ok' | 'repro' | 'wip' | 'none'
+}
+interface GroupPhase {
+  id: string
+  name: string
+  issues: PhaseIssue[]
+  actions: PhaseAction[]
+}
+interface VerifyGroup {
+  id: string
+  name: string
+  createdAt: number
+  phases: GroupPhase[]
+  /** 검증 환경(GroupEnv 주석) — 없으면 리포트에 '검증 환경' 을 싣지 않는다 */
+  env?: GroupEnv
+  /**
+   * 환경 구성도(lib/envMap 주석) — 장비에서 조회한 실제 구성. 사람이 정한 env 와 따로 두고 서로 덮어쓰지 않는다(2026-11-14 사용자 결정).
+   * 원문은 남기지 않고 구성도에 쓰는 값만 둔다(groups.json 이 커지지 않게)
+   */
+  envMap?: EnvMapSnapshot
+}
+/** 환경 구성도 수집 단계 — 출처마다 하나 */
+type EnvStep = 'nodes' | 'ctrl' | 'os' | 'ceph' | 'k8s'
+const ENV_STEPS: { k: EnvStep; label: string; what: string }[] = [
+  { k: 'nodes', label: '물리 노드', what: 'OS · CPU · 메모리 · 서비스 · NTP' },
+  { k: 'ctrl', label: 'Pacemaker · RabbitMQ · Galera', what: 'pcs status · rabbitmqctl cluster_status · wsrep' },
+  { k: 'os', label: 'OpenStack', what: '서버 · 하이퍼바이저 · flavor · nova 서비스 · Masakari 세그먼트' },
+  { k: 'ceph', label: 'Ceph', what: 'ceph -s · orch ps · osd tree · pool' },
+  { k: 'k8s', label: 'k8s', what: '노드 · 파드 · DaemonSet' },
+]
+type EnvCollect = {
+  run: (onStep: (k: EnvStep, st: 'run' | 'ok' | 'fail', msg?: string) => void) => Promise<EnvMapRaw>
+  /** 출처마다 쓰는 세션(상태보드 설정 그대로) */
+  sessions: () => Record<EnvStep, string>
+}
+/**
+ * 검증 환경(2026-11-13 사용자 결정 · 목업 group-mock3~6) — 리포트 맨 앞 '① 검증 환경' 카드가 그대로 이 데이터다.
+ *  - 노드: 표준 이름('노드 1') + 그 버전의 실제 호스트 이름(contrabass01) + 역할(컨트롤러 · 컴퓨트, 겸용이면 둘 다)
+ *  - VM: 표준 이름(리포트 기본) + 실제 이름(선택, 리포트에서 '실제 이름' 을 고를 때만) + 종류(k8s · 웹 서비스 · 기타 = 색)
+ *    + evacuation 대상(종류와 따로 — 웹 서비스이면서 대상일 수 있어 노란 테두리로 겹쳐 보인다)
+ *  - 묶음 VM: 'webserver01~10' 처럼 대수(count)를 가진 한 칸. 실제 이름은 대수만큼 줄로 적는다
+ *  - 안내 문구: 줄마다 리포트 카드 아래 '* …' 로. 문구 속 표준 이름은 '실제 이름' 리포트에서 실제 이름으로 바뀐다(자리표시 문법 없이)
+ * 기본 틀은 고정 구성이 아니다 — 4노드 · 3노드(3중화) · 빈 틀 · 다른 그룹 복사에서 시작해 노드 · VM 을 자유롭게 더하고 뺀다.
+ * 리포트의 숫자(노드 수 · VM 수)는 모두 이 데이터에서 센다.
+ */
+interface EnvVm {
+  id: string
+  /** 표준 이름 — 묶음이면 'webserver01~10' */
+  name: string
+  /** 묶음 대수(2 이상일 때만) */
+  count?: number
+  /** 실제 이름 — 묶음이면 대수만큼. 비면 리포트는 표준 이름 */
+  real?: string[]
+  kind: 'k8s' | 'web' | 'etc'
+  evac: boolean
+}
+interface EnvNode {
+  id: string
+  /** 표준 이름 — '노드 1' */
+  label: string
+  /** 그 버전의 실제 호스트 이름 */
+  host: string
+  controller: boolean
+  compute: boolean
+  vms: EnvVm[]
+}
+interface GroupEnv {
+  /** 장애 주입 방법 — 리포트 환경 머리 · 시나리오 흐름 ① 에 */
+  inject: string
+  nodes: EnvNode[]
+  /** 안내 문구(줄마다 한 항목) */
+  notes: string[]
+}
+const vmCount = (v: EnvVm) => (v.count && v.count > 1 ? v.count : 1)
+/** 리포트에 보일 VM 이름 — 실제 이름을 골랐고 적어 둔 것이 있으면 그것(묶음은 번호가 이어지면 'a01~10', 아니면 이름 나열) */
+function vmDisplay(v: EnvVm, real: boolean): string {
+  const r = (v.real ?? []).map((x) => x.trim()).filter(Boolean)
+  if (!real || !r.length) return v.name
+  if (r.length === 1) return r[0]
+  const m = r.map((x) => x.match(/^(.*?)(\d+)$/))
+  if (m.every((x) => x && x[1] === m[0]![1])) {
+    const ns = m.map((x) => Number(x![2]))
+    if (ns.every((n, i) => i === 0 || n === ns[i - 1] + 1)) return `${m[0]![1]}${m[0]![2]}~${m[m.length - 1]![2]}`
+  }
+  return r.join(', ')
+}
+function envTemplate(kind: '4' | '3' | 'empty'): GroupEnv {
+  const vm = (name: string, kind2: EnvVm['kind'], evac = false, count?: number): EnvVm => ({ id: newId('vm'), name, kind: kind2, evac, count })
+  const k8s = (n: number, manager: boolean) => [vm(`master0${n}`, 'k8s'), vm(`infra0${n}`, 'k8s'), vm(`biz0${n}`, 'k8s'), ...(manager ? [vm(`manager0${n}`, 'k8s')] : [])]
+  const node = (n: number, vms: EnvVm[], compute = true, controller = true): EnvNode => ({ id: newId('nd'), label: `노드 ${n}`, host: '', controller, compute, vms })
+  const note = '웹 서비스 VM(webserver01~10)은 고정 배치가 아니라, 매 회차 다음 DOWN 대상 노드로 옮겨 두고 진행합니다.'
+  if (kind === 'empty') return { inject: 'IPMI 포털 접속 후 Power Down', nodes: [], notes: [] }
+  if (kind === '3')
+    return {
+      inject: 'IPMI 포털 접속 후 Power Down',
+      nodes: [
+        node(1, [...k8s(1, true), vm('deploy', 'etc', true), vm('webserver01~10', 'web', true, 10)]),
+        node(2, k8s(2, true)),
+        node(3, [...k8s(3, false), vm('backup', 'etc', true)]),
+      ],
+      notes: [note],
+    }
+  return {
+    inject: 'IPMI 포털 접속 후 Power Down',
+    nodes: [
+      node(1, [...k8s(1, true), vm('deploy', 'etc', true), vm('webserver01~10', 'web', true, 10)]),
+      node(2, k8s(2, true)),
+      node(3, [...k8s(3, false), vm('backup', 'etc', true)]),
+      node(4, [], true, false),
+    ],
+    notes: [note],
+  }
+}
+/** Nova 에서 읽은 컴퓨트 호스트와 그 위 VM 이름 */
+type NovaHosts = { host: string; vms: string[] }[]
+/** Nova 에서 읽은 VM 이 환경과 다른 노드에 있는 것 — [Nova 배치대로 옮기기] 로 옮긴다 */
+type NovaMove = { vmId: string; vm: string; real: string; fromNode: string; toNodeId?: string; toNode?: string; host: string }
+/**
+ * Nova 결과로 환경의 **빈 칸만** 채운다(2026-11-13 사용자 요청: 상태보드 설정의 OpenStack 세션 · openrc 를 그대로 쓴다).
+ *  - 노드 호스트: 적어 둔 호스트가 Nova 호스트와 같거나 앞부분이 같으면 그 호스트. 빈 칸은 그 노드의 표준 VM 과 가장 많이 맞는 호스트,
+ *    그래도 남은 빈 노드 · 호스트가 같은 수면 순서대로
+ *  - VM 실제 이름: 표준 이름의 글자 부분(biz)이 들어 있고 끝 번호(01)가 같은 VM(대소문자 무시). 그 노드 호스트에서 하나로 정해지면 그것,
+ *    없으면 **모든 호스트에서** 하나로 정해질 때 채운다 — 이름 짝은 위치와 무관하다. 11-13 실사용: Epoxy_Biz1~3 이 모두 contrabass04 에,
+ *    Epoxy_Backup 이 contrabass01 에 있어 '그 노드 호스트에서만' 찾던 규칙이 놓쳤다. 이때 배치가 다르다는 것은 moves 로 따로 알린다
+ *    (배치는 사람이 정한 기준이라 자동으로 옮기지 않고 [Nova 배치대로 옮기기] 로 고르게 한다)
+ *  - 묶음(webserver01~10): 이름에 표준 글자가 든 VM 이 대수만큼이면 그것. 없으면 '같은 글자 + 이어지는 번호' 계열 중 대수가 딱 맞는
+ *    계열이 **하나뿐일 때만**(11-13 실사용: 웹 서비스 VM 실제 이름이 service_vm01~10 이었다)
+ *  - 이미 적어 둔 값은 덮어쓰지 않는다. 확신 없는 것은 비워 두고 이유와 함께 알린다(엉뚱한 이름이 리포트에 실리는 것보다 낫다)
+ */
+function fillFromNova(
+  env: GroupEnv,
+  nova: NovaHosts,
+): { env: GroupEnv; hosts: number; names: number; missed: { where: string; why: string }[]; moves: NovaMove[]; spare: string[] } {
+  const H = nova.map((x) => x.host)
+  const same = (a: string, b: string) => {
+    const x = a.toLowerCase()
+    const y = b.toLowerCase()
+    return x === y || x.startsWith(y + '.') || y.startsWith(x + '.')
+  }
+  const taken = new Set<string>()
+  let hosts = 0
+  let names = 0
+  const missed: { where: string; why: string }[] = []
+  const moves: NovaMove[] = []
+  const nodes = env.nodes.map((n) => {
+    const hit = n.host ? H.find((h) => same(h, n.host)) : undefined
+    if (hit) taken.add(hit)
+    return { ...n, _h: hit }
+  })
+  const tail = (v: string) => v.match(/(\d+)$/)?.[1]
+  const base = (v: string) => v.replace(/[\d~]+$/, '').replace(/\d+~\d+$/, '').replace(/[-_.\s]+$/, '').toLowerCase()
+  /** 단일 VM 의 후보 — 표준 이름의 글자 부분이 들어 있고 끝 번호가 같은 것 */
+  const candOf = (v: EnvVm, names2: string[]) => {
+    const b = base(v.name)
+    const num = tail(v.name)
+    return b ? names2.filter((x) => x.toLowerCase().includes(b) && (num == null || Number(tail(x)) === Number(num))) : []
+  }
+  const vmsOf = (h: string) => nova.find((x) => x.host === h)?.vms ?? []
+  const score = (n: EnvNode, h: string) => n.vms.filter((v) => vmCount(v) === 1 && candOf(v, vmsOf(h)).length > 0).length
+  for (const n of [...nodes].filter((x) => !x._h && !x.host.trim()).sort((a, b) => b.vms.length - a.vms.length)) {
+    let best: string | undefined
+    let bs = 0
+    for (const h of H) {
+      if (taken.has(h)) continue
+      const sc = score(n, h)
+      if (sc > bs) {
+        bs = sc
+        best = h
+      }
+    }
+    if (!best && !n.vms.length) best = H.find((h) => !taken.has(h) && !vmsOf(h).length)
+    if (!best) continue
+    taken.add(best)
+    n._h = best
+    n.host = best
+    hosts++
+  }
+  const restN = nodes.filter((x) => !x._h && !x.host.trim())
+  const restH = H.filter((h) => !taken.has(h))
+  if (restN.length && restN.length === restH.length)
+    restN.forEach((n, i) => {
+      taken.add(restH[i])
+      n._h = restH[i]
+      n.host = restH[i]
+      hosts++
+    })
+  const nodeOfHost = (h: string) => nodes.find((x) => x._h === h)
+  const used = new Set<string>()
+  const allVms = nova.flatMap((x) => x.vms)
+  const hostOfVm = (name: string) => nova.find((x) => x.vms.includes(name))?.host ?? ''
+  // 같은 글자 + 이어지는 번호 계열(service_vm01~10) — 묶음 VM 찾기용
+  const series = (() => {
+    const m = new Map<string, { n: number; name: string }[]>()
+    for (const x of allVms) {
+      const mm = x.match(/^(.*?)(\d+)$/)
+      if (!mm) continue
+      const k = mm[1].toLowerCase()
+      m.set(k, [...(m.get(k) ?? []), { n: Number(mm[2]), name: x }])
+    }
+    return [...m.values()].map((a) => a.sort((p, q) => p.n - q.n)).filter((a) => a.every((x, i) => i === 0 || x.n === a[i - 1].n + 1))
+  })()
+  const out = nodes.map(({ _h, ...n }) => ({
+    ...n,
+    vms: n.vms.map((v) => {
+      if ((v.real ?? []).some((x) => x.trim())) return v
+      const b = base(v.name.split('~')[0])
+      if (!b) return v
+      if (vmCount(v) > 1) {
+        let cand = allVms.filter((x) => !used.has(x) && x.toLowerCase().includes(b))
+        if (cand.length !== vmCount(v)) {
+          const fit = series.filter((a) => a.length === vmCount(v) && a.every((x) => !used.has(x.name)))
+          cand = fit.length === 1 ? fit[0].map((x) => x.name) : []
+        }
+        if (cand.length === vmCount(v)) {
+          cand.forEach((x) => used.add(x))
+          names++
+          return { ...v, real: [...cand].sort((a, c) => a.localeCompare(c, undefined, { numeric: true })) }
+        }
+        missed.push({ where: `${n.label} · ${v.name}`, why: `'${b}' 가 든 VM 도, 번호가 이어지는 ${vmCount(v)}대짜리 이름 계열도 하나로 정해지지 않음` })
+        return v
+      }
+      const here = _h ? candOf(v, vmsOf(_h).filter((x) => !used.has(x))) : []
+      const any = candOf(
+        v,
+        allVms.filter((x) => !used.has(x)),
+      )
+      const pick = here.length === 1 ? here[0] : !here.length && any.length === 1 ? any[0] : null
+      if (pick) {
+        used.add(pick)
+        names++
+        const h = hostOfVm(pick)
+        if (_h && h !== _h) {
+          const to = nodeOfHost(h)
+          moves.push({ vmId: v.id, vm: v.name, real: pick, fromNode: n.label, toNodeId: to?.id, toNode: to?.label, host: h })
+        }
+        return { ...v, real: [pick] }
+      }
+      const num = tail(v.name)
+      missed.push({
+        where: `${n.label} · ${v.name}`,
+        why: (here.length ? here : any).length
+          ? `후보 ${(here.length ? here : any).length}개: ${(here.length ? here : any).slice(0, 3).join(', ')}`
+          : `'${b}'${num != null ? ` + 번호 ${Number(num)}` : ''} 인 VM 없음`,
+      })
+      return v
+    }),
+  }))
+  const spare = allVms.filter((x) => !used.has(x) && !env.nodes.some((n) => n.vms.some((v) => (v.real ?? []).includes(x))))
+  return { env: { ...env, nodes: out }, hosts, names, missed, moves, spare }
+}
+/** 편집용 사본 — id 는 그대로(취소하면 원본이 그대로 남게 얕은 공유를 끊는다) */
+function cloneEnvKeepIds(e: GroupEnv): GroupEnv {
+  return { ...e, notes: [...e.notes], nodes: e.nodes.map((n) => ({ ...n, vms: n.vms.map((v) => ({ ...v, real: v.real ? [...v.real] : undefined })) })) }
+}
+/** 다른 그룹 환경 복사 — id 는 새로 붙인다(두 그룹이 같은 노드 · VM 객체를 나눠 쓰지 않게) */
+function cloneEnv(e: GroupEnv): GroupEnv {
+  return { ...e, notes: [...e.notes], nodes: e.nodes.map((n) => ({ ...n, id: newId('nd'), vms: n.vms.map((v) => ({ ...v, id: newId('vm'), real: v.real ? [...v.real] : undefined })) })) }
+}
+const GROUPS_KEY = 'statusboard_groups_v1'
+/** 새 회차가 들어갈 그룹 · 차수(상태보드 머리에서 고름) */
+const CUR_GROUP_KEY = 'statusboard_group_cur_v1'
+/** 그룹 정리 — 저장본마다 빠진 칸을 채운다(파일 · 예전 localStorage 공통) */
+function normGroups(arr: unknown[]): VerifyGroup[] {
+  return (arr as VerifyGroup[])
+    .filter((g) => g && typeof g.id === 'string')
+    .map((g) => ({
+      ...g,
+      phases: (g.phases ?? []).map((ph) => ({ ...ph, issues: ph.issues ?? [], actions: ph.actions ?? [] })),
+    }))
+}
+/** 예전 저장 위치(localStorage)의 그룹 — 파일로 처음 옮길 때만 읽는다 */
+function loadGroupsLegacy(): VerifyGroup[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(GROUPS_KEY) || '[]')
+    return Array.isArray(arr) ? normGroups(arr) : []
+  } catch {
+    return []
+  }
+}
+function loadCurGroup(): { groupId?: string; phaseId?: string } {
+  try {
+    const v = JSON.parse(localStorage.getItem(CUR_GROUP_KEY) || 'null')
+    return v && typeof v === 'object' ? { groupId: v.groupId || undefined, phaseId: v.phaseId || undefined } : {}
+  } catch {
+    return {}
+  }
+}
+function saveCurGroup(v: { groupId?: string; phaseId?: string }): void {
+  try {
+    localStorage.setItem(CUR_GROUP_KEY, JSON.stringify(v))
+  } catch {
+    /* 기억 못 해도 이번에는 쓴다 */
+  }
+}
+const newId = (p: string) => `${p}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
+/** 담당자 칸('플랫폼팀 이OO')의 팀 부분 — 첫 낱말. 비면 '담당 팀 미기재' */
+const teamOfOwner = (owner?: string) => (owner ?? '').trim().split(/\s+/)[0] || '담당 팀 미기재'
+/**
+ * 회차마다 적은 원인 · 조치(RunNote)를 차수의 이슈 · 팀별 조치 꼴로 모은다(2026-11-14 사용자 결정: 가져오기 · 비워 두면 자동 둘 다).
+ * 같은 원인은 이슈 하나에 회차를 모으고, 조치는 담당자의 팀별로(같은 팀 · 같은 글은 하나로). 조치 결과는 회차 기록에 없어 비워 둔다
+ * (result 없음 = 리포트에 결과 표시를 붙이지 않는다 — 모르는 것을 '확인 중' 으로 지어 붙이지 않는다).
+ */
+function notesToPhase(runs: HistoryRecord[]): { issues: PhaseIssue[]; actions: (Omit<PhaseAction, 'result'> & { result?: PhaseAction['result'] })[] } {
+  const iss = new Map<string, string[]>()
+  const acts = new Map<string, { team: string; text: string }>()
+  for (const h of runs)
+    for (const n of h.notes ?? []) {
+      const c = n.cause.trim()
+      if (c) iss.set(c, [...new Set([...(iss.get(c) ?? []), h.id])])
+      const a = (n.action ?? '').trim()
+      if (a) {
+        const team = teamOfOwner(n.owner)
+        acts.set(`${team}\n${a}`, { team, text: a })
+      }
+    }
+  return {
+    issues: [...iss].map(([text, runIds]) => ({ id: newId('is'), text, runIds })),
+    actions: [...acts.values()].map((x) => ({ id: newId('ac'), ...x })),
+  }
+}
+/** 그룹 · 차수가 사라진 회차의 소속을 지운다 — 그룹을 지우거나 차수를 빼면 회차는 남고 소속만 풀린다 */
+function pruneMembership(list: HistoryRecord[], groups: VerifyGroup[]): HistoryRecord[] {
+  const gm = new Map(groups.map((g) => [g.id, new Set(g.phases.map((p) => p.id))]))
+  let changed = false
+  const out = list.map((h) => {
+    if (!h.groupId) return h
+    const ps = gm.get(h.groupId)
+    if (!ps) {
+      changed = true
+      return { ...h, groupId: undefined, phaseId: undefined }
+    }
+    if (h.phaseId && !ps.has(h.phaseId)) {
+      changed = true
+      return { ...h, phaseId: undefined }
+    }
+    return h
+  })
+  return changed ? out : list
 }
 /**
  * 저장된 이력을 읽지 못했다(JSON 깨짐) — 이때는 **덮어쓰지 않는다**(코드 점검 10-30). 예전엔 읽기 실패를 빈 목록으로 돌려줘, 다음 회차가
  * 그 위에 저장되며 남아 있던 이력 전체가 지워졌다(CLAUDE.md '손상 시 기본값으로 뭉개지 않는다').
  */
 let historyUnreadable = false
+/**
+ * 포털 최종 정상화 · 다시 끊김 · 안 돌아온 화면을 판정 기록(portalLog)으로 다시 맞춘다(lib/portalPhases portalFromLog 주석).
+ * 최소화 버그(StatusBoard minChip 주석)로 굳은 옛 회차도 이력 · 리포트 · 증적에서 같은 말을 하게, 읽을 때 한 번 고친다.
+ * 판정 기록이 없는 옛 회차는 그대로 둔다. 같은 기록으로 늘 같은 결과라 여러 번 거쳐도 바뀌지 않는다.
+ */
+function repairPortalRecord(h: HistoryRecord): HistoryRecord {
+  const ms = h?.milestones
+  if (!ms?.portalLog?.length) return h
+  const fixed = portalFromLog({ portal: ms.portal ?? [], portalFlaps: ms.portalFlaps, portalPending: ms.portalPending, portalLog: ms.portalLog, maxLog: PORTAL_LOG_MAX })
+  if (!fixed) return h
+  return {
+    ...h,
+    milestones: {
+      ...ms,
+      portal: fixed.portal,
+      portalFlaps: fixed.portalFlaps.length ? fixed.portalFlaps : undefined,
+      portalPending: fixed.portalPending.length ? fixed.portalPending : undefined,
+    },
+  }
+}
 function loadHistory(): HistoryRecord[] {
   try {
     const raw = localStorage.getItem(HIST_KEY)
     if (!raw) return []
     const arr = JSON.parse(raw)
-    if (Array.isArray(arr)) return arr as HistoryRecord[]
+    if (Array.isArray(arr)) return (arr as HistoryRecord[]).map(repairPortalRecord)
     historyUnreadable = true
     return []
   } catch {
@@ -959,17 +1387,11 @@ function loadHistory(): HistoryRecord[] {
   }
 }
 /**
- * 이력 저장 — 실패하면 사유를 돌려준다(빈 문자열 = 저장됨). 예전엔 용량 초과를 조용히 삼켜, 새 회차가 화면엔 보이는데 저장은 안 됐고
- * 앱을 다시 켜야 사라진 것을 알았다(코드 점검 10-30). 검증 자체는 막지 않고 보드에 알린다.
+ * 보관 한도를 넘는 회차 — 그룹에 들지 않은 회차 중 오래된 것부터(HIST_MAX 주석). list 는 새 회차가 앞(시작 시각 내림차순)
  */
-function saveHistory(list: HistoryRecord[]): string {
-  if (historyUnreadable) return '저장된 이력을 읽지 못해 덮어쓰지 않았습니다(기존 이력을 지우지 않으려고). 이번 회차는 저장되지 않습니다.'
-  try {
-    localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX)))
-    return ''
-  } catch (e) {
-    return `검증 이력을 저장하지 못했습니다(${e instanceof Error ? e.name : '저장 실패'}: 저장 공간이 찼을 수 있습니다). 이번 회차는 앱을 끄면 사라집니다. 이력 창에서 오래된 회차를 지우거나 리포트로 먼저 내보내세요.`
-  }
+function overflowOf(list: HistoryRecord[]): string[] {
+  const loose = list.filter((h) => !h.groupId)
+  return loose.length > HIST_MAX ? loose.slice(HIST_MAX).map((h) => h.id) : []
 }
 
 function fmtElapsed(ms: number): string {
@@ -1035,21 +1457,297 @@ function suggestRunLabel(at: number, node: string): string {
 export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLiveLog, onAnalyzeText }: StatusBoardProps) {
   const [cfg, setCfg] = useState<BoardConfig>(loadCfg)
   const [view, setView] = useState<'config' | 'board'>('config')
-  const [history, setHistory] = useState<HistoryRecord[]>(loadHistory)
+  /**
+   * 검증 이력 — 파일(statusboard-history/)에서 열 때 읽어 온다(boardHistory:load). 읽기가 끝나기 전에 회차가 저장돼도 그 회차 파일만
+   * 쓰므로 다른 회차를 지우지 않고, 읽어 온 목록과 합친다(같은 id 는 메모리 쪽이 최신).
+   */
+  const [history, setHistory] = useState<HistoryRecord[]>([])
+  /**
+   * 마지막으로 저장한 목록 — persistHistory 가 바뀐 회차만 골라 쓰고 빠진 회차만 지우는 기준. **이력을 바꾸는 곳은 모두 이것을 바탕으로
+   * 새 목록을 만든다**(화면 상태 history 가 아니라) — 검증 중에는 회차가 주기마다 다시 저장되므로, 한 박자 늦은 history 로 만든 목록을
+   * 저장하면 방금 저장된 진행 중 회차가 '빠진 회차' 로 지워진다(빌드 전 검토 11-13)
+   */
+  const historyRef = useRef<HistoryRecord[]>([])
+  const [histLoaded, setHistLoaded] = useState(false)
+  const histLoadedRef = useRef(false)
+  /** 불러올 때 난 경고 — 저장 성공으로 지우지 않는다 */
+  const loadWarnRef = useRef('')
   const [showHistory, setShowHistory] = useState(false)
   /**
    * 이력 지우기 확인(코드 점검 10-30) — '전체 삭제' · 회차 X 가 누르는 즉시 이력과 증적 파일(서버 원문)까지 지웠다. 되살릴 수 없는데
    * '전체 삭제' 는 [목표 기준] 버튼 바로 옆이다. CLAUDE.md '파괴적 동작에는 대상 확인' 에 맞춘다.
    */
   const [askDrop, setAskDrop] = useState<{ ids: string[]; all: boolean } | null>(null)
+  /**
+   * 검증 중 닫기 확인(2026-11-09 사용자 요청) — X 는 곧 '검증 종료' 인데 확인 없이 닫혀, 지켜보던 회차가 손이 스친 클릭에 끝났다.
+   * 응답 측정 창과 같은 꼴: [검증 종료하고 닫기] · [최소화(검증 계속)] · [취소]. 검증 중이 아니면 묻지 않고 닫는다.
+   * 최소화 칩의 X 도 같은 확인을 거친다(칩에서는 창을 펼쳐서 묻는다 — 칩 크기에는 확인창이 안 들어간다).
+   */
+  const [closeAsk, setCloseAsk] = useState(false)
   /** 이력 저장 실패 사유(없으면 빈 문자열) — 보드 위에 빨갛게 띄운다 */
-  const [histErr, setHistErr] = useState(() =>
-    historyUnreadable ? '저장된 검증 이력을 읽지 못했습니다. 기존 이력을 지우지 않으려고 새 회차를 저장하지 않습니다. 리포트로 먼저 내보내 두세요.' : '',
-  )
-  const persistHistory = (next: HistoryRecord[]): boolean => {
-    const err = saveHistory(next)
-    if (mountedRef.current) setHistErr(err)
-    return !err
+  const [histErr, setHistErr] = useState('')
+  /**
+   * 이력 저장 — 직전 목록과 견줘 **바뀐 회차만 쓰고, 빠진 회차만 지운다**. 실패하면 보드 위에 사유를 띄운다(검증은 막지 않는다).
+   * 성공하면 true(밀려난 회차의 증적은 저장이 된 뒤에 지운다 — 코드 점검 10-30).
+   */
+  const persistHistory = async (next: HistoryRecord[]): Promise<boolean> => {
+    const prev = new Map(historyRef.current.map((h) => [h.id, h]))
+    historyRef.current = next
+    const ups = next.filter((h) => prev.get(h.id) !== h)
+    const keep = new Set(next.map((h) => h.id))
+    const dels = [...prev.keys()].filter((id) => !keep.has(id))
+    try {
+      const a = ups.length ? await window.electronAPI.boardHistorySave(ups as unknown as BoardHistoryRecord[]) : { ok: true }
+      const b = dels.length ? await window.electronAPI.boardHistoryDelete(dels) : { ok: true }
+      const err = !a.ok ? `검증 이력을 저장하지 못했습니다(${(a as { error?: string }).error ?? '저장 실패'}). 이번 회차는 앱을 끄면 사라질 수 있습니다. 리포트로 먼저 내보내 두세요.` : !b.ok ? `이력에서 지운 회차 파일을 지우지 못했습니다(${(b as { error?: string }).error ?? '삭제 실패'}). 다음에 열면 다시 보일 수 있습니다.` : ''
+      // 저장이 잘 되면 저장 오류만 지운다 — 불러올 때 난 경고(손상 파일 · 그룹 파일)는 남긴다(저장 한 번에 경고가 사라져 놓쳤다)
+      if (mountedRef.current) setHistErr(err || loadWarnRef.current)
+      return !err
+    } catch (e) {
+      if (mountedRef.current) setHistErr(`검증 이력을 저장하지 못했습니다(${e instanceof Error ? e.message : String(e)}).`)
+      return false
+    }
+  }
+  /** 검증 그룹(VerifyGroup 주석) · 새 회차가 들어갈 그룹 · 차수 */
+  const [groups, setGroups] = useState<VerifyGroup[]>([])
+  const groupsRef = useRef<VerifyGroup[]>([])
+  groupsRef.current = groups
+  /** groups.json 을 읽지 못함(손상) — 덮어쓰면 그룹이 지워지므로 저장을 막는다 */
+  const groupsBadRef = useRef(false)
+  /**
+   * 열 때 파일에서 이력 · 그룹을 읽는다. 처음 한 번은 예전 저장 위치(localStorage)의 이력 · 그룹을 파일로 옮긴다(boardHistory:migrate 주석).
+   * 예전 이력이 깨져 읽지 못하면 옮기지 않고(표시도 남기지 않아 다음에 다시 시도) 알리기만 한다.
+   */
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      let r = await window.electronAPI.boardHistoryLoad()
+      let migWarn = ''
+      if (r.ok && !r.migrated) {
+        const legacy = loadHistory()
+        if (historyUnreadable) {
+          migWarn = '예전 저장 위치의 검증 이력을 읽지 못해 새 저장 위치로 옮기지 못했습니다. 예전 이력은 지우지 않고 남겨 둡니다.'
+        } else {
+          const m = await window.electronAPI.boardHistoryMigrate(legacy as unknown as BoardHistoryRecord[], loadGroupsLegacy())
+          if (!m.ok) migWarn = `예전 검증 이력을 새 저장 위치로 옮기지 못했습니다(${m.error ?? '실패'}). 다음에 열면 다시 시도합니다.`
+          if (m.ok) r = await window.electronAPI.boardHistoryLoad()
+        }
+      }
+      if (!alive) return
+      const warns: string[] = migWarn ? [migWarn] : []
+      if (!r.ok) warns.push(`검증 이력을 읽지 못했습니다(${r.error ?? '읽기 실패'}). 새 회차는 저장되지만 지난 회차 · 그룹이 보이지 않을 수 있고, 그룹 변경은 저장하지 않습니다.`)
+      else if (r.bad.length) warns.push(`검증 이력 파일 ${r.bad.length}개를 읽지 못했습니다(손상). 그 파일은 지우지 않고 남겨 둡니다.`)
+      if (r.groupsBad) warns.push('검증 그룹 파일을 읽지 못했습니다(손상). 그룹을 덮어쓰지 않으려고 그룹 변경을 저장하지 않습니다.')
+      const loaded = (r.list as unknown as HistoryRecord[]).map(repairPortalRecord)
+      // 읽는 사이에 저장된 회차(메모리 쪽)가 이긴다
+      const map = new Map(loaded.map((h) => [h.id, h]))
+      for (const h of historyRef.current) map.set(h.id, h)
+      const merged = [...map.values()].sort((a, b) => b.t0 - a.t0)
+      historyRef.current = merged
+      setHistory(merged)
+      // 읽기 자체가 실패했어도(r.ok=false) 그룹은 빈 목록일 뿐 '없는' 것이 아니다 — 저장하면 파일의 그룹을 지우므로 막는다
+      groupsBadRef.current = !!r.groupsBad || !r.ok
+      if (warns.length) {
+        loadWarnRef.current = warns.join(' ')
+        setHistErr((cur) => [cur, loadWarnRef.current].filter(Boolean).join(' '))
+      }
+      if (!groupsRef.current.length) setGroups(normGroups(r.groups))
+      histLoadedRef.current = true
+      setHistLoaded(true)
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+  /**
+   * 환경 구성도 수집(lib/envMap 주석) — 상태보드 설정의 세션을 그대로 쓰고 **조회 명령만** 보낸다(2026-11-14 사용자: 노드 안 제어 금지).
+   * 출처마다 따로 돌려 하나가 실패해도 나머지는 그린다. 노드 세션은 설정의 노드 칸(hosts) · 클러스터 상태는 OpenStack 조회 세션 ·
+   * Ceph 는 Ceph 조회 세션(없으면 OpenStack 조회 세션) · k8s 는 kubectl 조회 세션.
+   */
+  const envCollect: EnvCollect = {
+    sessions: () => {
+      const c = cfgRef.current
+      const nm = (id: string) => (id ? `${nameOf(id)}${connectedOf(id) ? '' : '(연결 안 됨)'}` : '설정 안 됨')
+      const nodes = [...new Set(c.hosts.filter(Boolean))]
+      return {
+        nodes: `${nodes.length ? `노드 세션 ${nodes.length}개(${nodes.map(nm).join(', ')})` : '설정의 노드 세션 없음'} + 연결된 다른 세션`,
+        ctrl: nm(c.osSession),
+        os: nm(c.osSession),
+        ceph: nm(c.ceph || c.osSession),
+        k8s: nm(c.pod),
+      }
+    },
+    run: async (onStep) => {
+      const c = cfgRef.current
+      const raw: EnvMapRaw = { at: Date.now(), nodes: [], errors: {} }
+      const live = (id: string) => !!id && connectedOf(id)
+      /** 성공이지만 알릴 말(다른 세션으로 읽음 등) — 단계 줄에 회색으로 */
+      const notes: Partial<Record<EnvStep, string>> = {}
+      const step = async (k: EnvStep, label: string, fn: () => Promise<string>) => {
+        onStep(k, 'run')
+        try {
+          const msg = await fn()
+          if (msg) raw.errors[label] = msg
+          onStep(k, msg ? 'fail' : 'ok', msg || notes[k])
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          raw.errors[label] = msg
+          onStep(k, 'fail', msg)
+        }
+      }
+      const tail = (r: RunResult) => ((r.out || r.err || r.error || '') + '').trim().slice(-200)
+      await Promise.all([
+        step('nodes', '물리 노드', async () => {
+          /*
+           * 설정의 노드 칸 세션 + **연결된 다른 세션 전부**(11-14 실사용: 컴퓨트 노드 세션을 열어 두었지만 설정의 노드 칸(3개)에 없어 노드4 가
+           * '못 읽음' 이었다 — 상태보드 노드 칸은 DOWN 감시 대상이라 컴퓨트를 일부러 넣지 않을 수 있다). 다른 세션도 hostname · 서비스 목록 같은
+           * 조회뿐이고, 물리 노드가 아닌 곳(k8s VM 등)의 결과는 묶을 때 Nova 하이퍼바이저 · pcs 노드에 없는 이름이라 버린다(buildEnvMap)
+           */
+          const cfgIds = [...new Set(c.hosts.filter(Boolean))]
+          const extra = sessionsRef.current.filter((x) => x.connected && !cfgIds.includes(x.id)).map((x) => x.id)
+          const on = [...cfgIds.filter(live), ...extra]
+          if (!on.length) return '연결된 세션이 없습니다'
+          const rs = await Promise.all(on.map((id) => run(id, NODE_SCRIPT, 40_000)))
+          raw.nodes = rs.map((r) => (r.ok && r.out ? { out: r.out } : { error: tail(r) }))
+          // 실패 수는 설정의 노드 칸만 센다(다른 세션은 노드가 아닐 수 있다)
+          const bad = rs.slice(0, cfgIds.filter(live).length).filter((r) => !r.ok || !r.out).length
+          const off = cfgIds.length - cfgIds.filter(live).length
+          return bad || off ? `설정의 노드 세션 ${bad + off}개를 읽지 못했습니다(연결 안 됨 ${off} · 실패 ${bad})` : ''
+        }),
+        step('ctrl', 'Pacemaker · RabbitMQ · Galera', async () => {
+          if (!live(c.osSession)) return 'OpenStack 조회 세션이 연결돼 있지 않습니다'
+          const r = await run(c.osSession, CTRL_SCRIPT, 40_000)
+          if (!r.ok) return `읽지 못했습니다. ${tail(r)}`
+          raw.ctrl = r.out
+          return ''
+        }),
+        step('os', 'OpenStack', async () => {
+          if (!live(c.osSession)) return 'OpenStack 조회 세션이 연결돼 있지 않습니다'
+          const os: NonNullable<EnvMapRaw['os']> = {}
+          const miss: string[] = []
+          for (const [k, sub] of Object.entries(OS_CMDS) as [keyof typeof OS_CMDS, string][]) {
+            const r = await run(c.osSession, osCmd(c.osRc, sub), 90_000)
+            if (r.ok && jsonOf(r.out) != null) os[k] = r.out
+            else miss.push(sub.split(' ')[0])
+          }
+          // 세그먼트마다 호스트(uuid 는 셸에 들어가므로 UUID 꼴만)
+          const segs = Array.isArray(jsonOf(os.segments)) ? (jsonOf(os.segments) as Record<string, unknown>[]) : []
+          os.segHosts = {}
+          for (const g of segs) {
+            const id = String(g.uuid ?? '')
+            if (!/^[0-9a-f-]{36}$/i.test(id)) continue
+            const r = await run(c.osSession, osCmd(c.osRc, segHostsCmd(id)), 60_000)
+            // osCmd 는 2>&1 이라 실패해도 ok 다 — JSON 이 아니면 못 읽은 것(빈 세그먼트로 그리지 않는다, 검토 지적)
+            if (r.ok && Array.isArray(jsonOf(r.out))) os.segHosts[id] = r.out ?? ''
+            else miss.push(`segment host list(${String(g.name ?? id)})`)
+          }
+          raw.os = os
+          return miss.length ? `일부를 읽지 못했습니다(${miss.join(', ')}). openrc(${c.osRc}) · openstack CLI 를 확인하세요` : ''
+        }),
+        step('ceph', 'Ceph', async () => {
+          const id = c.ceph || c.osSession
+          if (!live(id)) return 'Ceph 조회 세션이 연결돼 있지 않습니다'
+          const r = await run(id, CEPH_SCRIPT, 60_000)
+          if (!r.ok) return `읽지 못했습니다. ${tail(r)}`
+          raw.ceph = r.out
+          return /"health"/.test(r.out ?? '') ? '' : 'ceph -s 를 읽지 못했습니다'
+        }),
+        step('k8s', 'k8s', async () => {
+          /*
+           * 설정의 kubectl 조회 세션이 지금 열린 세션으로 풀리지 않으면(저장된 프로필 키와 다른 주소 · 계정으로 붙은 경우 — 11-14 실사용:
+           * 컨트롤플레인 VM 을 열어 두었는데 '연결 안 됨'), 연결된 세션 중 kubectl 이 답하는 곳을 찾아 쓴다. 노드 · OpenStack · Ceph 세션은
+           * 뒤로 미룬다(대개 kubectl 이 없다). 찾는 명령도 조회(get nodes)뿐이다
+           */
+          let id = c.pod
+          if (!live(id)) {
+            const all = sessionsRef.current.filter((x) => x.connected).map((x) => x.id)
+            const used = new Set([...c.hosts, c.osSession, c.ceph])
+            for (const cid of [...all.filter((x) => !used.has(x)), ...all.filter((x) => used.has(x))]) {
+              const t = await run(cid, 'kubectl get nodes --no-headers --request-timeout=8s 2>&1 | head -3', 15_000)
+              if (t.ok && /\s(Ready|NotReady)(,\S+)?\s/.test(t.out ?? '')) {
+                id = cid
+                notes.k8s = `설정의 kubectl 조회 세션이 연결돼 있지 않아 ${nameOf(cid)} 에서 읽었습니다`
+                break
+              }
+            }
+            if (!live(id)) return 'kubectl 조회 세션이 연결돼 있지 않고, 연결된 세션 중 kubectl 이 되는 곳도 없습니다'
+          }
+          const r = await run(id, K8S_SCRIPT, 90_000)
+          if (!r.ok) return `읽지 못했습니다. ${tail(r)}`
+          raw.k8s = r.out
+          return /^NAME\s+STATUS/m.test(r.out ?? '') ? '' : 'kubectl get nodes 를 읽지 못했습니다'
+        }),
+      ])
+      return raw
+    },
+  }
+  /**
+   * 검증 환경의 Nova 불러오기(fillFromNova 주석) — 상태보드 설정의 OpenStack 세션 · openrc 로 nova-compute 호스트를 읽고, 호스트마다
+   * 그 위 VM 이름을 읽는다. 호스트 이름은 셸 명령에 들어가므로 노드명 꼴만 쓴다(looksLikeNode).
+   */
+  const novaFetch = async (): Promise<{ ok: true; hosts: NovaHosts } | { ok: false; error: string }> => {
+    const c = cfgRef.current
+    if (!c.osSession || !connectedOf(c.osSession)) return { ok: false, error: '상태보드 설정의 OpenStack 세션이 연결돼 있지 않습니다(설정 → OpenStack 세션 · admin_openrc 경로).' }
+    const json = (out: string): unknown => {
+      const a = out.indexOf('[')
+      const b = out.lastIndexOf(']')
+      if (a < 0 || b < a) return null
+      try {
+        return JSON.parse(out.slice(a, b + 1))
+      } catch {
+        return null
+      }
+    }
+    const r = await run(c.osSession, osCmd(c.osRc, 'compute service list --service nova-compute'), 60_000)
+    const svc = r.ok ? json(r.out ?? '') : null
+    if (!Array.isArray(svc)) return { ok: false, error: `nova-compute 목록을 읽지 못했습니다. openrc(${c.osRc}) · openstack CLI 를 확인하세요. ${(r.out || r.err || r.error || '').toString().trim().slice(-240)}` }
+    const hostNames = [...new Set(svc.map((x) => String((x as Record<string, unknown>).Host ?? '')).filter(looksLikeNode))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    const hosts: NovaHosts = []
+    for (const h of hostNames) {
+      // --limit 은 쓰지 않는다 — '--limit -1' 은 -1 을 옵션으로 읽었고, '--limit=-1' 은 'expected a non-negative integer' 로 막혔다
+      // (2026-11-13 실사용, CLI 판마다 다름). 빼면 Nova 기본 한도(max_limit, 보통 1000)까지 온다 — 호스트 하나의 VM 수로는 넉넉하다
+      const r2 = await run(c.osSession, osCmd(c.osRc, `server list --all-projects --host ${h} -c Name`), 60_000)
+      const arr = r2.ok ? json(r2.out ?? '') : null
+      // CLI 오류는 사용법(usage) 전문 뒤 마지막 줄에 이유가 온다 — 앞을 자르면 이유가 안 보였다(11-13 실사용)
+      if (!Array.isArray(arr)) return { ok: false, error: `${h} 의 VM 목록을 읽지 못했습니다. ${(r2.out || r2.err || r2.error || '').toString().trim().slice(-240)}` }
+      hosts.push({ host: h, vms: arr.map((x) => String((x as Record<string, unknown>).Name ?? '')).filter(Boolean) })
+    }
+    return { ok: true, hosts }
+  }
+  /** 그룹 저장 — 파일 쓰기는 비동기라 화면은 먼저 바꾸고, 실패하면 보드 위에 알린다 */
+  const saveGroups = (next: VerifyGroup[]): string => {
+    // 불러오기 전에 저장하면 파일의 그룹 목록을 이 목록(새로 만든 것 하나)으로 덮어쓴다(빌드 전 검토 11-13)
+    if (!histLoadedRef.current) return '검증 이력 · 그룹을 아직 불러오는 중입니다. 잠시 뒤에 다시 저장하세요.'
+    if (groupsBadRef.current) return '검증 그룹 파일을 읽지 못해 덮어쓰지 않았습니다(기존 그룹을 지우지 않으려고).'
+    void window.electronAPI
+      .boardHistorySaveGroups(next)
+      .then((r) => {
+        if (!r.ok && mountedRef.current) setHistErr(`검증 그룹을 저장하지 못했습니다(${r.error ?? '저장 실패'}).`)
+      })
+      .catch(() => {})
+    return ''
+  }
+  const [curGroup, setCurGroupState] = useState(loadCurGroup)
+  const curGroupRef = useRef(curGroup)
+  curGroupRef.current = curGroup
+  const setCurGroup = (v: { groupId?: string; phaseId?: string }) => {
+    setCurGroupState(v)
+    saveCurGroup(v)
+  }
+  /** 그룹을 바꾸고 저장 — 사라진 그룹 · 차수에 걸려 있던 회차의 소속도 같이 푼다 */
+  const applyGroups = (next: VerifyGroup[], hist: HistoryRecord[] = historyRef.current): string => {
+    const err = saveGroups(next)
+    if (err) return err
+    setGroups(next)
+    const pruned = pruneMembership(hist, next)
+    if (pruned !== hist || hist !== historyRef.current) {
+      void persistHistory(pruned)
+      setHistory(pruned)
+    }
+    const cg = curGroupRef.current
+    const g = next.find((x) => x.id === cg.groupId)
+    if (cg.groupId && (!g || (cg.phaseId && !g.phases.some((ph) => ph.id === cg.phaseId)))) setCurGroup(g ? { groupId: g.id } : {})
+    return ''
   }
   /** 회차 id(t0) → 저장된 증적 key 들 — 타임라인의 [증적] 버튼을 띄울지 정한다 */
   const [evIndex, setEvIndex] = useState<Record<string, string[]>>({})
@@ -1108,6 +1806,11 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
     }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', up)
+  }
+  const requestClose = () => {
+    if (!running) return onClose()
+    setMinimized(false)
+    setCloseAsk(true)
   }
   // 최소화 시 칩을 툴바의 '포트 포워딩(터널)' 버튼 우측에 붙인다(기본 위치). 이후 드래그로 옮길 수 있다.
   const minimize = () => {
@@ -1168,6 +1871,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
   const lastPcsOutRef = useRef('')
   /** masakari 완료를 원문 없이(직전 값으로) 처음 본 회차 — 다음 성공 조회에서 증적을 남긴다 */
   const masakariEvPendingRef = useRef(false)
+  /** 옮기지 못한 VM 이름을 이미 물어본 실패 기록(회차 · 엔진 · 시각) — 한 번만 묻는다(코드 리뷰 11-11: 폴링마다 server list 를 다시 쌓았다) */
+  const vmNameTriedRef = useRef<Set<string>>(new Set())
   // 네임스페이스 → 직전 폴링에서 비정상이던 워크로드 집합 (사라지면 복구로 판정)
   const badWorkloadsRef = useRef<Record<string, Set<string>>>({})
   /** pcs 가 OFFLINE 으로 본 적 있는 host — 다시 Online 이면 '클러스터 재합류' */
@@ -1221,7 +1926,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
   // host 세션 id → 실제 hostname (VIP 노드명 매칭용, 세션당 1회만 조회)
   const hostnamesRef = useRef<Record<string, string>>({})
   // masakari 세션 id → 로그시각 보정값 { delta(ms), ok } (검증 시작 시 host date 로 1회 산출)
-  const calibRef = useRef<Record<string, { delta: number; ok: boolean }>>({})
+  const calibRef = useRef<Record<string, { delta: number; ok: boolean; skew?: number }>>({})
   /** 지금 시계를 재는 중인 masakari 호스트 — 같은 호스트를 겹쳐 재지 않게 */
   const calibBusyRef = useRef<Set<string>>(new Set())
   /** 마지막으로 **제대로 받은** Ceph 상태 — 응답이 늦은 프레임에 '몇 초 전 값' 으로 보여 준다 */
@@ -1364,6 +2069,27 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
     if (t0Ref.current === runT0 && savedRef.current) commitRef.current(closedAtRef.current, true)
   }
 
+  /**
+   * Masakari 증적의 시각 근거 두 줄(2026-11-13 사용자 지적: 증적의 finished 줄 시각과 복구 타임라인이 1초씩 어긋났다).
+   * 어긋남은 오류가 아니다 — 로그는 **서버 시계 · 초 단위** 로 찍히고, 타임라인은 그것을 **PC 시계** 로 밀리초까지 보정한 뒤 초 아래를
+   * 버려 보인다. 서버 시계가 PC 보다 0.6초 빠르면 원문 15:04:05 가 타임라인 15:04:04 가 된다. 보정을 초 단위로 되돌리면 예전처럼
+   * 서버 시각이 최대 1초 치우친다(measureClock 주석) — 그래서 보정은 그대로 두고, 원문 표기 시각과 잰 시계 차이를 증적에 나란히 밝힌다.
+   */
+  const masaClockFacts = (id: string, line?: string): { label: string; text: string }[] => {
+    const out: { label: string; text: string }[] = []
+    const raw = (line ?? '').match(/\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2}:\d{2})/)?.[1]
+    if (raw) out.push({ label: '로그 원문 시각 (서버 시계 표기)', text: raw })
+    const sk = calibRef.current[id]?.skew
+    if (sk != null)
+      out.push({
+        label: '서버 시계 차이',
+        text:
+          Math.abs(sk) < 50
+            ? '거의 없음 (0.05초 안쪽)'
+            : `서버가 PC 보다 ${(Math.abs(sk) / 1000).toFixed(2)}초 ${sk > 0 ? '빠름' : '느림'}: 타임라인은 이만큼 보정한 PC 시계라 원문과 1초 안팎 다를 수 있습니다`,
+      })
+    return out
+  }
   /**
    * 호스트 시계 → PC 시계 보정값. 짧은 date 의 왕복 가운데를 '호스트가 찍은 순간' 으로 본다(masakari 와 같은 방식).
    *  - delta: 호스트 **로컬 표기**(시간대 없음)를 PC 로컬로 읽은 값 → PC 시계  (시간대 차이 + 시계 차이)
@@ -1745,6 +2471,10 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         firstAt: Math.min(...vms.map((v) => v.createdAt)),
         // 아직 옮기는 중인 VM 의 updatedAt 은 '완료' 가 아니다 — 끝난 VM 만
         lastAt: Math.max(...(vms.some((v) => v.done) ? vms.filter((v) => v.done) : vms).map((v) => v.updatedAt)),
+        // 이름을 찾은 것만(못 찾으면 비워 둔다 — 2026-11-11 사용자 결정: '기록 없음' 은 더 이상하다)
+        failedNames: vms.filter((v) => v.failed || !v.done).map((v) => names[v.server]).filter(Boolean).length
+          ? vms.filter((v) => v.failed || !v.done).map((v) => names[v.server]).filter(Boolean)
+          : undefined,
       }
       refreshSavedHistory(runT0)
     }
@@ -1796,6 +2526,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
       focus: [p.line ?? '', ...vms.map((v) => v.server)].filter(Boolean),
       facts: [
         { label: 'evacuation 완료 (masakari 로그 시각, PC 시계로 보정)', at: p.at },
+        ...masaClockFacts(id, p.line),
         ...(vms.length
           ? [
               { label: `첫 VM 시작 (Nova)`, at: Math.min(...vms.map((v) => v.createdAt)) },
@@ -2004,7 +2735,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         calibBusyRef.current.add(id)
         try {
           const clock = await measureClock(id)
-          calibRef.current[id] = clock ? { delta: clock.delta, ok: true } : { delta: 0, ok: false }
+          calibRef.current[id] = clock ? { delta: clock.delta, ok: true, skew: clock.skew } : { delta: 0, ok: false }
         } finally {
           calibBusyRef.current.delete(id)
         }
@@ -2184,6 +2915,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
       // 파서를 고쳐도 서식이 또 바뀔 수 있으니, '노드 목록에 있는 이름' 이라는 사실로 검증한다.
       const knownNodes = [...pcs.online, ...pcs.offline]
       let vipMoved: { from: string; to: string } | null = null
+      /** 같은 프레임의 역할 이동을 VIP 증적에 합칠 것(아래 byMove 주석) */
+      let vipExtra: { targets: { resources: string[]; to: string; label: string }[]; dc: string } | null = null
       const isKnown = (n: string) => knownNodes.some((k) => k.toLowerCase() === n.toLowerCase())
       if (vipNode && !noQuorum && (knownNodes.length === 0 || isKnown(vipNode))) {
         if (!vipSeenRef.current) vipSeenRef.current = vipNode
@@ -2270,7 +3003,13 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
             if (g.names[0] !== 'DC') targets.push({ resources: g.names, to: g.to, label: `${name}: ${g.from} → ${g.to}` })
           }
           const dcMove = [...byMove.values()].find((g) => g.names[0] === 'DC')
-          if (srcId)
+          /*
+           * 같은 프레임에 VIP 도 옮겨 갔으면 역할 이동을 따로 뜨지 않고 VIP 증적에 합친다(2026-11-10 사용자 요청: 'VIP 이동' · 'pacemaker 역할
+           * 이동' 이 같은 페일오버를 두 번 말했다). 다른 때 옮겨 간 것(노드가 돌아와 되돌아감 등)은 지금처럼 따로 남긴다.
+           */
+          if (vipMoved && srcId) {
+            vipExtra = { targets, dc: dcMove ? `DC ${dcMove.from} → ${dcMove.to}` : '' }
+          } else if (srcId)
             void ((runT0: number, opt: Parameters<typeof captureMove>[1]) => inSeq(srcId, () => captureMove(runT0, opt)))(t0Ref.current, {
               key: `roles:${now}`,
               title: `pacemaker 역할 이동${dcMove ? `: DC ${dcMove.from} → ${dcMove.to}` : ''}`,
@@ -2282,12 +3021,13 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         }
         if (vipMoved && srcId) {
           // VIP 와 같은 그룹의 리소스 start 시각도 함께 — 'VIP 는 넘어갔는데 haproxy 는 언제 떴나' 가 증적의 핵심이다
+          const ex = vipExtra as { targets: { resources: string[]; to: string; label: string }[]; dc: string } | null
           const vipRes = resources.find((r) => /int_vip/i.test(r.name))
           const groupMates = vipRes?.group ? resources.filter((r) => r.group === vipRes.group).map((r) => r.name) : []
           if (msRef.current.vip) msRef.current.vip.with = groupMates.filter((n) => !/int_vip/i.test(n))
           void ((runT0: number, opt: Parameters<typeof captureMove>[1]) => inSeq(srcId, () => captureMove(runT0, opt)))(t0Ref.current, {
             key: 'vip',
-            title: `VIP 이동: ${vipMoved.from} → ${vipMoved.to}`,
+            title: `VIP 이동: ${vipMoved.from} → ${vipMoved.to}${ex?.dc ? ` (pacemaker ${ex.dc})` : ''}`,
             srcId,
             before: lastPcsOutRef.current,
             after: pcsOut,
@@ -2297,6 +3037,8 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
                 to: vipMoved.to,
                 label: `VIP: ${vipMoved.from} → ${vipMoved.to}`,
               },
+              // 같은 때 옮겨 간 다른 pacemaker 리소스(역할 이동)도 이 증적에서 start 시각을 함께 본다
+              ...(ex?.targets ?? []),
             ],
             vip: true,
           })
@@ -2381,6 +3123,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
             focus: [m.line ?? '', ...near.filter((l) => /Failed to|Timeout for instance|state 'FAILURE'|\(HTTP \d{3}\)/i.test(l))].filter(Boolean),
             facts: [
               { label: `${m.state === 'failed' ? '최종 실패' : '1차 시도 실패'} (masakari 로그 시각, PC 시계로 보정): 타임라인 기준`, at },
+              ...masaClockFacts(m.id, m.line),
               ...('reason' in m && m.reason ? [{ label: '이유', text: m.reason }] : []),
             ],
             note: '강조된 첫 줄이 알림을 실패로 끝낸 줄(타임라인 시각)입니다. error 는 1차 시도 실패로 masakari 가 한 번 더 시도하고, failed 는 재시도까지 끝난 최종 실패입니다. 실패해도 장애 호스트는 maintenance 로 남으므로 노드가 돌아오면 풀어야 다음 장애 알림을 받습니다.',
@@ -2396,6 +3139,32 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
             brief: 'brief' in m ? m.brief : undefined,
             failedVms: 'failedVms' in m ? m.failedVms : undefined,
           })
+        /*
+         * 옮기지 못한 VM 의 이름 — 로그에는 UUID 만 있다. Nova 에서 이름을 찾아 붙인다(리포트 '실패 원인', 2026-11-11 사용자 요청).
+         * 못 찾으면 비워 둔다(사용자 결정: '기록 없음' 을 남기면 더 이상하다). 한 번만 묻는다 — 이미 이름이 있으면 건너뛴다.
+         */
+        const ids = 'failedIds' in m ? m.failedIds : undefined
+        const entry = list.find((x) => x.by === by && x.at === m.at)
+        const tryKey = `${t0Ref.current}|${by}|${m.at}`
+        if (ids?.length && entry && !entry.failedVmNames && !vmNameTriedRef.current.has(tryKey)) {
+          vmNameTriedRef.current.add(tryKey)
+          const os = masaOs(m.id)
+          const runT0 = t0Ref.current
+          if (os.sid)
+            void inSeq(os.sid, async () => {
+              const nr = await run(os.sid, `bash -lc '. ${os.rc} 2>/dev/null; openstack server list --all-projects --limit 2000 -c ID -c Name -f json'`, 30_000)
+              try {
+                const byId = new Map((JSON.parse(nr.out ?? '[]') as { ID?: string; Name?: string }[]).map((x) => [String(x.ID ?? '').toLowerCase(), x.Name ?? '']))
+                const found = ids.map((u) => byId.get(u.toLowerCase())).filter((x): x is string => !!x)
+                if (found.length && t0Ref.current === runT0) {
+                  entry.failedVmNames = found
+                  refreshSavedHistory(runT0)
+                }
+              } catch {
+                /* 이름 없이 둔다 */
+              }
+            })
+        }
       }
       const done = results.find((m) => m.state === 'finished')
       if (!msRef.current.masakari && done) {
@@ -2841,14 +3610,35 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         ceph: ms.ceph ? { ...ms.ceph } : undefined,
         cephHealthy: ms.cephHealthy ? { ...ms.cephHealthy } : undefined,
         portalPending: ms.portalPending?.length ? [...ms.portalPending] : undefined,
+        portalWatched: ms.portalWatched?.length ? [...ms.portalWatched] : undefined,
         rejoin: ms.rejoin ? [...ms.rejoin] : undefined,
         k8sReady: ms.k8sReady ? [...ms.k8sReady] : undefined,
       },
     }
-    const next = [rec, ...loadHistory().filter((h) => h.id !== rec.id)]
-    // 50회를 넘어 밀려나는 회차의 증적도 같이 지운다
+    const saved = historyRef.current
+    // 진행 중인 회차를 다시 저장할 때 이력 창에서 적어 둔 원인 · 조치를 덮어 지우지 않게(rec 은 마일스톤으로만 새로 만든다)
+    const prev = saved.find((h) => h.id === rec.id)
+    if (prev?.notes?.length) rec.notes = prev.notes
+    // 그룹 · 차수: 이미 저장된 회차면 이력 창에서 바꾼 소속을 지키고, 처음 저장이면 상태보드에서 고른 '지금 그룹 · 차수' 로
+    if (prev) {
+      rec.groupId = prev.groupId
+      rec.phaseId = prev.phaseId
+    } else {
+      const cg = curGroupRef.current
+      const g = groupsRef.current.find((x) => x.id === cg.groupId)
+      if (g) {
+        rec.groupId = g.id
+        rec.phaseId = g.phases.some((ph) => ph.id === cg.phaseId) ? cg.phaseId : undefined
+      }
+    }
+    const all = [rec, ...saved.filter((h) => h.id !== rec.id)]
+    // 보관 한도를 넘어 밀려나는 회차(그룹 밖 · 오래된 것)는 이력과 증적을 같이 지운다(HIST_MAX 주석)
     // 밀려난 회차의 증적은 **저장이 된 뒤에** 지운다 — 저장이 실패하면 저장본에는 그 회차가 남아 있어 증적 없는 회차가 됐다(코드 점검 10-30)
-    if (persistHistory(next)) dropEvidence(next.slice(HIST_MAX).map((h) => h.id))
+    const over = new Set(overflowOf(all))
+    const next = over.size ? all.filter((h) => !over.has(h.id)) : all
+    void persistHistory(next).then((ok) => {
+      if (ok && over.size) dropEvidence([...over])
+    })
     // 언마운트(보드 닫기) 중에도 저장은 돼야 하므로, 화면 갱신만 마운트 상태에서 한다
     if (mountedRef.current) setHistory(next)
   }
@@ -3019,15 +3809,18 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         { label: '한 노드에 몰림', text: `${bad.length}개 워크로드` },
         { label: '필수 규칙 없음(권장만 · 규칙 없음)', text: `${res.rows.filter((w) => w.verdict === 'soft' || w.verdict === 'none').length}개` },
       ],
-      note: '레플리카가 한 노드에만 있으면 그 노드를 내렸을 때 그 워크로드는 통째로 끊깁니다. 필수(required) 규칙이면 장애 뒤 노드가 돌아올 때 자동으로 다시 나뉩니다.',
+      note: `레플리카가 한 노드에만 있으면 그 노드를 내렸을 때 그 워크로드는 통째로 끊깁니다. ${SPREAD_NOTE_NEW}`,
     })
   }
-  /** 수동 [분산 점검] — 회차 사이(노드가 돌아온 뒤 다음 노드를 내리기 전)에 쓴다. 검증 중이면 그 회차 증적에도 남긴다 */
+  /**
+   * 수동 [분산 점검] — 회차 사이(노드가 돌아온 뒤 다음 노드를 내리기 전)에 쓴다. 결과 창으로만 보이고 증적에는 남기지 않는다
+   * (2026-11-10 사용자 결정: 검증 중에 누른 점검이 증적 · 리포트에 '파드 분산 상태 (장애 중)' 으로 섞였다. 회차 증적은 시작 직전 점검 하나면 된다).
+   * 예전 회차에 남은 'spread:<시각>' 증적은 그대로 읽힌다.
+   */
   const checkSpreadNow = async () => {
     if (spreadBusy) return
     const res = await runSpread()
     if (!res) return setSpreadView({ mode: 'manual', res: { at: Date.now(), rows: null, descheduler: null, namespaces: [], error: '파드 세션이 연결돼 있지 않거나 네임스페이스가 없습니다' } })
-    if (runningRef.current) saveSpreadEvidence(t0Ref.current, res, 'mid')
     setSpreadView({ mode: 'manual', res })
   }
   /** 시작 직전 점검 결과 — beginRun 뒤 그 회차 증적으로 저장한다(t0 가 정해져야 저장할 자리가 생긴다) */
@@ -3194,6 +3987,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
     forceTick((n) => n + 1)
   }, [])
   /** 포털 미복구 대상 — 바뀌면 이미 저장한 회차에도 반영한다(돌아올 때까지 계속 감시하므로 나중에 비워질 수 있다) */
+  /** 장애 뒤 감시한 화면 — 회차 동안 본 화면을 모두 모은다(중간에 설정을 바꿔 빠진 화면도 그 회차에서는 감시했던 것) */
+  const setPortalWatched = useCallback((names: string[]) => {
+    const cur = msRef.current.portalWatched ?? []
+    const add = names.filter((n) => !cur.includes(n))
+    if (!add.length) return
+    msRef.current.portalWatched = [...cur, ...add]
+    if (savedRef.current) commitRef.current(closedAtRef.current, true)
+  }, [])
   const setPortalPending = useCallback((names: string[]) => {
     const cur = msRef.current.portalPending ?? []
     if (cur.length === names.length && cur.every((n, i) => n === names[i])) return
@@ -3239,7 +4040,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
           const f = [...log].filter((e) => e.kind === 'fail').sort((a, b) => a.at - b.at)[0]
           return f ? [{ label: `최초 끊김 (${f.name})`, at: f.at }] : []
         })(),
-        ...(ph.firstAll != null ? [{ label: `1차 정상화: ${ph.pages}개 화면이 처음 모두 정상`, at: ph.firstAll }] : []),
+        ...(ph.firstAll != null ? [{ label: `1차 정상화: ${ph.total}개 화면이 처음 모두 정상${ph.calm ? `(끊기지 않은 ${ph.calm}개 포함)` : ''}`, at: ph.firstAll }] : []),
         ...(ms.portalFlaps ?? []).map((x) => ({ label: `다시 끊김: ${x.name}`, at: x.downAt })),
         ...(ph.finalAll != null && ph.flaps ? [{ label: '최종 정상화: 그 뒤 다시 끊기지 않음', at: ph.finalAll }] : []),
         ...(ms.portalPending?.length ? [{ label: '아직 안 돌아온 화면', text: ms.portalPending.join(', ') }] : []),
@@ -3511,9 +4312,14 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
     view === 'board' &&
     ((cfg.showServices && cleanUnits(cfg.services).length > 0) || (cfg.showOpenstack && !!cfg.osSession))
 
-  // 최소화: 컴포넌트는 계속 마운트되어 폴링이 유지되고, 우하단 작은 칩만 표시 → 뒤 세션 확인 가능
-  if (minimized) {
-    return (
+  /*
+   * 최소화: 칩만 보이고 보드는 **숨기기만** 한다(display:none). 예전엔 최소화하면 칩만 돌려주고(early return) 보드 본문을 내려서,
+   * 그 안의 포털 감시(PortalPanel) · 파드 로그 감시가 언마운트됐다. 최소화한 동안 포털을 조회하지 않았고, 다시 펼치면 감시가 새로
+   * 시작돼 화면마다 '끊김 · 정상화' 상태를 잊었다 — 2026-11-10 8회차: 이미 끊긴 화면에 '처음 끊김' 이 또 찍히고, 정상화됐던 화면이
+   * 다시 끊긴 것이 '다시 끊김' 이 아니라 '처음 끊김' 으로 남아 최종 정상화가 1차보다 이르게 굳었다(포털 실패가 성공으로 나옴).
+   * 다시 early return 으로 바꾸지 말 것: 상태보드 폴링(이 컴포넌트)만 살아 있어도 그 자식 감시는 죽는다.
+   */
+  const minChip = minimized ? (
       <div
         data-anchor="board-chip"
         onMouseDown={onChipDown}
@@ -3542,16 +4348,17 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
         >
           <Maximize2 size={14} />
         </button>
-        <button onClick={onClose} title="닫기" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+        <button onClick={requestClose} title="닫기" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
           <X size={14} />
         </button>
       </div>
-    )
-  }
+  ) : null
 
   return (
-    // 배경 클릭으로 닫히지 않게 한다(검증 중 실수 방지). 닫기는 X, 잠깐 비켜두려면 최소화 사용.
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8">
+    <>
+    {minChip}
+    {/* 배경 클릭으로 닫히지 않게 한다(검증 중 실수 방지). 닫기는 X, 잠깐 비켜두려면 최소화 사용. 최소화 중에는 숨기기만 한다(minChip 주석) */}
+    <div className={'fixed inset-0 z-50 items-center justify-center bg-black/60 p-8 ' + (minimized ? 'hidden' : 'flex')}>
       <div
         className={
           'flex h-[88vh] max-w-[97vw] flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl ' +
@@ -3632,6 +4439,42 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
               )}
             </span>
           )}
+          {view === 'board' && groups.length > 0 && (
+            <span
+              className="ml-2 flex shrink-0 items-center gap-1"
+              title="새 회차가 들어갈 검증 그룹 · 차수. 회차가 처음 저장될 때 붙고, 나중에 이력 창에서 바꿀 수 있습니다"
+            >
+              <select
+                value={curGroup.groupId ?? ''}
+                onChange={(e) => setCurGroup(e.target.value ? { groupId: e.target.value } : {})}
+                className="max-w-[170px] rounded border border-white/10 bg-panel-light px-1.5 py-1 text-[11px] text-gray-100"
+              >
+                <option value="">그룹 없음</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+              {(() => {
+                const g = groups.find((x) => x.id === curGroup.groupId)
+                return g ? (
+                  <select
+                    value={curGroup.phaseId ?? ''}
+                    onChange={(e) => setCurGroup({ groupId: g.id, phaseId: e.target.value || undefined })}
+                    className="max-w-[110px] rounded border border-white/10 bg-panel-light px-1.5 py-1 text-[11px] text-gray-100"
+                  >
+                    <option value="">차수 없음</option>
+                    {g.phases.map((ph) => (
+                      <option key={ph.id} value={ph.id}>
+                        {ph.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : null
+              })()}
+            </span>
+          )}
           {view === 'board' && (
             <input
               value={runLabel}
@@ -3687,7 +4530,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
             >
               <Minus size={16} />
             </button>
-            <button onClick={onClose} title="닫기 (검증 종료)" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
+            <button onClick={requestClose} title="닫기 (검증 종료)" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-200">
               <X size={16} />
             </button>
           </div>
@@ -3712,6 +4555,7 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
             onMilestones={addPortalMilestones}
             onMilestoneRevoked={revokePortalMilestone}
             onPending={setPortalPending}
+            onWatched={setPortalWatched}
             onEvent={addPortalEvent}
           />
         </div>
@@ -3851,6 +4695,19 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
       {showHistory && (
         <HistoryView
           list={history}
+          loading={!histLoaded}
+          groups={groups}
+          onSaveGroups={(next) => applyGroups(next)}
+          initialGroupId={curGroup.groupId}
+          novaFetch={novaFetch}
+          envCollect={envCollect}
+          onAssign={(map, nextGroups) => {
+            const hist = historyRef.current.map((h) => {
+              const m = map[h.id]
+              return m ? { ...h, groupId: m.groupId, phaseId: m.groupId ? m.phaseId : undefined } : h
+            })
+            return applyGroups(nextGroups ?? groups, hist)
+          }}
           evIndex={evIndex}
           onEvidence={(id, key) => setEvOpen({ id, key })}
           onClose={() => setShowHistory(false)}
@@ -3862,15 +4719,21 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
               runLabelRef.current = label
               setRunLabel(label)
             }
-            const next = history.map((h) => (h.id === id ? { ...h, label: label.trim() || undefined } : h))
-            persistHistory(next)
+            const next = historyRef.current.map((h) => (h.id === id ? { ...h, label: label.trim() || undefined } : h))
+            void persistHistory(next)
             setHistory(next)
           }}
           onSetInject={(id, inject) => {
             // 지금 진행 중인 회차면 메모리에도 넣는다 — 안 그러면 다음 갱신 저장이 이 값을 덮어쓴다
             if (id === String(t0Ref.current)) msRef.current.inject = inject
-            const next = history.map((h) => (h.id === id ? { ...h, milestones: { ...h.milestones, inject } } : h))
-            persistHistory(next)
+            const next = historyRef.current.map((h) => (h.id === id ? { ...h, milestones: { ...h.milestones, inject } } : h))
+            void persistHistory(next)
+            setHistory(next)
+          }}
+          onSetNotes={(id, notes) => {
+            // 진행 중인 회차를 다시 저장해도 지워지지 않는다 — commitHistory 가 저장본의 notes 를 이어 받는다
+            const next = historyRef.current.map((h) => (h.id === id ? { ...h, notes: notes.length ? notes : undefined } : h))
+            void persistHistory(next)
             setHistory(next)
           }}
         />
@@ -3886,6 +4749,27 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
               : history.find((h) => h.id === evOpen.id) ?? null
           }
           onClose={() => setEvOpen(null)}
+        />
+      )}
+      {closeAsk && (
+        <ConfirmDialog
+          title="검증 중입니다"
+          message={
+            '창을 닫으면 이 회차 검증이 끝납니다(지금까지의 기록은 이력에 남습니다).\n' +
+            '· 검증 종료하고 닫기: 폴링을 멈추고 이 회차를 확정합니다\n' +
+            '· 최소화: 검증은 계속 돌고, 툴바 옆 칩으로 줄여 둡니다'
+          }
+          confirmLabel="검증 종료하고 닫기"
+          onConfirm={() => {
+            setCloseAsk(false)
+            onClose()
+          }}
+          secondaryLabel="최소화 (검증 계속)"
+          onSecondary={() => {
+            setCloseAsk(false)
+            minimize()
+          }}
+          onCancel={() => setCloseAsk(false)}
         />
       )}
       {askDrop && (
@@ -3905,14 +4789,18 @@ export default function StatusBoard({ sessions, onClose, onReconnect, onOpenLive
           onCancel={() => setAskDrop(null)}
           onConfirm={() => {
             const drop = new Set(askDrop.ids)
-            const next = history.filter((h) => !drop.has(h.id))
-            if (persistHistory(next)) dropEvidence(askDrop.ids)
+            const next = historyRef.current.filter((h) => !drop.has(h.id))
+            const ids = askDrop.ids
+            void persistHistory(next).then((ok) => {
+              if (ok) dropEvidence(ids)
+            })
             setHistory(next)
             setAskDrop(null)
           }}
         />
       )}
     </div>
+    </>
   )
 }
 
@@ -3998,7 +4886,7 @@ function runTotals(h: HistoryRecord, useInject = true): RunTotals {
   const fromInject = useInject && downAt != null && !!ms.inject && ms.inject.at <= downAt
   const base = fromInject ? (ms.inject as { at: number }).at : (downAt ?? h.t0)
   const svcPending = ms.portalPending ?? []
-  const ph = portalPhases({ portal: ms.portal ?? [], portalFlaps: ms.portalFlaps, portalPending: svcPending, portalLog: ms.portalLog })
+  const ph = portalPhases({ portal: ms.portal ?? [], portalFlaps: ms.portalFlaps, portalPending: svcPending, portalLog: ms.portalLog, portalWatched: ms.portalWatched })
   const portalHad = ph.pages > 0
   const masaWatched = masaWatchedOf(ms)
   const allFail = (masaWatched && !masaDoneOf(ms)) || svcPending.length > 0 || (portalHad && ph.firstAll == null)
@@ -4112,7 +5000,7 @@ function loadRto(): RtoTargets {
 /** '1:30' · '90' · '2분' → 초. 비우면 undefined */
 /**
  * 리포트에 넣을 항목(사용자 요청 — 보고받는 사람은 파드·Ceph 에 관심이 없다). 여러 회차를 골라도 **모든 회차에 같은 선택**을
- * 쓴다 — 회차마다 칸이 다르면 비교표로 비교할 수 없다. 뺀 항목은 머리에 '제외한 항목' 으로 밝힌다(의도적으로 뺀 것임이 보이게).
+ * 쓴다 — 회차마다 칸이 다르면 비교표로 비교할 수 없다. 예전엔 뺀 항목을 머리에 '제외한 항목' 으로 밝혔으나 2026-11-10 사용자 요청으로 뺐다(보고용 묶음이 기본이라 늘 붙었다).
  */
 interface ReportItems {
   hostVip: boolean
@@ -4121,6 +5009,11 @@ interface ReportItems {
   pods: boolean
   ceph: boolean
   node: boolean
+  /**
+   * 파드 로그 이상(새 오류 묶음) — 파드 복구와 따로 고른다(2026-11-10 사용자 요청: 회차마다 100건이 넘어 증적 원문이 너무 길어졌다).
+   * 기본은 뺀다(보고용 · 창을 열 때마다). 기술 검토용은 넣는다. 증적 원문의 'podlog:' 증적과 회차별 결과의 파드 로그 이상 표가 이 항목을 따른다.
+   */
+  podLogs: boolean
   inject: boolean
   evidence: boolean
 }
@@ -4131,33 +5024,26 @@ const REPORT_ITEM_LABELS: { key: keyof ReportItems; label: string }[] = [
   { key: 'pods', label: '파드 복구' },
   { key: 'ceph', label: 'Ceph 복구' },
   { key: 'node', label: '노드 복귀 (재연결 · 재합류 · OSD · k8s Ready)' },
+  { key: 'podLogs', label: '파드 로그 이상 (회차마다 많아 증적이 길어집니다)' },
   { key: 'inject', label: '장애 주입 시각 (빼면 DOWN 감지부터 잼)' },
   { key: 'evidence', label: '증적(서버 원문) 포함' },
 ]
-const REPORT_ALL: ReportItems = { hostVip: true, masakari: true, portal: true, pods: true, ceph: true, node: true, inject: true, evidence: true }
+const REPORT_ALL: ReportItems = { hostVip: true, masakari: true, portal: true, pods: true, ceph: true, node: true, podLogs: true, inject: true, evidence: true }
 /** 보고용 — 서비스가 언제 돌아왔나만(사용자가 정한 묶음) */
-const REPORT_BRIEF: ReportItems = { hostVip: true, masakari: true, portal: true, pods: false, ceph: false, node: false, inject: true, evidence: false }
+const REPORT_BRIEF: ReportItems = { hostVip: true, masakari: true, portal: true, pods: false, ceph: false, node: false, podLogs: false, inject: true, evidence: false }
 /** 증적 key 에 넣는 짧은 해시(로그 묶음 key 는 문장이 들어 있어 길다) */
 function keyHash(s: string): string {
   let h = 0
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
   return (h >>> 0).toString(36)
 }
-const REPORT_ITEMS_KEY = 'report_items_v1'
+/*
+ * 넣을 항목은 창을 열 때마다 보고용 묶음(호스트 DOWN · VIP · Masakari · 포털 · 장애 주입)에서 시작한다(2026-11-10 사용자 요청: 대부분 이
+ * 묶음으로 뽑는다). 예전엔 마지막에 고른 것을 기억해(report_items_v1) 기술 검토용을 한 번 뽑으면 다음에도 파드 · Ceph · 노드 복귀가
+ * 켜진 채 열렸다. 파드 · Ceph · 노드 복귀가 필요하면 그때 켜거나 [기술 검토용] 을 누른다. 종류(종합 · 회차별 · 증적)는 지금처럼 기억한다.
+ */
 function loadReportItems(): ReportItems {
-  try {
-    const v = JSON.parse(localStorage.getItem(REPORT_ITEMS_KEY) || 'null')
-    return v && typeof v === 'object' ? { ...REPORT_ALL, ...v } : { ...REPORT_ALL }
-  } catch {
-    return { ...REPORT_ALL }
-  }
-}
-function saveReportItems(v: ReportItems): void {
-  try {
-    localStorage.setItem(REPORT_ITEMS_KEY, JSON.stringify(v))
-  } catch {
-    /* 저장 못 해도 이번 리포트에는 쓴다 */
-  }
+  return { ...REPORT_BRIEF }
 }
 /**
  * 증적 머리 이름표 — 앱 증적 창 · HTML 리포트 · Markdown 내보내기 세 곳이 같은 말을 쓰게 한 곳에 둔다(예전엔 따로 적혀 있었다).
@@ -4177,12 +5063,22 @@ const EV_LABEL = {
   verify: '재확인 명령',
   verifyHint: '서버에서 직접 실행',
 } as const
+/**
+ * 증적의 '조회 명령' 칸 — 포털은 명령이 아니라 판정 기준을 한 줄로(2026-11-10 사용자 요청: 감시 방식 설명이 길고 '조회 명령' 이라는 이름과도
+ * 맞지 않았다). 연속 횟수는 저장된 문구('연속 10회 정상')에서 읽는다 — 회차마다 설정이 다를 수 있다.
+ */
+const evCmdOf = (it: { key: string; command: string }): { label: string; text: string; code: boolean } => {
+  if (it.key !== 'portal') return { label: EV_LABEL.cmd, text: it.command, code: true }
+  const n = it.command.match(/연속 (\d+)회 정상/)?.[1] ?? 'N'
+  return { label: '판정 기준', text: `각 화면의 핵심 API 가 ${n}회 연속 200 OK 이면 정상`, code: false }
+}
 /** 타임라인 줄이 어느 항목인가 — 리포트에서 뺀 항목의 줄은 넣지 않는다 */
 function rowItem(r: TimelineItem): keyof ReportItems | null {
   const t = r.target ?? ''
   if (t === 'host' || t === 'vip' || t === 'roles') return 'hostVip'
   if (t === 'masakari') return 'masakari'
-  if (t === 'portal') return 'portal'
+  // 포털 정상화 묶음의 하위 줄도 포털 항목이다(포털을 뺀 리포트에서는 같이 빠져야 한다)
+  if (t === 'portal' || t === 'portal-child') return 'portal'
   if (t === 'pods' || t.startsWith('pods:') || t === 'k8s' || t === 'podlog') return 'pods'
   if (t === 'ceph') return 'ceph'
   if (t === 'node') return 'node'
@@ -4190,11 +5086,23 @@ function rowItem(r: TimelineItem): keyof ReportItems | null {
   return null
 }
 /** 증적이 어느 항목인가 */
+/**
+ * 리포트(증적 원문 포함)에 넣을 증적인가 — buildHtmlReport 와 makeRunsReport(만들 파일 고르기)가 같은 판단을 하게 한 곳에(코드 리뷰 11-10:
+ * 파일 고르기는 거르기 전 개수로 해서, 고른 항목에 맞는 증적이 하나도 없는 회차에 '저장된 증적이 없습니다' 파일이 생겼다).
+ * 검증 전 분산 점검('spread')은 늘 넣고, 검증 중에 누른 점검('spread:<시각>')은 넣지 않는다(buildHtmlReport 주석).
+ */
+function evKeep(key: string, inc: ReportItems): boolean {
+  if (key === 'spread') return true
+  if (key.startsWith('spread:')) return false
+  const k = evItem(key)
+  return k == null || inc[k]
+}
 function evItem(key: string): keyof ReportItems | null {
   if (key === 'portal') return 'portal'
   if (key === 'down' || key === 'vip' || key.startsWith('roles')) return 'hostVip'
   if (key === 'masakari' || key.startsWith('masakariFail')) return 'masakari'
-  if (key.startsWith('pods') || key.startsWith('podlog') || key.startsWith('spread')) return 'pods'
+  if (key.startsWith('podlog')) return 'podLogs'
+  if (key.startsWith('pods') || key.startsWith('spread')) return 'pods'
   if (key.startsWith('ceph')) return 'ceph'
   if (key === 'reconnect') return 'node'
   return null
@@ -4215,7 +5123,13 @@ function evItem(key: string): keyof ReportItems | null {
  * 같은 순간의 Ceph 데이터 복구 · HEALTH_OK 는 증적 하나로(타임라인 요약과 같은 기준). 사건 시각은 그 증적을 가리키는 타임라인 줄의 시각,
  * 포털은 최초 끊김(포털 이야기가 시작된 때), 그런 줄이 없으면(분산 점검 · 파드 로그) 떠 온 시각이다.
  */
-function runEvidenceLayout(items: BoardEvidenceItem[], msIn: Milestones, t0: number, base: number) {
+/**
+ * withUp=false: 노드 복귀를 리포트에서 뺐으면 '노드 UP 이후' 로 가르지 않는다(2026-11-10 사용자 요청: 포털까지만 뽑았는데 포털 다시 끊김
+ * 하나 때문에 '노드 UP 이후' 묶음이 섰다). 툴 증적 창은 늘 가른다.
+ */
+function runEvidenceLayout(items0: BoardEvidenceItem[], msIn: Milestones, t0: number, base: number, withUp = true) {
+  // 분산 점검 증적의 옛 '필수 분산' 문장은 새 문장으로 바꿔 보인다(spreadMeaning 주석) — 원문 파일은 그대로
+  const items = items0.map((it) => (it.key.startsWith('spread') ? { ...it, text: spreadTextNow(it.text), note: it.note?.split(SPREAD_NOTE_OLD).join(SPREAD_NOTE_NEW) } : it))
   const ms: Milestones = { ...msIn, pods: msIn.pods ?? [], portal: msIn.portal ?? [] }
   const evItems = mergeSameCeph(items, ms.ceph?.at ?? null, ms.cephHealthy?.at ?? null, SAME_EVENT_MS)
   const evKeys = new Set(evItems.map((x) => x.key))
@@ -4224,7 +5138,7 @@ function runEvidenceLayout(items: BoardEvidenceItem[], msIn: Milestones, t0: num
     const k = r.ev ? resolveEvKey(r.ev, evKeys) : null
     if (k && (!evRowAt.has(k) || r.at < (evRowAt.get(k) as number))) evRowAt.set(k, r.at)
   }
-  const upAt = nodeBackAt(ms)
+  const upAt = withUp ? nodeBackAt(ms) : null
   const portalV = new Map<string, PortalEvView>()
   // 미복구 · 최종 정상화 · 화면별은 이력으로 바로잡는다(applyRunTruth 주석 — 옛 버전이 미복구 목록보다 먼저 저장한 증적)
   const ph = portalPhases(ms)
@@ -4233,6 +5147,10 @@ function runEvidenceLayout(items: BoardEvidenceItem[], msIn: Milestones, t0: num
     firstAll: ph.firstAll,
     finalAll: ph.finalAll,
     pages: ms.portalLog?.length ? { title: '', ...portalPageRows(ms, ms.portalLog) } : undefined,
+    // 1차 · 최종 정상화 근거를 화면별로 다시 만들 판정 기록(정상화마다 연속 구간 원본)
+    log: ms.portalLog,
+    // 다시 끊김도 이력(판정 기록으로 맞춘 것)으로 — 판정 기록이 없는 옛 회차는 증적 문구 그대로
+    flaps: ms.portalLog?.length ? (ms.portalFlaps ?? []) : undefined,
   }
   for (const it of evItems) if (it.key === 'portal') portalV.set(it.key, applyRunTruth(portalEvidenceView(it), truth))
   const evArr: ArrangedEv[] = arrangeEvidence(
@@ -4253,8 +5171,8 @@ function flapSmall(v: PortalEvView): string {
 
 /** 포털 증적 안의 자리(목차가 가리킬 곳) — 연속 통과 기록 표가 있으면 그 표, 없으면(옛 회차) 일어난 순서의 그 줄 */
 function portalPartId(v: PortalEvView, a: string, part: '' | 'firstAll' | 'flap' | 'final'): string {
-  if (part === 'firstAll') return v.streaks.some((x) => x.role === 'first') ? `${a}-s1` : `${a}-f1`
-  if (part === 'final') return v.streaks.some((x) => x.role === 'final') ? `${a}-s2` : `${a}-f2`
+  if (part === 'firstAll') return hasFirstBasis(v) ? `${a}-s1` : `${a}-f1`
+  if (part === 'final') return hasFinalBasis(v) ? `${a}-s2` : `${a}-f2`
   if (part === 'flap') return v.pages ? `${a}-pages` : a
   return a
 }
@@ -4277,6 +5195,22 @@ function buildHtmlReport(
     kind?: 'total' | 'runs' | 'evidence' | 'all'
     /** 종합 결과에서 회차 이름을 누르면 갈 회차별 결과 파일 이름(같은 폴더). 없으면 링크를 걸지 않는다 */
     runsFile?: string
+    /**
+     * 파일 사이 이동(2026-11-10 사용자 요청) — 같이 뽑아 같은 폴더에 둔 파일만 건다(HTML 일 때만, PDF 는 파일 사이 링크가 안 된다).
+     *  - evFiles: 회차 id → 그 회차 증적 원문 파일. 종합 결과 비교표 끝 '증적' 칸 · 회차별 결과 회차 머리에서 간다
+     *  - totalFile: 종합 결과 파일 — 회차별 결과 · 증적 원문 머리의 [← 종합 결과] 로 돌아간다
+     */
+    evFiles?: Record<string, string>
+    totalFile?: string
+    /**
+     * 검증 그룹(VerifyGroup 주석) — 고른 회차가 모두 한 그룹이면 들어온다. 종합 결과 맨 앞에 ① 검증 환경 · ② 시나리오 흐름 · ③ 차수별 요약을
+     * 싣고, 회차는 차수 순서 → 시작 시각 순으로 센다(회차별 결과 파일도 같은 순서라야 #번호 링크가 맞는다)
+     */
+    group?: VerifyGroup
+    /** 검증 환경의 VM 을 실제 이름으로(기본은 표준 이름 — 리포트 만들기 창에서 매번 고른다) */
+    realNames?: boolean
+    /** 같이 뽑는 환경 구성도 파일 — ① 검증 환경 머리에 '상세 환경 구성도 →' 를 단다(2026-11-14) */
+    envFile?: string
   },
 ): string {
   const kind = opts.kind ?? 'all'
@@ -4291,10 +5225,18 @@ function buildHtmlReport(
    * 회차로 가는 링크. 같은 파일 안이면 #run-n(+ 펼치기), 종합 결과면 옆 회차별 결과 파일의 #run-n. 회차별 결과를 같이 뽑지 않았으면
    * 링크를 걸지 않는다 — 없는 파일로 가는 링크는 눌러도 아무 일이 없어 고장으로 보인다.
    */
+  const evFileOf = (h: HistoryRecord) => opts.evFiles?.[h.id]
+  const evCol = kind === 'total' && !!opts.evFiles && Object.keys(opts.evFiles).length > 0
+  const fileHref = (f: string) => he(encodeURIComponent(f))
   const hrefRun = (i: number) =>
     kind === 'total' ? (opts.runsFile ? `href="${he(encodeURIComponent(opts.runsFile))}#run-${i + 1}"` : '') : `href="#run-${i + 1}" data-open="run-${i + 1}"`
   const DOC_TITLE = { total: '가용성 검증 종합 결과', runs: '가용성 검증 회차별 결과', evidence: '가용성 검증 증적 원문', all: '가용성 검증 결과' }[kind]
-  const runs = [...recs].sort((a, b) => a.t0 - b.t0)
+  const grp = opts.group
+  const phIdx = (h: HistoryRecord) => {
+    const k = grp ? grp.phases.findIndex((ph) => ph.id === h.phaseId) : -1
+    return k < 0 ? 1e9 : k
+  }
+  const runs = [...recs].sort((a, b) => (grp ? phIdx(a) - phIdx(b) : 0) || a.t0 - b.t0)
   /** 증적 표 하나 — 제목이 비면 머리 없이. 칸에 마우스를 올리면 cellTitles(HTTP · 응답 시간 · 사유) */
   const tblHtml = (tb: BoardEvidenceTable, id = ''): string =>
     `${tb.title ? `<h3 style="font-size:12.5px"${id ? ` id="${id}"` : ''}>${he(tb.title)}</h3>` : ''}<div style="overflow:auto"${!tb.title && id ? ` id="${id}"` : ''}><table class="grid"><thead><tr>${tb.columns
@@ -4340,7 +5282,8 @@ function buildHtmlReport(
    */
   const svcFail = runs.map((h) => {
     const ms = h.milestones
-    return (inc.masakari && masaWatchedOf(ms) && !masaDoneOf(ms)) || (inc.portal && (ms.portalPending ?? []).length > 0)
+    // 사람이 '이 조치가 없었으면 복구되지 않았음' 을 켠 회차도 실패(RunNote 주석, 2026-11-11 사용자 결정)
+    return (inc.masakari && masaWatchedOf(ms) && !masaDoneOf(ms)) || (inc.portal && (ms.portalPending ?? []).length > 0) || manualFailOf(h)
   })
   const cols: Col[] = [
     { key: 'vip', label: 'VIP 이동', grp: 'step', at: (_h, ms) => (ms.vip ? vipAtOf(ms).at : null) },
@@ -4434,18 +5377,23 @@ function buildHtmlReport(
   const isPartial = (k: number, i: number) => !!cols[k].partial?.(msOf(runs[i]))
   const idxs = (k: string) => {
     const c = ci(k)
-    return c < 0 ? [] : runs.map((_h, i) => i).filter((i) => vals[c][i] != null && counted(i) && !isPartial(c, i))
+    // 수동 조치로 복구된 회차의 시간은 사람이 끼어든 값이라 표에만 남기고 평균 · 최소 · 최대에서 뺀다(RunNote 주석).
+    // 한 회차 리포트는 '평균' 이 곧 그 회차 값이라 빼면 카드가 'VIP 이동 없음 · 포털 감시 없음' 으로 거짓말을 한다 — 여러 회차일 때만
+    return c < 0 ? [] : runs.map((_h, i) => i).filter((i) => vals[c][i] != null && counted(i) && !isPartial(c, i) && (one || !manualFailOf(runs[i])))
   }
   const nums = (k: string) => idxs(k).map((i) => vals[ci(k)][i] as number)
   const stat = (k: string) => {
     if (!idxs(k).length) return null
     const a = nums(k)
-    return { avg: a.reduce((x, y) => x + y, 0) / a.length, max: Math.max(...a), n: a.length }
+    return { avg: a.reduce((x, y) => x + y, 0) / a.length, min: Math.min(...a), max: Math.max(...a), n: a.length }
   }
-  /** 평균에서 뺀 회차가 있는가 — 있으면 평균 옆에 'N회차 기준' 을 밝힌다 */
-  const sub = (st: { n: number } | null) => (st && !one && st.n < runs.length ? ` · ${st.n}회차 기준` : '')
+  /*
+   * 여러 회차 카드의 작은 글씨는 '최소 · 최대' 만(2026-11-10 사용자 요청). 예전 '최대 … · 6회차 기준 · 미복구 2회' 는 카드 폭을 넘어
+   * 두 줄로 꺾였다. 평균에서 뺀 회차 · 미복구는 바로 아래 회차 비교 표의 칸(미복구 · *)과 평균 줄 설명에 남는다.
+   */
   // 값이 없는 칸은 짧은 하이픈 — 긴 대시(—)는 표에서 선처럼 보였다(사용자 지적). 소요는 '8분 02초' 꼴(fmtDuration 주석)
   const E = (ms: number | null | undefined) => (ms == null ? '-' : fmtDuration(ms))
+  const rangeOf = (st: { min: number; max: number } | null) => (st ? `최소 ${E(st.min)} · 최대 ${E(st.max)}` : '')
   const first = runs[0]
   const last = runs[runs.length - 1]
   /**
@@ -4478,6 +5426,8 @@ function buildHtmlReport(
   }
   const verdicts: ('pass' | 'fail' | 'none')[] = runs.map((h, i) => {
     if (!rtoOn) return 'none'
+    // 수동 조치로 복구된 회차는 목표와 상관없이 불합격(RunNote 주석)
+    if (manualFailOf(h)) return 'fail'
     // 포털 대상이 하나라도 돌아오지 않았으면 그 회차는 불합격이다(모두 돌아와야 완료)
     if (inc.portal && tot[i].svcPending.length) return 'fail'
     // 파드도 같다 — 복구가 시작됐는데 끝나지 않은 네임스페이스가 있으면 값이 없다고 건너뛰지 않는다.
@@ -4522,22 +5472,22 @@ function buildHtmlReport(
 <style>
 :root{--fg:#1b2430;--mut:#5b6675;--line:#dfe3ea;--soft:#f5f7fa;--brand:#1f3a68;--acc:#2f6fdc;--ok:#13804b;--okbg:#e3f6ec;--warn:#a15c00;--warnbg:#fff4dd;--bad:#c62f2f;--badbg:#fdeaea}
 *{box-sizing:border-box}html{scroll-behavior:smooth}
-body{font-family:"Pretendard","Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:var(--fg);margin:0;background:#eef1f5;font-size:13px;line-height:1.6}
+body{font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo","Pretendard",sans-serif;color:var(--fg);margin:0;background:#eef1f5;font-size:12.5px;line-height:1.6}
 .page{max-width:1160px;margin:0 auto;padding:0 24px 48px}
 header.hero{background:linear-gradient(135deg,#1f3a68,#2f6fdc);color:#fff;padding:30px 24px 26px}
 header.hero .in{max-width:1112px;margin:0 auto}
-header.hero h1{margin:0;font-size:26px;letter-spacing:-.3px}
+header.hero h1{margin:0;font-size:22px;letter-spacing:-.3px}
 header.hero .meta{margin-top:6px;opacity:.85;font-size:13px}header.hero .meta+.meta{margin-top:2px}header.hero .meta.sm{font-size:12px;opacity:.7}header.hero .ml{display:inline-block;min-width:84px;opacity:.75}
 header.hero .chips{margin-top:12px;display:flex;flex-wrap:wrap;gap:6px}
-header.hero .chip{background:rgba(255,255,255,.16);border-radius:999px;padding:2px 10px;font-size:12px}
+header.hero .chip{background:rgba(255,255,255,.16);border-radius:999px;padding:2px 10px;font-size:12px}header.hero a.chip.back{color:#fff;text-decoration:none;background:rgba(255,255,255,.28);font-weight:600}header.hero a.chip.back:hover{background:rgba(255,255,255,.4)}a.evl{font-size:12px;white-space:nowrap}
 .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:-18px 0 8px}
-.kpi{background:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 1px 3px rgba(20,30,50,.08);border-top:3px solid var(--acc)}
-.kpi span{display:block;color:var(--mut);font-size:12px}.kpi b{display:block;font-size:22px;font-variant-numeric:tabular-nums;margin-top:2px}.kpi small{color:var(--mut);font-size:11.5px}
-.kpi.ok{border-top-color:var(--ok)}.kpi.warn{border-top-color:var(--warn)}.kpi.bad{border-top-color:var(--bad)}
+.kpi{background:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 1px 3px rgba(20,30,50,.08);border-top:3px solid var(--acc);display:flex;flex-direction:column}
+.kpi span{display:block;color:var(--mut);font-size:11.5px}.kpi b{display:block;font-size:17px;font-variant-numeric:tabular-nums;margin-top:3px}.kpi small{display:block;color:var(--mut);font-size:11px}
+.kpi .sr{display:flex;align-items:center;gap:6px;margin-top:auto;padding-top:6px;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}.kpi .sb{flex:1;height:6px;border-radius:3px;background:var(--badbg);overflow:hidden}.kpi .sb i{display:block;height:100%;background:#2ea567}.kpi small.fl{color:var(--bad)}.kpi.lead{background:#e7eefb;box-shadow:inset 0 0 0 1px #c8d7f2,0 1px 3px rgba(20,30,50,.08)}.kpi.ok{border-top-color:var(--ok)}.kpi.warn{border-top-color:var(--warn)}.kpi.bad{border-top-color:var(--bad)}
 section.sec{background:#fff;border-radius:14px;box-shadow:0 1px 3px rgba(20,30,50,.08);padding:18px 20px;margin-top:16px}
 .sh{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding-bottom:10px;border-bottom:2px solid var(--soft)}
-.sh .n{width:26px;height:26px;border-radius:8px;background:var(--brand);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
-.sh h2{margin:0;font-size:17px}.sh .d{margin-left:auto;color:var(--mut);font-size:12px}
+.sh .n{width:22px;height:22px;border-radius:7px;background:var(--brand);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px}
+.sh h2{margin:0;font-size:15px}.sh .d{margin-left:auto;color:var(--mut);font-size:12px}
 ul.sum{list-style:none;margin:0;padding:0;display:grid;gap:6px}
 ul.sum li{padding:8px 12px 8px 14px;border-radius:8px;background:var(--soft);border-left:4px solid var(--acc)}
 
@@ -4549,17 +5499,17 @@ table.grid tr:last-child td{border-bottom:0}table.grid tbody tr:nth-child(even) 
 table.grid th.grp{text-align:center;background:#e3eaf6}table.grid th.c,table.grid td.c{text-align:center}
 .num{font-variant-numeric:tabular-nums;white-space:nowrap}
 .best{color:var(--ok);font-weight:700}.worst{color:var(--warn);font-weight:700}.pass{color:var(--ok);font-weight:700}.fail{color:var(--bad);font-weight:700}.wip{color:var(--warn);font-weight:700}
-.cn{display:block;font-size:11px;font-weight:400;color:var(--mut)}td.fail .cn,td.wip .cn{color:inherit}
+.cn{display:block;font-size:11px;font-weight:400;color:var(--mut)}td.st{font-weight:700}td.fail .cn,td.wip .cn{color:inherit}
 .rn{display:block;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-table.cmp{overflow:visible}table.cmp thead tr:first-child th{position:sticky;top:0;z-index:2;height:36px}table.cmp thead tr:nth-child(2) th{position:sticky;top:36px;z-index:2;white-space:normal;line-height:1.3}
+table.cmp{overflow:visible}table.grid.cmp tbody tr:nth-child(even) td{background:transparent}table.grid.cmp td.key.ff{background:var(--badbg)!important;color:var(--bad)}table.cmp thead tr:first-child th{position:sticky;top:0;z-index:2;height:36px}table.cmp thead tr:nth-child(2) th{position:sticky;top:36px;z-index:2;white-space:normal;line-height:1.3}
 table.cmp thead tr:first-child th:first-child{border-top-left-radius:10px}table.cmp thead tr:first-child th:last-child{border-top-right-radius:10px}
 table.cmp tr.avg td:first-child{border-bottom-left-radius:10px}table.cmp tr.avg td:last-child{border-bottom-right-radius:10px}
-td.key{background:#f3f7ff!important;font-weight:600}tr.avg td{background:#eef2f8!important;font-weight:700}
+td.key{background:#f3f7ff!important;font-weight:600}tr.avg td,tr.sok td{background:#eef2f8!important;font-weight:700}
 a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 .mut{color:var(--mut)}.note{color:var(--mut);font-size:12px;margin:8px 0 0}
-.explain{margin:12px 0 0;padding:10px 14px;border-radius:8px;background:var(--soft);font-size:12.5px;line-height:1.7}
+.explain{margin:12px 0 0;padding:10px 14px;border-radius:8px;background:var(--soft);font-size:10.5px;line-height:1.7}
 .explain b{color:var(--brand)}
-.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--mut);margin:10px 0 0}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11.5px;color:var(--mut);margin:10px 0 0}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
 .flow{display:grid;grid-template-columns:210px 1fr 150px;gap:6px 12px;align-items:center;font-size:12px}
 .flow .hd{color:var(--mut);font-size:11.5px}
@@ -4574,11 +5524,72 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 .refl{margin:-4px 0 12px;font-size:12px;color:var(--mut)}
 table.grid.tl tbody tr.kd td{background:#fdeeee}table.grid.tl tbody tr.kd td:first-child{box-shadow:inset 3px 0 0 #d64545}table.grid.tl tbody tr.kd td:nth-child(3){color:#a32d2d;font-weight:600}
 table.grid.tl tbody tr.kr td{background:#eaf1fd}table.grid.tl tbody tr.kr td:first-child{box-shadow:inset 3px 0 0 #2f6fdc}table.grid.tl tbody tr.kr td:nth-child(3){color:#1d4f9e;font-weight:600}
-table.grid.tl tbody tr.kf td:first-child{box-shadow:inset 3px 0 0 #2f6fdc}table.grid.tl tbody tr.kf td:nth-child(3){color:#1d4f9e}
+table.grid.tl tbody tr.kf td:first-child{box-shadow:inset 3px 0 0 #a0a8b5}table.grid.tl tbody tr.kf td:nth-child(3){color:var(--mut)}
 table.grid.tl tbody tr.dim td{color:#a0a8b5}table.grid tbody tr.sep td{background:var(--soft);color:var(--mut);font-size:11.5px;padding:5px 8px}table.grid.tl tbody tr.sep td{background:var(--soft);color:var(--mut);font-size:11.5px;padding:5px 8px}
 .alltag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;background:#dff3e6;color:#13804b;font-size:11px;font-weight:600}
-.legend i.lk{display:inline-block;width:12px;height:10px;margin-right:4px;vertical-align:-1px;border-radius:2px}.lk.kd{background:#fdeeee;box-shadow:inset 3px 0 0 #d64545}.lk.kr{background:#eaf1fd;box-shadow:inset 3px 0 0 #2f6fdc}.lk.kf{box-shadow:inset 3px 0 0 #2f6fdc}
-.tools{display:flex;gap:6px;margin-bottom:10px}.tools button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
+.legend i.lk{display:inline-block;width:12px;height:10px;margin-right:4px;vertical-align:-1px;border-radius:2px}.lk.kd{background:#fdeeee;box-shadow:inset 3px 0 0 #d64545}.lk.kr{background:#eaf1fd;box-shadow:inset 3px 0 0 #2f6fdc}.lk.kf{background:#f1f3f6;box-shadow:inset 3px 0 0 #a0a8b5}.lk.ka{background:#fff3e3;box-shadow:inset 3px 0 0 #e08a1e}
+table.grid.tl tbody tr.ka td{background:#fff3e3}table.grid.tl tbody tr.ka td:first-child{box-shadow:inset 3px 0 0 #e08a1e}table.grid.tl tbody tr.ka td:nth-child(3){color:#9a5200;font-weight:600}
+.envsum{display:flex;align-items:center;gap:18px;padding:8px 12px;background:#f5f7fa;border:1px solid #e3e7ed;border-radius:8px;margin-bottom:12px;font-size:12px}
+.envsum b{color:#1f3a68;font-size:14px;margin-left:4px}.envsum .lgd{margin-left:auto;display:flex;gap:6px;align-items:center}
+.nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.nd{border:1px solid #d8dde4;border-radius:10px;overflow:hidden}
+.nd .ntop{background:#f3f6fb;border-bottom:1px solid #e3e7ed;padding:9px 12px}
+.nd .ntop .nt{display:flex;align-items:center;gap:5px}.nd .ntop .nt b{font-size:14px;color:#1f3a68;margin-right:2px}
+.nd .ntop .nh{font-size:12px;color:#374151;font-weight:600;margin-top:2px}
+.nrole{font-size:10.5px;border-radius:4px;padding:0 6px;font-weight:700}.nrole.ctl{background:#e3ebf8;color:#1f3a68}.nrole.cpt{background:#eef0f3;color:#374151}
+.nd .nbd{padding:10px 12px;line-height:1.9}.nd .nbd .nnone{font-size:11.5px;color:#5b6675}
+.vchip{display:inline-block;border-radius:4px;padding:0 6px;margin:0 6px 4px 0;font-size:11px;line-height:20px;white-space:nowrap}
+.vchip.vk8s{background:#e3ebf8;color:#1f3a68;border:1px solid #c3d2ea}.vchip.vweb{background:#e3f4ea;color:#0f5132;border:1px solid #b9e0c8}.vchip.vetc{background:#f1f3f6;color:#374151;border:1px solid #dde2e8}
+.vchip.vev{box-shadow:0 0 0 2px #f0c860;margin:0 9px 6px 2px}.envsum .lgd .vchip{margin:0}.envsum .lgd .vchip.vev{background:#fff;margin:0 2px}
+.envnote{margin:10px 0 0;padding:7px 12px;list-style:none;font-size:12.5px;font-weight:600;color:#3d2f00;background:#fff8e1;border-left:3px solid #e0b84a;border-radius:4px}.envnote li+li{margin-top:3px}
+.sflow{display:flex;align-items:stretch;margin-bottom:12px}
+.sflow .sst{flex:1;border:1px solid #c9d6ea;border-radius:10px;padding:12px 8px;background:#f7f9fd;text-align:center;font-weight:800;color:#1f3a68;display:flex;align-items:center;justify-content:center}
+.sflow .sst.sinj{background:#fdecec;border-color:#f3c1c1;color:#b42318}.sflow .sst.sfin{background:#e3f4ea;border-color:#b9e0c8;color:#0f5132}.sflow .sst.sref{background:#fff;border-style:dashed}
+.sflow .sar{display:flex;align-items:center;padding:0 5px;color:#9aa3ae;font-size:16px}
+table.sf{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+table.sf th{background:#c9d6ea;color:#1f3a68;border:1px solid #aebfda;padding:6px 8px}
+table.sf td{border:1px solid #d8dde4;padding:7px 9px;vertical-align:middle}table.sf td.snm{font-weight:700;color:#1f3a68}
+table.sf tr.sfin td{background:#f0f8f3}table.sf tr.sref td{color:#5b6675}
+table.ps{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+table.ps th{background:#c9d6ea;color:#1f3a68;border:1px solid #aebfda;padding:7px 8px;font-size:12px;text-align:center}table.ps th.pgrp{background:#bccbe3}
+table.ps td{border:1px solid #d8dde4;padding:9px 10px;vertical-align:top}table.ps td.pc{text-align:center;vertical-align:middle}
+table.ps td.pc .pdt{font-size:11px;color:#5b6675;font-weight:400;white-space:nowrap}
+table.ps .plb{font-weight:800;color:#1f3a68;font-size:12px;margin:0 0 4px}table.ps .plb.pact{margin-top:10px;padding-top:8px;border-top:1px dashed #d8dde4}
+table.ps ul{margin:0;padding-left:16px}table.ps li{margin:2px 0;line-height:1.5;white-space:pre-line}table.ps .irn{font-size:11px;margin-left:4px}table.ps .irn a{color:#1d5fd0}
+table.ps .ptm{font-weight:700;margin:6px 0 2px}table.ps .pnone{color:#5b6675}
+.ares{font-size:10.5px;border-radius:4px;padding:0 6px;font-weight:700;margin-left:6px;white-space:nowrap}.ares.a-ok{background:#e3f4ea;color:#0f5132}.ares.a-repro{background:#fdecec;color:#b42318}.ares.a-wip{background:#f1f3f6;color:#374151}.ares.a-done{background:#e3ebf8;color:#1f3a68}
+table.ps tfoot td{background:#e9eef6;font-weight:800;border-top:2px solid #aebfda;vertical-align:middle}
+table.ps .pg{color:#047a3f;font-weight:800}table.ps .pr{color:#c21f1f;font-weight:800}
+table.nc td.phc{font-weight:800;color:#1f3a68;background:#f3f6fb}
+table.nc,table.fx{width:100%;border-collapse:collapse;border:1px solid #c7cdd6;font-size:12.5px;font-variant-numeric:tabular-nums;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ksum{background:#fff;border:1px solid var(--line);border-radius:12px;margin:-18px 0 8px;padding:16px 20px 6px;box-shadow:0 1px 3px rgba(20,30,50,.08);-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ksum .kh{display:flex;align-items:baseline;gap:14px;padding:0 4px 12px;border-bottom:1px solid #e5e7eb}
+.ksum .kt{font-size:12px;color:#4b5563;font-weight:700}.ksum .kn{font-size:14px;font-weight:700;color:#1f2937}.ksum .kn b{color:#047a3f;font-weight:800}
+.ksum .km{margin-left:auto;font-size:11px;color:var(--mut)}
+table.ks{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12.5px;font-variant-numeric:tabular-nums}
+table.ks th{font-size:11.5px;color:#374151;font-weight:700;text-align:center;padding:0 10px;height:32px;border-bottom:1.5px solid #1f3a68}
+table.ks td{padding:0 10px;height:38px;border-bottom:1px solid #eceff3;text-align:center;vertical-align:middle;white-space:nowrap}
+table.ks .l{text-align:left}table.ks td.fr{white-space:normal}table.ks td.nm{font-weight:700}table.ks td.avg{font-weight:800;font-size:14px}
+table.ks tr.tot td{background:#f3f6fb;border-top:1.5px solid #c9d3e3}table.ks tr:last-child td{border-bottom:0}
+table.ks td.sr2 .sb{display:inline-block;width:min(120px,45%);height:7px;border-radius:4px;background:#f6dcdc;vertical-align:middle;margin-right:10px;overflow:hidden}
+table.ks td.sr2 .sb i{display:block;height:100%;background:#3aa76d}
+table.ks .g{color:#047a3f}table.ks .r{color:#c21f1f}table.ks .nv{color:#9aa3ae}
+table.nc th,table.fx th{background:#c9d6ea;color:#1f3a68;font-weight:700;font-size:12px;border:1px solid #aebfda;padding:0 10px;height:34px;text-align:center;vertical-align:middle}
+table.nc thead tr:first-child th.grp{background:#bccbe3}
+table.nc td{border:1px solid #d8dde4;height:38px;padding:0 10px;text-align:center;vertical-align:middle;white-space:nowrap;background:#fff}
+table.nc td.l{text-align:left}table.nc td.node{font-weight:600}
+table.nc td.res{font-weight:800}table.nc td.res.ok{color:#047a3f}table.nc td.res.bad{color:#c21f1f}table.nc td.res.nn{color:#6b7280;font-weight:600}
+table.nc td.fl{color:#c21f1f;font-weight:700}table.nc td.pass{color:var(--ok);font-weight:700}table.nc td.fail{color:var(--bad);font-weight:700}
+table.nc td.tot{font-weight:800;font-size:13px;background:#f3f6fb}table.nc td.nv{color:#6b7280;font-weight:400}
+table.nc tfoot td{background:#e9eef6;font-weight:800;border-top:2px solid #aebfda}table.nc td.rsum{font-weight:400;font-size:12px}table.nc td.rsum .g{color:#047a3f}table.nc td.rsum .r{color:#c21f1f}
+table.nc a.rn,table.fx a.rn{font-weight:600}
+table.fx td{border:1px solid #d8dde4;padding:9px 10px;vertical-align:middle;line-height:1.55;background:#fff}table.fx td.c{text-align:center}table.fx td.dc{background:#f7f9fc;font-size:11.5px}
+table.fx .rs{display:block;color:#6b7280;font-size:11.5px}
+.ln{display:flex;gap:4px}.ln+.ln{margin-top:1px}.ln b{color:#6b7280;flex:none}.ln span{white-space:pre-wrap;word-break:break-word}.nt+.nt{margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)}
+.fstep.act{background:#fff0dc;color:#b45f00}
+.cbox{border:1px solid var(--line);border-radius:10px;margin:10px 0 4px;overflow:hidden}.cbox .hd{background:#eef2f8;padding:6px 12px;font-weight:700;font-size:12.5px}.cbox .it{display:grid;grid-template-columns:90px 1fr;gap:10px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);font-size:11.5px}.cbox .it .c{text-align:center}
+@media (max-width:900px){table.nc th,table.nc td{padding:0 6px;font-size:11.5px}}
+.tools{display:flex;gap:6px;margin-bottom:10px;align-items:center}table.grid.fc td{vertical-align:top;padding:9px 8px}.fstep{display:inline-block;background:var(--badbg);color:var(--bad);border-radius:6px;padding:1px 10px;font-weight:700;font-size:12px}.fm{display:block;color:var(--mut);font-size:11.5px;margin-top:1px}.ncards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.ncard{border:1px solid var(--line);border-radius:10px;padding:12px 14px}.ncard .t{font-weight:700;font-size:13px}.ncard .big{font-size:16px;font-weight:700;margin:4px 0}.ncard .nb{height:8px;border-radius:4px;background:var(--badbg);overflow:hidden;margin:6px 0}.ncard .nb i{display:block;height:100%;background:#2ea567}.ncard .mut b{color:var(--fg)}.tools .tsum{margin-left:auto;font-size:12.5px;color:var(--mut)}.tools button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
 details.run{border:1px solid var(--line);border-radius:12px;margin:8px 0;background:#fff;scroll-margin-top:12px}
 details.run>summary{list-style:none;cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 details.run>summary::-webkit-details-marker{display:none}
@@ -4592,7 +5603,7 @@ h3{font-size:13.5px;margin:14px 0 6px;color:var(--brand)}
 .svr{background:var(--okbg);color:var(--ok);border-radius:4px;padding:0 6px;font-size:11.5px;white-space:nowrap}
 details.ev{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:6px 0;background:#fcfdff}details.ev>summary{cursor:pointer;font-weight:600}
 .evk{display:grid;grid-template-columns:150px 1fr;gap:2px 10px;margin:6px 0;font-size:12px}.evk span:nth-child(odd){color:var(--mut)}
-code,.pre{font-family:Consolas,"D2Coding",monospace;font-size:11.5px}.pre{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre;line-height:1.5;max-height:420px;overflow:auto}
+code,.pre{font-family:Consolas,"D2Coding",monospace;font-size:11.5px}.pre{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre;line-height:1.5;max-height:420px;overflow:auto}.pre .lw{display:block;width:max-content;min-width:100%}.pre .ln{display:block;max-width:200ch;white-space:pre-wrap;overflow-wrap:anywhere;padding-left:2ch;text-indent:-2ch;min-height:1.5em}.pre.nowrap .ln{max-width:none;white-space:pre}
 .h1l{background:#ffe8a3;color:#7a4b00;font-weight:700}.h2l{background:#fff7d6}
 tr.badrow td{background:var(--badbg)!important;color:var(--bad)}
 .top{display:inline-block;margin-top:10px;font-size:12px}
@@ -4606,14 +5617,14 @@ nav.toc{position:sticky;top:12px;margin-top:16px;max-height:calc(100vh - 24px);o
 .toc a .t{font-variant-numeric:tabular-nums;font-size:11px;color:var(--mut);text-align:right}.toc a.kd .t{color:var(--bad);font-weight:700}.toc a.kr .t{color:var(--acc);font-weight:700}.toc a.dim{color:#8a93a1}
 .evgrp{font-size:12px;color:var(--mut);font-weight:700;margin:14px 0 2px;padding-bottom:2px;border-bottom:1px dashed var(--line)}
 details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.flash{animation:evfl 1.2s ease-out}
-.toc a .pb{font-style:normal;display:inline-block;margin-left:5px;padding:0 5px;border-radius:5px;background:#efe6fb;color:#6a2fc0;font-size:10.5px;font-weight:600;vertical-align:1px}
+.toc a .lbl{display:flex;align-items:baseline;gap:5px;min-width:0}.toc a .lbl>span{min-width:0}.toc a .pb{flex:none;font-style:normal;display:inline-block;margin-left:0;padding:0 5px;border-radius:5px;background:#efe6fb;color:#6a2fc0;font-size:10.5px;font-weight:600;vertical-align:1px}
 .toc details.tf>summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:46px 1fr;gap:6px;padding:4px 8px;font-size:12px;border-radius:6px}.toc details.tf>summary::-webkit-details-marker{display:none}
 .toc details.tf>summary:hover{background:var(--soft)}.toc details.tf>summary span:last-child:after{content:' ▸';color:var(--mut)}.toc details.tf[open]>summary span:last-child:after{content:' ▾'}.toc details.tf a{padding-left:20px;font-size:11.5px}
 .pcards{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 4px}.pcards div{background:var(--soft);border-radius:8px;padding:6px 10px;min-width:150px}.pcards span{display:block;color:var(--mut);font-size:11.5px}.pcards b{display:block;font-size:14px;font-variant-numeric:tabular-nums}.pcards small{display:block;color:var(--mut);font-size:11px}.pcards .k{box-shadow:inset 3px 0 0 #2f6fdc}
 .psub{font-size:12px;font-weight:700;color:var(--mut);margin:14px 0 4px}table.grid tr.pk td{background:#eaf1fd}table.grid tr.pk td:first-child{box-shadow:inset 3px 0 0 #2f6fdc}@keyframes evfl{0%{box-shadow:0 0 0 3px #2f6fdc}100%{box-shadow:0 0 0 0 transparent}}
 .tlev{margin-left:6px;font-size:11px;white-space:nowrap}
 @media (max-width:900px){.page.wtoc{grid-template-columns:1fr}nav.toc{position:static;max-height:none}}
-@media print{body{background:#fff}.tools,.top,nav.toc,.tlev{display:none}.page.wtoc{display:block;max-width:none}section.sec,.kpi{box-shadow:none;border:1px solid var(--line)}.pre{max-height:none;overflow:visible;white-space:pre-wrap;word-break:break-all}details.run{break-inside:auto}header.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+@media print{.pre .lw{width:auto}.pre .ln{max-width:none}.pre.nowrap .ln{white-space:pre-wrap}body{background:#fff}.tools,.top,nav.toc,.tlev{display:none}.page.wtoc{display:block;max-width:none}section.sec,.kpi,.ksum{box-shadow:none;border:1px solid var(--line)}.kpi.lead{box-shadow:none;border-left-color:#c8d7f2;border-right-color:#c8d7f2;border-bottom-color:#c8d7f2;-webkit-print-color-adjust:exact;print-color-adjust:exact}.pre{max-height:none;overflow:visible;white-space:pre-wrap;word-break:break-all}details.run{break-inside:auto}header.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 @media (max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.flow{grid-template-columns:120px 1fr 80px}.kv{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>`)
 
@@ -4622,13 +5633,64 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
   H.push(`<header class="hero" id="top"><div class="in"><h1>${DOC_TITLE}${kind === 'evidence' && one ? `: ${he(nameOfRun(first, 0))}` : ''}</h1>
 <div class="meta"><span class="ml">검증 기간</span>${he(period)}${one ? ` (${E(last.closedAt - first.t0)})` : ` · ${runs.length}회차`}</div>
 <div class="meta sm"><span class="ml">리포트 작성</span>${he(fmtDateTime(Date.now()))} · Q-Term${appVer ? ` ${he(appVer)}` : ''}</div>
-<div class="chips"><span class="chip">${runs.length}회차</span></div>${
-    excluded.length ? `<div class="meta" style="margin-top:8px">제외한 항목: ${he(excluded.join(' · '))}</div>` : ''
-  }</div></header><div class="page">`)
+<div class="chips"><span class="chip">${runs.length}회차</span>${kind !== 'total' && opts.totalFile ? `<a class="chip back" href="${fileHref(opts.totalFile)}">← 종합 결과</a>` : ''}</div></div></header><div class="page">`)
+  // '제외한 항목: 파드 복구 · Ceph …' 줄은 뺐다(2026-11-10 사용자 요청) — 보고용 묶음이 기본이 되면서 거의 늘 붙어 머리만 길게 했다. 뺀 항목은 표 · 카드에 없는 것으로 드러난다
+  void excluded
   // 증적 원문의 왼쪽 목차가 들어갈 자리 — 회차를 그린 뒤에야 증적 목록을 알므로 끝에서 이 줄을 바꾼다(evidenceToc.ts)
   const pageIdx = H.length - 1
   let tocNav = ''
-  const kpi = (cls: string, label: string, v: string, sub = '') => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`
+  /**
+   * 세부 원인 및 조치 — '원인 : …' / '조치 : …' / '담당자 : …' 세 줄(2026-11-11 사용자 결정: 콜론 뒤 한 칸, 상태 라벨은 넣지 않는다).
+   * 사람이 적은 글이라 IP · 토큰이 섞일 수 있어 내보내기 마스킹을 거친다(증적 원문과 같은 출구).
+   */
+  const noteLine = (k: string, v?: string) => (v?.trim() ? `<div class="ln"><b>${k} :</b><span>${he(maskForExport(v.trim()))}</span></div>` : '')
+  const noteHtml = (ns: RunNote[]) => ns.map((n) => `<div class="nt">${noteLine('원인', n.cause)}${noteLine('조치', n.action)}${noteLine('담당자', n.owner)}</div>`).join('')
+  const kpi = (cls: string, label: string, v: string, sub = '', extra = '') => `<div class="kpi ${cls}"><span>${label}</span><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}${extra}</div>`
+  /*
+   * 회차 성공 셈(2026-11-10 사용자 요청 · 목업) — 종합 결과에 '몇 회 중 몇 회 성공' 이 없어, Masakari 카드의 '성공 7 / 8회' 만 튀어
+   * 8회 중 7회가 성공한 것처럼 읽혔다(실제로는 포털 실패 포함 5 / 8). 회차의 성공 = 전체 복구 성공(svcFail 이 아님).
+   * 항목마다: 성공 = 값이 있고 끝난 회차, 실패 = 그 항목이 끝나지 않은 회차. 일어나지 않은 회차('-')는 분모에서 뺀다.
+   */
+  const colFail = (key: string, i: number): boolean => {
+    const ms = msOf(runs[i])
+    if (key === 'all') return svcFail[i]
+    if (key === 'svc') return tot[i].svcPending.length > 0
+    if (key === 'masa') return masaWatchedOf(ms) && !masaDoneOf(ms)
+    if (key === 'pods') return podsDoneSummary(ms).pending > 0
+    return false
+  }
+  const colCount = (key: string): { ok: number; n: number } | null => {
+    const c = ci(key)
+    if (c < 0) return null
+    let ok = 0
+    let n = 0
+    runs.forEach((_h, i) => {
+      if (colFail(key, i)) n++
+      else if (vals[c][i] != null && !isPartial(c, i)) {
+        ok++
+        n++
+      }
+    })
+    return n ? { ok, n } : null
+  }
+  /** 카드 아래 '성공 n / m' 막대 */
+  // 성공 막대는 카드 바닥에 붙인다(.kpi 세로 flex + .sr margin-top:auto) — 카드마다 위 글 줄 수가 달라 막대 높이가 들쑥날쑥했다(2026-11-11 사용자 지적)
+  const okBar = (st: { ok: number; n: number } | null) =>
+    st ? `<div class="sr"><span class="sb"><i style="width:${((st.ok / st.n) * 100).toFixed(1)}%"></i></span>성공 ${st.ok} / ${st.n}</div>` : ''
+  const okCls = (st: { ok: number; n: number } | null) => (!st ? '' : st.ok === st.n ? 'ok' : 'bad')
+  /*
+   * 회차 결과 — 전체 복구 열의 '성공' 셈(colCount('all'))과 같은 기준(코드 리뷰 11-11: 검증 결과 카드는 7/8, 전체 복구 카드는 6/7 처럼
+   * 같은 회차를 다르게 셌다). 실패 = 끝나지 않은 것이 있다(svcFail). 성공 = 전체 복구 값이 있고 끝난 값. 그 밖(잴 것이 없었던 회차 ·
+   * Nova 를 못 읽어 VM 이 다 옮겨졌는지 모름)은 '판정 못 함' 으로 성공에 넣지 않는다 — 조회 실패를 성공으로 세지 않는다.
+   */
+  const runVerdict = (i: number): 'ok' | 'fail' | 'none' => {
+    if (svcFail[i]) return 'fail'
+    const ca = ci('all')
+    return ca >= 0 && vals[ca][i] != null && !isPartial(ca, i) ? 'ok' : 'none'
+  }
+  const failRunIdx = runs.map((_h, i) => i).filter((i) => runVerdict(i) === 'fail')
+  const okRunN = runs.filter((_h, i) => runVerdict(i) === 'ok').length
+  const noneRunN = runs.length - okRunN - failRunIdx.length
   /**
    * Masakari 카드 — 성공 / 실패를 말한다(사용자 지적 10-27). 예전엔 '실패 VM 0대 / evacuation 실패 없음' 이라 VM 10대를 옮기며 성공한
    * 회차도 실패 숫자로 읽혔다. 한 회차: 성공 · 실패 · 미완료 · '-'(동작 없음). 여러 회차: '성공 4 / 5회'(목표 합격 카드와 같은 꼴).
@@ -4654,74 +5716,64 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
       const dur = ci('masa') >= 0 ? vals[ci('masa')][0] : null
       switch (oc[0]) {
         case 'ok':
-          return kpi('ok', 'Masakari', '성공', [moved ? `VM ${moved}대 이동` : '', dur != null ? E(dur) : '', fails.length ? '재시도로 완료' : ''].filter(Boolean).join(' · '))
+          return kpi('ok', 'Masakari evacuation', '성공', [moved ? `VM ${moved}대 이동` : '', dur != null ? E(dur) : '', fails.length ? '재시도로 완료' : ''].filter(Boolean).join(' · '))
         case 'part':
           // 한 대라도 못 옮기면 실패(사용자 결정 10-30)
-          return kpi('bad', 'Masakari', '실패', he(masaFailText(ms)))
+          return kpi('bad', 'Masakari evacuation', '실패', he(masaFailText(ms)))
         case 'fail':
-          return kpi('bad', 'Masakari', '실패', he(lastF?.brief ?? lastF?.reason ?? 'status: failed'))
+          return kpi('bad', 'Masakari evacuation', '실패', he(lastF?.brief ?? lastF?.reason ?? 'status: failed'))
         case 'open':
-          return kpi('warn', 'Masakari', '미완료', '마지막 상태: 1차 시도 실패 (결과 전에 검증 종료)')
+          return kpi('warn', 'Masakari evacuation', '미완료', '마지막 상태: 1차 시도 실패 (결과 전에 검증 종료)')
         default:
-          return kpi('', 'Masakari', '-', 'Masakari 동작 없음')
+          return kpi('', 'Masakari evacuation', '-', 'Masakari 동작 없음')
       }
     }
     const judged = oc.filter((o) => o !== 'none').length
-    if (!judged) return kpi('', 'Masakari', '-', 'Masakari 동작 없음')
+    if (!judged) return kpi('', 'Masakari evacuation', '-', 'Masakari 동작 없음')
     const okN = oc.filter((o) => o === 'ok').length
     const bad = runs.filter((_h, i) => oc[i] === 'fail' || oc[i] === 'part')
     const open = oc.filter((o) => o === 'open').length
     const moved = runs.reduce((a, h) => a + (h.milestones.masakari ? (h.milestones.masakari.vms?.count ?? h.milestones.masakari.evac) : 0), 0)
+    // 여러 회차: 다른 카드와 같은 꼴(평균 크게 · 최소 최대 · 성공 막대). 예전엔 '성공 7 / 8회' 를 크게 써서 이 카드만 튀었다(colCount 주석)
+    void okN
+    void moved
     return kpi(
-      bad.length ? 'bad' : open ? 'warn' : 'ok',
-      'Masakari',
-      `성공 ${okN} / ${judged}회`,
-      [
-        bad.length ? `실패 ${bad.length}회 (${bad.map(runLink).join(', ')})` : moved ? `VM 합계 ${moved}대 이동` : '',
-        open ? `미완료 ${open}회` : '',
-        sMasa ? `평균 ${E(sMasa.avg)}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · '),
+      okCls(colCount('masa')) || (bad.length || open ? 'bad' : 'ok'),
+      'Masakari evacuation',
+      sMasa ? `평균 ${E(sMasa.avg)}` : '-',
+      sMasa ? rangeOf(sMasa) : '',
+      // 실패는 둘째 줄에 '실패 n회: #4'(2026-11-11 사용자 지적: 최소 · 최대 뒤에 이어 붙여 이 카드만 줄이 꺾였다). 검증 결과 카드와 같은 꼴
+      `${bad.length || open ? `<small>${[bad.length ? `실패 ${bad.length}회: ${bad.map(runLink).join(' ')}` : '', open ? `미완료 ${open}회` : ''].filter(Boolean).join(' · ')}</small>` : ''}${
+      // 막대는 표의 '성공' 줄과 같은 셈(colCount) — 감시했는데 Masakari 가 움직이지 않은 회차도 실패로 센다(회차 결과 svcFail 과 같은 기준).
+      // 예전엔 judged(동작이 있었던 회차)만 세어, 22회차 리포트에서 카드 11/14 · 표 11/17 로 같은 항목이 다른 숫자였다(기능 점검 11-11)
+      okBar(colCount('masa'))}`,
     )
   }
   // 주요 수치 ~ ③ 복구 흐름은 종합 결과(와 예전 한 파일)에만 — 나머지 종류는 아래에서 이 자리부터 잘라 낸다
   const topStart = H.length
-  H.push(
-    `<div class="kpis">${kpi('', '회차', String(runs.length), `대상 노드 ${nodes.length}개${unknownRuns ? ` · 미확인 ${unknownRuns}회차` : ''}`)}${
-      inc.portal
-        ? kpi(
-            pendingRuns.length ? 'warn' : 'ok',
-            one ? '포털 1차 정상화' : '포털 1차 정상화 평균',
-            pendingRuns.length && one ? '미복구' : E(sSvc?.avg),
-            one
-              ? pendingRuns.length
-                ? `화면 ${tot[0].svcPending.length}개 안 돌아옴`
-                : sSvc
-                  ? '장애 시작 후 처음 모두 정상'
-                  : '포털 감시 없음'
-              : sSvc
-                ? `최대 ${E(sSvc.max)}${sub(sSvc)}${pendingRuns.length ? ` · 미복구 ${pendingRuns.length}회` : ''}`
-                : '포털 감시 없음',
-          )
-        : ''
-    }${
+  const kpiCards =
+    // 카드 순서는 일이 일어나는 차례(2026-11-10 사용자 요청): 총 회차 → VIP 이동 → Masakari evacuation → 포털 1차 정상화 → 전체 복구
+    // 결론 카드(검증 결과 · 전체 복구)는 lead — 옅은 남색 바탕으로 가운데 단계 카드와 가른다(2026-11-11 사용자 결정 · 시안 A). 상태는 윗줄 색이 그대로 맡는다
+    `<div class="kpis">${
+      // 맨 앞은 회차 결과(colCount 주석). 전체 복구를 잴 수 없는 리포트(Masakari · 포털 둘 다 뺌)는 예전처럼 회차 수
       allLabel
-        ? kpi(
-            svcFailRuns.length ? 'warn' : '',
-            one ? allLabel : `${allLabel} 평균`,
-            one && !sAll ? (svcFailRuns.length ? '미복구' : '-') : E(sAll?.avg),
-            one
-              ? sAll
-                ? allBasis
-                : svcFailRuns.length
-                  ? 'Masakari · 포털이 다 끝나지 않음'
-                  : '잴 것 없음(Masakari 동작 · 포털 끊김 없음)'
-              : sAll
-                ? `최대 ${E(sAll.max)}${sub(sAll)}${svcFailRuns.length ? ` · 미복구 ${svcFailRuns.length}회` : ''}`
-                : '',
-          )
-        : ''
+        ? one
+          ? kpi(
+              `lead ${{ ok: 'ok', fail: 'bad', none: '' }[runVerdict(0)]}`,
+              '검증 결과',
+              { ok: '성공', fail: '실패', none: '-' }[runVerdict(0)],
+              runVerdict(0) === 'none' ? '판정 못 함(잴 것이 없었거나 VM 이동을 확인하지 못함)' : `대상 노드 ${he(runs[0].node)}`,
+            )
+          : kpi(
+              failRunIdx.length ? 'lead bad' : 'lead ok',
+              '검증 결과',
+              `성공 ${okRunN} / ${okRunN + failRunIdx.length}회`,
+              [failRunIdx.length ? `실패 ${failRunIdx.length}회: ${failRunIdx.map((i) => runLink(runs[i])).join(' ')}` : '모두 성공', noneRunN ? `판정 못 함 ${noneRunN}회` : '']
+                .filter(Boolean)
+                .join(' · '),
+              `<small>대상 노드 ${nodes.length}개${unknownRuns ? ` · 미확인 ${unknownRuns}회차` : ''}</small>${okBar(okRunN + failRunIdx.length ? { ok: okRunN, n: okRunN + failRunIdx.length } : null)}`,
+            )
+        : kpi('', one ? '회차' : '총 회차', String(runs.length), `대상 노드 ${nodes.length}개${unknownRuns ? ` · 미확인 ${unknownRuns}회차` : ''}`)
     }${
       rtoOn
         ? kpi(
@@ -4731,19 +5783,295 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
             '목표 기준 On',
           )
         : inc.hostVip
-          ? kpi('', one ? 'VIP 이동' : 'VIP 이동 평균', E(sVip?.avg), sVip ? (one ? '장애 시작 후' : `${sVip.n}회차`) : 'VIP 이동 없음')
+          ? one
+            ? kpi('', 'VIP 이동', E(sVip?.avg), sVip ? '장애 시작 후' : 'VIP 이동 없음')
+            : kpi(okCls(colCount('vip')), 'VIP 이동', sVip ? `평균 ${E(sVip.avg)}` : '-', sVip ? rangeOf(sVip) : 'VIP 이동 없음', okBar(colCount('vip')))
           : ''
-    }${inc.masakari ? masaKpi() : ''}</div>`,
-  )
+    }${inc.masakari ? masaKpi() : ''}${
+      inc.portal
+        ? kpi(
+            one ? (pendingRuns.length ? 'bad' : 'ok') : okCls(colCount('svc')),
+            '포털 1차 정상화',
+            pendingRuns.length && one ? '실패' : one ? E(sSvc?.avg) : sSvc ? `평균 ${E(sSvc.avg)}` : '-',
+            one
+              ? pendingRuns.length
+                ? `화면 ${tot[0].svcPending.length}개 안 돌아옴`
+                : sSvc
+                  ? '장애 시작 후 처음 모두 정상'
+                  : '포털 감시 없음'
+              : sSvc
+                ? rangeOf(sSvc)
+                : '포털 감시 없음',
+            one ? '' : okBar(colCount('svc')),
+          )
+        : ''
+    }${
+      allLabel
+        ? kpi(
+            `lead ${one ? (svcFailRuns.length ? 'bad' : '') : okCls(colCount('all'))}`,
+            allLabel,
+            one && !sAll ? (svcFailRuns.length ? '실패' : '-') : one ? E(sAll?.avg) : sAll ? `평균 ${E(sAll.avg)}` : '-',
+            one
+              ? sAll
+                ? allBasis
+                : svcFailRuns.length
+                  ? manualFailOf(runs[0]) && !(inc.masakari && masaWatchedOf(msOf(runs[0])) && !masaDoneOf(msOf(runs[0]))) && !tot[0].svcPending.length
+                    ? '자동으로 복구되지 않아 수동 조치 후 복구'
+                    : 'Masakari · 포털이 다 끝나지 않음'
+                  : '잴 것 없음(Masakari 동작 · 포털 끊김 없음)'
+              : sAll
+                ? rangeOf(sAll)
+                : '',
+            one ? '' : okBar(colCount('all')),
+          )
+        : ''
+    }</div>`
+  /*
+   * 여러 회차의 주요 수치는 카드 5개 대신 요약 표 하나(2026-11-12 사용자 결정 · 목업 kpi-alt 시안 B → mock-b-total).
+   * 카드는 제목 · 평균 · 범위 · 실패 회차 · 막대가 같은 크기로 흩어져 읽을 곳이 분명하지 않았고, 폭이 좁으면 3줄로 꺾였다.
+   * 단계를 행으로, 성공 · 평균 · 최소 · 최대 · 실패 회차를 열로 두어 숫자가 세로로 줄을 맞춘다. 셈은 카드와 같은 colCount · stat.
+   * 머리 줄은 '총 n회 중 m회 성공' 만(실패 회차는 아래 전체 복구 행과 겹쳐 뺐다) · 성공은 초록 · 글씨는 표 평균과 같은 크기(혼자 튀지 않게).
+   * 한 회차 리포트는 최소 = 최대 = 평균이라 표가 의미 없어 카드를 그대로 쓴다.
+   */
+  const stepSummary = () => {
+    const rows = [
+      inc.hostVip ? { key: 'vip', label: 'VIP 이동', st: sVip } : null,
+      inc.masakari ? { key: 'masa', label: 'Masakari evacuation', st: sMasa } : null,
+      inc.portal ? { key: 'svc', label: '포털 1차 정상화', st: sSvc } : null,
+      allLabel ? { key: 'all', label: allLabel, st: sAll } : null,
+    ].filter((r): r is { key: string; label: string; st: typeof sAll } => !!r)
+    const tr = rows
+      .map((r) => {
+        const cnt = colCount(r.key)
+        const fails = ci(r.key) >= 0 ? runs.map((_h, i) => i).filter((i) => colFail(r.key, i)) : []
+        const okTd = cnt
+          ? `<span class="sb"><i style="width:${((cnt.ok / cnt.n) * 100).toFixed(1)}%"></i></span><b class="${cnt.ok === cnt.n ? 'g' : 'r'}">${cnt.ok}</b> / ${cnt.n}`
+          : '<span class="nv">-</span>'
+        return `<tr${r.key === 'all' ? ' class="tot"' : ''}><td class="l nm">${he(r.label)}</td><td class="l sr2">${okTd}</td><td class="avg">${r.st ? E(r.st.avg) : '-'}</td><td>${r.st ? E(r.st.min) : '-'}</td><td>${r.st ? E(r.st.max) : '-'}</td><td class="l fr">${
+          fails.length ? fails.map((i) => runLink(runs[i])).join(' ') : '<span class="nv">-</span>'
+        }</td></tr>`
+      })
+      .join('')
+    const verdict = allLabel
+      ? `총 ${runs.length}회 중 <b>${okRunN}회 성공</b>${noneRunN ? ` · 판정 못 함 ${noneRunN}회` : ''}`
+      : `총 ${runs.length}회`
+    const goal = rtoOn ? ` · 목표 합격 ${verdicts.filter((v) => v === 'pass').length} / ${verdicts.filter((v) => v !== 'none').length}회` : ''
+    return `<div class="ksum"><div class="kh"><span class="kt">검증 결과</span><span class="kn">${verdict}${goal}</span><span class="km">대상 노드 ${nodes.length}개${
+      unknownRuns ? ` · 미확인 ${unknownRuns}회차` : ''
+    }${rows.length ? ' · 시간은 성공한 회차만' : ''}</span></div>${
+      rows.length
+        ? `<table class="ks"><thead><tr><th class="l" style="width:22%">단계</th><th class="l" style="width:22%">성공</th><th>평균</th><th>최소</th><th>최대</th><th class="l" style="width:18%">실패 회차</th></tr></thead><tbody>${tr}</tbody></table>`
+        : ''
+    }</div>`
+  }
+  /**
+   * 그룹 리포트 앞 절 셋(2026-11-13 사용자 결정 · 목업 group-mock2 · 6): ① 검증 환경 → ② 시나리오 흐름 → ③ 차수별 요약.
+   *  - 환경: 노드 카드(표준 이름 + 실제 호스트 + 역할) · VM 칩(파랑 k8s · 초록 웹 서비스 · 회색 기타, 노란 테두리 = evacuation 대상).
+   *    VM 이름은 기본 표준 이름, 리포트 만들기 창에서 '실제 이름' 을 고르면 적어 둔 실제 이름(안내 문구 속 표준 이름도 같이 바뀐다)
+   *  - 흐름: 단계 이름만 상자로 잇고, 단계마다 내용 · 완료 기준은 아래 표(상자 안 설명은 표와 겹쳐 뺐다). 평균 시간은 넣지 않는다
+   *  - 차수별 요약: 건수 · 성공 평균은 앱이 세고, 이슈 → 팀별 조치는 그룹 편집 창에서 사람이 적은 것. 이 리포트에 든 회차의 차수만
+   * 그룹 · 환경이 없으면 해당 절을 싣지 않는다(빈 카드를 내보내지 않는다).
+   */
+  // 이슈 · 조치 글은 입력한 줄바꿈을 그대로 살린다(white-space:pre-line, 2026-11-14 사용자 요청: 툴에서 Enter 로 나눠 적어도 리포트에서 한 줄로 이어졌다)
+  function groupSections(): string {
+    if (!grp) return ''
+    const out: string[] = []
+    const env = grp.env
+    const real = !!opts.realNames
+    if (env && env.nodes.length) {
+      const allVms = env.nodes.flatMap((n) => n.vms)
+      const cnt = (f: (v: EnvVm) => boolean) => allVms.filter(f).reduce((a, v) => a + vmCount(v), 0)
+      const chip = (v: EnvVm) => {
+        const nm = vmDisplay(v, real)
+        const many = vmCount(v) > 1
+        // 실제 이름이 이어지지 않아 나열로 바뀐 묶음은 칩 하나에 몰지 않고 '이름 (n대)' 에 마우스를 올려 보게 한다
+        const long = many && nm.includes(', ')
+        return `<span class="vchip v${v.kind}${v.evac ? ' vev' : ''}"${long ? ` title="${he(nm)}"` : ''}>${he(long ? v.name : nm)}${many ? ` <b>(${vmCount(v)}대)</b>` : ''}</span>`
+      }
+      // 안내 문구 속 표준 이름 → 실제 이름(실제 이름 리포트일 때만). 긴 이름부터 바꿔 'web01' 이 'web01~10' 안에서 먼저 바뀌지 않게
+      const swap = (t: string) =>
+        real
+          ? allVms
+              .filter((v) => (v.real ?? []).length)
+              .sort((a, b) => b.name.length - a.name.length)
+              .reduce((acc, v) => acc.split(v.name).join(vmDisplay(v, true)), t)
+          : t
+      // 2026-11-14 사용자 요청: 요약 줄의 'evacuation 대상 VM n' 은 뺐다(노란 테두리 범례로 충분하다).
+      // 아래 안내(envnote)는 웹 서비스 VM 배치처럼 꼭 읽어야 하는 말이라 굵게 · 노란 띠로 눈에 띄게 했다
+      out.push(
+        `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>검증 환경</h2>${env.inject || opts.envFile ? `<span class="d">${env.inject ? `장애 주입: ${he(env.inject)}` : ''}${opts.envFile ? `${env.inject ? ' · ' : ''}<a href="${he(encodeURIComponent(opts.envFile))}" style="color:#1d5fd0;font-weight:700">상세 환경 구성도 →</a>` : ''}</span>` : ''}</div>`,
+        `<div class="envsum"><span>물리 노드<b>${env.nodes.length}</b></span><span>k8s VM<b>${cnt((v) => v.kind === 'k8s')}</b></span><span>웹 서비스 VM<b>${cnt((v) => v.kind === 'web')}</b></span><span class="lgd"><span class="vchip vk8s">k8s VM</span><span class="vchip vweb">웹 서비스 VM</span><span class="vchip vetc vev">노란 테두리 = evacuation 대상</span></span></div>`,
+        `<div class="nodes">${env.nodes
+          .map(
+            (n) =>
+              `<div class="nd"><div class="ntop"><div class="nt"><b>${he(n.label)}</b>${n.controller ? '<span class="nrole ctl">컨트롤러</span>' : ''}${n.compute ? '<span class="nrole cpt">컴퓨트</span>' : ''}</div><div class="nh">${he(n.host || '-')}</div></div><div class="nbd">${
+                n.vms.length ? n.vms.map(chip).join('') : '<span class="nnone">배치 VM 없음</span>'
+              }</div></div>`,
+          )
+          .join('')}</div>`,
+        env.notes.length ? `<ul class="envnote">${env.notes.map((t) => `<li>* ${he(maskForExport(swap(t)))}</li>`).join('')}</ul>` : '',
+        `</section>`,
+      )
+    } else if (opts.envFile) {
+      // 환경 탭을 비워 둔 그룹 — 검증 환경 카드는 없지만 같이 뽑은 구성도로 가는 길은 남긴다(검토 지적: 파일은 생기는데 링크가 없었다)
+      out.push(
+        `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>검증 환경</h2><span class="d"><a href="${he(encodeURIComponent(opts.envFile))}" style="color:#1d5fd0;font-weight:700">상세 환경 구성도 →</a></span></div></section>`,
+      )
+    }
+    // ② 시나리오 흐름 — 리포트에 넣은 항목대로. 포털 화면 이름은 이 리포트 회차들이 감시한 화면(버전마다 달라서 고정 문구로 두지 않는다)
+    const screens = Array.from(new Set(runs.flatMap((h) => (msOf(h).portal ?? []).map((pm) => pm.name)))).slice(0, 8)
+    // 내용 칸은 모두 '~ 확인' 으로 끝낸다(2026-11-14 사용자 요청: 각 단계에서 무엇을 확인하는지 읽히게).
+    // 장애 주입은 예전 기본값 'IPMI 포털 Power Down' 으로 저장된 그룹도 '접속 후' 가 들어간 새 기본값 문장으로 싣는다
+    const inject = env?.inject ? (env.inject.trim() === 'IPMI 포털 Power Down' ? 'IPMI 포털 접속 후 Power Down' : env.inject.trim()) : ''
+    const steps: { name: string; cls: string; body: string; done: string }[] = [
+      { name: '노드 DOWN', cls: 'sinj', body: `장애 대상 노드를 ${inject ? `${he(inject)} 진행` : '강제 종료'} 확인`, done: '노드 DOWN 시각(IPMI 이벤트 로그)' },
+      ...(inc.hostVip ? [{ name: 'VIP 이동', cls: '', body: '장애 대상 노드에 vIP 를 위치시킨 뒤 DOWN, 다른 컨트롤러 노드로 vIP 이동 확인', done: '다른 컨트롤러 노드에서 vIP 시작 시간' }] : []),
+      ...(inc.masakari
+        ? [{ name: 'Masakari evacuation', cls: '', body: '장애 대상 노드에 있던 evacuation 대상 VM 이 다른 노드로 정상 이동되었는지 확인', done: '대상 VM 모두 이동 완료. 1대라도 실패면 실패' }]
+        : []),
+      ...(inc.portal
+        ? [{ name: '포털 1차 정상화', cls: '', body: `주요 화면${screens.length ? `(${he(screens.join(', '))})` : ''} 정상 접속 확인`, done: '모든 주요 화면이 처음으로 함께 정상이 된 시각' }]
+        : []),
+    ]
+    const circ = (k: number) => '①②③④⑤⑥⑦⑧'[k] ?? `${k + 1}.`
+    const last = steps.length
+    const flowBoxes = [
+      ...steps.map((st, k) => `<div class="sst${st.cls ? ` ${st.cls}` : ''}">${circ(k)} ${he(st.name)}</div>`),
+      ...(allLabel ? [`<div class="sst sfin">${he(allLabel)}</div>`] : []),
+      `<div class="sst sref">${circ(last)} 노드 UP</div>`,
+    ]
+    const ends = [inc.masakari && steps.findIndex((x) => x.name === 'Masakari evacuation'), inc.portal && steps.findIndex((x) => x.name === '포털 1차 정상화')].filter((x): x is number => typeof x === 'number' && x >= 0)
+    out.push(
+      `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>시나리오 흐름</h2></div>`,
+      `<div class="sflow">${flowBoxes.join('<div class="sar">›</div>')}</div>`,
+      `<table class="sf"><colgroup><col style="width:180px"><col><col style="width:280px"></colgroup><thead><tr><th>단계</th><th>내용</th><th>완료 기준</th></tr></thead><tbody>`,
+      ...steps.map((st, k) => `<tr><td class="snm">${circ(k)} ${he(st.name)}</td><td>${st.body}</td><td>${he(st.done)}</td></tr>`),
+      allLabel
+        ? `<tr class="sfin"><td class="snm">${he(allLabel)}</td><td>${
+            ends.length > 1 ? `${circ(ends[0])} ${he(steps[ends[0]].name)} 과 ${circ(ends[1])} ${he(steps[ends[1]].name)} 중 늦게 복구된 시각 확인` : ends.length ? `${circ(ends[0])} ${he(steps[ends[0]].name)} 완료 시각 확인` : '-'
+          }</td><td>${ends.length > 1 ? '둘 다 완료. 하나라도 안 끝나면 실패' : '완료. 안 끝나면 실패'}</td></tr>`
+        : '',
+      `<tr class="sref"><td class="snm">${circ(last)} 노드 UP</td><td>${he(allLabel || '복구')} 이후 노드를 올리고 k8s VM 기동 후 Ceph 정상화 · 파드 정상화 확인</td><td>참고 기록</td></tr>`,
+      `</tbody></table></section>`,
+    )
+    // ③ 차수별 요약
+    const ca = ci('all')
+    const rowsOf = (ids: Set<number>) => {
+      const idx = [...ids]
+      const ok = idx.filter((i) => runVerdict(i) === 'ok')
+      const vs = ca >= 0 ? ok.filter((i) => counted(i)).map((i) => vals[ca][i] as number).filter((v) => v != null) : []
+      return { n: idx.length, ok: ok.length, fail: idx.filter((i) => runVerdict(i) === 'fail').length, avg: vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null }
+    }
+    const used = grp.phases.filter((ph) => runs.some((h) => h.phaseId === ph.id))
+    const loose = runs.map((h, i) => (grp.phases.some((ph) => ph.id === h.phaseId) ? -1 : i)).filter((i) => i >= 0)
+    if (used.length || loose.length) {
+      // 기간은 '10.28 ~ 11.10' 한 줄로(2026-11-14 사용자 요청: 칸이 좁아 '11-' 에서 줄이 꺾였다). 점 표기 + 줄바꿈 금지 + 차수 칸 112px
+      const day = (t: number) => fmtDateTime(t).slice(5, 10).replace('-', '.')
+      const RES: Record<PhaseAction['result'], string> = { done: '조치 완료', ok: '재현 안 됨', repro: '재현됨', wip: '확인 중', none: '' }
+      const body = (ph: GroupPhase | null, idx: number[]) => {
+        let iss = (ph?.issues ?? []).filter((x) => x.text.trim())
+        let acts: (Omit<PhaseAction, 'result'> & { result?: PhaseAction['result'] })[] = (ph?.actions ?? []).filter((x) => x.text.trim())
+        // 차수에 하나도 적지 않았으면 그 차수 회차들의 원인 · 조치를 모아 싣는다(notesToPhase 주석). 적은 것이 있으면 그것만
+        if (!iss.length && !acts.length) {
+          const d = notesToPhase(idx.map((i) => runs[i]))
+          iss = d.issues
+          acts = d.actions
+        }
+        if (!iss.length && !acts.length) return '<div class="plb">이슈</div><ul><li class="pnone">없음</li></ul>'
+        const issHtml = iss.length
+          ? `<div class="plb">이슈</div><ul>${iss
+              .map((x) => {
+                const ri = x.runIds.map((id) => runs.findIndex((h) => h.id === id)).filter((i) => i >= 0 && idx.includes(i))
+                return `<li>${he(maskForExport(x.text.trim()))}${ri.length > 1 ? ` ${ri.length}회` : ''}<span class="irn">${ri.length ? ri.map((i) => runLink(runs[i])).join(' ') : '공통'}</span></li>`
+              })
+              .join('')}</ul>`
+          : ''
+        const teams = [...new Set(acts.map((x) => x.team.trim() || '담당 팀'))]
+        const actHtml = acts.length
+          ? `<div class="plb${iss.length ? ' pact' : ''}">팀별 조치</div>${teams
+              .map(
+                (tm) =>
+                  `<div class="ptm">${he(tm)}</div><ul>${acts
+                    .filter((x) => (x.team.trim() || '담당 팀') === tm)
+                    .map((x) => `<li>${he(maskForExport(x.text.trim()))}${x.result && x.result !== 'none' ? `<span class="ares a-${x.result}">${RES[x.result]}</span>` : ''}</li>`)
+                    .join('')}</ul>`,
+              )
+              .join('')}`
+          : ''
+        return issHtml + actHtml
+      }
+      const tr = (name: string, ph: GroupPhase | null, idx: number[]) => {
+        const r = rowsOf(new Set(idx))
+        const ts = idx.map((i) => runs[i].t0)
+        const a = day(Math.min(...ts))
+        const b = day(Math.max(...ts))
+        return `<tr><td class="pc"><b>${he(name)}</b><div class="pdt">${a === b ? a : `${a} ~ ${b}`}</div></td><td class="pc">${r.n}</td><td class="pc pg">${r.ok}</td><td class="pc${r.fail ? ' pr' : ''}">${r.fail}</td><td>${body(ph, idx)}</td><td class="pc"><b>${r.avg != null ? E(r.avg) : '-'}</b></td></tr>`
+      }
+      const all = rowsOf(new Set(runs.map((_h, i) => i)))
+      out.push(
+        `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>차수별 요약</h2></div>`,
+        `<table class="ps"><colgroup><col style="width:112px"><col style="width:46px"><col style="width:46px"><col style="width:46px"><col><col style="width:100px"></colgroup>`,
+        `<thead><tr><th rowspan="2">차수</th><th colspan="3" class="pgrp">건수</th><th rowspan="2">이슈 및 조치</th><th rowspan="2">${he(allLabel || '전체 복구')}<br>(성공 평균)</th></tr><tr><th>총</th><th>성공</th><th>실패</th></tr></thead><tbody>`,
+        ...used.map((ph) =>
+          tr(
+            ph.name,
+            ph,
+            runs.map((h, i) => (h.phaseId === ph.id ? i : -1)).filter((i) => i >= 0),
+          ),
+        ),
+        loose.length ? tr('차수 없음', null, loose) : '',
+        `</tbody><tfoot><tr><td class="pc">합계</td><td class="pc">${all.n}</td><td class="pc pg">${all.ok}</td><td class="pc${all.fail ? ' pr' : ''}">${all.fail}</td><td style="font-weight:400;color:#5b6675">단계별 성공 수 · 평균은 아래 회차 비교 맨 아래 줄</td><td class="pc">${all.avg != null ? E(all.avg) : '-'}</td></tr></tfoot></table></section>`,
+      )
+    }
+    return out.join('\n')
+  }
+  // 그룹 리포트는 맨 위 요약 표를 싣지 않는다 — ③ 차수별 요약이 같은 일을 한다(2026-11-13 사용자 결정)
+  H.push(one ? kpiCards : grp ? '' : stepSummary())
+  /** 절 번호 — 그룹 리포트는 앞에 절이 셋 붙어 번호가 밀린다 */
+  let secNo = 0
+  const sno = () => String(++secNo)
+  if (grp && kind === 'total') H.push(groupSections())
 
   // ── ② 회차 비교 ──
   const nStep = cols.filter((c) => c.grp === 'step').length
   const nTotal = cols.filter((c) => c.grp === 'total').length
   const grpTh = (n: number, label: string) => (n ? `<th class="grp" colspan="${n}">${label}</th>` : '')
-  H.push(`<section class="sec"><div class="sh"><span class="n">1</span><h2>${one ? '단계별 시간' : '회차 비교'}</h2><span class="d">장애 시작부터 걸린 시간</span></div>`)
+  // 오른쪽 안내(2026-11-14 사용자 요청): 회차 · 증적이 눌리는 링크라는 것을 알린다. 링크가 실제로 걸릴 때만(회차별 결과 · 증적을 같이 뽑았을 때) 그 말을 넣는다
+  const runLinked = kind !== 'total' || !!opts.runsFile
+  const cmpHint = !one && (runLinked || evCol) ? `${runLinked && evCol ? '회차와 증적을' : runLinked ? '회차를' : '증적을'} 선택하면 상세 내용을 확인할 수 있습니다` : ''
+  H.push(`<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>${one ? '단계별 시간' : '회차 비교'}</h2><span class="d">장애 시작부터 걸린 시간${cmpHint ? ` · ${cmpHint}` : ''}</span></div>`)
+  /*
+   * 회차 비교 표(2026-11-11 사용자 결정 · 목업 cmp-mock → total-mock6). '보기 힘들다 · 가시성이 떨어진다' 는 의견에 다시 그렸다:
+   *  - 칸마다 선 · 머리는 모두 가운데. 머리 색은 처음 진한 남색(흰 글씨)이었다가 너무 진해 연한 남색 바탕 · 남색 글씨로(2026-11-12 사용자 결정 · 목업 시안 C, 실패 원인 표도 같이). 글꼴은 리포트 전체를 맑은 고딕으로(Pretendard 가 없는 PC 에서 한글 · 숫자가 서로 다른 글꼴로 섞였다)
+   *  - 노드 바로 뒤에 '검증 결과' 칸(성공 초록 · 실패 빨강 굵은 글씨). 판정 못 함은 회색 글씨.
+   *    처음엔 칸을 초록 · 빨강으로 채웠으나 너무 진해 표에서 혼자 튀었다(2026-11-12 사용자 결정) — 실패 단계 칸처럼 글자색으로만
+   *  - 실패한 단계 칸은 바탕 없이 빨간 글씨 '실패'(분홍 바탕은 알록달록해 보기 힘들었다) · 실패한 회차의 전체 복구는 '-'(결과 칸이 이미 말한다)
+   *  - '장애 시작' 칸 · 회차 아래 날짜 줄은 뺐다(회차별 상세에 있다).
+   *    세트마다 묶음 줄('1회차 1세트 · 날짜')도 넣었다가 뺐다(2026-11-12 사용자 결정) — 회차 칸에 같은 세트 이름이 있어 줄만 늘고 읽기를 끊었다
+   *  - 맨 아래 '성공' 줄은 뺐다(위 카드에 같은 숫자) · '평균 (성공한 회차만)' → '결과 및 소요 시간 평균', 결과 칸 아래 '성공 n · 실패 n'
+   */
+  const showRes = !!allLabel
+  /** 회차 이름의 '(노드 down)' 꼬리 — 옆 칸이 노드라 표에서는 뺀다(전체 이름은 마우스를 올리면) */
+  const shortName = (h: HistoryRecord, i: number) => {
+    const n = nameOfRun(h, i)
+    const s2 = n.replace(/\s*\(([^()]*)\)\s*$/, (m, x: string) => (h.node && x.includes(h.node) ? '' : m))
+    return s2 || n
+  }
+  /** 차수 칸(그룹 리포트) — 같은 차수가 이어지는 행을 세로로 합친다(회차는 차수 순서로 정렬돼 있다) */
+  const phCol = !!grp && !one
+  const phaseOfRun = (h: HistoryRecord) => grp?.phases.find((ph) => ph.id === h.phaseId)?.name ?? '차수 없음'
+  const nFix = (one ? 0 : 1) + 2 + (phCol ? 1 : 0)
+  const resCell = (i: number) => {
+    const v = runVerdict(i)
+    return v === 'ok'
+      ? '<td class="res ok">성공</td>'
+      : v === 'fail'
+        ? `<td class="res bad"${manualFailOf(runs[i]) ? ' title="수동 조치로 복구됨: 자동 복구 실패로 셈"' : ''}>실패</td>`
+        : '<td class="res nn" title="잴 것이 없었거나 VM 이동을 확인하지 못함">판정 못 함</td>'
+  }
   H.push(
-    `<table class="grid cmp"><thead><tr>${one ? '' : '<th rowspan="2" class="c">#</th>'}<th rowspan="2">회차</th><th rowspan="2">대상 노드</th><th rowspan="2" class="c">장애 시작</th>${grpTh(nStep, '단계별 복구')}${grpTh(nTotal, '총 소요')}${rtoOn ? '<th rowspan="2" class="c">목표 판정</th>' : ''}</tr><tr>${cols
-      .map((c) => `<th class="c">${he(c.label)}${rtoGoal(c.key) != null ? `<div class="mut" style="font-weight:400;font-size:11px">목표 ≤ ${fmtDuration((rtoGoal(c.key) as number) * 1000)}</div>` : ''}</th>`)
+    `<table class="nc"><thead><tr>${phCol ? '<th rowspan="2" style="width:76px">차수</th>' : ''}${one ? '' : '<th rowspan="2" style="width:44px">#</th>'}<th rowspan="2">회차</th><th rowspan="2" style="width:130px">대상 노드</th>${showRes ? '<th rowspan="2" style="width:92px">검증 결과</th>' : ''}${grpTh(nStep, '단계별 복구')}${grpTh(nTotal, '총 소요')}${rtoOn ? '<th rowspan="2" style="width:84px">목표 판정</th>' : ''}${evCol ? '<th rowspan="2" style="width:70px">증적</th>' : ''}</tr><tr>${cols
+      .map((c) => `<th>${he(c.label)}${rtoGoal(c.key) != null ? `<div style="font-weight:400;font-size:10.5px;opacity:.85">목표 ≤ ${fmtDuration((rtoGoal(c.key) as number) * 1000)}</div>` : ''}</th>`)
       .join('')}</tr></thead><tbody>`,
   )
   runs.forEach((h, i) => {
@@ -4751,59 +6079,48 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
     const cells = cols
       .map((c, k) => {
         const v = vals[k][i]
-        /**
-         * 빠름/느림은 평균과 같은 값들(DOWN 감지 · 끝난 값)끼리 — 그리고 0 이하는 빼고 본다. VIP '0초' 는 pacemaker 가 DOWN 과 같은 초에
-         * 옮긴 것이라 비교할 거리가 아닌데 '가장 빠름' 초록으로 칠해졌다(13회차 리포트).
-         */
-        const a = nums(c.key).filter((x) => x > 0)
-        // 모든 회차가 같은 값이면 빠르고 느린 것이 없다 — 전부 초록으로 칠하지 않는다
-        const lo = Math.min(...a)
-        const hi = Math.max(...a)
-        const ranked = v != null && v > 0 && counted(i) && !isPartial(k, i)
-        // 1차 정상화 뒤 다시 끊겨 안 돌아온 화면이 있으면 미복구 — 1차 시각은 아랫줄에 남긴다(사용자 결정 A)
-        if (c.key === 'svc' && tot[i].svcPending.length)
-          return `<td class="num c fail key" title="${he(tot[i].svcPending.join(', '))}">미복구 ${tot[i].svcPending.length}${v != null ? `<span class="cn">1차 ${E(v)}</span>` : ''}</td>`
-        if (c.key === 'all' && svcFail[i]) return `<td class="num c fail key">미복구</td>`
-        if (c.key === 'masa' && masaFailOf(ms)) return `<td class="num c fail">실패<span class="cn">${he(masaFailText(ms))}</span></td>`
-        // 목표 기준이 켜져 있고 이 항목에 목표가 있으면 빠름·느림 대신 합격·불합격으로 칠한다
+        // 빠름 · 느림 칠과 칸 아래 꼬리표는 뺐다(2026-11-10 사용자 요청) — 표는 숫자만, 자세한 것은 회차 상세
+        if (c.key === 'svc' && tot[i].svcPending.length) return `<td class="fl" title="${he(tot[i].svcPending.join(', '))}">실패</td>`
+        // 실패한 회차의 전체 복구는 '-' — 결과 칸이 이미 실패라고 말한다(2026-11-11 사용자 결정)
+        if (c.key === 'all' && svcFail[i]) return `<td class="tot nv">-</td>`
+        if (c.key === 'masa' && masaFailOf(ms)) return `<td class="fl" title="${he(masaFailText(ms))}">실패</td>`
+        // 감시했는데 끝나지 않음(완료 · 최종 실패 기록 없음) — 회차 결과는 실패인데 칸이 '-' 라 셈과 맞지 않았다(코드 리뷰 11-11)
+        if (c.key === 'masa' && v == null && masaWatchedOf(ms) && !masaDoneOf(ms)) return `<td class="fl" title="Masakari 가 evacuation 을 끝낸 기록이 없음">미완료</td>`
+        // 목표 기준이 켜져 있고 이 항목에 목표가 있으면 합격 · 불합격으로 칠한다
         const goal = rtoGoal(c.key)
-        const cls =
-          goal != null
-            ? v == null
-              ? ''
-              : v <= goal * 1000
-                ? 'pass'
-                : 'fail'
-            : ranked && a.length > 1 && lo < hi
-              ? v === lo
-                ? 'best'
-                : v === hi
-                  ? 'worst'
-                  : ''
-              : ''
-        const key = c.grp === 'total' ? ' key' : ''
-        // 꼬리표('미완 1' · '재장애 4')는 아랫줄에 작게 — 한 줄에 붙이면 칸이 넓어져 표가 옆으로 밀렸다
-        const note = c.note ? c.note(ms).trim() : ''
-        return `<td class="num c ${cls}${key}">${E(v)}${goal != null && v != null ? (v <= goal * 1000 ? ' ✓' : ' ✗') : ''}${!tot[i].fromDown && v != null ? '*' : ''}${note ? `<span class="cn">${he(note)}</span>` : ''}</td>`
+        const cls = goal != null && v != null ? (v <= goal * 1000 ? 'pass' : 'fail') : ''
+        const tc = [cls, c.grp === 'total' ? 'tot' : '', v == null ? 'nv' : ''].filter(Boolean).join(' ')
+        return `<td${tc ? ` class="${tc}"` : ''}>${E(v)}${goal != null && v != null ? (v <= goal * 1000 ? ' ✓' : ' ✗') : ''}${!tot[i].fromDown && v != null ? '*' : ''}</td>`
       })
       .join('')
+    const phCell = (() => {
+      if (!phCol) return ''
+      if (i > 0 && phaseOfRun(runs[i - 1]) === phaseOfRun(h)) return ''
+      let span = 1
+      while (i + span < runs.length && phaseOfRun(runs[i + span]) === phaseOfRun(h)) span++
+      return `<td class="phc" rowspan="${span}">${he(phaseOfRun(h))}</td>`
+    })()
     H.push(
-      `<tr>${one ? '' : `<td class="num c mut">${i + 1}</td>`}<td><a${one ? '' : ' class="rn"'} ${hrefRun(i)} title="${he(nameOfRun(h, i))}">${he(nameOfRun(h, i))}</a><div class="mut" style="font-size:11.5px">${he(fmtDateTime(h.t0))}</div></td><td>${he(h.node)}</td><td class="num c">${tot[i].fromDown ? `${he(fmtClock(tot[i].base))}<span class="cn">${tot[i].fromInject ? '장애 주입' : 'DOWN 감지'}</span>` : '-'}</td>${cells}${
-        rtoOn ? `<td class="c">${verdicts[i] === 'pass' ? '<span class="pill ok">합격</span>' : verdicts[i] === 'fail' ? '<span class="pill bad">불합격</span>' : '<span class="mut">-</span>'}</td>` : ''
-      }</tr>`,
+      `<tr>${phCell}${one ? '' : `<td>${i + 1}</td>`}<td class="l"><a${one ? '' : ' class="rn"'} ${hrefRun(i)} title="${he(nameOfRun(h, i))}">${he(shortName(h, i))}</a></td><td class="node">${he(h.node)}</td>${showRes ? resCell(i) : ''}${cells}${
+        rtoOn ? `<td>${verdicts[i] === 'pass' ? '<span class="pill ok">합격</span>' : verdicts[i] === 'fail' ? '<span class="pill bad">불합격</span>' : '<span class="mut">-</span>'}</td>` : ''
+      }${evCol ? `<td>${evFileOf(h) ? `<a class="evl" href="${fileHref(evFileOf(h) as string)}" title="이 회차의 증적 원문 파일">증적 →</a>` : '<span class="mut">-</span>'}</td>` : ''}</tr>`,
     )
   })
-  const avgRow = cols.map((c) => {
-    const a = nums(c.key)
-    return `<td class="num c${c.grp === 'total' ? ' key' : ''}">${a.length ? E(a.reduce((x, y) => x + y, 0) / a.length) : '-'}</td>`
-  })
+  H.push(`</tbody>`)
   // 한 회차면 평균 줄은 같은 숫자의 되풀이라 뺀다
-  const avgOff = runs.some((_h, i) => !counted(i) || cols.some((_c, k) => isPartial(k, i)) || svcFail[i])
-  if (!one)
+  if (!one) {
+    const avgRow = cols.map((c) => {
+      const a = nums(c.key)
+      return `<td${c.grp === 'total' ? ' class="tot"' : ''}>${a.length ? E(a.reduce((x, y) => x + y, 0) / a.length) : '-'}</td>`
+    })
+    const resSum = [`<b class="g">성공 ${okRunN}</b>`, `<b class="r">실패 ${failRunIdx.length}</b>`, noneRunN ? `판정 못 함 ${noneRunN}` : ''].filter(Boolean).join(' · ')
     H.push(
-      `<tr class="avg"><td colspan="4">평균${avgOff ? '<span class="cn">DOWN 미감지(*) · 미완 값은 빼고 냄</span>' : ''}</td>${avgRow.join('')}${rtoOn ? '<td></td>' : ''}</tr>`,
+      `<tfoot><tr><td colspan="${nFix}" class="l" title="평균은 실패 회차 · DOWN 을 감지하지 못한 회차(*) · 끝나지 않은 값 · 수동 조치로 복구된 회차를 빼고 냄">${showRes ? '결과 및 소요 시간 평균' : '소요 시간 평균'}</td>${
+        showRes ? `<td class="rsum">${resSum}</td>` : ''
+      }${avgRow.join('')}${rtoOn ? '<td></td>' : ''}${evCol ? '<td></td>' : ''}</tr></tfoot>`,
     )
-  H.push(`</tbody></table>`)
+  }
+  H.push(`</table>`)
   H.push(`<div class="explain">
 <div><b>장애 시작</b> 복구 시간을 재는 기준(0)입니다. ${inc.inject ? '장애 주입 시각(수동 입력 · 버튼)이 있으면 그 시각, 없으면 노드 DOWN 을 감지한 시각입니다.' : '노드 DOWN 을 감지한 시각입니다(장애 주입 시각 항목을 뺐습니다).'} DOWN 을 감지하지 못한 회차는 검증 시작부터 잽니다(*).</div>
 <div><b>포털 1차 정상화</b> 장애 시작부터, 감시 중인 포털 화면이 <b>처음으로 모두 동시에</b> 정상(화면의 핵심 API 가 모두 200 OK, 연속 정해진 횟수)이 된 시점까지입니다(포털 서비스 정상화). 그 뒤 다시 끊겼다가 안정된 최종 정상화는 회차 상세의 참고에 있습니다.</div>
@@ -4811,18 +6128,15 @@ ${
     allLabel
       ? `<div><b>전체 복구 기준</b> ${
           allParts.length > 1
-            ? `장애 시작 이후 ${[inc.masakari && 'Masakari evacuation 완료(VM 모두 이동)', inc.portal && '포털 1차 정상화'].filter(Boolean).join('와 ')} 중 <b>마지막으로 완료된 시점</b>까지입니다. 하나라도 끝나지 않으면 미복구입니다.`
+            ? `장애 시작 이후 ${[inc.masakari && 'Masakari evacuation 완료(VM 모두 이동)', inc.portal && '포털 1차 정상화'].filter(Boolean).join('와 ')} 중 <b>마지막으로 완료된 시점</b>까지입니다. 하나라도 끝나지 않으면 실패입니다.`
             : `장애 시작 이후 ${he(allParts[0])} 시점까지입니다(다른 항목은 리포트에서 뺐습니다).`
         }</div>`
       : ''
   }
-<div><b>파드 · Ceph</b> 노드를 다시 올린 뒤에 끝나는 일이라 노드를 언제 올리느냐에 따라 달라집니다. 전체 복구에는 넣지 않습니다.</div>
+${inc.pods || inc.ceph ? `<div><b>${[inc.pods && '파드', inc.ceph && 'Ceph'].filter(Boolean).join(' · ')}</b> 노드를 다시 올린 뒤에 끝나는 일이라 노드를 언제 올리느냐에 따라 달라집니다. 전체 복구에는 넣지 않습니다.</div>` : ''}
 </div>`)
-  H.push(`<div class="legend">${
-    rtoOn
-      ? `<span><b class="pass">✓</b> 목표 이내</span><span><b class="fail">✗</b> 목표 초과</span><span>목표가 없는 열은 <b class="best">초록</b> 가장 빠름 · <b class="worst">노랑</b> 가장 느림</span>`
-      : `<span><b class="best">초록</b> 가장 빠름</span><span><b class="worst">노랑</b> 가장 느림</span>`
-  }<span>- 해당 없음(그 회차에 일어나지 않았거나 감시하지 않음)</span><span>* DOWN 을 감지하지 못해 검증 시작부터 잰 값${one ? '' : '(평균에서 뺌)'}</span><span>− 장애 시작보다 먼저 관측됨(장애 주입이 없고 SSH 끊김으로 DOWN 을 잡은 회차는 감지가 최대 90초 늦을 수 있음)</span></div></section>`)
+  // 표 아래 기호 설명(- · * · −)은 뺐다(2026-11-10 사용자 요청). 목표 기준을 켰을 때의 ✓ · ✗ 만 남긴다
+  H.push(`${rtoOn ? `<div class="legend"><span><b class="pass">✓</b> 목표 이내</span><span><b class="fail">✗</b> 목표 초과</span></div>` : ''}</section>`)
 
   /**
    * ③ 복구 흐름 — 장애 시작(0)부터 각 단계가 끝난 시점. 막대는 장애 대응 구간(VIP · Masakari · 포털 정상화)만이고, 포털 최종 · 파드 ·
@@ -4864,7 +6178,6 @@ ${
   }
   const grid = (ax: { step: number; end: number }) =>
     `background-image:repeating-linear-gradient(90deg,#dfe3ea 0,#dfe3ea 1px,transparent 1px,transparent ${((ax.step / ax.end) * 100).toFixed(3)}%)`
-  const allShort = allLabel ? allLabel.replace(' 복구', '') : ''
   if (marks.length) {
     if (one) {
       const ms = msOf(runs[0])
@@ -4876,10 +6189,10 @@ ${
       // 값이 없어 막대가 없는 실패 — 빠뜨리면 '없었다' 로 읽힌다
       const fails = [
         inc.masakari && masaFailOf(ms) ? { label: 'Masakari', text: `실패 (${masaFailText(ms)})`, title: '' } : null,
-        inc.portal && t.svcPending.length ? { label: '포털', text: `미복구 (화면 ${t.svcPending.length}개)`, title: t.svcPending.join(', ') } : null,
+        inc.portal && t.svcPending.length ? { label: '포털', text: `실패 (화면 ${t.svcPending.length}개 안 돌아옴)`, title: t.svcPending.join(', ') } : null,
       ].filter((x): x is { label: string; text: string; title: string } => !!x)
       const ax = axisOf(Math.max(0, ...steps.map((x) => x.v)))
-      H.push(`<section class="sec"><div class="sh"><span class="n">2</span><h2>복구 흐름</h2><span class="d">장애 시작(0)부터 각 단계가 끝난 시점</span></div><div class="flow">`)
+      H.push(`<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>복구 흐름</h2><span class="d">장애 시작(0)부터 각 단계가 끝난 시점</span></div><div class="flow">`)
       H.push(`<div></div>${axisRow(ax)}<div></div>`)
       for (const x of steps)
         H.push(
@@ -4892,48 +6205,122 @@ ${
         .map((k) => `${cols[ci(k)].label} ${E(vals[ci(k)][0])}${cols[ci(k)].note?.(ms) ?? ''}`)
       if (allLabel || after.length)
         H.push(
-          `<div class="after">${allLabel ? `<b>${he(allLabel)} ${ci('all') >= 0 && vals[ci('all')][0] != null ? E(vals[ci('all')][0]) : '미복구'}</b>` : ''}${after.length ? `${allLabel ? ' · ' : ''}참고: ${after.join(' · ')}` : ''}</div>`,
+          `<div class="after">${allLabel ? `<b>${he(allLabel)} ${ci('all') >= 0 && vals[ci('all')][0] != null ? E(vals[ci('all')][0]) : '실패'}</b>` : ''}${after.length ? `${allLabel ? ' · ' : ''}참고: ${after.join(' · ')}` : ''}</div>`,
         )
       H.push(`</section>`)
-    } else {
-      // 축 끝 — 값들의 90% 지점(값이 적으면 최댓값). 그보다 긴 값은 축 밖
-      const all = runs.flatMap((_h, i) => marks.map((m) => vals[ci(m.key)][i])).filter((v): v is number => v != null && v > 0).sort((x, y) => x - y)
-      const cap = all.length >= 5 ? all[Math.floor((all.length - 1) * 0.9)] : (all[all.length - 1] ?? 0)
-      const ax = axisOf(cap)
-      H.push(
-        `<section class="sec"><div class="sh"><span class="n">2</span><h2>복구 흐름</h2><span class="d">장애 시작(0)부터 각 단계가 끝난 시점 · 축 끝 ${he(tickLabel(ax.end))}</span></div><div class="flow">`,
-      )
-      H.push(`<div class="hd">회차</div>${axisRow(ax)}<div class="hd">${he(allShort)}</div>`)
-      runs.forEach((h, i) => {
-        const pts = marks
-          .map((m) => ({ m, v: vals[ci(m.key)][i] }))
-          .filter((x): x is { m: (typeof marks)[number]; v: number } => x.v != null)
-          .sort((x, y) => x.v - y.v)
-        let prev = -100
-        let flip = false
-        const dots = pts
-          .map((x) => {
-            const at = +pct(x.v, ax.end)
-            // 앞 점과 2.5% 안쪽이면 위아래로 엇갈린다 — 같은 자리에 겹치면 뒤 점만 보였다
-            const near = at - prev < 2.5
-            flip = near ? !flip : false
-            prev = at
-            const over = x.v > ax.end
-            return `<span class="dot${over ? ' over' : ''}${near ? (flip ? ' up' : ' dn') : ''}" title="${he(x.m.label)} ${E(x.v)}" style="left:${at}%;background:${x.m.color}"></span>`
+    }
+  }
+  /*
+   * 여러 회차: ② 실패 원인 · ③ 노드별 결과(2026-11-11 사용자 결정 · 목업). 예전 '② 복구 흐름'(회차마다 단계 점)은 ① 회차 비교 표의 시간을
+   * 다시 그린 것이라 새로 알려 주는 것이 없었다(사용자 지적). 표에 없는 것 — 왜 실패했나 · 노드별로 다른가 — 를 둔다. 한 회차는 위 흐름 그대로.
+   */
+  if (!one && allLabel) {
+    // 포털 판정의 연속 성공 횟수 — 회차 기록(정상화 확정 streak · 판정 기록 n)에서 읽는다. 없으면 숫자 없이
+    const streakN = (ms: Milestones) => Math.max(0, ...(ms.portal ?? []).map((p) => p.streak ?? 0), ...(ms.portalLog ?? []).map((e) => e.n ?? 0)) || null
+    /** key: 세부 원인 및 조치를 찾을 단계(RunNote.step) · note: 수동 조치 줄은 그 기록 하나 */
+    const failRows: { i: number; step: string; head: string; subs: string[]; key: RunNote['step']; note?: RunNote }[] = []
+    runs.forEach((h, i) => {
+      if (!svcFail[i]) return
+      const ms = msOf(h)
+      const t = tot[i]
+      if (inc.masakari && masaWatchedOf(ms) && !masaDoneOf(ms)) {
+        const subs: string[] = []
+        let head = (ms.masakariFail ?? []).length ? 'Masakari evacuation 끝나지 않음' : 'Masakari evacuation 기록 없음'
+        let names: string[] | undefined
+        if (masaPartOf(ms) && ms.masakari?.vms) {
+          const v = ms.masakari.vms
+          head = `VM ${v.count}대 중 ${v.failed + (v.pending ?? 0)}대 실패`
+          if (v.pending) subs.push(`${v.pending}대는 끝까지 완료되지 않음`)
+          names = v.failedNames
+        } else if (masaFailedRun(ms)) {
+          const fs = [...(ms.masakariFail ?? [])].sort((a, b) => a.at - b.at)
+          const f = fs.filter((x) => x.failedVms).pop() ?? fs[fs.length - 1]
+          head = f?.failedVms ? (f.evac >= f.failedVms ? `VM ${f.evac}대 중 ${f.failedVms}대 실패` : `VM ${f.failedVms}대 실패`) : 'Masakari evacuation 실패'
+          // 이유에서 대수 부분은 위 굵은 글씨와 겹치므로 뺀다('VM 11대 중 1대 옮기지 못함 · 1대 evacuation 확인 시간 초과(601초)' → 뒤만)
+          const why = (f?.reason ?? f?.brief ?? '').replace(/^VM \d+대(?: 중 \d+대)? 옮기지 못함(?: · )?/, '').trim()
+          if (why) subs.push(why)
+          // 대수를 정한 기록(f)의 이름만 — 앞선 1차 시도에서 실패했다가 재시도에서 옮겨진 VM 이 섞이지 않게(코드 리뷰 11-11)
+          names = f?.failedVmNames
+        }
+        if (!masaPartOf(ms) && !masaFailedRun(ms) && !(ms.masakariFail ?? []).length) subs.push('알림 처리 · evacuation 완료 기록을 찾지 못함')
+        if (names?.length) subs.push(Array.from(new Set(names)).join(' · '))
+        failRows.push({ i, step: 'Masakari', head, subs, key: 'masakari' })
+      }
+      if (inc.portal && t.svcPending.length) {
+        const ph = portalPhases(ms)
+        const n = streakN(ms)
+        if (ph.firstAll != null) {
+          // 끝내 안 돌아온 화면이 다시 끊긴 시각만 — 다른 화면의 끊김(곧 돌아온 것)을 적지 않게(코드 리뷰 11-11)
+          const re = Math.min(...(ms.portalFlaps ?? []).filter((f) => t.svcPending.includes(f.name)).map((f) => f.downAt).filter((x) => x > (ph.firstAll as number)))
+          failRows.push({
+            i,
+            step: '포털',
+            key: 'portal',
+            head: '정상화 이후 다시 포털 실패',
+            subs: [
+              `${E(ph.firstAll - t.base)}에 모두 정상${Number.isFinite(re) ? ` → ${E(re - t.base)}에 다시 끊김` : ''} → 검증 끝까지 안 돌아옴`,
+              t.svcPending.join(' · '),
+            ],
           })
-          .join('')
-        const end = Math.max(0, ...pts.map((x) => x.v))
-        const overs = pts.filter((x) => x.v > ax.end)
-        const total = ci('all') >= 0 ? vals[ci('all')][i] : null
+        } else failRows.push({ i, step: '포털', key: 'portal', head: `주요 화면 API 200 OK ${n ? `${n}회 ` : ''}연속 성공하지 못함`, subs: [t.svcPending.join(' · ')] })
+      }
+      // 사람이 '조치로 복구됨' 을 켠 수동 조치 — 앱이 성공으로 본 회차도 여기서 실패 줄이 된다(RunNote 주석)
+      for (const nt of (h.notes ?? []).filter((x) => x.step === 'manual' && x.recovered && x.cause.trim()))
+        failRows.push({
+          i,
+          step: '수동 조치',
+          key: 'manual',
+          note: nt,
+          head: '수동 조치 후 복구',
+          subs: [`자동으로 복구되지 않아 사람이 조치함${nt.at != null ? ` · ${fmtDateTime(nt.at)}` : ''}`],
+        })
+    })
+    H.push(`<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>실패 원인</h2><span class="d">실패한 회차만 · 실패한 단계마다 한 줄</span></div>`)
+    if (!failRows.length) H.push(`<p class="note" style="margin:0">모든 회차가 성공했습니다.</p>`)
+    else {
+      /*
+       * 실패 원인 표(2026-11-11 사용자 결정 · 목업 total-mock6): 회차 비교 표와 같은 꼴(남색 머리 · 칸마다 선 · 머리 가운데).
+       * 회차 · 실패 칸은 좌우 · 위아래 가운데, 내용 · 세부 원인 및 조치는 왼쪽(위아래 가운데). 오른쪽 칸은 이력 창에서 적은 것 — 비었으면 빈칸.
+       */
+      H.push(`<table class="fx"><thead><tr><th style="width:190px">회차</th><th style="width:96px">실패</th><th style="width:34%">내용</th><th>세부 원인 및 조치</th></tr></thead><tbody>`)
+      failRows.forEach((r, k) => {
+        const span = failRows.filter((x) => x.i === r.i).length
+        const firstOfRun = k === 0 || failRows[k - 1].i !== r.i
+        const h = runs[r.i]
+        const ns = r.note ? [r.note] : (h.notes ?? []).filter((x) => x.step === r.key && x.cause.trim())
         H.push(
-          `<div><a class="rn" ${hrefRun(i)} title="${he(nameOfRun(h, i))}">#${i + 1} ${he(nameOfRun(h, i))}</a></div><div class="track" style="${grid(ax)}"><span class="bar" style="width:${pct(end, ax.end)}%"></span>${dots}</div><div class="num mut">${
-            allLabel ? (total != null ? E(total) : svcFail[i] ? '미복구' : '미완') : ''
-          }${overs.map((x) => `<span class="ovf">축 밖: ${he(x.m.label)} ${E(x.v)}</span>`).join('')}</div>`,
+          `<tr>${
+            firstOfRun
+              ? `<td class="c"${span > 1 ? ` rowspan="${span}"` : ''}><a class="rn" ${hrefRun(r.i)} title="${he(nameOfRun(h, r.i))}">#${r.i + 1} ${he(shortName(h, r.i))}</a><span class="rs">${he(h.node)}</span></td>`
+              : ''
+          }<td class="c"><span class="fstep${r.key === 'manual' ? ' act' : ''}">${he(r.step)}</span></td><td><b>${he(r.head)}</b>${r.subs
+            .filter(Boolean)
+            .map((x) => `<span class="fm">${he(x)}</span>`)
+            .join('')}</td><td class="dc">${noteHtml(ns)}</td></tr>`,
         )
       })
-      H.push(
-        `</div><div class="legend">${marks.map((m) => `<span><i style="background:${m.color}"></i>${he(m.label)}</span>`).join('')}<span>정확한 값은 ① 회차 비교 표에 있습니다(점에 마우스를 올려도 보입니다) · 파드 · Ceph 는 노드를 올린 뒤의 일이라 막대에서 뺐습니다(표에 있음)</span></div></section>`,
-      )
+      H.push(`</tbody></table>`)
+    }
+    H.push(`</section>`)
+
+    // ③ 노드별 결과 — 어느 노드를 내렸을 때 약한가. 평균 · 최대는 성공한 회차만(위 평균과 같은 기준)
+    const nodeList = Array.from(new Set(runs.map((h) => h.node).filter((nd) => nd && nd !== UNKNOWN_NODE)))
+    if (nodeList.length) {
+      const ca = ci('all')
+      H.push(`<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>노드별 결과</h2><span class="d">시간은 성공한 회차만</span></div><div class="ncards">`)
+      for (const nd of nodeList) {
+        const idx = runs.map((_h, i) => i).filter((i) => runs[i].node === nd)
+        const okN = idx.filter((i) => runVerdict(i) === 'ok').length
+        const judgedN = idx.filter((i) => runVerdict(i) !== 'none').length
+        const vs = idx.filter((i) => runVerdict(i) === 'ok' && counted(i)).map((i) => vals[ca][i] as number)
+        const avg = vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null
+        H.push(
+          `<div class="ncard"><div class="t">${he(nd)}</div><div class="mut">${idx.length}회 (${idx.map((i) => runLink(runs[i])).join(' ')})</div><div class="big">성공 ${okN} / ${judgedN}</div><div class="nb"><i style="width:${judgedN ? ((okN / judgedN) * 100).toFixed(1) : 0}%"></i></div><div class="mut">${
+            avg != null ? `${he(allLabel)} 평균 <b>${E(avg)}</b> · 최대 ${E(Math.max(...vs))}` : `${he(allLabel)}: 성공한 회차 없음`
+          }</div></div>`,
+        )
+      }
+      H.push(`</div></section>`)
     }
   }
 
@@ -4952,39 +6339,48 @@ ${
   H.push(
     `<div class="tools"><button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=true)">모두 펼치기</button>${
       one ? '' : `<button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=d.hasAttribute('data-bad'))">문제 있는 회차만 펼치기</button>`
-    }<button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=false)">모두 접기</button></div>`,
+    }<button type="button" onclick="document.querySelectorAll('details.run').forEach(d=>d.open=false)">모두 접기</button>${
+      // 회차 결과 요약 — 종합 결과의 '검증 결과' 카드와 같은 말
+      allLabel && !one
+        ? `<span class="tsum">${runs.length}회 중 <b class="pass">성공 ${okRunN}</b> · <b class="fail">실패 ${failRunIdx.length}</b>${noneRunN ? ` · 판정 못 함 ${noneRunN}` : ''}${failRunIdx.length ? ` (${failRunIdx.map((i) => runLink(runs[i])).join(' ')})` : ''}</span>`
+        : ''
+    }</div>`,
   )
   runs.forEach((h, i) => {
     const ms = msOf(h)
     const t = tot[i]
     // 뺀 항목의 증적은 넣지 않는다 — 증적을 통째로 뺐으면 하나도 넣지 않는다.
-    // 단 '증적 원문' 파일은 항목과 상관없이 전부 — 보고용 항목(파드 · Ceph 뺌)으로 뽑으면 증적이 있는데도 '저장된 증적이 없습니다' 가 됐다(코드 점검 10-29)
-    const items = inc.evidence
-      ? (evidence[h.id] ?? []).filter((it) => {
-          if (kind === 'evidence') return true
-          const k = evItem(it.key)
-          return k == null || inc[k]
-        })
-      : []
+    /*
+     * '증적 원문' 파일도 넣을 항목을 따른다(2026-11-10 사용자 요청: 포털 정상화까지만 뽑았는데 증적 목차에 노드 UP 이후의 파드 · Ceph ·
+     * 세션 재연결이 줄줄이 섰다). 예전(10-29)엔 증적 원문만 항목과 상관없이 전부 넣었다 — 보고용 항목으로 뽑으면 '저장된 증적이 없습니다' 가
+     * 됐던 탓인데, 그 판단은 저장된 증적 수(makeRunsReport)로 하므로 여기서 걸러도 파일이 빠지지 않는다.
+     * 검증 전 분산 점검('spread')은 항목과 상관없이 넣는다(장애 전 상태라 늘 볼 값). 검증 중에 누른 점검('spread:<시각>', 이제는 저장하지 않음)은
+     * 옛 회차에 남아 있어도 넣지 않는다(사용자 결정: 검증 중 점검은 이력에 남기지 않는다).
+     */
+    const items = inc.evidence ? (evidence[h.id] ?? []).filter((it) => evKeep(it.key, inc)) : []
     // 증적을 사건 시각 순으로 늘어놓고 '노드 DOWN 이전 · 이후 · UP 이후' 로 묶는다(runEvidenceLayout)
-    const lay = runEvidenceLayout(items, ms, h.t0, t.base)
+    const lay = runEvidenceLayout(items, ms, h.t0, t.base, inc.node)
     const { evItems, evKeys, evArr, upAt } = lay
     const evAnchor = new Map(evArr.map((x, n) => [x.it.key, `ev-${i + 1}-${n + 1}`]))
     const pend = podsDoneSummary(ms).pending
     const allV = ci('all') >= 0 ? vals[ci('all')][i] : null
     const pills = [
-      !inc.portal ? '' : t.svcPending.length ? `<span class="pill bad">포털 미복구 ${t.svcPending.length}</span>` : t.svc != null ? `<span class="pill ok">포털 ${E(t.svc)}</span>` : '',
-      // 잴 것이 없는 회차(Masakari 동작 · 포털 끊김 없음)는 미복구가 아니다 — 비교표의 '-' 와 같은 말을 한다(코드 점검 10-30)
-      !allLabel ? '' : svcFail[i] ? `<span class="pill bad">전체 미복구</span>` : allV != null ? `<span class="pill">전체 ${E(allV)}</span>` : '',
+      /*
+       * 포털 실패 · 전체 실패 · Masakari 실패 라벨은 뺐다(2026-11-10 사용자 요청: 펼치면 바로 아래 카드가 같은 말을 한다).
+       * 포털 · 전체 시간 알약도 뺐다(같은 날 사용자 요청) — 회차 결과(성공 / 실패) 하나만 남긴다
+       */
       t.fromDown ? '' : `<span class="pill warn">DOWN 미감지: 시작 기준</span>`,
-      inc.masakari && masaFailOf(ms) ? `<span class="pill bad">Masakari 실패 · ${he(masaFailText(ms))}</span>` : '',
       inc.pods && pend ? `<span class="pill warn">파드 미완 ${pend}</span>` : '',
       inc.evidence ? `<span class="pill">증적 ${evItems.length}</span>` : '',
+      // 회차 결과 하나(2026-11-10 사용자 요청: 포털 · 전체 시간 알약은 빼고 끝에 성공 / 실패, 그 오른쪽에 증적 링크). 시간은 펼친 카드에 있다
+      allLabel ? { ok: '<span class="pill ok">성공</span>', fail: '<span class="pill bad">실패</span>', none: '<span class="pill" title="잴 것이 없었거나 VM 이동을 확인하지 못함">판정 못 함</span>' }[runVerdict(i)] : '',
+      kind === 'runs' && evFileOf(h) ? `<a class="evl" href="${fileHref(evFileOf(h) as string)}" title="이 회차의 증적 원문 파일">증적 →</a>` : '',
     ].join('')
-    // '문제 있는 회차만 펼치기' 의 대상 — 실패 · 미복구 · 미완 · DOWN 미감지
+    // '문제 있는 회차만 펼치기' 의 대상 — 실패 · 미완 · DOWN 미감지
+    // 회차는 첫 회차만 펼쳐 연다(2026-11-10 사용자 요청: 다 펼치면 첫 화면이 한 회차로 꽉 찬다). PDF(openEvidence)는 접힌 것이 인쇄되지 않아 모두 펼친다
     const bad = (inc.portal && t.svcPending.length > 0) || svcFail[i] || (inc.masakari && masaFailOf(ms)) || (inc.pods && pend > 0) || !t.fromDown
     H.push(
-      `<details class="run" id="run-${i + 1}"${bad ? ' data-bad' : ''}${openRuns ? ' open' : ''}><summary><span class="rt">${i + 1}. ${he(nameOfRun(h, i))}</span><span class="tag">${he(h.node)}</span><span class="mut">${he(fmtDateTime(h.t0))}</span>${pills}</summary><div class="rb">`,
+      `<details class="run" id="run-${i + 1}"${bad ? ' data-bad' : ''}${openRuns && (i === 0 || opts.openEvidence) ? ' open' : ''}><summary><span class="rt">${i + 1}. ${he(nameOfRun(h, i))}</span><span class="tag">${he(h.node)}</span><span class="mut">${he(fmtDateTime(h.t0))}</span>${pills}</summary><div class="rb">`,
     )
     /*
      * 머리 카드 — 장애 시작 · Masakari 완료 · 포털 1차 정상화 · 전체 복구 넷(10-30 사용자 결정, 목업). 걸린 시간은 크게, 시각은 작게.
@@ -4993,27 +6389,41 @@ ${
      * 흔들림이 끝난 포털 최종 · Ceph · 노드 복귀는 노드를 올린 시각에 따라 바뀌므로 카드 아래 '참고' 한 줄로.
      */
     const inj = h.milestones.inject
-    const startCard = t.fromInject
-      ? `<b>${he(fmtDateTime(t.base))}</b><small>${inj?.source === 'manual' ? `수동 입력${inj.note ? ` · ${he(inj.note)}` : ''}` : '장애 주입 버튼'} · DOWN 감지 +${E((t.downAt as number) - t.base)}</small>`
-      : t.fromDown
-        ? `<b>${he(fmtDateTime(t.base))}</b><small>DOWN 감지 · 검증 시작 후 ${E(t.base - h.t0)}</small>`
-        : '<b>-</b><small>DOWN 감지 못함: 검증 시작 기준</small>'
+    // 카드 아래 작은 글씨(수동 입력 · DOWN 감지 +n초 · 화면 수 앞 '처음' · 전체 복구 기준)는 뺐다(2026-11-10 사용자 요청: 간결하게).
+    // 장애 시작은 이미 장애 주입 · DOWN 감지 중 이른 쪽이다(runTotals)
+    void inj
+    const startCard = t.fromDown ? `<b>${he(fmtDateTime(t.base))}</b>` : '<b>-</b><small>DOWN 감지 못함: 검증 시작 기준</small>'
     const masaCard = masaFailOf(ms)
       ? `<b class="fail">실패</b><small>${he(masaFailText(ms))}</small>`
       : ms.masakari
         ? `<b>${E(ms.masakari.at - t.base)}</b><small>${ms.masakari.evac > 0 ? `${ms.masakari.evac}대 · ` : ''}${he(fmtDateTime(ms.masakari.at))}${masaUncheckedOf(ms) ? ' · VM 이동 확인 못 함(Nova 조회 실패)' : ''}</small>`
         : `<b>-</b><small>${masaWatchedOf(ms) ? '끝나지 않음' : 'Masakari 동작 없음'}</small>`
     const ph = portalPhases(ms)
+    // 끝나지 않은 것은 '미복구' 가 아니라 '실패' 로 부른다(2026-11-10 사용자 요청) — 리포트 전체가 같은 말
     const svcCard = t.svcPending.length
-      ? `<b class="fail">${t.svc != null ? E(t.svc) : '미복구'}</b><small>${t.svc != null ? '1차 정상화 뒤 다시 끊겨 미복구: ' : ''}${he(t.svcPending.join(', '))}</small>`
+      ? `<b class="fail">실패</b><small>${t.svc != null ? `1차 정상화 ${E(t.svc)} 뒤 다시 끊겨 안 돌아옴: ` : '안 돌아온 화면: '}${he(t.svcPending.join(', '))}</small>`
       : t.svc == null
         ? '<b>-</b><small>포털 끊김 기록 없음</small>'
-        : `<b>${E(t.svc)}</b><small>처음 ${ph.pages}/${ph.pages} 화면 · ${he(fmtDateTime(t.base + t.svc))}</small>`
+        : `<b>${E(t.svc)}</b><small>${ph.total}/${ph.total} 화면${ph.calm ? `(끊기지 않은 ${ph.calm}개 포함)` : ''} · ${he(fmtDateTime(t.base + t.svc))}</small>`
+    /*
+     * 전체 복구 실패는 무엇 때문인지 한 줄로(2026-11-10 사용자 요청: 'Masakari 는 성공했으나 포털 정상화 불가로 실패' 꼴). svcFail 과 같은 조건:
+     * Masakari 를 감시했는데 끝나지 않았거나, 포털에 안 돌아온 화면이 있다. 리포트에서 뺀 항목은 말하지 않는다.
+     */
+    const masaBad = inc.masakari && masaWatchedOf(ms) && !masaDoneOf(ms)
+    const portalBad = inc.portal && t.svcPending.length > 0
+    // 사람이 '조치로 복구됨' 을 켠 회차 — 앱이 잰 것은 모두 끝났지만 사람이 손대서 끝난 것(RunNote 주석)
+    const failWhy = !masaBad && !portalBad && manualFailOf(h)
+      ? '자동으로 복구되지 않아 수동 조치 후 복구'
+      : masaBad && portalBad
+        ? 'Masakari evacuation 실패 · 포털 정상화 불가로 실패'
+        : portalBad
+          ? `${inc.masakari && masaDoneOf(ms) ? 'Masakari evacuation 은 성공했으나 ' : ''}포털 정상화 불가로 실패`
+          : `${inc.portal && t.svc != null ? '포털은 정상화됐으나 ' : ''}Masakari evacuation ${masaFailOf(ms) ? '실패' : '미완료'}로 실패`
     const allCard = svcFail[i]
-      ? '<b class="fail">미복구</b><small>Masakari · 포털이 다 끝나지 않음</small>'
+      ? `<b class="fail">실패</b><small>${he(failWhy)}</small>`
       : allV == null
         ? '<b>-</b><small>잴 것 없음(Masakari 동작 · 포털 끊김 없음)</small>'
-        : `<b>${E(allV)}</b><small>${he(allBasis)} · ${he(fmtDateTime(t.base + allV))}</small>`
+        : `<b>${E(allV)}</b>`
     // 노드 항목을 뺀 리포트는 노드 복귀 · 그 뒤 구분선 · 흐린 줄을 쓰지 않는다
     const nb = inc.node ? nodeBackAt(ms) : null
     const refLine = [
@@ -5028,6 +6438,32 @@ ${
         inc.portal ? `<div><span>포털 1차 정상화</span>${svcCard}</div>` : ''
       }${allLabel ? `<div><span>전체 복구</span>${allCard}</div>` : ''}</div>${refLine.length ? `<div class="refl">참고: ${refLine.map(he).join(' · ')}</div>` : ''}`,
     )
+    // 세부 원인 및 조치(RunNote 주석) — 요약 칸 아래 상자. 종합 결과의 실패 원인 표 오른쪽 칸과 같은 글
+    const notesOk = (h.notes ?? []).filter((n) => n.cause.trim())
+    if (notesOk.length)
+      H.push(
+        `<div class="cbox"><div class="hd">세부 원인 및 조치</div>${notesOk
+          .map(
+            (n) =>
+              `<div class="it"><div class="c"><span class="fstep${n.step === 'manual' ? ' act' : ''}">${NOTE_STEP_LABEL[n.step]}</span></div><div>${noteHtml([n])}${
+                n.step === 'manual' && n.recovered ? '<div class="mut" style="font-size:11px;margin-top:2px">이 조치로 복구됨: 회차는 실패로 셈</div>' : ''
+              }</div></div>`,
+          )
+          .join('')}</div>`,
+      )
+    /** 조치 시각을 적은 기록은 타임라인에 '사람 조치' 줄(주황)로 — 무엇이 조치 덕분에 돌아왔는지 시간 순서로 보이게 */
+    const noteRows: TimelineItem[] = notesOk
+      .filter((n) => n.at != null)
+      .map((n) => ({
+        at: n.at as number,
+        icon: null,
+        text: maskForExport(`${n.step === 'manual' ? '수동 조치' : '조치'}: ${(n.action?.trim() || n.cause.trim()).split('\n')[0]}${n.owner?.trim() ? ` (${n.owner.trim()})` : ''}`),
+        tone: 'info' as TlTone,
+        target: 'note',
+      }))
+    const manualAt = Math.min(Infinity, ...notesOk.filter((n) => n.step === 'manual' && n.recovered && n.at != null).map((n) => n.at as number))
+    const withNotes = (rows: TimelineItem[]) =>
+      noteRows.length ? [...rows, ...noteRows].sort((a, b) => (a.sortAt ?? a.at) - (b.sortAt ?? b.at) || (a.ord ?? 0) - (b.ord ?? 0)) : rows
     /**
      * 타임라인은 화면과 같이 **요약** 을 먼저 두고, 전체 기록은 접어서 아래에 둔다(사용자 결정 — 보고서가 30줄 넘는 표로 시작했다).
      * PDF 는 접힌 내용이 인쇄되지 않으므로 증적처럼 펼쳐서 뽑는다. 리포트에서 뺀 항목(opts.keep)은 두 표 모두에서 뺀다.
@@ -5044,8 +6480,13 @@ ${
      * 참고 색으로 칠해지고 전체 복구 표시도 빠졌고, 전체 기록 표의 '포털 정상화: 4개 화면 (4/4)' 은 문구 꼴이 달라 강조되지 않았다.
      */
     const isUp = (r: TimelineItem) => r.target === 'portal' && r.text.includes('정상화') && !r.text.includes('미복구')
-    const rowCls = (r: TimelineItem): 'kd' | 'kr' | 'kf' | '' => {
-      if (r.target === 'inject' || (r.target === 'host' && r.text.startsWith('호스트 DOWN'))) return 'kd'
+    const rowCls = (r: TimelineItem): 'kd' | 'kr' | 'kf' | 'ka' | '' => {
+      if (r.target === 'note') return 'ka'
+      // 끝내 안 돌아온 포털(요약의 '포털 실패' 줄)도 장애 색 — 범례가 장애 · 복구 · 참고 셋이다
+      if (r.target === 'inject' || (r.target === 'host' && r.text.startsWith('호스트 DOWN')) || (r.target === 'portal' && r.text.startsWith('포털 실패'))) return 'kd'
+      // Masakari 최종 실패 · 일부 VM 을 못 옮긴 완료도 장애 색 — 회차 결과를 '실패' 로 만든 줄인데 흰 줄이었다(2026-11-11 사용자 지적).
+      // 1차 시도 실패(error)는 재시도로 넘어가는 중간 단계라 칠하지 않는다
+      if (r.target === 'masakari' && (r.text.startsWith('Masakari 최종 실패') || (r.text.startsWith('Masakari evacuation 완료') && masaPartOf(ms)))) return 'kd'
       if (r.target === 'vip' || (r.target === 'masakari' && r.text.startsWith('Masakari evacuation 완료') && masaDoneOf(ms))) return 'kr'
       // 전체 기록 표는 같은 순간(PORTAL_SAME_MS 안) 돌아온 화면을 한 줄로 묶고 그 묶음의 가장 이른 시각을 적는다 — 1~2초 어긋날 수 있다
       const near = (x: number | null) => x != null && Math.abs(r.at - x) <= PORTAL_SAME_MS
@@ -5056,11 +6497,71 @@ ${
     const elapsedHead = t.fromDown ? '장애 시작 후' : '검증 시작 후'
     const since = (at: number) => `${at < t.base ? '−' : '+'}${fmtElapsed(Math.abs(at - t.base))}`
     // 요약 표는 화면 요약과 같이 '한 문장' 만(안 1) — 설명 · 서버 기록은 아래 전체 기록에 있다
+    /*
+     * 요약 타임라인 줄이기(2026-11-10 사용자 요청: 전체 기록에 다 있으니 요약은 흐름만).
+     *  - 장애 주입과 호스트 DOWN 은 같은 일을 두 줄로 말했다 → 이른 쪽 시각(= 장애 시작)에 '호스트 DOWN: 노드' 한 줄
+     *  - 포털 다시 끊김을 화면 · 순간마다 늘어놓지 않는다 → 끊김 > 1차 정상화 > 다시 끊김 n회 > 최종 정상화
+     */
+    const condense = (rows: TimelineItem[]): TimelineItem[] => {
+      // 포털 묶음만 머리 한 줄로 줄인다. 파드 흔들림 같은 다른 묶음은 예전처럼 머리를 빼고 줄을 펼친다(항목에서 뺐으면 keepRow 가 거른다)
+      let out = rows.filter((x) => x.fold !== 'portal' && (!x.foldHead || x.foldHead === 'portal') && (x.foldHead === 'portal' || keepRow(x)))
+      if (!inc.portal) out = out.filter((x) => x.foldHead !== 'portal')
+      const injRow = out.find((r) => r.target === 'inject')
+      const downRow = out.find((r) => r.target === 'host' && r.text.startsWith('호스트 DOWN'))
+      if (injRow && downRow) {
+        const merged: TimelineItem = { ...downRow, at: Math.min(injRow.at, downRow.at), text: `호스트 DOWN: ${h.node}` }
+        out = out.filter((r) => r !== injRow && r !== downRow)
+        out.push(merged)
+      }
+      out = out.map((r) =>
+        r.foldHead
+          ? { ...r, foldHead: undefined, target: 'portal', text: r.text.replace(/^포털 흔들림 (\d+)회.*$/, '포털 다시 끊김 $1회') }
+          : r.target === 'portal' && r.text.startsWith('포털 1차 정상화')
+            ? { ...r, text: r.text.replace(/ · 이후 다시 끊김 \d+회$/, '') }
+            : r,
+      )
+      /*
+       * 끝내 안 돌아온 화면이 있는 회차의 '포털 1/4 정상화 · 미복구 3' 줄은 마지막으로 돌아온 화면의 시각에 서서, 1차 정상화보다 앞에
+       * 놓였다(11-10 8회차). 리포트 요약에서는 마지막으로 끊긴 때에 '포털 실패: n개 화면 안 돌아옴' 으로 둔다(카드와 같은 말)
+       */
+      const pend = t.svcPending.length
+      if (pend) {
+        const lastBad = Math.max(-Infinity, ...(ms.portalLog ?? []).filter((e) => e.kind !== 'up').map((e) => e.at))
+        const failText = `포털 실패: ${pend}개 화면 안 돌아옴`
+        out = out.map((r) =>
+          r.target === 'portal' && / · 미복구 \d+$/.test(r.text) ? { ...r, at: Number.isFinite(lastBad) ? Math.max(r.at, lastBad) : r.at, sortAt: undefined, text: failText } : r,
+        )
+        // 돌아온 화면이 하나도 없으면 위 줄이 없다 — 마지막으로 끊긴 때에 같은 줄을 둔다
+        if (!out.some((r) => r.text === failText) && Number.isFinite(lastBad))
+          out.push({ at: lastBad, icon: null, text: failText, tone: 'bad', target: 'portal', ev: 'portal' })
+      }
+      // 다시 끊김이 접히지 않을 만큼 적으면(FLAP_FOLD_MIN 미만) 순간마다 줄이 섰다 — 요약은 첫 순간에 'n회' 한 줄
+      /*
+       * 1차 정상화 앞 · 뒤로 나눠 센다(코드 리뷰 11-10) — 한 줄로 합치면 1차 전 흔들림까지 세어 카드의 '1차 뒤 다시 끊김 n회'
+       * (flapsAfterFirst)와 숫자가 달랐다. 셈은 portalPhases 와 같이 같은 순간(SAME_MS) 끊긴 화면을 한 번으로.
+       */
+      const reDown = out.filter((r) => r.target === 'portal' && r.text.startsWith('포털 다시 끊김'))
+      if (reDown.length) {
+        const downs = (ms.portalFlaps ?? []).map((f) => f.downAt)
+        const fa = ph.firstAll
+        out = out.filter((r) => !reDown.includes(r))
+        const side = (xs: number[]) => {
+          if (!xs.length) return
+          out.push({ ...reDown[0], at: Math.min(...xs), sortAt: undefined, sub: undefined, text: `포털 다시 끊김 ${episodes(xs)}회` })
+        }
+        side(fa == null ? downs : downs.filter((x) => x <= fa))
+        if (fa != null) side(downs.filter((x) => x > fa))
+      }
+      // 1차 뒤 다시 끊기지 않았으면 1차가 곧 최종이다 — 흐름(끊김 > 1차 > 다시 끊김 > 최종)에 맞춰 '1차 정상화' 로 부른다
+      if (ph.firstAll != null && ph.flapsAfterFirst === 0)
+        out = out.map((r) => (r.target === 'portal' && /^포털 (최종 )?정상화/.test(r.text) ? { ...r, text: r.text.replace(/^포털 (최종 )?정상화/, '포털 1차 정상화') } : r))
+      return out.sort((a, b) => (a.sortAt ?? a.at) - (b.sortAt ?? b.at) || (a.ord ?? 0) - (b.ord ?? 0))
+    }
     const tlTable = (rows: TimelineItem[], compact = false) => {
-      const kept = rows.filter((x) => !x.foldHead && keepRow(x))
+      const kept = compact ? condense(rows) : rows.filter((x) => !x.foldHead && keepRow(x))
       const sepAt = nb != null ? kept.findIndex((r) => r.at >= nb) : -1
       const span = compact ? 3 : 4
-      return `<table class="grid tl"><thead><tr><th style="width:150px">시각</th><th class="c" style="width:78px">${elapsedHead}</th><th>내용 (Q-Term 관측)</th>${compact ? '' : '<th style="width:230px">서버 기록</th>'}</tr></thead><tbody>${kept
+      return `<table class="grid tl"><thead><tr><th style="width:150px">시각</th><th class="c" style="width:78px">${elapsedHead}</th><th>내용</th>${compact ? '' : '<th style="width:230px">서버 기록</th>'}</tr></thead><tbody>${kept
         .map((r, k) => {
           const c = rowCls(r)
           const dim = !c && (r.text === '검증 시작' || (sepAt >= 0 && k >= sepAt && r.target !== 'portal'))
@@ -5071,18 +6572,20 @@ ${
           // 증적 원문 파일이면 증적이 있는 줄에서 그 원문으로 바로 간다
           const evK = kind === 'evidence' && r.ev ? resolveEvKey(r.ev, evKeys) : null
           const evLink = evK && evAnchor.has(evK) ? `<a class="tlev" href="#${evAnchor.get(evK)}">증적 →</a>` : ''
-          return `${k === sepAt ? `<tr class="sep"><td colspan="${span}">노드 UP 이후 (참고: 노드를 올린 시각에 따라 달라짐)</td></tr>` : ''}<tr${c || dim ? ` class="${c || 'dim'}"` : ''}><td class="num">${he(fmtDateTime(r.at))}</td><td class="num c">${since(r.at)}</td><td>${he(r.text)}${tag}${evLink}${!compact && r.sub ? `<br><span class="mut">${he(r.sub)}</span>` : ''}${!compact && r.tag ? `<br><span class="mut">${he(r.tag)}</span>` : ''}</td>${compact ? '' : `<td>${r.server ? `<span class="svr">${he(r.server)}</span>` : ''}</td>`}</tr>`
+          // 수동 조치 뒤에 돌아온 포털은 '(조치 후)' — 그 정상화가 사람 손으로 된 것이라는 게 줄에서 보이게
+          const afterFix = c === 'kr' && r.target === 'portal' && Number.isFinite(manualAt) && r.at > manualAt ? ' (조치 후)' : ''
+          return `${k === sepAt ? `<tr class="sep"><td colspan="${span}">노드 UP 이후 (참고: 노드를 올린 시각에 따라 달라짐)</td></tr>` : ''}<tr${c || dim ? ` class="${c || 'dim'}"` : ''}><td class="num">${he(fmtDateTime(r.at))}</td><td class="num c">${since(r.at)}</td><td>${he(r.text)}${afterFix}${tag}${evLink}${!compact && r.sub ? `<br><span class="mut">${he(r.sub)}</span>` : ''}${!compact && r.tag ? `<br><span class="mut">${he(r.tag)}</span>` : ''}</td>${compact ? '' : `<td>${r.server ? `<span class="svr">${he(r.server)}</span>` : ''}</td>`}</tr>`
         })
         .join('')}</tbody></table>`
     }
-    H.push(`<h3 id="tl-${i + 1}">타임라인</h3>${tlTable(buildTimelineRows(ms, h.t0, 'summary'), true)}`)
+    H.push(`<h3 id="tl-${i + 1}">타임라인</h3>${tlTable(withNotes(buildTimelineRows(ms, h.t0, 'summary')), true)}`)
     H.push(
-      `<div class="legend"><span><i class="lk kd"></i>장애 시작</span><span><i class="lk kr"></i>복구 이정표</span><span><i class="lk kf"></i>포털 최종 (참고)</span><span class="mut">흐린 글씨: 노드 복귀 뒤 · 검증 시작</span></div>`,
+      `<div class="legend"><span><i class="lk kd"></i>장애</span><span><i class="lk kr"></i>복구</span>${noteRows.length ? '<span><i class="lk ka"></i>사람 조치</span>' : ''}<span><i class="lk kf"></i>참고</span></div>`,
     )
-    H.push(`<details class="ev"${opts.openEvidence ? ' open' : ''}><summary>전체 기록 (네임스페이스·노드마다 한 줄씩)</summary>${tlTable(buildTimelineRows(ms, h.t0, 'full'))}</details>`)
+    H.push(`<details class="ev"${opts.openEvidence ? ' open' : ''}><summary>전체 기록 (네임스페이스·노드마다 한 줄씩)</summary>${tlTable(withNotes(buildTimelineRows(ms, h.t0, 'full')))}</details>`)
     // 파드 로그 이상은 타임라인과 따로(10-29) — 오류는 표로 펼치고, 경고는 접어 둔다(화면의 LogIssueList 와 같은 기준)
     const logIs = [...(ms.logIssues ?? [])].sort((a, b) => a.at - b.at)
-    if (inc.pods && logIs.length) {
+    if (inc.podLogs && logIs.length) {
       /*
        * 상태보드 목록(LogIssueList)과 같이 같은 문구는 한 줄로 합치고(횟수 합 · 처음은 가장 이른 · 마지막은 가장 늦은), 장애 시작 · 노드 UP 으로
        * 구간을 나눈다(2026-11-07 사용자 결정, lib/podLogList). 리포트는 펼칠 수 없어 'n건 합침' 같은 표시는 붙이지 않는다(사용자 결정).
@@ -5130,9 +6633,9 @@ ${
           v.firstAll ? el(v.firstAll.at) : '-',
           v.firstAll ? `${fmtClock(v.firstAll.at)}${n}` : '아직 모두 정상이 된 적 없음',
           true,
-        )}${card('1차 뒤 다시 끊김', `${v.flapTimes}회`, flapSmall(v))}${card(
+        )}${card(v.firstAll ? '1차 뒤 다시 끊김' : '다시 끊김', `${v.flapTimes}회`, flapSmall(v))}${card(
           '최종 정상화',
-          v.pending ? '미복구' : v.final ? el(v.final.at) : v.firstAll ? el(v.firstAll.at) : '-',
+          v.pending ? '실패' : v.final ? el(v.final.at) : v.firstAll ? el(v.firstAll.at) : '-',
           v.pending ? he(v.pending) : v.final ? `${fmtClock(v.final.at)}${n}` : v.firstAll ? '1차 정상화와 같음' : '',
           true,
         )}</div>`,
@@ -5141,7 +6644,7 @@ ${
         `<div class="psub">① 일어난 순서</div><table class="grid" style="margin:6px 0"><thead><tr><th style="width:170px">시각</th><th class="c" style="width:64px">경과</th><th>기록</th></tr></thead><tbody>${v.facts
           .map((f) => {
             const id = f.role === 'firstAll' ? `${a}-f1` : f.role === 'final' ? `${a}-f2` : ''
-            const go = f.role === 'firstAll' && sFirst ? `${a}-s1` : f.role === 'final' && sFinal ? `${a}-s2` : ''
+            const go = f.role === 'firstAll' && (sFirst || v.basis?.first.length) ? `${a}-s1` : f.role === 'final' && (sFinal || v.basis?.final.length) ? `${a}-s2` : ''
             return `<tr${id ? ` id="${id}" class="pk"` : ''}><td class="num">${he(f.at ? fmtDateTime(f.at) : f.text ?? '-')}</td><td class="num c">${f.at ? el(f.at) : ''}</td><td>${he(factLabel(f.label))}${
               go ? ` <a class="tlev" href="#${go}">연속 통과 기록 ↓</a>` : ''
             }</td></tr>`
@@ -5149,7 +6652,38 @@ ${
           .join('')}</tbody></table>`,
       )
       if (v.pages) P.push(`<div class="psub" id="${a}-pages">② 화면별</div>${tblHtml({ ...v.pages, title: '' })}`)
-      if (v.streaks.length) {
+      /*
+       * ③ 1차 · 최종 정상화 근거(화면별, 2026-11-09 사용자 요청 · 목업) — 그 순간 정상이던 모든 화면을 한 표로 보이고, 화면마다 API 별 기록을
+       * 아래에 둔다(마지막으로 돌아온 화면만 펼침). 판정 기록이 있는 회차만 — 없으면 아래 예전 그림.
+       */
+      const basisHtml = (rows: PortalBasisRow[], title: string, id: string) =>
+        `<div class="psub" id="${id}">${title}</div><div style="overflow:auto"><table class="grid"><thead><tr><th>화면</th><th class="c">첫 정상</th><th class="c">확정</th><th class="c">연속</th><th class="c">핵심 API</th><th>직전 응답에서 깨져 있던 API</th><th class="c">응답 시간(중앙값)</th></tr></thead><tbody>${rows
+          .map(
+            (r) =>
+              `<tr${r.last ? ' class="pk"' : ''}><td>${he(r.name)}${r.last ? ' <span class="pill">마지막으로 돌아옴</span>' : ''}</td><td class="num c">${fmtClock(r.firstOk)}</td><td class="num c">${r.confirm ? fmtClock(r.confirm) : '-'}</td><td class="num c pass">✓ ${r.n ?? '-'}회</td><td class="num c">${r.apis || '-'}</td><td class="${r.broken.length ? 'fail' : 'mut'}">${r.broken.length ? he(r.broken.join(', ')) : '-'}</td><td class="num c">${r.median != null ? `${r.median}ms` : '-'}</td></tr>`,
+          )
+          .join('')}</tbody></table></div>${rows
+          .map(
+            (r) =>
+              `<details class="ev"${r.last || o ? ' open' : ''}><summary>${he(r.name)} · API 별 기록</summary>${r.compact ? tblHtml({ ...r.compact, title: '' }) : ''}${
+                r.tb ? `<details class="ev"${o}><summary>요청마다의 칸 보기 (${r.tb.columns.length - 1}회 × ${r.tb.rows.length - 1}개)</summary>${tblHtml({ ...r.tb, title: '' })}</details>` : ''
+              }</details>`,
+          )
+          .join('')}`
+      if (v.basis?.first.length) {
+        const nb = v.basis.first.length
+        P.push(basisHtml(v.basis.first, `③ 1차 정상화 근거 (${nb}/${nb} 화면) · ${v.firstAll ? fmtClock(v.firstAll.at) : ''} 모든 화면이 처음 동시에 정상`, `${a}-s1`))
+        if (v.basis.final.length) {
+          const nf = v.basis.final.length
+          P.push(basisHtml(v.basis.final, `최종 정상화 근거 (${nf}/${nf} 화면) · 각 화면의 마지막 정상화`, `${a}-s2`))
+        }
+        if (v.basis.others.length)
+          P.push(
+            `<details class="ev"${o}><summary>그 밖의 정상화 확정 ${v.basis.others.length}건 (1차 · 최종에 쓰이지 않은 중간 정상화)</summary>${v.basis.others
+              .map((r) => (r.compact ? tblHtml({ ...r.compact, title: `${r.name} · 첫 정상 ${fmtClock(r.firstOk)}` }) : ''))
+              .join('')}</details>`,
+          )
+      } else if (v.streaks.length) {
         P.push(`<div class="psub">③ 연속 통과 기록 (정상화를 확정한 근거)</div>`)
         const one1 = (x: (typeof v.streaks)[number], id = '') =>
           x.compact
@@ -5175,16 +6709,20 @@ ${
         const fi = lines.findIndex((l) => focus.some((f) => l.includes(f)))
         if (fi >= 0) strong.add(fi)
       }
-      const pre = lines
+      /*
+       * 원문 줄(2026-11-10 사용자 요청): 보통 길이의 줄은 한 줄 그대로(창보다 넓으면 가로 스크롤), 200자를 넘는 줄만 접고 이어지는 줄은
+       * 들여 쓴다. 다 접으면 열로 읽는 명령 출력이 줄마다 쪼개져 읽기 어렵고(증적 창 wrap 주석), 안 접으면 페이로드 한 줄이 화면 몇 배로 늘었다.
+       */
+      const pre = `<span class="lw">${lines
         .map((l, li) => {
-          const cls = strong.has(li) ? 'h1l' : focus.some((f) => l.includes(f)) ? 'h2l' : ''
-          return cls ? `<span class="${cls}">${he(l)}</span>` : he(l)
+          const cls = strong.has(li) ? ' h1l' : focus.some((f) => l.includes(f)) ? ' h2l' : ''
+          return `<span class="ln${cls}">${he(l)}</span>`
         })
-        .join('\n')
+        .join('')}</span>`
       const a = evAnchor.get(it.key) as string
       H.push(`<details class="ev" id="${a}"${opts.openEvidence || kind === 'evidence' ? ' open' : ''}><summary>${he(it.title)}</summary>`)
       H.push(
-        `<div class="evk"><span>${EV_LABEL.host}</span><span>${he(it.host)}</span><span>${EV_LABEL.at}</span><span>${he(fmtDateTime(it.capturedAt))} <span class="mut">(${EV_LABEL.atHint})</span></span><span>${EV_LABEL.cmd}</span><code>${he(it.command)}</code>${it.verifyCmd ? `<span>${EV_LABEL.verify}</span><span><code>${he(it.verifyCmd)}</code> <span class="mut">(${EV_LABEL.verifyHint})</span></span>` : ''}</div>`,
+        `<div class="evk"><span>${EV_LABEL.host}</span><span>${he(it.host)}</span><span>${EV_LABEL.at}</span><span>${he(fmtDateTime(it.capturedAt))} <span class="mut">(${EV_LABEL.atHint})</span></span><span>${evCmdOf(it).label}</span>${evCmdOf(it).code ? `<code>${he(it.command)}</code>` : `<span>${he(evCmdOf(it).text)}</span>`}${it.verifyCmd ? `<span>${EV_LABEL.verify}</span><span><code>${he(it.verifyCmd)}</code> <span class="mut">(${EV_LABEL.verifyHint})</span></span>` : ''}</div>`,
       )
       const v = it.key === 'portal' ? lay.portalV.get(it.key) : undefined
       if (v) {
@@ -5197,7 +6735,8 @@ ${
         H.push(`<table class="grid" style="margin:6px 0"><thead><tr><th style="width:170px">시각 / 값</th><th>기록</th></tr></thead><tbody>${it.facts.map((f) => `<tr><td class="num">${he(f.at ? fmtDateTime(f.at) : f.text ?? '-')}</td><td>${he(factLabel(f.label))}</td></tr>`).join('')}</tbody></table>`)
       for (const tb of [it.table, ...(it.tables ?? [])]) if (tb) H.push(tblHtml(tb))
       if (it.note) H.push(`<div class="note">${he(it.note)}</div>`)
-      H.push(`<div class="pre" style="margin-top:6px">${pre}</div></details>`)
+      // 분산 점검은 열로 읽는 표라 접지 않는다(2026-11-10 사용자 요청: 판정 칸이 접혀 다음 워크로드 줄에 섞였다) — 가로 스크롤
+      H.push(`<div class="pre${it.key.startsWith('spread') ? ' nowrap' : ''}" style="margin-top:6px">${pre}</div></details>`)
     }
     H.push(`<a class="top" href="#top">↑ 맨 위로</a></div></details>`)
     // 왼쪽 목차 — 증적 원문 파일(회차 하나)에만. 여러 회차를 담는 회차별 · 종합 결과는 이번엔 붙이지 않았다
@@ -5210,13 +6749,12 @@ ${
         return v ? portalPartId(v, a, e.part) : a
       }
       const link = (e: Parameters<typeof hrefOf>[0] & { at: number; label: string; tone: string; portal?: boolean }) =>
-        `<a href="#${hrefOf(e)}"${e.tone ? ` class="${e.tone}"` : ''}><span class="t">${el(e.at)}</span><span>${he(e.label)}${e.portal ? '<i class="pb">포털</i>' : ''}</span></a>`
+        `<a href="#${hrefOf(e)}"${e.tone ? ` class="${e.tone}"` : ''}><span class="t">${el(e.at)}</span>${e.portal ? `<span class="lbl"><span>${he(e.label)}</span><i class="pb">포털</i></span>` : `<span>${he(e.label)}</span>`}</a>`
       for (const e of tocEntries(evArr, t.base, upAt, { masaDone: lay.masaDone, portal: (it) => lay.portalV.get(it.key) as PortalEvView })) {
         if (e.grp !== g) nav.push(`<div class="grp">${EV_GROUP_LABEL[e.grp]}</div>`)
         g = e.grp
         nav.push(e.fold ? `<details class="tf"><summary><span class="t">${el(e.at)}</span><span>${he(e.label)}</span></summary>${e.fold.map(link).join('')}</details>` : link(e))
       }
-      nav.push(`<a class="pl" href="#notes" style="margin-top:6px">참고사항</a>`)
       tocNav = `<nav class="toc" id="toc"><div class="tt">목차${evArr.length ? '<button type="button" id="evAll">모두 접기</button>' : ''}</div>${nav.join('')}</nav>`
     }
   })
@@ -5225,13 +6763,15 @@ ${
 
   // 맨 아래 절 이름은 '참고사항'(10-30 사용자 요청, 예전 '읽는 법')
   if (tocNav) H[pageIdx] = H[pageIdx].replace(/<div class="page">$/, `<div class="page wtoc">${tocNav}<div class="tmain">`)
-  H.push(`<section class="sec" id="notes"><div class="sh"><span class="n">i</span><h2>참고사항</h2></div><ul class="sum">
+  // 참고사항은 종합 · 회차별 · 증적 원문 모두에서 뺐다(2026-11-10 사용자 요청: 숫자 아래 긴 설명이 오히려 방해). 예전 한 파일(all)에만 남는다
+  if (kind === 'all') H.push(`<section class="sec" id="notes"><div class="sh"><span class="n">i</span><h2>참고사항</h2></div><ul class="sum">
 <li><b>기준 시각(장애 시작)</b> 복구 시간은 모두 장애 시작부터 잽니다. 장애 주입 시각(수동 입력 · 버튼)이 있으면 그 시각을, 없으면 노드 DOWN 시각을 씁니다. DOWN 시각은 클러스터 저널에 노드 이탈 기록이 있고 Q-Term 감지보다 2분 안쪽으로 앞서면 그 서버 기록을, 없으면 Q-Term 이 처음 본 시각(pcs OFFLINE)입니다. Q-Term 은 몇 초~수십 초 늦게 보기 때문에 그대로 쓰면 복구 시간이 짧게 나옵니다. VIP 이동도 pacemaker 가 남긴 start 시각을 같은 원칙으로 씁니다. DOWN 을 감지하지 못한 회차만 검증 시작부터 재고 * 로 표시합니다. 타임라인의 경과도 같은 기준입니다.</li>
 <li><b>복구 이정표와 참고</b> 장애 대응을 보는 구간은 장애 시작부터 Masakari evacuation 완료와 포털 1차 정상화(처음으로 모든 화면 정상)까지이고, 전체 복구는 둘 중 마지막으로 완료된 시점입니다. 포털 최종 정상화 · 파드 · Ceph · 노드 복귀는 노드를 다시 올린 시각에 따라 달라지므로 참고로만 적습니다.</li>
 <li><b>Q-Term 관측</b> 상태보드가 주기적으로 조회해 처음 확인한 시각입니다. 복구는 연속 성공(포털 N회 · Ceph 2회)으로 확정하므로 한 번 튄 성공은 복구로 세지 않습니다. 표와 판정은 이 시각 기준입니다.</li>
 <li><b>서버 기록</b> pacemaker(동작 이력) · corosync 저널 · k8s(Ready 전환) · Nova(VM 별 evacuation) · masakari-engine 로그가 스스로 남긴 시각입니다. 시간대가 없는 표기는 그 서버 시계를 Q-Term PC 시계로 보정했고, UTC 기록은 이 PC 시간대로 바꿔 표시했습니다.</li>
 <li><b>증적 원문</b> 마일스톤이 찍힌 순간 떠 둔 원문입니다. 진한 노란 줄이 그 시각의 근거입니다. k8s 이벤트(1시간 보관)·pacemaker 이력(cleanup 시 삭제)은 나중에 다시 구할 수 없을 수 있습니다.</li>
-</ul></section>${tocNav ? '</div>' : ''}</div>
+</ul></section>`)
+  H.push(`${tocNav ? '</div>' : ''}</div>
 <script>
 // 비교표·흐름의 회차 이름을 누르면 그 상세를 펼치고 이동한다(스크립트가 꺼져 있어도 이동은 된다)
 document.querySelectorAll('[data-open]').forEach(function(a){a.addEventListener('click',function(){var d=document.getElementById(a.getAttribute('data-open'));if(d)d.open=true})});
@@ -5275,6 +6815,22 @@ function saveReportKinds(v: ReportKinds): void {
     /* 저장 못 해도 이번에는 쓴다 */
   }
 }
+/** 리포트를 한 파일로 만들까(2026-11-12 사용자 결정: 기본 한 파일, 따로 받고 싶은 사람은 끈다). 다음에도 기억한다 */
+const REPORT_ONEFILE_KEY = 'report_onefile_v1'
+function loadReportOneFile(): boolean {
+  try {
+    return localStorage.getItem(REPORT_ONEFILE_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+function saveReportOneFile(v: boolean): void {
+  try {
+    localStorage.setItem(REPORT_ONEFILE_KEY, v ? '1' : '0')
+  } catch {
+    /* 저장 못 해도 이번에는 쓴다 */
+  }
+}
 const stampOf = (t: number, sec = false) => {
   const d = new Date(t)
   const p = (n: number) => String(n).padStart(2, '0')
@@ -5284,11 +6840,70 @@ const stampOf = (t: number, sec = false) => {
 const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, '_').slice(0, 60)
 
 /**
+ * 한 파일 리포트(2026-11-12 사용자 결정) — 종합 결과 · 회차별 결과 · 증적 원문(회차마다)을 **따로 만든 그대로** 한 HTML 에 담는다.
+ * 받는 사람이 파일 여러 개를 같은 폴더에 두지 않아도 되게 하되, 보는 방식은 여러 파일과 같다: 종합 결과에서 회차를 누르면 회차별 결과의
+ * 그 회차로, '증적 →' 을 누르면 그 회차 증적만 있는 화면으로 바뀐다(한 페이지에 다 늘어놓으면 8회차에 증적 상자 900개가 한 화면이 된다).
+ *
+ * 화면마다 iframe(srcdoc)에 그 페이지 원문을 그대로 띄운다 — 페이지마다 같은 id(run-1 · ev-…)와 스크립트 · 목차가 있어 한 문서에 합치면 서로
+ * 부딪친다. 원문은 JSON 으로 품고 보이는 화면 하나만 그리므로 증적이 수 MB 여도 열 때 무겁지 않다.
+ *  - 파일 사이 링크(runsFile · evFiles · totalFile)는 손대지 않는다: 페이지 안 스크립트가 같은 이름의 화면으로 바꿔 달라고 부모에 알린다
+ *  - srcdoc 문서의 기준 주소는 부모 파일이라 '#run-3' 같은 페이지 안 링크가 부모 파일로 빠져나간다 — 페이지 안 링크도 직접 이동시킨다
+ *  - 화면 바꿈은 주소 뒤 #p1/run-3 로 남겨 브라우저 뒤로 가기가 된다
+ *  - Ctrl+P 는 보이는 화면을 인쇄한다(부모를 인쇄하면 iframe 한 장만 나온다). PDF 는 이 방식을 쓰지 않는다(파일 사이 이동이 없다)
+ */
+const BUNDLE_CHILD = `<script>(function(){var P=window.parent;if(P===window)return;
+function go(id){if(!id){window.scrollTo(0,0);return}var d=document.getElementById(id);if(!d)return;for(var p=d;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;d.scrollIntoView();if(id.indexOf('ev-')===0){d.classList.remove('flash');void d.offsetWidth;d.classList.add('flash')}}
+window.addEventListener('message',function(e){if(e.source!==P)return;var m=e.data||{};if(typeof m.qtGo==='string')go(m.qtGo);if(m.qtPrint)window.print()});
+document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;var h=a.getAttribute('href')||'';if(/^[a-z]+:/i.test(h)){e.preventDefault();window.open(h,'_blank');return}
+e.preventDefault();var i=h.indexOf('#'),f=i<0?h:h.slice(0,i),id=i<0?'':h.slice(i+1);if(!f){go(id);return}P.postMessage({qtNav:decodeURIComponent(f),a:id},'*')});
+document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&(e.key==='p'||e.key==='P')){e.preventDefault();window.print()}});
+P.postMessage({qtTitle:document.title},'*')})();</script>`
+function bundleReportHtml(files: { name: string; html: string }[], title: string): string {
+  const keyOf = new Map(files.map((f, i) => [`${f.name}.html`, `p${i}`]))
+  const pages: Record<string, string> = {}
+  files.forEach((f, i) => {
+    const at = f.html.lastIndexOf('</body>')
+    pages[`p${i}`] = at < 0 ? f.html + BUNDLE_CHILD : f.html.slice(0, at) + BUNDLE_CHILD + f.html.slice(at)
+  })
+  // </script> 로 품은 JSON 이 끊기지 않게 '<' 를 이스케이프한다
+  const json = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c')
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${he(title)}</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#eef1f6}iframe{position:fixed;inset:0;width:100%;height:100%;border:0;background:#eef1f6}</style></head>
+<body><iframe id="qtv" title="${he(title)}"></iframe>
+<script id="qt-pages" type="application/json">${json(pages)}</script>
+<script id="qt-names" type="application/json">${json(Object.fromEntries(keyOf))}</script>
+<script>(function(){var pages=JSON.parse(document.getElementById('qt-pages').textContent),names=JSON.parse(document.getElementById('qt-names').textContent),f=document.getElementById('qtv'),cur=null,pend='';
+function parse(){var h=location.hash.slice(1),i=h.indexOf('/'),p=i<0?h:h.slice(0,i);return pages[p]?{p:p,a:i<0?'':decodeURIComponent(h.slice(i+1))}:{p:'p0',a:''}}
+function show(){var r=parse();if(r.p!==cur){cur=r.p;pend=r.a;f.srcdoc=pages[r.p]}else if(f.contentWindow)f.contentWindow.postMessage({qtGo:r.a},'*')}
+f.addEventListener('load',function(){if(f.contentWindow)f.contentWindow.postMessage({qtGo:pend},'*');pend=''});
+window.addEventListener('message',function(e){if(e.source!==f.contentWindow)return;var m=e.data||{};
+if(typeof m.qtNav==='string'){var k=names[m.qtNav];if(k){var nh='#'+k+(m.a?'/'+encodeURIComponent(m.a):'');if(location.hash===nh)show();else location.hash=nh}}
+if(typeof m.qtTitle==='string'&&m.qtTitle)document.title=m.qtTitle});
+window.addEventListener('hashchange',show);
+document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&(e.key==='p'||e.key==='P')){e.preventDefault();if(f.contentWindow)f.contentWindow.postMessage({qtPrint:1},'*')}});
+show()})();</script></body></html>`
+}
+
+/**
  * 고른 종류대로 리포트 파일을 만든다(10-29). 한 파일이면 예전처럼 저장 창, 여러 파일이면 폴더를 한 번만 고른다.
  * 증적 원문은 **회차마다 한 파일**(사용자 결정) — 문의가 오면 그 회차 파일만 건네면 되고, 증적을 다 몰면 수십 MB 라 열기가 무겁다.
  * 증적이 하나도 없는 회차(증적 저장 이전)는 빈 파일을 만들지 않고 건너뛴 수를 알린다.
+ * HTML 은 기본으로 이 파일들을 한 파일에 담는다(bundleReportHtml, 2026-11-12) — 화면은 따로라 증적을 다 몰아도 보이는 화면 하나만 그린다.
  */
-async function makeRunsReport(recs: HistoryRecord[], fmt: 'html' | 'pdf', kinds: ReportKinds, rto?: RtoTargets, items?: ReportItems): Promise<{ msg: string; path?: string }> {
+async function makeRunsReport(
+  recs: HistoryRecord[],
+  fmt: 'html' | 'pdf',
+  kinds: ReportKinds,
+  rto?: RtoTargets,
+  items?: ReportItems,
+  /** HTML 을 한 파일로(bundleReportHtml) — 기본. 끄면 예전처럼 종류마다 · 회차마다 따로 */
+  oneFile = true,
+  /** 고른 회차가 모두 든 검증 그룹(buildHtmlReport opts.group) · VM 실제 이름 여부 */
+  group?: VerifyGroup,
+  realNames = false,
+  /** 환경 구성도 HTML(renderEnvMapHtml) — 있으면 종합 결과 다음 파일로 같이 뽑고 검증 환경에서 링크한다 */
+  envMapHtml?: string,
+): Promise<{ msg: string; path?: string }> {
   const evidence: Record<string, BoardEvidenceItem[]> = {}
   /** 증적을 **읽지 못한** 회차 — '증적이 없는 회차' 와 섞으면 복호화 실패 등으로 못 읽은 증적이 '저장 기능 이전' 으로 둔갑한다(조회 실패 ≠ 없음) */
   const readFail: HistoryRecord[] = []
@@ -5301,30 +6916,67 @@ async function makeRunsReport(recs: HistoryRecord[], fmt: 'html' | 'pdf', kinds:
   const stamp = stampOf(Date.now(), true)
   const n = recs.length
   const ext = fmt === 'pdf' ? '.pdf' : '.html'
-  const runsName = `가용성검증_회차별결과_${n}회차_${stamp}`
+  /*
+   * 파일 이름(2026-11-11 사용자 결정) — 여러 회차면 '(총합)', 한 회차면 증적 파일처럼 회차 이름을 붙인다. 사용자가 받은 파일을
+   * '종합결과(총합)' · '회차별상세결과(총합)' 으로 손수 고쳐 쓰고 있었는데, 그러면 파일 사이 링크(종합 → 회차별 23곳)가 옛 이름을 가리켜 끊겼다.
+   */
+  const scope = n === 1 ? `_${fileSafe(recs[0].label || recs[0].node || '회차')}` : '(총합)'
+  const runsName = `가용성검증_회차별상세결과${scope}_${stamp}`
   const files: { name: string; html: string }[] = []
   // 종합 결과의 회차 링크는 같이 뽑는 회차별 결과(HTML)로 — PDF 는 파일 사이 링크가 안 되므로 걸지 않는다
   const runsFile = kinds.runs && fmt === 'html' ? `${runsName}.html` : undefined
   const pdf = fmt === 'pdf'
-  if (kinds.total) files.push({ name: `가용성검증_종합결과_${n}회차_${stamp}`, html: buildHtmlReport(recs, {}, { kind: 'total', openEvidence: pdf, rto, items, runsFile }) })
-  if (kinds.runs) files.push({ name: runsName, html: buildHtmlReport(recs, {}, { kind: 'runs', openEvidence: pdf, rto, items }) })
-  let noEv = 0
-  if (kinds.evidence)
-    for (const h of [...recs].sort((a, b) => a.t0 - b.t0)) {
-      if (readFail.includes(h)) continue
-      if (!(evidence[h.id] ?? []).length) {
-        noEv++
-        continue
-      }
-      files.push({
-        name: `가용성검증_증적_${fileSafe(h.label || h.node || '회차')}_${stampOf(h.t0)}`,
-        html: buildHtmlReport([h], evidence, { kind: 'evidence', openEvidence: pdf, rto, items }),
-      })
-    }
+  const totalName = `가용성검증_종합결과${scope}_${stamp}`
+  // 파일 사이 링크(buildHtmlReport opts.evFiles · totalFile 주석) — 이름을 먼저 정해 두고 서로 건다. 파일이 둘 이상일 때만(한 파일이면 갈 곳이 없다)
+  /*
+   * 증적 파일 이름 — 이름 · 노드가 같고 같은 분에 시작한 회차는 이름이 겹친다. 저장할 때 뒤 파일에 ' (2)' 가 붙으면서 링크 바꾸기가 두 회차의
+   * 링크를 함께 바꿔, 종합 결과에서 1회차의 '증적 →' 이 2회차 파일로 갔다(코드 리뷰 11-10). 여기서 미리 번호를 붙여 겹치지 않게 한다.
+   */
+  const evItemsSel: ReportItems = { ...(items ?? REPORT_ALL), evidence: true }
+  const evCount = (h: HistoryRecord) => (evidence[h.id] ?? []).filter((it) => evKeep(it.key, evItemsSel)).length
+  const evRecs = kinds.evidence ? [...recs].sort((a, b) => a.t0 - b.t0).filter((h) => !readFail.includes(h) && evCount(h)) : []
+  const evNames = new Map<string, string>()
+  const usedEv = new Set<string>()
+  for (const h of evRecs) {
+    const b = `가용성검증_증적_${fileSafe(h.label || h.node || '회차')}_${stampOf(h.t0)}`
+    let nm = b
+    for (let k = 2; usedEv.has(nm.toLowerCase()); k++) nm = `${b}_${k}`
+    usedEv.add(nm.toLowerCase())
+    evNames.set(h.id, nm)
+  }
+  const evName = (h: HistoryRecord) => evNames.get(h.id) as string
+  const envName = `가용성검증_환경구성도${scope}_${stamp}`
+  const nFiles = (kinds.total ? 1 : 0) + (kinds.runs ? 1 : 0) + evRecs.length + (envMapHtml ? 1 : 0)
+  const linkOn = !pdf && nFiles > 1
+  const envFile = linkOn && envMapHtml && kinds.total ? `${envName}.html` : undefined
+  const evFiles = linkOn && evRecs.length ? Object.fromEntries(evRecs.map((h) => [h.id, `${evName(h)}.html`])) : undefined
+  const totalFile = linkOn && kinds.total ? `${totalName}.html` : undefined
+  if (kinds.total) files.push({ name: totalName, html: buildHtmlReport(recs, {}, { kind: 'total', openEvidence: pdf, rto, items, runsFile, evFiles, group, realNames, envFile }) })
+  // 구성도 머리의 '← 종합 결과' — 링크가 걸릴 때만(파일 이름 자리표시를 바꾼다, renderEnvMapHtml totalFile)
+  // 걸 곳이 없으면(PDF · 종합 결과 없음) 링크째 뺀다 — 빈 링크는 눌러도 아무 일이 없어 고장으로 보인다
+  if (envMapHtml)
+    files.push({
+      name: envName,
+      html: envMapHtml.replace(/<a href="__QT_TOTAL_FILE__"[^>]*>← 종합 결과<\/a>/, (a) => (totalFile ? a.replace('__QT_TOTAL_FILE__', he(encodeURIComponent(totalFile))) : '')),
+    })
+  if (kinds.runs) files.push({ name: runsName, html: buildHtmlReport(recs, {}, { kind: 'runs', openEvidence: pdf, rto, items, evFiles, totalFile, group }) })
+  const noEv = kinds.evidence ? recs.filter((h) => !readFail.includes(h) && !evCount(h)).length : 0
+  for (const h of evRecs)
+    files.push({
+      name: evName(h),
+      html: buildHtmlReport([h], evidence, { kind: 'evidence', openEvidence: pdf, rto, items, totalFile, group }),
+    })
   const skipped =
-    (noEv ? ` 증적이 없는 회차 ${noEv}개는 건너뛰었습니다(증적 저장 기능 이전의 회차).` : '') +
+    (noEv ? ` 고른 항목의 증적이 없는 회차 ${noEv}개는 증적 원문을 만들지 않았습니다(증적 저장 기능 이전의 회차이거나, 고른 항목에 맞는 증적이 없음).` : '') +
     (readFail.length ? ` 증적을 읽지 못한 회차 ${readFail.length}개(${readFail.map((h) => h.label || fmtDateTime(h.t0)).slice(0, 3).join(', ')}${readFail.length > 3 ? ' 외' : ''})는 증적 원문을 만들지 못했습니다. 다시 시도해 보세요.` : '')
   if (!files.length) return { msg: `만들 것이 없습니다.${skipped}` }
+  if (oneFile && !pdf && files.length > 1) {
+    const name = `가용성검증_결과${scope}_${stamp}`
+    const html = bundleReportHtml(files, `가용성 검증 결과${n === 1 ? `: ${recs[0].label || recs[0].node}` : ''}`)
+    const res = await window.electronAPI.saveReport({ defaultName: `${name}.html`, content: html, format: 'html' })
+    if (res.saved) return { msg: `저장했습니다(${files.length}개 화면을 한 파일에). ${res.path ?? ''}${skipped}`, path: res.path }
+    return { msg: res.error ? `저장 실패: ${res.error}` : '저장하지 않았습니다(저장 창을 닫았습니다).' }
+  }
   // 취소도 말로 남긴다 — 예전엔 빈 문구라, 폴더를 골랐는데 취소로 돌아온 경우 '저장했는데 파일이 없다' 로 보였다(사용자 지적 10-29)
   const CANCELED = '저장하지 않았습니다(저장 창을 닫았습니다).'
   if (files.length === 1) {
@@ -5385,7 +7037,20 @@ function buildRunReport(h: HistoryRecord, items: BoardEvidenceItem[]): string {
     }`,
     '',
   )
-  L.push('## 복구 타임라인 (Q-Term 관측)', '', `| 시각 | ${t.fromDown ? '장애 시작 후' : '검증 시작 후'} | 내용 | 비고 |`, '|---|---|---|---|')
+  // 세부 원인 및 조치(RunNote 주석) — HTML 리포트와 같은 글. 사람이 적은 글이라 IP · 토큰이 섞일 수 있어 내보내기 마스킹을 거친다
+  const notesOk = (h.notes ?? []).filter((n) => n.cause.trim())
+  if (notesOk.length) {
+    L.push('## 세부 원인 및 조치', '')
+    for (const n of notesOk) {
+      L.push(`### ${NOTE_STEP_LABEL[n.step]}${n.step === 'manual' && n.recovered ? ' (이 조치로 복구됨: 회차는 실패로 셈)' : ''}`, '')
+      L.push(`- 원인 : ${maskForExport(n.cause.replace(/\n/g, ' '))}`)
+      if (n.action?.trim()) L.push(`- 조치 : ${maskForExport(n.action.replace(/\n/g, ' '))}`)
+      if (n.owner?.trim()) L.push(`- 담당자 : ${maskForExport(n.owner)}`)
+      if (n.at != null) L.push(`- 조치 시각 : ${fmtDateTime(n.at)}`)
+      L.push('')
+    }
+  }
+  L.push('## 복구 타임라인', '', `| 시각 | ${t.fromDown ? '장애 시작 후' : '검증 시작 후'} | 내용 | 비고 |`, '|---|---|---|---|')
   for (const r of rows) L.push(`| ${fmtDateTime(r.at)} | ${r.at < t.base ? '−' : '+'}${fmtElapsed(Math.abs(r.at - t.base))} | ${cell(r.text)} | ${cell([r.sub, r.tag, r.server].filter(Boolean).join(' · '))} |`)
   L.push('')
   const logIs = [...(ms.logIssues ?? [])].sort((a, b) => a.at - b.at)
@@ -5400,10 +7065,13 @@ function buildRunReport(h: HistoryRecord, items: BoardEvidenceItem[]): string {
     return L.join('\n')
   }
   L.push('## 증적 (서버 원문)', '')
-  for (const it of items) {
+  // 리포트와 같게 — 검증 중에 누른 분산 점검은 빼고, 옛 '필수 분산' 문장은 새 문장으로(runEvidenceLayout)
+  for (const it0 of items) {
+    if (it0.key.startsWith('spread:')) continue
+    const it = it0.key === 'spread' ? { ...it0, text: spreadTextNow(it0.text) } : it0
     L.push(`### ${it.title}`, '')
     L.push(`- ${EV_LABEL.host}: ${it.host} · ${EV_LABEL.at}: ${fmtDateTime(it.capturedAt)} (${EV_LABEL.atHint})`)
-    L.push(`- ${EV_LABEL.cmd}: \`\` ${it.command} \`\``)
+    L.push(evCmdOf(it).code ? `- ${EV_LABEL.cmd}: \`\` ${it.command} \`\`` : `- ${evCmdOf(it).label}: ${evCmdOf(it).text}`)
     if (it.verifyCmd) L.push(`- ${EV_LABEL.verify} (${EV_LABEL.verifyHint}): \`\` ${it.verifyCmd} \`\``)
     L.push('')
     if (it.facts?.length) {
@@ -5487,6 +7155,72 @@ function EvFold({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+/**
+ * 정상화 근거 표(툴) — 그 순간 정상이던 화면을 한 줄씩, 누르면 그 화면의 API 별 기록을 펼친다. 처음엔 마지막으로 돌아온 화면만 펼친다
+ * (그 화면이 1차 · 최종 정상화를 만들었다). 화면이 저절로 움직이지 않게 펼침은 사람이 누를 때만 바뀐다.
+ */
+function BasisTable({ rows, title, id }: { rows: PortalBasisRow[]; title: string; id: string }) {
+  const [open, setOpen] = useState<Set<string>>(() => new Set(rows.filter((r) => r.last).map((r) => r.name)))
+  const toggle = (n: string) =>
+    setOpen((cur) => {
+      const x = new Set(cur)
+      if (x.has(n)) x.delete(n)
+      else x.add(n)
+      return x
+    })
+  return (
+    <div className="mb-3" id={id}>
+      <div className="mb-1.5 mt-4 text-[11.5px] font-semibold text-gray-400">{title}</div>
+      <div className="overflow-x-auto rounded-lg border border-white/10">
+        <table className="w-full text-[11.5px]">
+          <thead className="bg-white/[0.04] text-gray-400">
+            <tr>
+              {['화면', '첫 정상', '확정', '연속', '핵심 API', '직전 응답에서 깨져 있던 API', '응답 시간(중앙값)'].map((c) => (
+                <th key={c} className="whitespace-nowrap px-2 py-1 text-left font-normal">
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr
+                key={r.name}
+                onClick={() => toggle(r.name)}
+                className={'cursor-pointer border-t border-white/5 text-gray-200 hover:bg-white/[0.04] ' + (r.last ? 'bg-blue-500/10 shadow-[inset_3px_0_0_#3b82f6]' : '')}
+              >
+                <td className="whitespace-nowrap px-2 py-1">
+                  <span className="mr-1 text-gray-500">{open.has(r.name) ? '▾' : '▸'}</span>
+                  {r.name}
+                  {r.last && <span className="ml-1.5 rounded bg-blue-500/20 px-1.5 text-[10.5px] text-blue-200">마지막으로 돌아옴</span>}
+                </td>
+                <td className="px-2 py-1 tabular-nums">{fmtClock(r.firstOk)}</td>
+                <td className="px-2 py-1 tabular-nums">{r.confirm ? fmtClock(r.confirm) : '-'}</td>
+                <td className="px-2 py-1 text-emerald-300">✓ {r.n ?? '-'}회</td>
+                <td className="px-2 py-1 tabular-nums">{r.apis || '-'}</td>
+                <td className={'px-2 py-1 ' + (r.broken.length ? 'text-red-300' : 'text-gray-500')}>{r.broken.length ? r.broken.join(', ') : '-'}</td>
+                <td className="px-2 py-1 tabular-nums">{r.median != null ? `${r.median}ms` : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows
+        .filter((r) => open.has(r.name))
+        .map((r) => (
+          <div key={r.name} className="ml-4 mt-2">
+            {r.compact && <EvTable tb={{ ...r.compact, title: `${r.name} · 첫 정상 ${fmtClock(r.firstOk)}${r.confirm ? ` → 확정 ${fmtClock(r.confirm)}` : ''}` }} />}
+            {r.tb && (
+              <EvFold label={`요청마다의 칸 보기 (${r.tb.columns.length - 1}회 × ${r.tb.rows.length - 1}개)`}>
+                <EvTable tb={{ ...r.tb, title: '' }} />
+              </EvFold>
+            )}
+          </div>
+        ))}
+    </div>
+  )
+}
+
 /** 포털 증적(툴) — 리포트와 같은 구성(portalEvidence.ts): 숫자 카드 → ① 일어난 순서 → ② 화면별 → ③ 연속 통과 기록. ④ 원문은 아래 공통 */
 function PortalEvSections({ v, base }: { v: PortalEvView; base: number | null }) {
   const el = (at: number) => (base == null ? fmtClock(at) : `${at < base ? '−' : '+'}${fmtElapsed(Math.abs(at - base))}`)
@@ -5523,10 +7257,10 @@ function PortalEvSections({ v, base }: { v: PortalEvView; base: number | null })
       <div id="pe-top" className="mb-1 flex flex-wrap gap-2">
         {card('최초 끊김', v.first ? el(v.first.at) : '-', v.first ? `${fmtClock(v.first.at)} · ${v.first.label.replace(/^최초 끊김 \((.*)\)$/, '$1')}` : '끊김 기록 없음')}
         {card('1차 정상화', v.firstAll ? el(v.firstAll.at) : '-', v.firstAll ? `${fmtClock(v.firstAll.at)}${n}` : '아직 모두 정상이 된 적 없음', true)}
-        {card('1차 뒤 다시 끊김', `${v.flapTimes}회`, flapSmall(v))}
+        {card(v.firstAll ? '1차 뒤 다시 끊김' : '다시 끊김', `${v.flapTimes}회`, flapSmall(v))}
         {card(
           '최종 정상화',
-          v.pending ? '미복구' : v.final ? el(v.final.at) : v.firstAll ? el(v.firstAll.at) : '-',
+          v.pending ? '실패' : v.final ? el(v.final.at) : v.firstAll ? el(v.firstAll.at) : '-',
           v.pending ? v.pending : v.final ? `${fmtClock(v.final.at)}${n}` : v.firstAll ? '1차 정상화와 같음' : '',
           true,
         )}
@@ -5535,7 +7269,7 @@ function PortalEvSections({ v, base }: { v: PortalEvView; base: number | null })
       <div className="mb-3 rounded-lg border border-white/10 bg-black/20 p-1.5">
         {v.facts.map((f, i) => {
           const k = f.role === 'firstAll' || f.role === 'final'
-          const go = f.role === 'firstAll' && sFirst ? 'pe-s1' : f.role === 'final' && sFinal ? 'pe-s2' : ''
+          const go = f.role === 'firstAll' && hasFirstBasis(v) ? 'pe-s1' : f.role === 'final' && hasFinalBasis(v) ? 'pe-s2' : ''
           return (
             <div
               key={i}
@@ -5563,7 +7297,20 @@ function PortalEvSections({ v, base }: { v: PortalEvView; base: number | null })
           <EvTable tb={{ ...v.pages, title: '' }} />
         </>
       )}
-      {!!v.streaks.length && (
+      {/* ③ 1차 · 최종 정상화 근거(화면별) — 리포트와 같은 구성(portalBasis). 판정 기록이 없는 옛 회차는 아래 예전 그림 */}
+      {v.basis?.first.length ? (
+        <>
+          <BasisTable rows={v.basis.first} id="pe-s1" title={`③ 1차 정상화 근거 (${v.basis.first.length}/${v.basis.first.length} 화면)${v.firstAll ? ` · ${fmtClock(v.firstAll.at)} 모든 화면이 처음 동시에 정상` : ''}`} />
+          {!!v.basis.final.length && (
+            <BasisTable rows={v.basis.final} id="pe-s2" title={`최종 정상화 근거 (${v.basis.final.length}/${v.basis.final.length} 화면) · 각 화면의 마지막 정상화`} />
+          )}
+          {!!v.basis.others.length && (
+            <EvFold label={`그 밖의 정상화 확정 ${v.basis.others.length}건 (1차 · 최종에 쓰이지 않은 중간 정상화)`}>
+              {v.basis.others.map((r, i) => r.compact && <EvTable key={i} tb={{ ...r.compact, title: `${r.name} · 첫 정상 ${fmtClock(r.firstOk)}` }} />)}
+            </EvFold>
+          )}
+        </>
+      ) : !!v.streaks.length && (
         <>
           {sub('③ 연속 통과 기록 (정상화를 확정한 근거)')}
           {sFirst && streak(sFirst, 'pe-s1')}
@@ -5662,7 +7409,11 @@ function EvidenceView({ id, initialKey, run, onClose }: { id: string; initialKey
   }
   const sideRow = (o: { k: string; at: number; label: ReactNode; tone?: string; sub?: boolean; part?: string; active?: boolean }) => (
     <button
-      key={`${o.k}:${o.part ?? ''}:${o.at}`}
+      /*
+       * key 에 줄 종류(본 줄 · 하위 줄)와 이름까지 넣는다. 포털 본 줄과 '└ 최초 끊김' 은 증적 · 자리(pe-top) · 시각이 모두 같아
+       * key 가 겹쳤고, 목록을 다시 그릴 때마다(파드 로그 묶음 펼치기 등) React 가 옛 줄을 못 지워 '포털 응답 기록' 이 쌓였다(2026-11-09 사용자 발견).
+       */
+      key={`${o.sub ? 'sub' : 'main'}:${o.k}:${o.part ?? ''}:${o.at}:${typeof o.label === 'string' ? o.label : ''}`}
       onClick={() => pick(o.k, o.part)}
       className={
         'grid w-full gap-1.5 rounded px-2 py-1 text-left leading-snug ' +
@@ -5725,10 +7476,10 @@ function EvidenceView({ id, initialKey, run, onClose }: { id: string; initialKey
       side.push(sideRow({ k: x.it.key, at: x.at, label: isLog ? podLogLabel(x.it) : tocLabel(x.it, x.grp), tone, active: x.it.key === curKey, part: v ? 'pe-top' : undefined }))
       if (v) {
         if (v.first) side.push(sideRow({ k: 'portal', at: v.first.at, label: '└ 최초 끊김', sub: true, part: 'pe-top' }))
-        if (v.firstAll) side.push(sideRow({ k: 'portal', at: v.firstAll.at, label: `└ 1차 정상화${v.screens != null ? ` (${v.screens}/${v.screens})` : ''}`, tone: 'kr', sub: true, part: v.streaks.some((s) => s.role === 'first') ? 'pe-s1' : 'pe-f1' }))
+        if (v.firstAll) side.push(sideRow({ k: 'portal', at: v.firstAll.at, label: `└ 1차 정상화${v.screens != null ? ` (${v.screens}/${v.screens})` : ''}`, tone: 'kr', sub: true, part: hasFirstBasis(v) ? 'pe-s1' : 'pe-f1' }))
         const after = v.flaps.find((f) => !v.firstAll || f.at > v.firstAll.at)
         if (v.flapTimes && after) side.push(sideRow({ k: 'portal', at: after.at, label: `└ 다시 끊김 ${v.flapTimes}회`, sub: true, part: v.pages ? 'pe-pages' : 'pe-top' }))
-        if (v.final) side.push(sideRow({ k: 'portal', at: v.final.at, label: `└ 최종 정상화${v.screens != null ? ` (${v.screens}/${v.screens})` : ''}`, tone: 'kr', sub: true, part: v.streaks.some((s) => s.role === 'final') ? 'pe-s2' : 'pe-f2' }))
+        if (v.final) side.push(sideRow({ k: 'portal', at: v.final.at, label: `└ 최종 정상화${v.screens != null ? ` (${v.screens}/${v.screens})` : ''}`, tone: 'kr', sub: true, part: hasFinalBasis(v) ? 'pe-s2' : 'pe-f2' }))
       }
     }
   } else {
@@ -5797,8 +7548,8 @@ function EvidenceView({ id, initialKey, run, onClose }: { id: string; initialKey
                   <span className="text-gray-200">
                     {fmtDateTime(item.capturedAt)} <span className="text-gray-500">({EV_LABEL.atHint})</span>
                   </span>
-                  <span>{EV_LABEL.cmd}</span>
-                  <code className="break-all text-gray-300">{item.command}</code>
+                  <span>{evCmdOf(item).label}</span>
+                  {evCmdOf(item).code ? <code className="break-all text-gray-300">{item.command}</code> : <span className="text-gray-300">{evCmdOf(item).text}</span>}
                   {item.verifyCmd && (
                     <>
                       <span title={EV_LABEL.verifyHint}>{EV_LABEL.verify}</span>
@@ -5841,8 +7592,10 @@ function EvidenceView({ id, initialKey, run, onClose }: { id: string; initialKey
                           key={i}
                           ref={i === firstIdx ? focusRef : undefined}
                           className={
-                            (wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre') +
-                            ' px-1 ' +
+                            // 접기 끔(기본)이어도 200자를 넘는 줄은 접는다 — 리포트 원문과 같은 기준(buildHtmlReport '원문 줄' 주석)
+                            // 분산 점검은 열로 읽는 표라 접지 않는다(리포트 '.pre.nowrap' 과 같은 기준)
+                            (wrap ? 'whitespace-pre-wrap break-all' : item.key.startsWith('spread') ? 'whitespace-pre' : 'max-w-[200ch] whitespace-pre-wrap [overflow-wrap:anywhere]') +
+                            ' pl-[calc(2ch+0.25rem)] pr-1 -indent-[2ch] ' +
                             (strong.has(i) ? 'rounded bg-amber-400/25 text-amber-100' : hit ? 'rounded bg-amber-400/10 text-amber-100/90' : '')
                           }
                         >
@@ -5982,9 +7735,1439 @@ function InjectEditor({
   )
 }
 
+// ── 세부 원인 및 조치 입력 (이력 창) ───────────────────────────
+/**
+ * 회차의 실패 단계 · 수동 조치마다 원인 · 조치 · 담당자 · 조치 시각을 적는 창(RunNote 주석, 2026-11-11 사용자 결정 · 목업 cause-mock).
+ * 카드는 앱이 실패로 잡은 단계(Masakari · 포털)마다 하나씩 열리고, 앱이 잡지 못한 것(검증 중 사람이 손댄 것)은 '수동 조치 추가' 로 더한다.
+ * 상태(분석 중 · 조치 완료 · 재검증 필요) 칸은 두지 않는다 — 리포트에 싣지 않기로 해서(사용자 결정) 고르게 해 봐야 번거롭기만 하다.
+ * 닫기는 X · 취소 · 저장 버튼뿐(모달 규칙 — 길게 적은 글이 손이 스친 클릭에 사라지면 안 된다).
+ */
+type NoteDraft = { step: RunNote['step']; cause: string; action: string; owner: string; atText: string; recovered: boolean }
+const toDraft = (n: RunNote): NoteDraft => ({
+  step: n.step,
+  cause: n.cause,
+  action: n.action ?? '',
+  owner: n.owner ?? '',
+  atText: n.at != null ? fmtDateTime(n.at) : '',
+  recovered: !!n.recovered,
+})
+/** 앱이 실패로 잡은 단계 — 카드 머리에 회색으로 보여 무엇에 대한 원인인지 알게 한다(리포트 svcFail 과 같은 조건) */
+function failedStepsOf(h: HistoryRecord): { step: 'masakari' | 'portal'; text: string }[] {
+  const ms = h.milestones
+  const out: { step: 'masakari' | 'portal'; text: string }[] = []
+  if (masaWatchedOf(ms) && !masaDoneOf(ms)) out.push({ step: 'masakari', text: masaFailOf(ms) ? masaFailText(ms) : 'Masakari evacuation 끝나지 않음' })
+  const pend = ms.portalPending ?? []
+  if (pend.length) out.push({ step: 'portal', text: `안 돌아온 화면: ${pend.join(' · ')}` })
+  return out
+}
+function RunNotesDialog({ h, num, onSave, onClose }: { h: HistoryRecord; num: number; onSave: (notes: RunNote[]) => void; onClose: () => void }) {
+  const failed = failedStepsOf(h)
+  const [drafts, setDrafts] = useState<NoteDraft[]>(() => {
+    const have = h.notes ?? []
+    const out: NoteDraft[] = []
+    // 실패한 단계는 늘 카드를 연다(적은 것이 있으면 그것으로). 지금은 실패가 아닌데 예전에 적어 둔 단계 기록도 버리지 않고 보여 준다
+    for (const st of ['masakari', 'portal'] as const) {
+      const n = have.find((x) => x.step === st)
+      if (n) out.push(toDraft(n))
+      else if (failed.some((f) => f.step === st)) out.push({ step: st, cause: '', action: '', owner: '', atText: '', recovered: false })
+    }
+    for (const n of have.filter((x) => x.step === 'manual')) out.push(toDraft(n))
+    return out
+  })
+  const [err, setErr] = useState('')
+  const set = (k: number, patch: Partial<NoteDraft>) => setDrafts((cur) => cur.map((d, j) => (j === k ? { ...d, ...patch } : d)))
+  const save = () => {
+    const out: RunNote[] = []
+    for (const d of drafts) {
+      // 아무것도 안 적은 카드는 저장하지 않는다(실패 단계 카드가 비어 있어도 된다 — 리포트에서 빈칸)
+      if (!(d.cause.trim() || d.action.trim() || d.owner.trim() || d.atText.trim())) continue
+      if (!d.cause.trim()) return setErr(`${NOTE_STEP_LABEL[d.step]}: 세부 원인을 적어 주세요`)
+      let at: number | undefined
+      if (d.atText.trim()) {
+        const v = parseLocalDateTime(d.atText, h.t0)
+        if (v == null) return setErr(`${NOTE_STEP_LABEL[d.step]}: 조치 시각은 2026-11-11 15:09 또는 15:09 처럼 넣으세요`)
+        at = v
+      }
+      out.push({
+        step: d.step,
+        cause: d.cause.trim(),
+        action: d.action.trim() || undefined,
+        owner: d.owner.trim() || undefined,
+        at,
+        recovered: d.step === 'manual' && d.recovered ? true : undefined,
+      })
+    }
+    onSave(out)
+  }
+  const field =
+    'w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-[12px] leading-relaxed text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none'
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-8">
+      <div className="flex max-h-[90vh] w-[720px] max-w-[94vw] flex-col rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <span className="shrink-0 text-sm font-semibold text-gray-100">원인 · 조치</span>
+          <span className="min-w-0 truncate text-[11.5px] text-gray-400">
+            #{num} {h.label || h.node} · {fmtDateTime(h.t0)}
+            {!failed.length ? ' · 앱 판정은 실패 아님' : ''}
+          </span>
+          <button onClick={onClose} title="닫기 (저장하지 않음)" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-100">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          {drafts.length === 0 && (
+            <div className="text-[12px] text-gray-500">앱이 실패로 잡은 단계가 없는 회차입니다. 검증 중 사람이 손댄 것이 있으면 아래 '수동 조치 추가' 로 적으세요.</div>
+          )}
+          {drafts.map((d, k) => {
+            const auto = failed.find((f) => f.step === d.step)?.text
+            return (
+              <div key={k} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <span
+                    className={'shrink-0 rounded px-2 py-0.5 text-[11.5px] font-semibold ' + (d.step === 'manual' ? 'bg-amber-500/15 text-amber-300' : 'bg-red-500/15 text-red-300')}
+                  >
+                    {NOTE_STEP_LABEL[d.step]}
+                  </span>
+                  <span className="min-w-0 truncate text-[11.5px] text-gray-500">
+                    {d.step === 'manual' ? '앱이 실패로 잡지 않은 것 · 검증 중 사람이 손댄 것' : (auto ?? '지금 기록으로는 이 단계가 실패가 아님 (예전에 적은 내용)')}
+                  </span>
+                  {(d.step === 'manual' || !auto) && (
+                    <button
+                      onClick={() => setDrafts((cur) => cur.filter((_x, j) => j !== k))}
+                      title="이 카드 지우기"
+                      className="ml-auto shrink-0 rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-[84px_1fr] items-baseline gap-x-3 gap-y-2 text-[12px]">
+                  <label className="text-gray-400">
+                    세부 원인 <span className="text-red-400">*</span>
+                  </label>
+                  <textarea rows={2} value={d.cause} onChange={(e) => set(k, { cause: e.target.value })} placeholder="무엇 때문에 실패했는지" className={field + ' resize-y'} />
+                  <label className="text-gray-400">조치 내역</label>
+                  <textarea rows={2} value={d.action} onChange={(e) => set(k, { action: e.target.value })} placeholder="무엇을 했는지 (없으면 비워 두기)" className={field + ' resize-y'} />
+                  <label className="text-gray-400">담당자</label>
+                  <div className="grid grid-cols-[1fr_64px_1fr] items-baseline gap-3">
+                    <input value={d.owner} onChange={(e) => set(k, { owner: e.target.value })} placeholder="XX팀 이름" className={field} />
+                    <label className="text-right text-gray-400">조치 시각</label>
+                    <input value={d.atText} onChange={(e) => set(k, { atText: e.target.value })} placeholder="예: 15:09 (적으면 타임라인에)" className={field + ' font-mono'} />
+                  </div>
+                  {d.step === 'manual' && (
+                    <>
+                      <span />
+                      <label className="flex cursor-pointer items-start gap-2 text-gray-200">
+                        <input type="checkbox" checked={d.recovered} onChange={(e) => set(k, { recovered: e.target.checked })} className="mt-[3px]" />
+                        <span>
+                          이 조치가 없었으면 복구되지 않았음
+                          <span className="block text-[11px] text-gray-500">켜면 이 회차는 실패로 셉니다. 잰 시간은 표에 남기고 평균에서는 뺍니다.</span>
+                        </span>
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          <button
+            onClick={() => setDrafts((cur) => [...cur, { step: 'manual', cause: '', action: '', owner: '', atText: '', recovered: false }])}
+            className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-white/15 py-2 text-[12px] text-gray-400 hover:bg-white/5 hover:text-gray-200"
+          >
+            <Plus size={13} /> 수동 조치 추가 (앱이 실패로 잡지 못한 것 · 검증 중 사람이 손댄 것)
+          </button>
+          <div className="text-[11px] leading-relaxed text-gray-500">
+            적은 내용은 리포트 종합 결과의 '실패 원인' 표 오른쪽 칸과 회차별 결과에 나옵니다. 리포트로 저장할 때 IP · 토큰은 마스킹 설정대로 가려집니다.
+          </div>
+        </div>
+        <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5">
+          {err && <span className="text-[11.5px] text-amber-300">{err}</span>}
+          <button onClick={onClose} className="ml-auto rounded border border-white/10 px-3 py-1 text-[12px] text-gray-300 hover:bg-white/10">
+            취소
+          </button>
+          <button onClick={save} className="rounded border border-blue-500/50 bg-blue-500/80 px-3 py-1 text-[12px] font-medium text-white hover:bg-blue-500">
+            저장
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── 검증 그룹 · 차수 (VerifyGroup 주석) ───────────────────────────
+/** VM 종류 색 — 리포트와 같은 뜻(파랑 k8s · 초록 웹 서비스 · 회색 기타), evacuation 대상은 노란 테두리 */
+const VM_KIND_LABEL: Record<EnvVm['kind'], string> = { k8s: 'k8s', web: '웹 서비스', etc: '기타' }
+const vmChipCls = (v: EnvVm) =>
+  'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] border ' +
+  (v.kind === 'k8s' ? 'border-blue-400/30 bg-blue-500/15 text-blue-100' : v.kind === 'web' ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-100' : 'border-white/15 bg-white/[0.06] text-gray-200') +
+  (v.evac ? ' ring-2 ring-amber-400/70' : '')
+
+/**
+ * 환경 탭(GroupEnv 주석) — 틀 고르기 · 노드 · VM · 안내 문구. 값은 부모(그룹 편집 창)가 들고 저장할 때 같이 쓴다.
+ * VM 칸을 누르면 아래에 그 VM 편집 줄이 열린다(표준 이름 · 대수 · 실제 이름 · 종류 · evacuation 대상 · 옮기기 · 빼기).
+ */
+function EnvEditor({
+  value,
+  onChange,
+  others,
+  hosts,
+  novaFetch,
+  envMap,
+}: {
+  value: GroupEnv | undefined
+  onChange: (v: GroupEnv | undefined) => void
+  /** 이 그룹의 환경 구성도 수집본 — 있으면 [실측 이름 불러오기] 가 장비에 다시 묻지 않고 이것으로 채운다 */
+  envMap?: EnvMapSnapshot
+  /** 복사해 올 수 있는 다른 그룹 환경 */
+  others: { id: string; name: string; env: GroupEnv }[]
+  /** 이 그룹 회차들이 실제로 내린 노드 이름(호스트 채우기 제안) */
+  hosts: string[]
+  /** Nova 에서 호스트 · VM 이름 읽기(상태보드 설정의 OpenStack 세션 · openrc) */
+  novaFetch?: () => Promise<{ ok: true; hosts: NovaHosts } | { ok: false; error: string }>
+}) {
+  const [open, setOpen] = useState<string | null>(null)
+  const [novaBusy, setNovaBusy] = useState(false)
+  const [novaMsg, setNovaMsg] = useState<{
+    text: string
+    warn: boolean
+    missed: { where: string; why: string }[]
+    moves: NovaMove[]
+    spare: string[]
+  } | null>(null)
+  /**
+   * [실측 이름 불러오기] 하나(2026-11-14 사용자 결정 · 목업 envdiff-mock ①): 환경 구성도 수집본이 있으면 그것으로(장비 조회 없이 즉시),
+   * 없으면 Nova 를 조회한다. 버튼을 둘 두면 무엇을 눌러야 할지 애매하다는 의견 — 어디서 가져오는지는 버튼 옆 글자로만 보인다.
+   * 수집본은 검증 기본 구성 VM 만 싣고 웹 서비스 VM 은 없어서, 그 칸은 못 맞춘 안내 안에서만 'Nova 에서 다시 읽기' 를 보인다.
+   * 맞추는 규칙은 같다(fillFromNova) — 수집본의 노드 · VM 이름을 Nova 결과와 같은 꼴로 넘긴다
+   */
+  const [lastSrc, setLastSrc] = useState<'map' | 'nova' | null>(null)
+  const loadNova = async (force?: 'nova') => {
+    if (!value) return
+    const useMap = !!envMap && force !== 'nova'
+    if (!useMap && !novaFetch) return
+    setNovaBusy(true)
+    setNovaMsg(null)
+    setLastSrc(useMap ? 'map' : 'nova')
+    try {
+      const r: { ok: true; hosts: NovaHosts } | { ok: false; error: string } = useMap
+        ? { ok: true, hosts: envMap!.nodes.map((n) => ({ host: n.host, vms: envMap!.vms.filter((v) => v.host === n.host).map((v) => v.name) })) }
+        : await novaFetch!()
+      if (!r.ok) return setNovaMsg({ text: r.error, warn: true, missed: [], moves: [], spare: [] })
+      const f = fillFromNova(value, r.hosts)
+      onChange(f.env)
+      setNovaMsg({
+        text: `${useMap ? `환경 구성도 수집본(${fmtDateTime(envMap!.at)})에서` : 'Nova 에서'} 호스트 ${r.hosts.length}개 · VM ${r.hosts.reduce((a, x) => a + x.vms.length, 0)}대를 읽어 호스트 ${f.hosts}칸 · 실측 이름 ${f.names}칸을 채웠습니다. 적어 둔 칸은 그대로 둡니다.${useMap ? ' (장비 조회 없음)' : ''}`,
+        warn: f.missed.length > 0 || f.moves.length > 0,
+        missed: f.missed,
+        moves: f.moves,
+        spare: f.spare,
+      })
+    } catch (e) {
+      setNovaMsg({ text: `Nova 를 읽지 못했습니다(${e instanceof Error ? e.message : String(e)})`, warn: true, missed: [], moves: [], spare: [] })
+    } finally {
+      setNovaBusy(false)
+    }
+  }
+  const [newVm, setNewVm] = useState<Record<string, string>>({})
+  const [askTpl, setAskTpl] = useState<GroupEnv | null>(null)
+  const field = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none'
+  const env = value
+  const setNodes = (f: (n: EnvNode[]) => EnvNode[]) => env && onChange({ ...env, nodes: f(env.nodes) })
+  const setNode = (id: string, patch: Partial<EnvNode>) => setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, ...patch } : n)))
+  const setVm = (nid: string, vid: string, patch: Partial<EnvVm>) =>
+    setNodes((ns) => ns.map((n) => (n.id === nid ? { ...n, vms: n.vms.map((v) => (v.id === vid ? { ...v, ...patch } : v)) } : n)))
+  const pickTpl = (t: GroupEnv) => (env && env.nodes.length ? setAskTpl(t) : onChange(t))
+  // 버튼 이름(2026-11-14 사용자 결정): '틀 고르기' → '환경 구성 선택', 겸용 → 믹스드(현장 용어), 빈 틀 → 수동 구성
+  const tplBar = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[11px] text-gray-400">환경 구성 선택</span>
+      <button onClick={() => pickTpl(envTemplate('4'))} className="rounded border border-white/10 px-2 py-0.5 text-[11.5px] text-gray-200 hover:bg-white/10">
+        4노드 (믹스드 3 + 컴퓨트 1)
+      </button>
+      <button onClick={() => pickTpl(envTemplate('3'))} className="rounded border border-white/10 px-2 py-0.5 text-[11.5px] text-gray-200 hover:bg-white/10">
+        3노드 (믹스드 3, 3중화)
+      </button>
+      <button onClick={() => pickTpl(envTemplate('empty'))} className="rounded border border-white/10 px-2 py-0.5 text-[11.5px] text-gray-200 hover:bg-white/10">
+        수동 구성
+      </button>
+      {others.length > 0 && (
+        <select
+          value=""
+          onChange={(e) => {
+            const o = others.find((x) => x.id === e.target.value)
+            if (o) pickTpl(cloneEnv(o.env))
+          }}
+          className="rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11.5px] text-gray-200"
+        >
+          <option value="">다른 그룹에서 복사</option>
+          {others.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.name}
+            </option>
+          ))}
+        </select>
+      )}
+    </div>
+  )
+  if (!env)
+    return (
+      <div className="space-y-2 text-[12px]">
+        <div className="text-[11.5px] leading-relaxed text-gray-400">
+          리포트 맨 앞 '검증 환경' 에 나올 노드 · VM 배치입니다. 환경 구성을 하나 고른 뒤 이 버전 환경에 맞게 고치세요. 노드 이름은 '노드 1' 같은 표준 이름과 실제 호스트 이름을 같이 적고,
+          VM 은 표준 이름(리포트 기본)과 필요하면 실제 이름을 적습니다.
+        </div>
+        {tplBar}
+      </div>
+    )
+  const nVm = env.nodes.reduce((a, n) => a + n.vms.reduce((b, v) => b + vmCount(v), 0), 0)
+  return (
+    <div className="space-y-3 text-[12px]">
+      {askTpl && (
+        <div className="flex items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11.5px] text-amber-100">
+          지금 적은 노드 · VM 을 이 구성으로 바꿀까요? (저장 전이라 취소하면 되돌릴 수 있습니다)
+          <button
+            onClick={() => {
+              onChange({ ...askTpl, inject: env.inject || askTpl.inject })
+              setAskTpl(null)
+            }}
+            className="ml-auto rounded border border-amber-400/50 px-2 py-0.5 hover:bg-amber-500/20"
+          >
+            바꾸기
+          </button>
+          <button onClick={() => setAskTpl(null)} className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10">
+            그만두기
+          </button>
+        </div>
+      )}
+      {tplBar}
+      <label className="flex items-center gap-2">
+        <span className="w-[86px] shrink-0 text-[11px] text-gray-400">장애 주입 방법</span>
+        <input value={env.inject} onChange={(e) => onChange({ ...env, inject: e.target.value })} placeholder="예: IPMI 포털 접속 후 Power Down" className={field + ' flex-1'} />
+      </label>
+      <div className="flex items-center gap-2 text-[11px] text-gray-500">
+        노드 {env.nodes.length} · VM {nVm}대
+        {(envMap || novaFetch) && (
+          <>
+            <button
+              onClick={() => void loadNova()}
+              disabled={novaBusy}
+              title={
+                envMap
+                  ? '환경 구성도 수집본의 호스트 · VM 이름으로 비어 있는 호스트 · 실측 이름 칸을 채웁니다(장비 조회 없음)'
+                  : '상태보드 설정의 OpenStack 세션 · openrc 로 nova-compute 호스트와 그 위 VM 이름을 읽어, 비어 있는 호스트 · 실측 이름 칸을 채웁니다'
+              }
+              className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 text-blue-100 hover:bg-blue-500/25 disabled:opacity-50"
+            >
+              {novaBusy && <Loader2 size={11} className="animate-spin" />} 실측 이름 불러오기
+            </button>
+            <span className="text-[11px] text-blue-200/80">{envMap ? `환경 구성도 ${fmtDateTime(envMap.at)} 수집본 기준` : 'Nova 조회 (OpenStack 조회 세션)'}</span>
+          </>
+        )}
+        {hosts.length > 0 && (
+          <button
+            onClick={() => setNodes((ns) => ns.map((n, i) => (n.host.trim() || !hosts[i] ? n : { ...n, host: hosts[i] })))}
+            title={`이 그룹 회차들이 내린 노드: ${hosts.join(', ')}. 비어 있는 호스트 칸만 순서대로 채웁니다`}
+            className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10"
+          >
+            회차 기록으로 호스트 채우기
+          </button>
+        )}
+        <span className="ml-auto flex items-center gap-1.5">
+          <span className="rounded border border-blue-400/30 bg-blue-500/15 px-1.5 text-blue-100">k8s</span>
+          <span className="rounded border border-emerald-400/30 bg-emerald-500/15 px-1.5 text-emerald-100">웹 서비스</span>
+          <span className="rounded border border-white/15 bg-white/[0.06] px-1.5 text-gray-200">기타</span>
+          <span className="rounded px-1.5 text-gray-300 ring-2 ring-amber-400/70">evacuation 대상</span>
+        </span>
+      </div>
+      {/* 버튼만 보고는 무엇을 미리 해 둬야 하는지 몰랐다(2026-11-14 사용자 요청). 누르기 전에 알도록 버튼 바로 아래에 늘 보인다 */}
+      {novaFetch && !envMap && (
+        <div className="-mt-1.5 text-[11px] leading-relaxed text-gray-500">
+          Nova 조회는 상태보드 설정 → ⑥ OpenStack 서비스(API) 의 조회 세션에 컨트롤러 세션을 골라 두고, 그 세션이 연결돼 있어야 동작합니다.
+        </div>
+      )}
+      {novaMsg && (
+        <div className={'space-y-1.5 rounded px-2.5 py-2 text-[11.5px] leading-relaxed ' + (novaMsg.warn ? 'bg-amber-500/10 text-amber-50' : 'bg-emerald-500/10 text-emerald-100')}>
+          <div>{novaMsg.text}</div>
+          {novaMsg.moves.length > 0 && (
+            <div>
+              <div className="flex items-center gap-2 font-semibold text-amber-200">
+                환경과 다른 노드에 있는 VM {novaMsg.moves.length}개 (실제 이름은 채움)
+                {novaMsg.moves.some((m) => m.toNodeId) && (
+                  <button
+                    onClick={() => {
+                      const mv = novaMsg.moves.filter((m) => m.toNodeId)
+                      setNodes((ns) => {
+                        const pick = new Map(mv.map((m) => [m.vmId, m.toNodeId as string]))
+                        const moving = ns.flatMap((n) => n.vms.filter((v) => pick.has(v.id)))
+                        return ns.map((n) => ({
+                          ...n,
+                          vms: [...n.vms.filter((v) => !pick.has(v.id)), ...moving.filter((v) => pick.get(v.id) === n.id)],
+                        }))
+                      })
+                      setNovaMsg({ ...novaMsg, moves: novaMsg.moves.filter((m) => !m.toNodeId) })
+                    }}
+                    title="이 VM 들을 실측(Nova · 환경 구성도)에서 올라가 있는 노드로 옮깁니다. 리포트 검증 환경의 배치가 바뀝니다"
+                    className="rounded border border-amber-400/50 px-2 py-0.5 font-normal text-amber-100 hover:bg-amber-500/20"
+                  >
+                    실측 배치대로 옮기기
+                  </button>
+                )}
+              </div>
+              <ul className="mt-0.5 space-y-0.5 pl-1">
+                {novaMsg.moves.map((m) => (
+                  <li key={m.vmId} className="flex gap-1.5">
+                    <span className="text-amber-300">·</span>
+                    <span>
+                      <b className="font-medium">{m.vm}</b> ({m.real}): 환경은 {m.fromNode}, 실측은 {m.toNode ? `${m.toNode}(${m.host})` : m.host}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {novaMsg.missed.length > 0 && (
+            <div>
+              <div className="flex flex-wrap items-center gap-2 font-semibold text-amber-200">
+                못 맞춘 VM {novaMsg.missed.length}개 (칩을 눌러 실측 이름을 직접 적으세요)
+                {/* 수집본에는 검증 기본 구성 VM 만 있어 웹 서비스 VM 등은 여기서만 Nova 로 다시 읽게 한다(버튼은 평소 하나) */}
+                {lastSrc === 'map' && novaFetch && (
+                  <button
+                    onClick={() => void loadNova('nova')}
+                    disabled={novaBusy}
+                    className="rounded border border-amber-400/50 px-2 py-0.5 font-normal text-amber-100 hover:bg-amber-500/20 disabled:opacity-50"
+                  >
+                    Nova 에서 다시 읽기
+                  </button>
+                )}
+              </div>
+              {lastSrc === 'map' && <div className="text-[11px] font-normal text-amber-100/80">환경 구성도에는 검증 기본 구성 VM 만 있어, 웹 서비스 VM 같은 것은 Nova 조회가 필요합니다.</div>}
+              <ul className="mt-0.5 space-y-0.5 pl-1">
+                {novaMsg.missed.map((m) => (
+                  <li key={m.where} className="flex gap-1.5">
+                    <span className="text-amber-300">·</span>
+                    <span>
+                      <b className="font-medium">{m.where}</b>: {m.why}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {novaMsg.spare.length > 0 && (
+            <details className="mt-1 text-gray-300">
+              <summary className="cursor-pointer text-[11px] text-gray-400">환경에 없는 Nova VM {novaMsg.spare.length}대 (복사해서 쓰기)</summary>
+              <div className="mt-1 select-text break-all font-mono text-[11px]">{novaMsg.spare.join('  ')}</div>
+            </details>
+          )}
+        </div>
+      )}
+      {env.nodes.map((n, k) => (
+        <div key={n.id} className="rounded-lg border border-white/10 bg-black/20 p-2.5">
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <input value={n.label} onChange={(e) => setNode(n.id, { label: e.target.value })} title="표준 이름" className={field + ' w-[84px] font-semibold'} />
+            <input value={n.host} onChange={(e) => setNode(n.id, { host: e.target.value })} placeholder="실제 호스트 이름" title="그 버전의 실제 호스트 이름" className={field + ' w-[150px]'} />
+            <label className="flex items-center gap-1 text-[11.5px] text-gray-300">
+              <input type="checkbox" checked={n.controller} onChange={(e) => setNode(n.id, { controller: e.target.checked })} /> 컨트롤러
+            </label>
+            <label className="flex items-center gap-1 text-[11.5px] text-gray-300">
+              <input type="checkbox" checked={n.compute} onChange={(e) => setNode(n.id, { compute: e.target.checked })} /> 컴퓨트
+            </label>
+            <span className="ml-auto flex items-center gap-0.5">
+              <button
+                onClick={() => setNodes((ns) => (k ? [...ns.slice(0, k - 1), ns[k], ns[k - 1], ...ns.slice(k + 1)] : ns))}
+                disabled={!k}
+                title="위로"
+                className="rounded px-1.5 text-gray-400 hover:bg-white/10 disabled:opacity-30"
+              >
+                ↑
+              </button>
+              <button
+                onClick={() => setNodes((ns) => (k < ns.length - 1 ? [...ns.slice(0, k), ns[k + 1], ns[k], ...ns.slice(k + 2)] : ns))}
+                disabled={k === env.nodes.length - 1}
+                title="아래로"
+                className="rounded px-1.5 text-gray-400 hover:bg-white/10 disabled:opacity-30"
+              >
+                ↓
+              </button>
+              <button onClick={() => setNodes((ns) => ns.filter((x) => x.id !== n.id))} title="이 노드 빼기" className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200">
+                <X size={13} />
+              </button>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {n.vms.map((v) => (
+              <button
+                key={v.id}
+                onClick={() => setOpen(open === v.id ? null : v.id)}
+                title={(v.real ?? []).some((x) => x.trim()) ? `실제 이름: ${vmDisplay(v, true)} (눌러서 고치기)` : '눌러서 고치기'}
+                className={vmChipCls(v) + (open === v.id ? ' outline outline-1 outline-white/60' : '')}>
+                {v.name}
+                {vmCount(v) > 1 && <b>({vmCount(v)}대)</b>}
+                {/* 실제 이름을 채운 칩 표시 — '실제' 는 무엇이 실제인지 모호해 '실측' 으로(2026-11-14 사용자 결정) */}
+                {(v.real ?? []).some((x) => x.trim()) && <span className="text-[10px] opacity-70">실측</span>}
+              </button>
+            ))}
+            <input
+              value={newVm[n.id] ?? ''}
+              onChange={(e) => setNewVm((c) => ({ ...c, [n.id]: e.target.value }))}
+              onKeyDown={(e) => {
+                const v = (newVm[n.id] ?? '').trim()
+                if (e.key !== 'Enter' || !v) return
+                const kind: EnvVm['kind'] = /master|infra|biz|manager|k8s|worker/i.test(v) ? 'k8s' : /web/i.test(v) ? 'web' : 'etc'
+                setNode(n.id, { vms: [...n.vms, { id: newId('vm'), name: v, kind, evac: kind !== 'k8s' }] })
+                setNewVm((c) => ({ ...c, [n.id]: '' }))
+              }}
+              placeholder="+ VM 이름 (Enter)"
+              className={field + ' w-[130px] py-0.5 text-[11.5px]'}
+            />
+          </div>
+          {n.vms
+            .filter((v) => v.id === open)
+            .map((v) => (
+              <div key={v.id} className="mt-2 grid grid-cols-[70px_1fr] items-start gap-x-2 gap-y-1.5 rounded border border-white/10 bg-black/30 p-2 text-[11.5px]">
+                <span className="pt-1 text-gray-400">표준 이름</span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input value={v.name} onChange={(e) => setVm(n.id, v.id, { name: e.target.value })} className={field + ' w-[150px]'} />
+                  <span className="text-gray-400">대수</span>
+                  <input
+                    value={v.count ?? 1}
+                    onChange={(e) => {
+                      const c = Math.max(1, Math.min(200, Number(e.target.value.replace(/\D/g, '')) || 1))
+                      setVm(n.id, v.id, { count: c > 1 ? c : undefined })
+                    }}
+                    title="묶음 VM 이면 대수(예: webserver01~10 → 10)"
+                    className={field + ' w-[52px] text-right'}
+                  />
+                  <select value={v.kind} onChange={(e) => setVm(n.id, v.id, { kind: e.target.value as EnvVm['kind'] })} className={field}>
+                    {(['k8s', 'web', 'etc'] as const).map((x) => (
+                      <option key={x} value={x}>
+                        {VM_KIND_LABEL[x]}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center gap-1 text-gray-200">
+                    <input type="checkbox" checked={v.evac} onChange={(e) => setVm(n.id, v.id, { evac: e.target.checked })} /> evacuation 대상
+                  </label>
+                </div>
+                <span className="pt-1 text-gray-400">실제 이름</span>
+                <div>
+                  <textarea
+                    rows={Math.min(5, Math.max(1, vmCount(v)))}
+                    value={(v.real ?? []).join('\n')}
+                    onChange={(e) => setVm(n.id, v.id, { real: e.target.value.split('\n') })}
+                    placeholder={vmCount(v) > 1 ? `한 줄에 하나씩 ${vmCount(v)}개 (비우면 리포트에 표준 이름)` : '비우면 리포트에 표준 이름'}
+                    className={field + ' w-full resize-y font-mono'}
+                  />
+                  {(() => {
+                    const c = (v.real ?? []).filter((x) => x.trim()).length
+                    return c > 0 && c !== vmCount(v) ? <div className="text-amber-300">{vmCount(v)}대인데 실제 이름이 {c}개입니다</div> : null
+                  })()}
+                </div>
+                <span />
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const to = e.target.value
+                      if (!to) return
+                      setNodes((ns) => ns.map((x) => (x.id === n.id ? { ...x, vms: x.vms.filter((y) => y.id !== v.id) } : x.id === to ? { ...x, vms: [...x.vms, v] } : x)))
+                    }}
+                    className={field}
+                  >
+                    <option value="">다른 노드로 옮기기</option>
+                    {env.nodes
+                      .filter((x) => x.id !== n.id)
+                      .map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.label}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    onClick={() => {
+                      setNode(n.id, { vms: n.vms.filter((y) => y.id !== v.id) })
+                      setOpen(null)
+                    }}
+                    className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10"
+                  >
+                    이 VM 빼기
+                  </button>
+                  <button onClick={() => setOpen(null)} className="ml-auto rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10">
+                    접기
+                  </button>
+                </div>
+              </div>
+            ))}
+        </div>
+      ))}
+      <button
+        onClick={() =>
+          setNodes((ns) => [...ns, { id: newId('nd'), label: `노드 ${ns.length + 1}`, host: '', controller: false, compute: true, vms: [] }])
+        }
+        className="flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-white/15 py-1.5 text-[12px] text-gray-400 hover:bg-white/5 hover:text-gray-200"
+      >
+        <Plus size={13} /> 노드 더하기
+      </button>
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-gray-400">안내 문구 (한 줄이 한 항목, 리포트 카드 아래 '* …' 로. 문구 속 표준 VM 이름은 실제 이름 리포트에서 바뀝니다)</span>
+        <textarea rows={2} value={env.notes.join('\n')} onChange={(e) => onChange({ ...env, notes: e.target.value.split('\n') })} className={field + ' w-full resize-y'} />
+      </label>
+    </div>
+  )
+}
+
+/**
+ * 차수의 이슈 · 팀별 조치(목업 group-mock2 A) — 리포트 '차수별 요약' 의 이슈 및 조치 칸이 그대로 이것이다.
+ * 이슈는 관련 회차를 눌러 고르면 리포트에 'n회 #번호' 가 붙고, 안 고르면 '공통'. 조치는 팀 · 내용 · 결과(재현 안 됨 · 재현됨 · 확인 중).
+ * [회차 원인 · 조치 가져오기] 는 이 차수 회차들에 적어 둔 원인(RunNote)을 이슈로 옮긴다(같은 글은 다시 넣지 않는다).
+ */
+function PhaseNotesEditor({
+  phase,
+  runs,
+  numOf,
+  teams,
+  onChange,
+}: {
+  phase: GroupPhase
+  /** 이 차수 회차(시작 시각 순) */
+  runs: HistoryRecord[]
+  numOf: (id: string) => number
+  teams: string[]
+  onChange: (ph: GroupPhase) => void
+}) {
+  const field = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none'
+  const setIssue = (id: string, patch: Partial<PhaseIssue>) => onChange({ ...phase, issues: phase.issues.map((x) => (x.id === id ? { ...x, ...patch } : x)) })
+  const setAct = (id: string, patch: Partial<PhaseAction>) => onChange({ ...phase, actions: phase.actions.map((x) => (x.id === id ? { ...x, ...patch } : x)) })
+  const fromNotes = runs.flatMap((h) => (h.notes ?? []).filter((n) => n.cause.trim()).map((n) => ({ h, n })))
+  const dlId = `teams-${phase.id}`
+  return (
+    <div className="mt-1.5 space-y-2.5 rounded-lg border border-white/10 bg-black/20 p-2.5 text-[12px]">
+      <datalist id={dlId}>
+        {teams.map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
+      <div>
+        <div className="mb-1 flex items-center gap-2">
+          <span className="font-semibold text-gray-200">① 이슈</span>
+          <button
+            onClick={() => onChange({ ...phase, issues: [...phase.issues, { id: newId('is'), text: '', runIds: [] }] })}
+            className="ml-auto rounded border border-white/10 px-2 py-0.5 text-[11.5px] text-gray-200 hover:bg-white/10"
+          >
+            + 이슈
+          </button>
+        </div>
+        {phase.issues.length === 0 && <div className="text-[11.5px] text-gray-500">이슈가 없습니다. 리포트에는 '없음' 으로 나옵니다.</div>}
+        {phase.issues.map((x) => (
+          // 회차가 없으면 회차 고르기 칸을 아예 빼고 입력칸을 넓힌다(2026-11-14 사용자 요청: '회차가 아직 없습니다' 안내가 불필요했다.
+          // 넣는 방법은 새 그룹 창 위 '검증 그룹 쓰는 순서' 가 알려 준다)
+          <div key={x.id} className={'mb-1.5 grid items-start gap-2 ' + (runs.length ? 'grid-cols-[1fr_200px_20px]' : 'grid-cols-[1fr_20px]')}>
+            <textarea rows={2} value={x.text} onChange={(e) => setIssue(x.id, { text: e.target.value })} placeholder="이 차수에서 발생한 이슈를 적어 주세요" className={field + ' resize-y'} />
+            <div className={runs.length ? 'flex flex-wrap gap-1' : 'hidden'}>
+              {runs.map((h) => {
+                const on = x.runIds.includes(h.id)
+                return (
+                  <button
+                    key={h.id}
+                    onClick={() => setIssue(x.id, { runIds: on ? x.runIds.filter((y) => y !== h.id) : [...x.runIds, h.id] })}
+                    title={`${h.label || h.node} · ${fmtDateTime(h.t0)}`}
+                    className={'rounded border px-1.5 text-[11px] ' + (on ? 'border-blue-400/60 bg-blue-500/25 text-blue-100' : 'border-white/10 text-gray-400 hover:bg-white/10')}
+                  >
+                    #{numOf(h.id)}
+                  </button>
+                )
+              })}
+              {runs.length > 0 && !x.runIds.length && <span className="text-[11px] text-gray-500">공통</span>}
+            </div>
+            <button onClick={() => onChange({ ...phase, issues: phase.issues.filter((y) => y.id !== x.id) })} title="이 이슈 지우기" className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200">
+              <X size={13} />
+            </button>
+          </div>
+        ))}
+        {fromNotes.length > 0 && (
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+            이 차수 회차에 적은 원인 · 조치 {fromNotes.length}건
+            <button
+              onClick={() => {
+                // 원인 → 이슈(회차 모음), 조치 → 담당자 팀별 조치(회차에 적은 조치는 이미 한 일이라 '조치 완료' 로 넣고 사람이 고친다). 이미 있는 글은 다시 넣지 않는다
+                const d = notesToPhase(runs)
+                const haveI = new Set(phase.issues.map((x) => x.text.trim()))
+                const haveA = new Set(phase.actions.map((x) => `${x.team.trim()}\n${x.text.trim()}`))
+                onChange({
+                  ...phase,
+                  issues: [...phase.issues, ...d.issues.filter((x) => !haveI.has(x.text))],
+                  actions: [...phase.actions, ...d.actions.filter((x) => !haveA.has(`${x.team}\n${x.text}`)).map((x) => ({ ...x, result: 'done' as const }))],
+                })
+              }}
+              className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10"
+            >
+              원인 · 조치 가져오기
+            </button>
+            <span>비워 두면 리포트가 이 회차 기록을 자동으로 모아 싣습니다</span>
+          </div>
+        )}
+      </div>
+      <div>
+        <div className="mb-1 flex items-center gap-2">
+          <span className="font-semibold text-gray-200">② 팀별 조치</span>
+          <button
+            onClick={() => onChange({ ...phase, actions: [...phase.actions, { id: newId('ac'), team: '', text: '', result: 'done' }] })}
+            className="ml-auto rounded border border-white/10 px-2 py-0.5 text-[11.5px] text-gray-200 hover:bg-white/10"
+          >
+            + 조치
+          </button>
+        </div>
+        {phase.actions.map((x) => (
+          <div key={x.id} className="mb-1.5 grid grid-cols-[120px_1fr_100px_20px] items-start gap-2">
+            <input list={dlId} value={x.team} onChange={(e) => setAct(x.id, { team: e.target.value })} placeholder="팀 (예: Expert팀)" className={field} />
+            {/* 2.5줄 높이(줄 18px x 2.5 + 위아래 여백 · 테두리 10px). 2026-11-14 사용자 요청: 회차 조치를 불러오면 한 줄 칸이라 글이 잘려 보였다.
+                반 줄을 더 보여 줘서 아래에 글이 더 있다는 것을 알 수 있게 한다. 더 보려면 오른쪽 아래 모서리로 늘린다 */}
+            <textarea value={x.text} onChange={(e) => setAct(x.id, { text: e.target.value })} placeholder="조치한 내용을 적어 주세요" className={field + ' h-[55px] resize-y leading-[18px]'} />
+            <select value={x.result} onChange={(e) => setAct(x.id, { result: e.target.value as PhaseAction['result'] })} className={field}>
+              <option value="done">조치 완료</option>
+              <option value="wip">확인 중</option>
+              <option value="ok">재현 안 됨</option>
+              <option value="repro">재현됨</option>
+              <option value="none">표시 안 함</option>
+            </select>
+            <button onClick={() => onChange({ ...phase, actions: phase.actions.filter((y) => y.id !== x.id) })} title="이 조치 지우기" className="rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200">
+              <X size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 그룹 만들기 · 고치기 — 이름과 차수 목록. 차수를 지우면 그 차수의 회차는 지워지지 않고 '차수 없음' 으로 남는다(pruneMembership).
+ * 닫기는 X · 취소 · 저장뿐(모달 규칙).
+ */
+/** 환경 구성도 파일 이름 */
+const envMapFile = (groupName: string, at: number, ext: string) => `환경구성도_${fileSafe(groupName || '검증그룹')}_${stampOf(at)}.${ext}`
+/**
+ * 환경 구성도 보기 — 앱 안 큰 창에 그대로 띄운다(파일로 저장하기 전에 확인). 배경 클릭으로 닫지 않는다(모달 규칙)
+ */
+function EnvMapViewer({
+  snap,
+  title,
+  fileBase,
+  onClose,
+  page,
+}: {
+  snap?: EnvMapSnapshot
+  title: string
+  fileBase: { group: string; at: number }
+  onClose: () => void
+  /** 구성도가 아닌 다른 페이지(수집본 비교) — 보기 · 저장에 이 HTML 을 그대로 쓴다 */
+  page?: { html: string; name: string }
+}) {
+  const [msg, setMsg] = useState('')
+  // 앱 안에서는 '확인 필요' 상자까지 보이고, 저장 파일에는 싣지 않는다(renderEnvMapHtml checks 주석)
+  const view = useMemo(() => page?.html ?? (snap ? renderEnvMapHtml(snap, { title, checks: true }) : ''), [page, snap, title])
+  const html = useMemo(() => page?.html ?? (snap ? renderEnvMapHtml(snap, { title }) : ''), [page, snap, title])
+  const save = async (png: boolean) => {
+    setMsg('')
+    const name = page ? page.name.replace(/\.html$/, png ? '.png' : '.html') : envMapFile(fileBase.group, fileBase.at, png ? 'png' : 'html')
+    const r = png ? await window.electronAPI.saveHtmlPng({ html, defaultName: name }) : await window.electronAPI.saveReport({ defaultName: name, content: html, format: 'html' })
+    setMsg(r.saved ? `저장했습니다. ${r.path ?? ''}${'cut' in r && r.cut ? ' (그림이 너무 길어 아래 일부가 잘렸습니다. 전체는 HTML 로 저장하세요)' : ''}` : r.error ? `저장 실패: ${r.error}` : '')
+  }
+  return (
+    <div className="fixed inset-0 z-[80] flex flex-col bg-black/70 p-5">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
+          <span className="text-sm font-semibold text-gray-100">{title}</span>
+          {msg && <span className="truncate text-[11.5px] text-gray-400">{msg}</span>}
+          <button onClick={() => void save(false)} className="ml-auto rounded border border-white/10 px-2.5 py-0.5 text-[12px] text-gray-200 hover:bg-white/10">
+            HTML 저장
+          </button>
+          <button onClick={() => void save(true)} className="rounded border border-white/10 px-2.5 py-0.5 text-[12px] text-gray-200 hover:bg-white/10">
+            PNG 저장
+          </button>
+          <button onClick={onClose} title="닫기" className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-100">
+            <X size={15} />
+          </button>
+        </div>
+        <iframe title={title} srcDoc={view} sandbox="allow-scripts" className="min-h-0 flex-1 bg-white" />
+      </div>
+    </div>
+  )
+}
+/**
+ * 그룹 편집 → 환경 구성도 탭(2026-11-14 사용자 결정 · 목업 envmap-tool-mock). 수집 · 요약 · 확인 필요 · 노드별 미리 보기 · 보기/저장.
+ * 수집본은 이 창의 [저장] 으로 그룹에 남는다(다른 탭과 같다 — 취소하면 버린다).
+ */
+function EnvMapPanel({
+  value,
+  onChange,
+  collect,
+  groupName,
+  env,
+  dirty,
+  others = [],
+}: {
+  value?: EnvMapSnapshot
+  /** 수집본이 있는 다른 그룹 — 비교 대상 */
+  others?: { id: string; name: string; envMap: EnvMapSnapshot }[]
+  onChange: (v: EnvMapSnapshot) => void
+  collect?: EnvCollect
+  groupName: string
+  env?: GroupEnv
+  /** 저장 안 한 새 수집본 */
+  dirty: boolean
+}) {
+  type St = { st: 'run' | 'ok' | 'fail'; msg?: string; t0: number; ms?: number }
+  const [steps, setSteps] = useState<Partial<Record<EnvStep, St>>>({})
+  const [busy, setBusy] = useState(false)
+  const [view, setView] = useState(false)
+  const [msg, setMsg] = useState('')
+  /** 비교할 다른 그룹(수집본) — 왼쪽이 그 그룹(이전), 오른쪽이 이 그룹(지금) */
+  const [cmpId, setCmpId] = useState(() => others[0]?.id ?? '')
+  const [cmpView, setCmpView] = useState(false)
+  const cmp = others.find((o) => o.id === cmpId) ?? others[0]
+  const diffPage = useMemo(() => {
+    if (!value || !cmp) return null
+    const nameB = groupName || '이 그룹'
+    return {
+      html: renderEnvDiffHtml(cmp.envMap, value, { title: '환경 구성도 비교', nameA: cmp.name, nameB }),
+      name: `환경구성도비교_${fileSafe(cmp.name)}_${fileSafe(nameB)}_${stampOf(value.at)}.html`,
+    }
+  }, [value, cmp, groupName])
+  const sess = collect?.sessions()
+  const title = `환경 구성도 · ${groupName || '검증 그룹'}`
+  const html = useMemo(() => (value ? renderEnvMapHtml(value, { title }) : ''), [value, title])
+  const doCollect = async () => {
+    if (!collect || busy) return
+    setBusy(true)
+    setMsg('')
+    setSteps({})
+    try {
+      const raw = await collect.run((k, st, m) =>
+        setSteps((cur) => {
+          const t0 = st === 'run' ? Date.now() : cur[k]?.t0 ?? Date.now()
+          return { ...cur, [k]: { st, msg: m, t0, ms: st === 'run' ? undefined : Date.now() - t0 } }
+        }),
+      )
+      // 노드 표준 이름은 환경 탭에 적어 둔 것을 따른다(호스트가 같으면 '노드 1' 등). VM 은 환경 탭의 실제 이름도 고르는 데 넣는다
+      const labels = Object.fromEntries((env?.nodes ?? []).filter((n) => n.host.trim()).map((n) => [n.host.trim(), n.label]))
+      const keepVms = (env?.nodes ?? []).flatMap((n) => n.vms.flatMap((v) => v.real ?? []))
+      onChange(buildEnvMap(raw, { labels, keepVms }))
+    } catch (e) {
+      setMsg(`수집하지 못했습니다(${e instanceof Error ? e.message : String(e)})`)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const save = async (png: boolean) => {
+    if (!value) return
+    setMsg('')
+    const name = envMapFile(groupName, value.at, png ? 'png' : 'html')
+    const r = png ? await window.electronAPI.saveHtmlPng({ html, defaultName: name }) : await window.electronAPI.saveReport({ defaultName: name, content: html, format: 'html' })
+    setMsg(r.saved ? `저장했습니다. ${r.path ?? ''}${'cut' in r && r.cut ? ' (그림이 너무 길어 아래 일부가 잘렸습니다. 전체는 HTML 로 저장하세요)' : ''}` : r.error ? `저장 실패: ${r.error}` : '')
+  }
+  const k8s = value?.k8s
+  const nPods = k8s?.workloads.reduce((a, w) => a + Object.values(w.at).reduce((x, y) => x + y, 0) + w.pending, 0) ?? 0
+  const errs = value ? Object.entries(value.errors) : []
+  const btn = 'rounded border border-white/10 px-2.5 py-1 text-[12px] text-gray-200 hover:bg-white/10 disabled:opacity-40'
+  return (
+    <div className="space-y-3 text-[12px]">
+      <div className="text-[11.5px] leading-relaxed text-gray-400">
+        장비에서 조회한 실제 구성입니다. 환경 탭(사람이 정한 표준 이름 · evacuation 대상)과 따로 두고 서로 덮어쓰지 않습니다. 검증을 시작하기 전 형상으로 수집해 두세요.
+      </div>
+      <div className="rounded border border-white/10 bg-white/[0.02] px-3 py-2.5">
+        {value ? (
+          <div className="grid grid-cols-[86px_1fr] gap-x-3 gap-y-1 text-[11.5px]">
+            <span className="text-gray-400">마지막 수집</span>
+            <span className="text-gray-100">
+              {fmtDateTime(value.at)}
+              {dirty && <span className="ml-2 text-amber-300">저장을 눌러야 이 그룹에 남습니다</span>}
+            </span>
+            <span className="text-gray-400">요약</span>
+            <span className="text-emerald-300">
+              물리 노드 {value.nodes.length} · 검증 VM {value.vms.length}
+              {k8s ? ` · k8s 노드 ${k8s.nodes.length} · 워크로드 ${k8s.workloads.length} · 파드 ${nPods}` : ''}
+            </span>
+            {value.warnings.length > 0 && (
+              <>
+                <span className="text-gray-400">확인 필요</span>
+                <ul className="space-y-0.5 text-amber-200">
+                  {value.warnings.map((w, i) => (
+                    <li key={i}>· {w}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {errs.length > 0 && (
+              <>
+                <span className="text-gray-400">못 읽음</span>
+                <ul className="space-y-0.5 text-red-300">
+                  {errs.map(([k, v]) => (
+                    <li key={k}>
+                      · {k}: {v}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="text-[11.5px] text-gray-400">아직 수집하지 않았습니다. [수집] 을 누르면 아래 세션으로 조회합니다.</div>
+        )}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <button onClick={() => void doCollect()} disabled={!collect || busy} className="inline-flex items-center gap-1 rounded border border-blue-500/60 bg-blue-500/80 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-blue-500 disabled:opacity-50">
+            {busy && <Loader2 size={12} className="animate-spin" />}
+            {value ? '다시 수집' : '수집'}
+          </button>
+          <button onClick={() => setView(true)} disabled={!value || busy} className={btn}>
+            구성도 보기
+          </button>
+          <button onClick={() => void save(false)} disabled={!value || busy} className={btn}>
+            HTML 저장
+          </button>
+          <button onClick={() => void save(true)} disabled={!value || busy} className={btn}>
+            PNG 저장
+          </button>
+          <span className="ml-auto text-[11px] text-gray-500">조회 명령만 실행합니다(설정 · 상태 변경 없음)</span>
+        </div>
+        {msg && <div className="mt-1.5 text-[11.5px] text-gray-300">{msg}</div>}
+      </div>
+      {/* 수집본 비교(2026-11-14 사용자 결정 · 목업 envdiff-mock ②) — 수집본은 그룹(버전)마다 하나라 비교 대상은 수집본이 있는 다른 그룹 */}
+      {value && (
+        <div className="rounded border border-white/10 px-3 py-2">
+          {cmp ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold text-amber-200">비교</span>
+              <span className="text-[11px] text-gray-400">이전</span>
+              <select value={cmp.id} onChange={(e) => setCmpId(e.target.value)} className="min-w-0 max-w-[340px] rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11.5px] text-gray-100">
+                {others.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name} ({fmtDateTime(o.envMap.at).slice(0, 10)} 수집)
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-gray-400">→ 지금 이 그룹</span>
+              <button onClick={() => setCmpView(true)} disabled={busy} className={btn}>
+                비교 보기
+              </button>
+              <button
+                onClick={async () => {
+                  if (!diffPage) return
+                  const r = await window.electronAPI.saveReport({ defaultName: diffPage.name, content: diffPage.html, format: 'html' })
+                  setMsg(r.saved ? `비교를 저장했습니다. ${r.path ?? ''}` : r.error ? `저장 실패: ${r.error}` : '')
+                }}
+                disabled={busy}
+                className={btn}
+              >
+                비교 HTML 저장
+              </button>
+            </div>
+          ) : (
+            <div className="text-[11px] text-gray-500">다른 그룹(버전)에 환경 구성도 수집본이 생기면 여기서 비교할 수 있습니다.</div>
+          )}
+        </div>
+      )}
+      {cmpView && diffPage && cmp && <EnvMapViewer title={`환경 구성도 비교 · ${cmp.name} → ${groupName || '이 그룹'}`} fileBase={{ group: groupName, at: value?.at ?? Date.now() }} page={diffPage} onClose={() => setCmpView(false)} />}
+      <div className="rounded border border-white/10 px-3 py-2">
+        <div className="mb-1 text-[11px] text-gray-400">수집 출처 (상태보드 설정 그대로)</div>
+        <div className="space-y-0.5">
+          {ENV_STEPS.map((x) => {
+            const st = steps[x.k]
+            return (
+              <div key={x.k} className="flex items-start gap-2 text-[11.5px]">
+                <span className={'w-4 shrink-0 text-center ' + (st?.st === 'ok' ? 'text-emerald-400' : st?.st === 'fail' ? 'text-red-400' : 'text-gray-500')}>
+                  {st?.st === 'run' ? <Loader2 size={11} className="mt-0.5 inline animate-spin" /> : st?.st === 'ok' ? '✓' : st?.st === 'fail' ? '✕' : '·'}
+                </span>
+                <span className="w-[178px] shrink-0 text-gray-200">{x.label}</span>
+                <span className="min-w-0 flex-1 text-gray-500">
+                  {sess?.[x.k] ?? '-'}
+                  {st?.msg ? <span className={'block ' + (st.st === 'fail' ? 'text-red-300' : 'text-gray-400')}>{st.msg}</span> : null}
+                </span>
+                {st?.ms != null && <span className="shrink-0 text-gray-500">{(st.ms / 1000).toFixed(1)}초</span>}
+              </div>
+            )
+          })}
+        </div>
+        <details className="mt-1.5 text-[11px] text-gray-500">
+          <summary className="cursor-pointer select-none hover:text-gray-300">실행하는 명령 보기</summary>
+          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-mono text-[10.5px] leading-relaxed text-gray-400">
+            {[
+              `# 물리 노드마다\n${NODE_SCRIPT.split('; ').filter((x) => !x.startsWith('echo')).join('\n')}`,
+              `# OpenStack 조회 세션\n${CTRL_SCRIPT.split('; ').filter((x) => !x.startsWith('echo')).join('\n')}\n${Object.values(OS_CMDS).map((x) => `openstack ${x} -f json`).join('\n')}\nopenstack segment host list <세그먼트> -f json`,
+              `# Ceph 조회 세션\n${CEPH_SCRIPT.split('; ').filter((x) => !x.startsWith('echo')).join('\n')}`,
+              `# kubectl 조회 세션\n${K8S_SCRIPT.split('; ').filter((x) => !x.startsWith('echo')).join('\n')}`,
+            ].join('\n\n')}
+          </pre>
+        </details>
+      </div>
+      {value && value.nodes.length > 0 && (
+        <div>
+          <div className="mb-1 text-[11px] text-gray-400">미리 보기 (노드별 요약 · 전체 그림은 [구성도 보기])</div>
+          <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min(value.nodes.length, 4)}, minmax(0, 1fr))` }}>
+            {value.nodes.map((n) => {
+              const c = n.ceph
+              const bits = [
+                n.vip ? 'VIP' : '',
+                n.pcs?.resources.some((r) => /haproxy/i.test(r)) ? 'HAProxy' : '',
+                n.pcs?.dc ? 'DC' : '',
+                c?.mon ? 'MON' : '',
+                c?.mgr ? (c.mgrActive ? 'MGR active' : 'MGR') : '',
+                c?.mds ? (c.mdsActive ? 'MDS active' : 'MDS') : '',
+                c?.rgw ? 'RGW' : '',
+                c?.osds.length ? `OSD ${c.osds.join('·')}` : '',
+              ].filter(Boolean)
+              return (
+                <div key={n.host} className="min-w-0 rounded border border-white/10 bg-white/[0.02] px-2.5 py-2">
+                  <div className="flex items-center gap-1.5">
+                    <b className="text-[12.5px] text-gray-100">{n.label}</b>
+                    {n.role && <span className={'rounded px-1.5 text-[10.5px] font-semibold text-white ' + (n.role === 'compute' ? 'bg-slate-500' : 'bg-blue-900')}>{roleText(n.role)}</span>}
+                  </div>
+                  <div className="truncate text-[11px] text-gray-500">
+                    {n.host} · {n.mgmtIp}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                    {bits.join(' · ') || '-'}
+                    {n.mysql === 'outside' && <span className="text-amber-300"> · mysql (Galera 구성 미포함)</span>}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {value.vms
+                      .filter((v) => v.host === n.host)
+                      .map((v) => (
+                        <span
+                          key={v.name}
+                          title={`${v.ip}${v.k8s ? ` · k8s ${v.k8s}` : ''}${v.ha ? ' · evacuation 대상' : ''}`}
+                          className={
+                            'rounded border px-1.5 text-[10.5px] ' +
+                            (v.k8s ? 'border-blue-400/30 bg-blue-500/15 text-blue-100' : 'border-white/15 bg-white/[0.06] text-gray-200') +
+                            (v.ha ? ' ring-1 ring-amber-400/80' : '') +
+                            (v.status !== 'ACTIVE' ? ' opacity-50' : '')
+                          }
+                        >
+                          {v.name.replace(/^[A-Za-z0-9]+[_-]/, '')}
+                        </span>
+                      ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {view && value && <EnvMapViewer snap={value} title={title} fileBase={{ group: groupName, at: value.at }} onClose={() => setView(false)} />}
+    </div>
+  )
+}
+function GroupEditDialog({
+  group,
+  runCount,
+  others,
+  hosts,
+  groupRuns,
+  teams,
+  novaFetch,
+  envCollect,
+  envMaps,
+  onSave,
+  onDelete,
+  onClose,
+}: {
+  /** null = 새 그룹 */
+  group: VerifyGroup | null
+  /** 환경을 복사해 올 수 있는 다른 그룹 */
+  others: { id: string; name: string; env: GroupEnv }[]
+  /** 이 그룹 회차들이 내린 노드 이름 */
+  hosts: string[]
+  /** 이 그룹 회차 — 차수의 이슈에 관련 회차를 고를 때 */
+  groupRuns: HistoryRecord[]
+  /** 다른 차수 · 그룹에서 쓴 팀 이름(조치 팀 칸 제안) */
+  teams: string[]
+  novaFetch?: () => Promise<{ ok: true; hosts: NovaHosts } | { ok: false; error: string }>
+  envCollect?: EnvCollect
+  /** 환경 구성도 수집본이 있는 다른 그룹 — 비교 대상 */
+  envMaps?: { id: string; name: string; envMap: EnvMapSnapshot }[]
+  /** 차수 id → 회차 수 (지울 때 알리려고). '' = 그룹 전체 */
+  runCount: Record<string, number>
+  onSave: (g: VerifyGroup) => string
+  onDelete?: () => string
+  onClose: () => void
+}) {
+  const [name, setName] = useState(group?.name ?? '')
+  const [phases, setPhases] = useState<GroupPhase[]>(() => group?.phases.map((ph) => ({ ...ph })) ?? [])
+  const [err, setErr] = useState('')
+  const [askDel, setAskDel] = useState(false)
+  const [tab, setTab] = useState<'phase' | 'env' | 'map'>('phase')
+  const [envMap, setEnvMap] = useState<EnvMapSnapshot | undefined>(group?.envMap)
+  /** 이슈 · 조치를 펼친 차수 */
+  const [phOpen, setPhOpen] = useState<string | null>(null)
+  /** 리포트와 같은 번호 — 그룹 전체를 뽑을 때의 차례(차수 순서 → 시작 시각) */
+  const runNum = (id: string) => {
+    const k = (h: HistoryRecord) => {
+      const i = phases.findIndex((ph) => ph.id === h.phaseId)
+      return i < 0 ? 1e9 : i
+    }
+    return [...groupRuns].sort((a, b) => k(a) - k(b) || a.t0 - b.t0).findIndex((h) => h.id === id) + 1
+  }
+  const [env, setEnv] = useState<GroupEnv | undefined>(() => (group?.env ? cloneEnvKeepIds(group.env) : undefined))
+  /**
+   * 차수는 [+ 차수 추가] 하나로 빈 줄을 더하고 이름은 사람이 적는다(2026-11-14 사용자 결정).
+   * 예전의 이름 칸 + [더하기] · [+ 사전 점검] · [+ n회차] 세 버튼은 쓸모가 겹치고 이름 꼴도 버전마다 달라 뺐다.
+   * 빈 이름은 저장 때 막는다(save). 새 줄의 이름 칸에 바로 커서를 둔다
+   */
+  const [focusPh, setFocusPh] = useState<string | null>(null)
+  const addPhase = () => {
+    const id = newId('ph')
+    setErr('')
+    setPhases((cur) => [...cur, { id, name: '', issues: [], actions: [] }])
+    setFocusPh(id)
+  }
+  const move = (k: number, d: -1 | 1) =>
+    setPhases((cur) => {
+      const j = k + d
+      if (j < 0 || j >= cur.length) return cur
+      const next = [...cur]
+      ;[next[k], next[j]] = [next[j], next[k]]
+      return next
+    })
+  const save = () => {
+    const n = name.trim()
+    if (!n) return setErr('그룹 이름을 적어 주세요 (예: CONTRABASS V4.0.0 PoC #3)')
+    const names = phases.map((ph) => ph.name.trim())
+    if (names.some((x) => !x)) return setErr('이름이 빈 차수가 있습니다')
+    if (new Set(names).size !== names.length) return setErr('같은 이름의 차수가 둘 있습니다')
+    // 환경: 빈 줄 · 빈 실제 이름은 버린다(실제 이름이 하나도 없으면 칸 자체를 뺀다 — 리포트가 표준 이름을 쓴다)
+    const envClean: GroupEnv | undefined = env && {
+      ...env,
+      inject: env.inject.trim(),
+      notes: env.notes.map((x) => x.trim()).filter(Boolean),
+      nodes: env.nodes.map((nd) => ({
+        ...nd,
+        label: nd.label.trim(),
+        host: nd.host.trim(),
+        vms: nd.vms
+          .filter((v) => v.name.trim())
+          .map((v) => {
+            const real = (v.real ?? []).map((x) => x.trim()).filter(Boolean)
+            return { ...v, name: v.name.trim(), real: real.length ? real : undefined }
+          }),
+      })),
+    }
+    if (envClean?.nodes.some((nd) => !nd.label)) return setErr('환경: 표준 이름이 빈 노드가 있습니다')
+    const e = onSave({
+      id: group?.id ?? newId('g'),
+      name: n,
+      createdAt: group?.createdAt ?? Date.now(),
+      phases: phases.map((ph) => ({ ...ph, name: ph.name.trim() })),
+      env: envClean,
+      envMap,
+    })
+    if (e) setErr(e)
+  }
+  const field = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none'
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-8">
+      <div className="flex max-h-[88vh] w-[760px] max-w-[94vw] flex-col rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <span className="text-sm font-semibold text-gray-100">{group ? '검증 그룹 편집' : '새 검증 그룹'}</span>
+          <button onClick={onClose} title="닫기 (저장하지 않음)" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-100">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-[12px]">
+          {/* 새 그룹에서만 보이는 사용 순서(2026-11-14 사용자 요청: 그룹을 만든 뒤 지난 회차를 넣고 다음 회차를 지정하는 방법이 창에 안 보였다).
+              편집 때는 이미 아는 내용이라 빼서 창을 짧게 둔다 */}
+          {!group && (
+            <div className="rounded border border-blue-400/30 bg-blue-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-blue-50">
+              <div className="mb-1 font-semibold text-blue-200">검증 그룹 쓰는 순서</div>
+              <ol className="list-decimal space-y-0.5 pl-4">
+                <li>그룹 이름을 적고 [+ 차수 추가] 로 차수를 만들어 이름(1회차 · 사전 점검 등)을 적은 뒤 저장합니다.</li>
+                <li>
+                  <b className="font-semibold">이미 진행한 회차</b>: 이력 목록에서 회차를 고르고 [그룹 · 차수 지정] 으로 넣습니다.
+                </li>
+                <li>
+                  <b className="font-semibold">앞으로 진행할 회차</b>: 상태보드 위쪽에서 그룹 · 차수를 골라 두고 시작하면 그 차수로 저장됩니다.
+                </li>
+                <li>환경 탭은 리포트의 검증 환경 그림입니다. 나중에 [그룹 편집] 에서 채워도 됩니다.</li>
+              </ol>
+            </div>
+          )}
+          <label className="block">
+            <span className="mb-1 block text-[11px] text-gray-400">그룹 이름 (버전 · 환경)</span>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="예: CONTRABASS V4.0.0 PoC #3" className={field + ' w-full'} />
+          </label>
+          <div className="flex gap-1 border-b border-white/10">
+            {(
+              [
+                // 탭 이름(2026-11-14 사용자 결정): '차수 n' → '회차 설정'. 숫자는 차수 개수라 '회차' 옆에 두면 회차 수로 읽혀 뺐다
+                ['phase', '회차 설정'],
+                ['env', env ? `환경 · 노드 ${env.nodes.length}` : '환경'],
+                // 장비에서 조회한 실제 구성 — 환경 탭(사람이 정한 기준) 옆에 따로(2026-11-14 사용자 결정)
+                ['map', '환경 구성도'],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setTab(k)}
+                className={'-mb-px border-b-2 px-3 py-1.5 text-[12px] ' + (tab === k ? 'border-blue-400 font-semibold text-gray-100' : 'border-transparent text-gray-400 hover:text-gray-200')}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {tab === 'env' && <EnvEditor value={env} onChange={setEnv} others={others} hosts={hosts} novaFetch={novaFetch} envMap={envMap} />}
+          {/* 다른 탭으로 가도 내리지 않는다 — 수집 중 탭을 바꿨다 돌아와 다시 누르면 수집이 겹쳐 늦은 옛 결과가 새 결과를 덮었다(검토 지적) */}
+          <div className={tab === 'map' ? '' : 'hidden'}>
+            <EnvMapPanel value={envMap} onChange={setEnvMap} collect={envCollect} groupName={name.trim()} env={env} dirty={envMap !== group?.envMap} others={envMaps} />
+          </div>
+          <div className={tab === 'phase' ? '' : 'hidden'}>
+            <div className="mb-1 text-[11px] text-gray-400">차수 (리포트 차수별 요약의 행 순서)</div>
+            {phases.length === 0 && <div className="mb-1 text-[11.5px] text-gray-500">차수가 없습니다. [+ 차수 추가] 로 더하고 이름을 적으세요.</div>}
+            <div className="space-y-1">
+              {phases.map((ph, k) => (
+                <div key={ph.id} className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    autoFocus={focusPh === ph.id}
+                    value={ph.name}
+                    onChange={(e) => setPhases((cur) => cur.map((x, j) => (j === k ? { ...x, name: e.target.value } : x)))}
+                    placeholder="예: 1회차, 사전 점검"
+                    className={field + ' w-40'}
+                  />
+                  <span className="w-14 text-[11px] text-gray-500">{runCount[ph.id] ?? 0}회</span>
+                  <button
+                    onClick={() => setPhOpen(phOpen === ph.id ? null : ph.id)}
+                    className={
+                      'rounded border px-2 py-0.5 text-[11.5px] ' + (phOpen === ph.id ? 'border-blue-400/50 bg-blue-500/15 text-blue-100' : 'border-white/10 text-gray-300 hover:bg-white/10')
+                    }
+                  >
+                    이슈 · 조치 {ph.issues.filter((x) => x.text.trim()).length + ph.actions.filter((x) => x.text.trim()).length || ''}
+                  </button>
+                  <button onClick={() => move(k, -1)} disabled={k === 0} title="위로" className="rounded px-1.5 text-gray-400 hover:bg-white/10 disabled:opacity-30">
+                    ↑
+                  </button>
+                  <button onClick={() => move(k, 1)} disabled={k === phases.length - 1} title="아래로" className="rounded px-1.5 text-gray-400 hover:bg-white/10 disabled:opacity-30">
+                    ↓
+                  </button>
+                  <button
+                    onClick={() => setPhases((cur) => cur.filter((_x, j) => j !== k))}
+                    title={runCount[ph.id] ? `이 차수의 회차 ${runCount[ph.id]}개는 '차수 없음' 으로 남습니다 (회차는 지우지 않음)` : '차수 지우기'}
+                    className="ml-auto rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
+                  >
+                    <X size={13} />
+                  </button>
+                  {phOpen === ph.id && (
+                    <div className="basis-full">
+                      <PhaseNotesEditor
+                        phase={ph}
+                        runs={groupRuns.filter((h) => h.phaseId === ph.id).sort((a, b) => a.t0 - b.t0)}
+                        numOf={runNum}
+                        teams={teams}
+                        onChange={(next) => setPhases((cur) => cur.map((x) => (x.id === ph.id ? next : x)))}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2">
+              <button onClick={addPhase} className="rounded border border-white/10 px-2.5 py-1 text-gray-200 hover:bg-white/10">
+                + 차수 추가
+              </button>
+            </div>
+          </div>
+          {group && onDelete && (
+            <div className="border-t border-white/10 pt-3">
+              {askDel ? (
+                <div className="flex items-center gap-2 text-[11.5px] text-amber-200">
+                  이 그룹을 지울까요? 회차 {runCount[''] ?? 0}개는 지워지지 않고 '그룹 없음' 으로 남습니다.
+                  <button
+                    onClick={() => {
+                      const e = onDelete()
+                      if (e) setErr(e)
+                    }}
+                    className="ml-auto rounded border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-red-100 hover:bg-red-500/25"
+                  >
+                    지우기
+                  </button>
+                  <button onClick={() => setAskDel(false)} className="rounded border border-white/10 px-2 py-0.5 text-gray-300 hover:bg-white/10">
+                    그만두기
+                  </button>
+                </div>
+              ) : (
+                <button onClick={() => setAskDel(true)} className="rounded border border-white/10 px-2 py-1 text-[11.5px] text-gray-400 hover:bg-white/10">
+                  그룹 지우기
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5">
+          {err && <span className="text-[11.5px] text-amber-300">{err}</span>}
+          <button onClick={onClose} className="ml-auto rounded border border-white/10 px-3 py-1 text-[12px] text-gray-300 hover:bg-white/10">
+            취소
+          </button>
+          <button onClick={save} className="rounded border border-blue-500/50 bg-blue-500/80 px-3 py-1 text-[12px] font-medium text-white hover:bg-blue-500">
+            저장
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 고른 회차를 그룹 · 차수에 넣기. 차수는 기존 차수 · 새 차수 · 회차 이름 앞부분으로 나누기('1회차 2세트' → 1회차, 없는 차수는 만든다) · 차수 없음.
+ * 지난 회차를 처음 묶을 때 이름으로 나누기가 가장 빠르다(사용자 설명: 이름 앞 'n회차' 가 차수).
+ */
+function AssignDialog({
+  recs,
+  groups,
+  defaultGroupId,
+  onApply,
+  onClose,
+}: {
+  recs: HistoryRecord[]
+  groups: VerifyGroup[]
+  defaultGroupId?: string
+  onApply: (map: Record<string, { groupId?: string; phaseId?: string }>, nextGroups: VerifyGroup[]) => string
+  onClose: () => void
+}) {
+  const [gsel, setGsel] = useState<string>(defaultGroupId && groups.some((g) => g.id === defaultGroupId) ? defaultGroupId : groups[0]?.id ?? '__new')
+  const [newGroup, setNewGroup] = useState('')
+  const g = groups.find((x) => x.id === gsel)
+  /**
+   * 기본은 '기존 차수'(2026-11-14 사용자 결정). '회차 이름으로 나누기'(이름 앞 'n회차' · '사전 점검' 을 읽어 차수를 만들던 것)는
+   * 결과를 미리 알기 어려워 헷갈린다고 해서 뺐다. 고른 그룹에 차수가 없으면(새 그룹 포함) 고를 것이 없으므로 '새 차수' 로 연다
+   */
+  const hasPh = (id: string) => !!groups.find((x) => x.id === id)?.phases.length
+  const [mode, setMode] = useState<'existing' | 'new' | 'none'>(() => (hasPh(gsel) ? 'existing' : 'new'))
+  const pickGroup = (id: string) => {
+    setGsel(id)
+    setPhSel('')
+    if (mode === 'existing' && !hasPh(id)) setMode('new')
+  }
+  const [phSel, setPhSel] = useState('')
+  const [phNew, setPhNew] = useState('')
+  const [err, setErr] = useState('')
+  const apply = () => {
+    if (gsel === '__out') {
+      const e = onApply(Object.fromEntries(recs.map((h) => [h.id, {}])), groups)
+      return e ? setErr(e) : onClose()
+    }
+    let grp: VerifyGroup
+    let nextGroups = groups
+    if (gsel === '__new') {
+      const n = newGroup.trim()
+      if (!n) return setErr('새 그룹 이름을 적어 주세요')
+      grp = { id: newId('g'), name: n, createdAt: Date.now(), phases: [] }
+      nextGroups = [...groups, grp]
+    } else {
+      if (!g) return setErr('그룹을 고르세요')
+      grp = { ...g, phases: [...g.phases] }
+      nextGroups = groups.map((x) => (x.id === g.id ? grp : x))
+    }
+    const findOrAdd = (name: string): string => {
+      const v = name.trim()
+      const hit = grp.phases.find((ph) => ph.name.trim() === v)
+      if (hit) return hit.id
+      const ph = { id: newId('ph'), name: v, issues: [], actions: [] }
+      grp.phases.push(ph)
+      return ph.id
+    }
+    const map: Record<string, { groupId?: string; phaseId?: string }> = {}
+    let phaseId: string | undefined
+    if (mode === 'existing') {
+      if (!phSel) return setErr('차수를 선택하세요')
+      phaseId = phSel
+    } else if (mode === 'new') {
+      if (!phNew.trim()) return setErr('새 차수 이름을 적어 주세요')
+      phaseId = findOrAdd(phNew)
+    }
+    for (const h of recs) map[h.id] = { groupId: grp.id, phaseId }
+    const e = onApply(map, nextGroups)
+    if (e) setErr(e)
+    else onClose()
+  }
+  const field = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-gray-100 placeholder:text-gray-600 focus:border-blue-500/60 focus:outline-none'
+  const radio = (v: typeof mode, label: ReactNode, extra?: ReactNode, disabled = false) => (
+    <label className={'flex items-center gap-2 ' + (disabled ? 'opacity-40' : 'cursor-pointer')}>
+      <input type="radio" disabled={disabled} checked={mode === v} onChange={() => setMode(v)} />
+      <span className="w-[150px] shrink-0">{label}</span>
+      {extra}
+    </label>
+  )
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-8">
+      <div className="w-[560px] max-w-[94vw] rounded-lg border border-white/10 bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+          <span className="text-sm font-semibold text-gray-100">그룹 · 차수 지정</span>
+          <span className="text-[11.5px] text-gray-400">고른 {recs.length}회</span>
+          <button onClick={onClose} title="닫기" className="ml-auto rounded p-1 text-gray-400 hover:bg-white/10 hover:text-gray-100">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="space-y-3 p-4 text-[12px] text-gray-200">
+          <div className="flex items-center gap-2">
+            <span className="w-12 shrink-0 text-[11px] text-gray-400">그룹</span>
+            <select value={gsel} onChange={(e) => pickGroup(e.target.value)} className={field + ' min-w-0 flex-1'}>
+              {groups.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.name}
+                </option>
+              ))}
+              <option value="__new">새 그룹 만들기</option>
+              <option value="__out">그룹에서 빼기</option>
+            </select>
+          </div>
+          {gsel === '__new' && (
+            <div className="flex items-center gap-2">
+              <span className="w-12 shrink-0" />
+              <input autoFocus value={newGroup} onChange={(e) => setNewGroup(e.target.value)} placeholder="예: CONTRABASS V4.0.0 PoC #3" className={field + ' flex-1'} />
+            </div>
+          )}
+          {gsel !== '__out' && (
+            <div className="space-y-1.5">
+              <div className="text-[11px] text-gray-400">차수</div>
+              {radio(
+                'existing',
+                '기존 차수',
+                <select value={phSel} onChange={(e) => setPhSel(e.target.value)} disabled={mode !== 'existing' || !g?.phases.length} className={field + ' min-w-0 flex-1'}>
+                  <option value="">차수를 선택하세요</option>
+                  {(g?.phases ?? []).map((ph) => (
+                    <option key={ph.id} value={ph.id}>
+                      {ph.name}
+                    </option>
+                  ))}
+                </select>,
+                !g?.phases.length,
+              )}
+              {radio('new', '새 차수', <input value={phNew} onChange={(e) => setPhNew(e.target.value)} disabled={mode !== 'new'} placeholder="예: 3회차" className={field + ' flex-1'} />)}
+              {radio('none', '차수 없음')}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5">
+          {err && <span className="text-[11.5px] text-amber-300">{err}</span>}
+          <button onClick={onClose} className="ml-auto rounded border border-white/10 px-3 py-1 text-[12px] text-gray-300 hover:bg-white/10">
+            취소
+          </button>
+          <button onClick={apply} className="rounded border border-blue-500/50 bg-blue-500/80 px-3 py-1 text-[12px] font-medium text-white hover:bg-blue-500">
+            {gsel === '__out' ? '그룹에서 빼기' : '지정'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── 검증 이력 (회차별 복구 타임라인) ───────────────────────────
 function HistoryView({
-  list,
+  list: allList,
+  loading,
+  groups,
+  initialGroupId,
+  onSaveGroups,
+  onAssign,
+  novaFetch,
+  envCollect,
   evIndex,
   onEvidence,
   onClose,
@@ -5992,8 +9175,17 @@ function HistoryView({
   onRemove,
   onRename,
   onSetInject,
+  onSetNotes,
 }: {
   list: HistoryRecord[]
+  /** 파일에서 이력을 읽는 중 */
+  loading?: boolean
+  groups: VerifyGroup[]
+  initialGroupId?: string
+  onSaveGroups: (next: VerifyGroup[]) => string
+  onAssign: (map: Record<string, { groupId?: string; phaseId?: string }>, nextGroups?: VerifyGroup[]) => string
+  novaFetch?: () => Promise<{ ok: true; hosts: NovaHosts } | { ok: false; error: string }>
+  envCollect?: EnvCollect
   evIndex: Record<string, string[]>
   onEvidence: (id: string, key: string) => void
   onClose: () => void
@@ -6001,7 +9193,26 @@ function HistoryView({
   onRemove: (id: string) => void
   onRename: (id: string, label: string) => void
   onSetInject: (id: string, inject: Milestones['inject'] | undefined) => void
+  onSetNotes: (id: string, notes: RunNote[]) => void
 }) {
+  /**
+   * 보는 그룹(VerifyGroup 주석) — 'all' 전체 · 'none' 그룹 없음 · 그룹 id. 그룹을 고르면 회차를 차수별로 묶어 보이고, 번호(#) · 범위 고르기 ·
+   * 리포트도 그 그룹 안에서 센다. 처음엔 상태보드에서 고른 '지금 그룹' 으로 연다(그 그룹에 회차가 있을 때).
+   */
+  const [gview, setGviewState] = useState<string>(() =>
+    initialGroupId && allList.some((h) => h.groupId === initialGroupId) ? initialGroupId : 'all',
+  )
+  const viewGroup = groups.find((g) => g.id === gview)
+  const list = useMemo(
+    () => (gview === 'all' ? allList : gview === 'none' ? allList.filter((h) => !h.groupId || !groups.some((g) => g.id === h.groupId)) : allList.filter((h) => h.groupId === gview)),
+    [allList, gview, groups],
+  )
+  /** 그룹 편집 창 — null 닫힘, 'new' 새 그룹, 그 밖 그룹 id */
+  const [groupEdit, setGroupEdit] = useState<string | null>(null)
+  const [assignOpen, setAssignOpen] = useState(false)
+  /** 원인 · 조치 창을 연 회차 */
+  const [noteFor, setNoteFor] = useState<string | null>(null)
+  const noteRec = noteFor ? list.find((h) => h.id === noteFor) : undefined
   /** 리포트에 담을 회차 — 체크한 순서와 무관하게 시작 시각 순으로 담긴다 */
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -6011,7 +9222,7 @@ function HistoryView({
   const [rtoErr, setRtoErr] = useState('')
   /**
    * 리포트 만들기 창(10-29) — 예전엔 [리포트(HTML)] · [PDF] 두 버튼이 같은 창을 열었다. 이제 버튼은 하나이고, 창에서 무엇을(종합 · 회차별 ·
-   * 증적) · 어떤 형식으로 만들지 고른다. 고른 항목 · 종류는 다음에도 기억한다(형식은 늘 HTML 로 연다 — PDF 는 가끔 쓰는 것).
+   * 증적) · 어떤 형식으로 만들지 고른다. 고른 종류는 다음에도 기억하고, 넣을 항목은 늘 보고용 묶음에서 시작한다(loadReportItems 주석). 형식은 늘 HTML 로 연다 — PDF 는 가끔 쓰는 것.
    */
   const [reportAsk, setReportAsk] = useState(false)
   /** 방금 저장한 리포트(첫 파일) — [폴더 열기] 로 탐색기에서 보인다 */
@@ -6019,6 +9230,13 @@ function HistoryView({
   const [repFmt, setRepFmt] = useState<'html' | 'pdf'>('html')
   const [repItems, setRepItems] = useState<ReportItems>(loadReportItems)
   const [repKinds, setRepKinds] = useState<ReportKinds>(loadReportKinds)
+  const [repOneFile, setRepOneFile] = useState<boolean>(loadReportOneFile)
+  /** VM 이름을 실제 이름으로 — 기본 표준 이름, 기억하지 않는다(실제 이름은 내부 정보에 가까워 밖으로 나가는 리포트엔 기본으로 싣지 않는다) */
+  const [repReal, setRepReal] = useState(false)
+  /** 리포트에 환경 구성도를 같이(그룹에 수집본이 있을 때만 보인다 · 기본 켬) */
+  const [repEnv, setRepEnv] = useState(true)
+  /** 이력 머리줄 [환경 구성도] 로 연 그룹 */
+  const [envView, setEnvView] = useState<string | null>(null)
   const setRto = (next: RtoTargets) => {
     setRtoState(next)
     try {
@@ -6028,23 +9246,95 @@ function HistoryView({
     }
   }
   const pickedRecs = list.filter((h) => picked.has(h.id))
-  const toggle = (id: string) =>
+  const setGview = (v: string) => {
+    setGviewState(v)
+    // 다른 그룹으로 바꾸면 고른 것을 비운다 — 보이지 않는 회차가 리포트에 섞이지 않게
+    setPicked(new Set())
+    lastPickRef.current = null
+  }
+  /*
+   * 회차 고르기(2026-11-10 사용자 요청: 50회차 중 10~19 만 고르려면 긴 타임라인을 내리며 체크박스를 하나씩 눌러야 했다).
+   *  - 한 줄 목록(기본): 회차마다 한 줄. 타임라인은 [자세히] 에서 본다. 늘 한 줄 목록으로 연다(기억하지 않는다)
+   *  - 번호: 오래된 회차가 #1 — 리포트가 회차를 시작 시각 순으로 담는 것과 같은 차례다
+   *  - 범위 입력 '10-19, 22' · Shift 클릭(마지막으로 누른 줄부터 이 줄까지 모두 고름)
+   */
+  const [histView, setHistView] = useState<'list' | 'detail'>('list')
+  const [rangeText, setRangeText] = useState('')
+  const [rangeErr, setRangeErr] = useState('')
+  const lastPickRef = useRef<string | null>(null)
+  const numOf = useMemo(() => {
+    const m = new Map<string, number>()
+    ;[...list].sort((a, b) => a.t0 - b.t0).forEach((h, i) => m.set(h.id, i + 1))
+    return m
+  }, [list])
+  const pick = (id: string, shift: boolean) => {
+    const last = lastPickRef.current
+    lastPickRef.current = id
     setPicked((cur) => {
       const next = new Set(cur)
-      if (next.has(id)) next.delete(id)
+      if (shift && last && last !== id && numOf.has(last)) {
+        const a = Math.min(numOf.get(last) as number, numOf.get(id) as number)
+        const b = Math.max(numOf.get(last) as number, numOf.get(id) as number)
+        for (const h of list) {
+          const n = numOf.get(h.id) as number
+          if (n >= a && n <= b) next.add(h.id)
+        }
+      } else if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
+  }
+  const pickRange = () => {
+    const v = rangeText.trim()
+    if (!v) return setRangeErr('범위를 넣으세요. 예: 10-19, 22')
+    const want = new Set<number>()
+    for (const part of v.split(',')) {
+      const m = part.trim().match(/^(\d+)(?:\s*[-~]\s*(\d+))?$/)
+      if (!m) return setRangeErr(`'${part.trim()}' 는 읽을 수 없습니다. 예: 10-19, 22`)
+      let a = Number(m[1])
+      let b = m[2] ? Number(m[2]) : a
+      if (a > b) [a, b] = [b, a]
+      if (a < 1 || b > list.length) return setRangeErr(`1 ~ ${list.length} 사이로 넣으세요`)
+      for (let i = a; i <= b; i++) want.add(i)
+    }
+    setRangeErr('')
+    setPicked((cur) => {
+      const next = new Set(cur)
+      for (const h of list) if (want.has(numOf.get(h.id) as number)) next.add(h.id)
+      return next
+    })
+  }
+  /** 회차 한 줄 요약 — 한 줄 목록 · 자세히 머리가 같은 말을 한다. 끝나지 않은 것은 리포트처럼 '실패' */
+  const runSummary = (h: HistoryRecord) => {
+    const t = runTotals(h)
+    return (
+      <span
+        className="whitespace-nowrap text-gray-500"
+        title={`${t.fromInject ? '장애 주입부터' : t.fromDown ? 'DOWN 감지부터' : 'DOWN 을 감지하지 못해 검증 시작부터'} · 포털 = 처음으로 모든 화면 정상 · 전체 = Masakari 완료 · 포털 정상화 중 늦은 쪽(실패 = 하나라도 끝나지 않음)`}
+      >
+        {t.svcPending.length ? <span className="text-red-300">포털 실패 · </span> : t.svc != null ? `포털 ${fmtSigned(t.svc)} · ` : ''}
+        {manualFailOf(h) ? (
+          <span className="text-red-300" title="이 조치가 없었으면 복구되지 않았음 (원인 · 조치에서 켬)">실패 (조치 후 복구)</span>
+        ) : t.allFail ? (
+          <span className="text-red-300">전체 실패</span>
+        ) : (
+          `전체 ${t.all != null ? fmtElapsed(t.all) : '-'}`
+        )}
+        {t.fromDown ? '' : ' *'}
+      </span>
+    )
+  }
   const makeReport = async () => {
     if (!pickedRecs.length || busy || !(repKinds.total || repKinds.runs || repKinds.evidence)) return
     setReportAsk(false)
-    saveReportItems(repItems)
     saveReportKinds(repKinds)
+    saveReportOneFile(repOneFile)
     setBusy(true)
     setMsg('')
     setSavedPath(null)
     try {
-      const r = await makeRunsReport(pickedRecs, repFmt, repKinds, rto, repItems)
+      const envMapHtml = pickGroup?.envMap && repEnv ? renderEnvMapHtml(pickGroup.envMap, { title: `환경 구성도 · ${pickGroup.name}`, totalFile: '__QT_TOTAL_FILE__' }) : undefined
+      const r = await makeRunsReport(pickedRecs, repFmt, repKinds, rto, repItems, repOneFile, pickGroup, !!pickGroup && repReal, envMapHtml)
       setMsg(r.msg)
       setSavedPath(r.path ?? null)
     } catch (e) {
@@ -6061,10 +9351,106 @@ function HistoryView({
     { label: '기술 검토용', items: REPORT_ALL, kinds: { total: false, runs: true, evidence: true }, title: '회차별 결과 + 증적 원문 · 모든 항목' },
   ] as const
   const sameKinds = (a: ReportKinds, b: ReportKinds) => a.total === b.total && a.runs === b.runs && a.evidence === b.evidence
+  /** 고른 회차가 모두 한 그룹이면 그 그룹 — 리포트 앞에 검증 환경 · 시나리오 흐름 · 차수별 요약이 붙는다 */
+  const pickGroup = pickedRecs.length ? groups.find((g) => pickedRecs.every((h) => h.groupId === g.id)) : undefined
+  const pickHasReal = !!pickGroup?.env?.nodes.some((n) => n.vms.some((v) => (v.real ?? []).some((x) => x.trim())))
+  /** 회차 결과(차수 머리의 성공 · 실패 셈) — 리포트와 같은 뜻: 끝나지 않은 것이 있거나 사람이 '조치로 복구' 를 켜면 실패 */
+  const outcomeOf = (h: HistoryRecord): 'ok' | 'fail' | 'none' => {
+    const t = runTotals(h)
+    return t.allFail || manualFailOf(h) ? 'fail' : t.all != null ? 'ok' : 'none'
+  }
+  /** 한 줄 목록의 묶음 — 그룹을 고르면 차수 순서대로(빈 차수도 머리는 보인다) + 차수 없음, 아니면 한 묶음 */
+  const sections: { key: string; title: string | null; none?: boolean; recs: HistoryRecord[] }[] = viewGroup
+    ? [
+        ...viewGroup.phases.map((ph) => ({ key: ph.id, title: ph.name, recs: list.filter((h) => h.phaseId === ph.id) })),
+        ...(() => {
+          const rest = list.filter((h) => !h.phaseId || !viewGroup.phases.some((ph) => ph.id === h.phaseId))
+          return rest.length ? [{ key: '__none', title: '차수 없음', none: true, recs: rest }] : []
+        })(),
+      ]
+    : [{ key: '__all', title: null, recs: list }]
   const nEvFiles = pickedRecs.filter((h) => (evIndex[h.id] ?? []).length > 0).length
-  const nFiles = (repKinds.total ? 1 : 0) + (repKinds.runs ? 1 : 0) + (repKinds.evidence ? nEvFiles : 0)
+  const nParts = (repKinds.total ? 1 : 0) + (repKinds.runs ? 1 : 0) + (repKinds.evidence ? nEvFiles : 0) + (pickGroup?.envMap && repEnv ? 1 : 0)
+  const oneFileOn = repOneFile && repFmt === 'html' && nParts > 1
+  const nFiles = oneFileOn ? 1 : nParts
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-8">
+      {(() => {
+        const g = envView ? groups.find((x) => x.id === envView) : undefined
+        if (!g?.envMap) return null
+        const title = `환경 구성도 · ${g.name}`
+        return <EnvMapViewer snap={g.envMap} title={title} fileBase={{ group: g.name, at: g.envMap.at }} onClose={() => setEnvView(null)} />
+      })()}
+      {groupEdit && (
+        <GroupEditDialog
+          group={groupEdit === 'new' ? null : groups.find((g) => g.id === groupEdit) ?? null}
+          others={groups.filter((g) => g.id !== groupEdit && g.env && g.env.nodes.length).map((g) => ({ id: g.id, name: g.name, env: g.env as GroupEnv }))}
+          hosts={[...new Set(allList.filter((h) => h.groupId === groupEdit && h.node && !h.node.startsWith('(')).map((h) => h.node))].sort()}
+          groupRuns={allList.filter((h) => h.groupId === groupEdit)}
+          teams={[...new Set(groups.flatMap((g) => g.phases.flatMap((ph) => ph.actions.map((a) => a.team.trim()))).filter(Boolean))]}
+          novaFetch={novaFetch}
+          envCollect={envCollect}
+          envMaps={groups.filter((g) => g.id !== groupEdit && g.envMap).map((g) => ({ id: g.id, name: g.name, envMap: g.envMap as EnvMapSnapshot }))}
+          runCount={(() => {
+            const c: Record<string, number> = { '': 0 }
+            for (const h of allList)
+              if (h.groupId === groupEdit) {
+                c['']++
+                if (h.phaseId) c[h.phaseId] = (c[h.phaseId] ?? 0) + 1
+              }
+            return c
+          })()}
+          onSave={(g) => {
+            const next = groups.some((x) => x.id === g.id) ? groups.map((x) => (x.id === g.id ? g : x)) : [...groups, g]
+            const e = onSaveGroups(next)
+            if (!e) {
+              if (groupEdit === 'new') setGview(g.id)
+              setGroupEdit(null)
+            }
+            return e
+          }}
+          onDelete={
+            groupEdit === 'new'
+              ? undefined
+              : () => {
+                  const e = onSaveGroups(groups.filter((x) => x.id !== groupEdit))
+                  if (!e) {
+                    setGview('all')
+                    setGroupEdit(null)
+                  }
+                  return e
+                }
+          }
+          onClose={() => setGroupEdit(null)}
+        />
+      )}
+      {assignOpen && (
+        <AssignDialog
+          recs={pickedRecs}
+          groups={groups}
+          defaultGroupId={viewGroup?.id ?? initialGroupId}
+          onApply={(map, next) => {
+            const e = onAssign(map, next)
+            if (!e) {
+              setPicked(new Set())
+              lastPickRef.current = null
+            }
+            return e
+          }}
+          onClose={() => setAssignOpen(false)}
+        />
+      )}
+      {noteRec && (
+        <RunNotesDialog
+          h={noteRec}
+          num={numOf.get(noteRec.id) ?? 0}
+          onClose={() => setNoteFor(null)}
+          onSave={(notes) => {
+            onSetNotes(noteRec.id, notes)
+            setNoteFor(null)
+          }}
+        />
+      )}
       {reportAsk && (
         /**
          * 리포트 항목 선택 — 보고받는 쪽은 파드·Ceph 를 보지 않는다(사용자 요청). 여러 회차를 골라도 같은 선택을 모든 회차에 쓴다.
@@ -6098,7 +9484,7 @@ function HistoryView({
             <div className="mb-3 space-y-1 rounded bg-white/[0.03] px-2.5 py-2">
               {(
                 [
-                  ['total', '종합 결과', '주요 수치 · 전체 회차 비교 · 복구 흐름 (1~2쪽)'],
+                  ['total', '종합 결과', '주요 수치 · 전체 회차 비교 · 실패 원인 · 노드별 결과 (1~2쪽)'],
                   ['runs', '회차별 결과', '회차마다 핵심 시간 · 요약 타임라인 · 파드 로그 이상 (증적 없음)'],
                   ['evidence', '증적 원문', `서버 원문, 회차마다 한 파일 (증적 있는 회차 ${nEvFiles}개)`],
                 ] as const
@@ -6111,17 +9497,66 @@ function HistoryView({
               ))}
             </div>
             <div className="mb-3 flex items-center gap-3 text-[12px] text-gray-200">
-              <span className="text-[11px] text-gray-400">형식</span>
+              <span className="w-[26px] shrink-0 text-[11px] text-gray-400">형식</span>
               {(['html', 'pdf'] as const).map((f) => (
-                <label key={f} className="flex cursor-pointer items-center gap-1">
+                <label key={f} className="flex w-[58px] shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap">
                   <input type="radio" checked={repFmt === f} onChange={() => setRepFmt(f)} />
                   {f === 'html' ? 'HTML' : 'PDF'}
                 </label>
               ))}
-              <span className="text-[11px] text-gray-500">
-                {repFmt === 'pdf' ? '접힌 내용은 모두 펼쳐 인쇄합니다. 파일 사이 링크는 없습니다' : '브라우저로 열고 인쇄할 수 있습니다'}
+              <span className="min-w-0 flex-1 text-[11px] text-gray-500">
+                {repFmt === 'pdf' ? '접힌 내용까지 펼쳐 인쇄, 파일 사이 링크 없음' : '브라우저로 열고 인쇄할 수 있습니다'}
               </span>
             </div>
+            {repFmt === 'html' && (
+              <div className="-mt-1.5 mb-3 flex items-center gap-3 text-[12px] text-gray-200">
+                <span className="w-[26px] shrink-0 text-[11px] text-gray-400">파일</span>
+                {(
+                  [
+                    [true, '통합'],
+                    [false, '분할'],
+                  ] as const
+                ).map(([v, label]) => (
+                  <label key={label} className="flex w-[58px] shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap">
+                    <input type="radio" checked={repOneFile === v} onChange={() => setRepOneFile(v)} />
+                    {label}
+                  </label>
+                ))}
+                <span className="min-w-0 flex-1 text-[11px] text-gray-500">{repOneFile ? '한 파일에 모두, 링크를 누르면 그 화면으로 이동' : '종류마다 따로, 증적은 회차마다 한 파일'}</span>
+              </div>
+            )}
+            {pickGroup ? (
+              <div className="mb-3 rounded bg-blue-500/[0.08] px-2.5 py-1.5 text-[11.5px] leading-relaxed text-blue-100/90">
+                <div>
+                  검증 그룹 <b>{pickGroup.name}</b>: 종합 결과 앞에 {pickGroup.env?.nodes.length ? '검증 환경 · ' : ''}시나리오 흐름 · 차수별 요약이 붙습니다.
+                  {!pickGroup.env?.nodes.length && <span className="text-amber-200/90"> 환경을 적지 않아 검증 환경은 빠집니다(그룹 편집 → 환경).</span>}
+                </div>
+                {pickGroup.envMap && (
+                  <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-gray-200">
+                    <input type="checkbox" checked={repEnv} onChange={(e) => setRepEnv(e.target.checked)} className="accent-blue-500" />
+                    환경 구성도 함께{' '}
+                    <span className="text-[11px] text-gray-400">
+                      ({fmtDateTime(pickGroup.envMap.at)} 수집본 · 검증 환경에서 링크 · VM 이름 선택과 상관없이 실제 호스트 · VM 이름과 IP 가 실립니다)
+                    </span>
+                  </label>
+                )}
+                {pickHasReal && (
+                  <div className="mt-1 flex items-center gap-3 text-gray-200">
+                    <span className="text-[11px] text-gray-400">VM 이름</span>
+                    <label className="flex cursor-pointer items-center gap-1">
+                      <input type="radio" checked={!repReal} onChange={() => setRepReal(false)} /> 표준 이름
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1">
+                      <input type="radio" checked={repReal} onChange={() => setRepReal(true)} /> 실제 이름
+                    </label>
+                  </div>
+                )}
+              </div>
+            ) : (
+              pickedRecs.some((h) => h.groupId) && (
+                <div className="mb-3 text-[11px] text-gray-500">고른 회차가 여러 그룹에 걸쳐 있어 검증 환경 · 차수별 요약은 싣지 않습니다. 한 그룹만 고르면 붙습니다.</div>
+              )
+            )}
             <div className="mb-1 text-[11px] text-gray-400">넣을 항목</div>
             <div className="space-y-1">
               {REPORT_ITEM_LABELS.filter((x) => x.key !== 'evidence').map((x) => (
@@ -6133,9 +9568,9 @@ function HistoryView({
             </div>
             <div className="mt-3 rounded bg-white/[0.04] px-2.5 py-1.5 text-[11px] leading-relaxed text-gray-400">
               {repItems.masakari || repItems.portal
-                ? `전체 복구 = 장애 시작(장애 주입, 없으면 DOWN 감지)부터 ${[repItems.masakari && 'Masakari 완료', repItems.portal && '포털 1차 정상화(처음 모두 정상)'].filter(Boolean).join('와 ')} 중 마지막으로 완료된 시각까지: 하나라도 끝나지 않은 회차는 미복구입니다.${repItems.ceph || repItems.pods ? ' 파드 · Ceph 는 단계별로만 들어갑니다.' : ''}`
+                ? `전체 복구 = 장애 시작(장애 주입, 없으면 DOWN 감지)부터 ${[repItems.masakari && 'Masakari 완료', repItems.portal && '포털 1차 정상화(처음 모두 정상)'].filter(Boolean).join('와 ')} 중 마지막으로 완료된 시각까지: 하나라도 끝나지 않은 회차는 실패입니다.${repItems.ceph || repItems.pods ? ' 파드 · Ceph 는 단계별로만 들어갑니다.' : ''}`
                 : '전체 복구 칸이 없습니다. Masakari, 포털 중 하나는 넣어야 전체 복구를 잽니다.'}
-              {pickedRecs.length > 1 && ` 고른 ${pickedRecs.length}회차 모두에 같은 항목을 씁니다.`} 뺀 항목은 리포트 머리에 적힙니다.
+              {pickedRecs.length > 1 && ` 고른 ${pickedRecs.length}회차 모두에 같은 항목을 씁니다.`} 뺀 항목은 표 · 카드 · 타임라인 · 증적 원문에서 모두 빠집니다.
             </div>
             {/* DOWN 을 못 잡은 회차(시험 삼아 켰다 끈 회차 등)는 기준이 달라 평균에서 빠진다 — 전체 선택으로 섞여 들어가기 쉬워
                 고르기 전에 알린다(13회차 리포트 검토). 빼라고 막지는 않는다: 그 회차도 기록으로 낼 수 있다 */}
@@ -6151,9 +9586,24 @@ function HistoryView({
             {repKinds.evidence && nEvFiles < pickedRecs.length && (
               <div className="mt-2 text-[11px] text-gray-500">증적이 없는 회차 {pickedRecs.length - nEvFiles}개는 증적 원문 파일을 만들지 않습니다.</div>
             )}
+            {(() => {
+              // 실패 회차인데 원인 · 조치를 하나도 적지 않은 것 — 빠뜨린 채 제출하지 않게 알리기만 한다(만들기는 막지 않는다)
+              const miss = pickedRecs.filter((h) => (failedStepsOf(h).length || manualFailOf(h)) && !(h.notes ?? []).some((n) => n.cause.trim()))
+              return repKinds.total && miss.length > 0 ? (
+                <div className="mt-2 text-[11px] text-amber-300/90">
+                  실패 회차 중 원인 · 조치를 적지 않은 회차 {miss.length}개: {miss.map((h) => `#${numOf.get(h.id)}`).join(' ')} (실패 원인 표의 오른쪽 칸이 비어 나옵니다. 창을 닫고 회차의 [원인 · 조치] 에서 적을 수 있습니다)
+                </div>
+              ) : null
+            })()}
             <div className="mt-3 flex items-center justify-end gap-2">
               <span className="mr-auto text-[11px] text-gray-500">
-                {nFiles === 0 ? '만들 것을 하나 이상 고르세요' : nFiles === 1 ? '파일 1개: 저장할 이름을 고릅니다' : `파일 ${nFiles}개: 저장 창에서 위치를 한 번 고르면 같은 폴더에 모두 저장합니다`}
+                {nFiles === 0
+                  ? '만들 것을 하나 이상 고르세요'
+                  : oneFileOn
+                    ? `파일 1개(화면 ${nParts}개): 저장할 이름을 고릅니다`
+                    : nFiles === 1
+                      ? '파일 1개: 저장할 이름을 고릅니다'
+                      : `파일 ${nFiles}개: 저장 창에서 위치를 한 번 고르면 같은 폴더에 모두 저장합니다`}
               </span>
               <button onClick={() => setReportAsk(false)} className="rounded border border-white/10 px-3 py-1 text-[12px] text-gray-300 hover:bg-white/10">
                 취소
@@ -6176,7 +9626,12 @@ function HistoryView({
         <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
           <Activity size={16} className="text-blue-400" />
           <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-gray-100">검증 이력</span>
-          <span className="shrink-0 whitespace-nowrap text-[11px] text-gray-500">{list.length}회 · 최근 {HIST_MAX}회까지 보관</span>
+          <span
+            className="shrink-0 whitespace-nowrap text-[11px] text-gray-500"
+            title={`그룹에 든 회차는 자동으로 지우지 않습니다. 그룹 밖 회차는 최근 ${HIST_MAX}회까지 보관합니다`}
+          >
+            {list.length}회
+          </span>
           {list.length > 0 && (
             <>
               <label className="ml-3 inline-flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap text-[11px] text-gray-400">
@@ -6189,7 +9644,12 @@ function HistoryView({
               </label>
               <span className="min-w-0 truncate text-[11px] text-gray-500">{pickedRecs.length ? `${pickedRecs.length}회 선택` : '리포트에 담을 회차를 고르세요'}</span>
               <button
-                onClick={() => setReportAsk(true)}
+                onClick={() => {
+                  // 열 때마다 보고용 묶음에서 시작(loadReportItems 주석) — 같은 창에서 기술 검토용을 뽑은 뒤 다시 열어도 마찬가지
+                  setRepItems(loadReportItems())
+                  setRepReal(false)
+                  setReportAsk(true)
+                }}
                 disabled={!pickedRecs.length || busy}
                 title="고른 회차로 종합 결과 · 회차별 결과 · 증적 원문을 HTML 또는 PDF 로 만듭니다"
                 className="ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-blue-500/40 bg-blue-500/15 px-2 py-1 text-xs text-blue-100 hover:bg-blue-500/25 disabled:opacity-40"
@@ -6236,6 +9696,50 @@ function HistoryView({
             <X size={16} />
           </button>
         </div>
+        {(allList.length > 0 || groups.length > 0) && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-4 py-1.5 text-[11.5px]">
+            <span className="text-gray-400">검증 그룹</span>
+            <select
+              value={gview}
+              onChange={(e) => setGview(e.target.value)}
+              className="max-w-[300px] rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-gray-100"
+            >
+              <option value="all">전체 ({allList.length}회)</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name} ({allList.filter((h) => h.groupId === g.id).length}회)
+                </option>
+              ))}
+              <option value="none">그룹 없음 ({allList.filter((h) => !h.groupId || !groups.some((g) => g.id === h.groupId)).length}회)</option>
+            </select>
+            {viewGroup?.envMap && (
+              <button
+                onClick={() => setEnvView(viewGroup.id)}
+                title={`이 그룹의 환경 구성도(${fmtDateTime(viewGroup.envMap.at)} 수집). 다시 수집은 그룹 편집 → 환경 구성도`}
+                className="rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10"
+              >
+                환경 구성도
+              </button>
+            )}
+            {viewGroup && (
+              <button onClick={() => setGroupEdit(viewGroup.id)} className="rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10">
+                그룹 편집
+              </button>
+            )}
+            <button onClick={() => setGroupEdit('new')} className="inline-flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10">
+              <Plus size={12} /> 새 그룹
+            </button>
+            <button
+              onClick={() => setAssignOpen(true)}
+              disabled={!pickedRecs.length}
+              title="고른 회차를 검증 그룹 · 차수에 넣거나 뺍니다"
+              className="rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10 disabled:opacity-40"
+            >
+              그룹 · 차수 지정{pickedRecs.length ? ` (${pickedRecs.length})` : ''}
+            </button>
+            <span className="text-gray-500">{groups.length ? '그룹을 고르면 차수별로 묶어 보입니다' : '버전 · 환경마다 그룹을 만들어 회차를 묶을 수 있습니다'}</span>
+          </div>
+        )}
         {rtoOpen && rto.enabled && (
           <div className="border-b border-white/10 bg-white/[0.02] px-4 py-2.5 text-[12px] text-gray-300">
             <div className="mb-2 flex items-center gap-2">
@@ -6295,12 +9799,139 @@ function HistoryView({
             )}
           </div>
         )}
+        {list.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-4 py-1.5 text-[11.5px]">
+            <span className="inline-flex overflow-hidden rounded-md border border-white/10">
+              {(['list', 'detail'] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setHistView(v)}
+                  className={'px-2 py-0.5 ' + (histView === v ? 'bg-blue-500/25 text-blue-100' : 'text-gray-400 hover:bg-white/10')}
+                >
+                  {v === 'list' ? '한 줄 목록' : '자세히'}
+                </button>
+              ))}
+            </span>
+            {/* 문구(2026-11-14 사용자 요청): '범위로 고르기 · 고르기' → '범위로 회차 선택 · 선택'. 버튼은 회차를 고르기만 하므로 '조회' 대신 '선택' 으로 옆 [선택 해제] 와 짝을 맞춘다 */}
+            <span className="ml-2 text-gray-400">범위로 회차 선택</span>
+            <input
+              value={rangeText}
+              onChange={(e) => {
+                setRangeText(e.target.value)
+                setRangeErr('')
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') pickRange()
+              }}
+              placeholder="예: 10-19, 22"
+              title="목록의 #번호로 선택합니다(오래된 회차가 #1). 이미 선택한 회차에 더합니다"
+              className="w-32 rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-gray-100 placeholder:text-gray-600"
+            />
+            <button onClick={pickRange} className="rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10">
+              선택
+            </button>
+            <button
+              onClick={() => {
+                setPicked(new Set())
+                lastPickRef.current = null
+              }}
+              disabled={!pickedRecs.length}
+              className="rounded border border-white/10 px-2 py-0.5 text-gray-200 hover:bg-white/10 disabled:opacity-40"
+            >
+              선택 해제
+            </button>
+            {rangeErr ? <span className="text-amber-300">{rangeErr}</span> : <span className="text-gray-500">Shift 를 누른 채 누르면 사이가 모두 골라집니다</span>}
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {list.length === 0 ? (
+          {list.length === 0 && allList.length > 0 ? (
+            <div className="text-[12px] leading-relaxed text-gray-500">
+              {gview === 'none' ? '그룹에 들지 않은 회차가 없습니다.' : '이 그룹에 든 회차가 없습니다. 위에서 [전체] 로 바꿔 회차를 고른 뒤 [그룹 · 차수 지정] 으로 넣으세요.'}
+            </div>
+          ) : list.length === 0 && loading ? (
+            <div className="flex items-center gap-2 text-[12px] text-gray-500">
+              <Loader2 size={13} className="animate-spin" /> 검증 이력을 불러오는 중입니다.
+            </div>
+          ) : list.length === 0 ? (
             <div className="text-[12px] leading-relaxed text-gray-500">
               아직 저장된 이력이 없습니다.
               <br />
               Ceph 의 degraded · misplaced 가 모두 0 이 되면 그 회차가 자동으로 저장됩니다. (검증을 중지해도 저장됩니다)
+            </div>
+          ) : histView === 'list' ? (
+            <div className="space-y-2">
+              {sections.map((sec) => (
+                <div key={sec.key} className="overflow-hidden rounded-lg border border-white/10 text-[12px]">
+                  {sec.title != null && (
+                    <div className="flex items-center gap-2.5 border-b border-white/10 bg-white/[0.05] px-3 py-1.5">
+                      <input
+                        type="checkbox"
+                        checked={sec.recs.length > 0 && sec.recs.every((h) => picked.has(h.id))}
+                        disabled={!sec.recs.length}
+                        onChange={(e) =>
+                          setPicked((cur) => {
+                            const n = new Set(cur)
+                            for (const h of sec.recs) {
+                              if (e.target.checked) n.add(h.id)
+                              else n.delete(h.id)
+                            }
+                            return n
+                          })
+                        }
+                        aria-label="이 차수 회차 모두 고르기"
+                        title="이 차수 회차 모두 고르기"
+                      />
+                      <span className={'font-semibold ' + (sec.none ? 'text-gray-400' : 'text-gray-100')}>{sec.title}</span>
+                      <span className="text-[11px] text-gray-500">
+                        {sec.recs.length}회
+                        {sec.recs.length > 0 && (
+                          <>
+                            {' · '}
+                            <span className="text-emerald-300/90">성공 {sec.recs.filter((h) => outcomeOf(h) === 'ok').length}</span>
+                            {' · '}
+                            <span className="text-red-300/90">실패 {sec.recs.filter((h) => outcomeOf(h) === 'fail').length}</span>
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  )}
+                  {sec.recs.map((h) => (
+                <div
+                  key={h.id}
+                  onClick={(e) => pick(h.id, e.shiftKey)}
+                  onMouseDown={(e) => {
+                    // Shift 클릭이 글자를 드래그 선택하지 않게
+                    if (e.shiftKey) e.preventDefault()
+                  }}
+                  className={
+                    'flex cursor-pointer select-none items-center gap-2.5 border-b border-white/5 px-3 py-1.5 last:border-b-0 ' +
+                    (picked.has(h.id) ? 'bg-blue-500/15' : 'hover:bg-white/5')
+                  }
+                >
+                  <input type="checkbox" readOnly checked={picked.has(h.id)} className="pointer-events-none" aria-label="리포트에 담기" />
+                  <span className="w-8 shrink-0 text-right tabular-nums text-gray-500">#{numOf.get(h.id)}</span>
+                  <span className="shrink-0 whitespace-nowrap tabular-nums text-gray-400">{fmtDateTime(h.t0)}</span>
+                  <span className="shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[11px] font-medium text-blue-200">{h.node}</span>
+                  <span className={'min-w-0 flex-1 truncate ' + (h.label ? 'text-gray-100' : 'text-gray-600')}>{h.label || '이름 없음'}</span>
+                  {runSummary(h)}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setNoteFor(h.id)
+                    }}
+                    title="세부 원인 및 조치 적기: 리포트 실패 원인 표 · 회차별 결과에 나옴"
+                    className={
+                      'inline-flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[11px] ' +
+                      ((h.notes ?? []).length ? 'border-blue-500/40 text-blue-200 hover:bg-blue-500/15' : 'border-white/10 text-gray-300 hover:bg-white/10')
+                    }
+                  >
+                    원인 · 조치
+                    {(h.notes ?? []).length > 0 && <span className="rounded-full bg-blue-500/25 px-1.5 text-[10.5px] leading-4 text-blue-100">{(h.notes ?? []).length}</span>}
+                  </button>
+                </div>
+                  ))}
+                </div>
+              ))}
             </div>
           ) : (
             <div className="space-y-3">
@@ -6310,31 +9941,15 @@ function HistoryView({
                     <input
                       type="checkbox"
                       checked={picked.has(h.id)}
-                      onChange={() => toggle(h.id)}
-                      title="리포트에 담기"
+                      onChange={() => undefined}
+                      onClick={(e) => pick(h.id, e.shiftKey)}
+                      title="리포트에 담기 (Shift: 사이 모두)"
                       aria-label="리포트에 담기"
                     />
+                    <span className="tabular-nums text-gray-500">#{numOf.get(h.id)}</span>
                     <span className="rounded bg-blue-500/20 px-2 py-0.5 font-medium text-blue-200">{h.node}</span>
                     <span className="whitespace-nowrap text-gray-300">{fmtDateTime(h.t0)}</span>
-                    {(() => {
-                      const t = runTotals(h)
-                      return (
-                        <span
-                          className="whitespace-nowrap text-gray-500"
-                          title={`${t.fromInject ? '장애 주입부터' : t.fromDown ? 'DOWN 감지부터' : 'DOWN 을 감지하지 못해 검증 시작부터'} · 포털 = 처음으로 모든 화면 정상 · 전체 = Masakari 완료 · 포털 정상화 중 늦은 쪽(미복구 = 하나라도 끝나지 않음)`}
-                        >
-                          {t.svcPending.length ? (
-                            <span className="text-red-300">포털 미복구 {t.svcPending.length} · </span>
-                          ) : t.svc != null ? (
-                            `포털 ${fmtSigned(t.svc)} · `
-                          ) : (
-                            ''
-                          )}
-                          전체 {t.all != null ? fmtElapsed(t.all) : t.allFail ? '미복구' : '-'}
-                          {t.fromDown ? '' : ' *'}
-                        </span>
-                      )
-                    })()}
+                    {runSummary(h)}
                     {/* 이름은 나중에도 고칠 수 있어야 한다 — 검증 중엔 손이 바빠 못 적고 지나가기 쉽다.
                         평소엔 테두리 없는 글자처럼 보이고, 올리면 입력칸임이 드러난다. */}
                     <input
@@ -6345,13 +9960,27 @@ function HistoryView({
                       className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 font-medium text-gray-100 placeholder:font-normal placeholder:text-gray-600 hover:border-white/10 focus:border-blue-500/60 focus:bg-black/20 focus:outline-none"
                     />
                     <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setNoteFor(h.id)
+                    }}
+                    title="세부 원인 및 조치 적기: 리포트 실패 원인 표 · 회차별 결과에 나옴"
+                    className={
+                      'inline-flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[11px] ml-auto ' +
+                      ((h.notes ?? []).length ? 'border-blue-500/40 text-blue-200 hover:bg-blue-500/15' : 'border-white/10 text-gray-300 hover:bg-white/10')
+                    }
+                  >
+                    원인 · 조치
+                    {(h.notes ?? []).length > 0 && <span className="rounded-full bg-blue-500/25 px-1.5 text-[10.5px] leading-4 text-blue-100">{(h.notes ?? []).length}</span>}
+                  </button>
+                    <button
                       onClick={() => {
                         exportRun(h)
                           .then((m) => m && setMsg(m))
                           .catch((e) => setMsg(`저장 실패: ${e instanceof Error ? e.message : String(e)}`))
                       }}
                       title="이 회차의 타임라인과 증적(서버 원문)을 Markdown 으로 저장: 제출용"
-                      className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
+                      className="inline-flex shrink-0 items-center gap-1 rounded border border-white/10 px-1.5 py-0.5 text-[11px] text-gray-300 hover:bg-white/10"
                     >
                       <Download size={12} /> 내보내기
                     </button>
@@ -7755,6 +11384,31 @@ const ruleRaw = (w: SpreadWorkload) =>
  * 그 규칙이면 **노드가 죽었을 때 어떻게 되나** — 설정값 대신 결과를 한 문장으로. 사용자가 판단하는 것은 결과다.
  * 몰림은 규칙과 무관하게 '지금' 이 문제이므로 그것을 먼저 말한다.
  */
+/*
+ * '필수 분산' 판정의 뜻 — 어떤 필수 규칙인지에 따라 쉬운 말로(2026-11-10 사용자 요청). 처음 바꾼 '파드 고정 · UP 되면 자동 복귀' 는
+ * 늘 맞지 않았다(코드 리뷰): Deployment 는 죽은 노드의 파드가 정리되면 규칙을 만족하는 빈 노드에 새로 뜨고, 노드가 돌아와도 저절로
+ * 다시 나뉘지 않는다. 규칙이 보장하는 것만 말한다.
+ *  - anti-affinity 필수: 같은 노드에 두 개가 뜨지 않는다 → 남은 파드로 서비스가 이어지고, 다시 뜰 때도 다른 파드가 없는 노드에만 뜬다
+ *  - topologySpread 필수(DoNotSchedule): 노드마다 고르게 뜬다 → 남은 파드로 이어지고, 고르게 맞출 수 있는 노드에만 다시 뜬다
+ */
+const SPREAD_OK_ANTI = '같은 노드에 두 개가 뜨지 않는 규칙(anti-affinity 필수). 노드가 DOWN 되어도 남은 파드로 서비스 유지, 다시 뜰 때도 파드가 없는 노드에만 뜸.'
+const SPREAD_OK_SPREAD = '노드마다 고르게 뜨는 규칙(topologySpread 필수). 노드가 DOWN 되어도 남은 파드로 서비스 유지, 고르게 맞출 수 있는 노드에만 다시 뜸.'
+/** 분산 점검 증적 아래 설명 — 옛 문장('돌아올 때 자동으로 다시 나뉩니다')도 늘 맞지는 않아 바꿨다(SPREAD_OK_ANTI 주석). 저장된 증적은 그릴 때 바꾼다 */
+const SPREAD_NOTE_OLD = '필수(required) 규칙이면 장애 뒤 노드가 돌아올 때 자동으로 다시 나뉩니다.'
+const SPREAD_NOTE_NEW = '필수(required) 규칙이면 노드마다 나뉘어 있어, 한 노드가 DOWN 되어도 남은 파드로 서비스가 이어집니다.'
+/** 이미 저장된 증적에 남은 옛 '필수 분산' 문장들 — 그릴 때 줄의 ANTI-AFFINITY 칸을 보고 새 문장으로 바꾼다(spreadTextNow) */
+const SPREAD_OK_OLDS = ['노드가 죽어도 남은 노드에서 버티고, 돌아오면 자동으로 다시 나뉩니다.', 'k8s 노드가 DOWN 되어도 파드는 그 자리에 고정(다른 노드로 옮기지 않음), 노드가 UP 되면 자동 복귀.']
+/** 분산 점검 증적 원문의 옛 문장을 지금 문장으로 — 줄은 탭으로 나뉜 NS · WORKLOAD · REPLICAS · ANTI-AFFINITY · SPREAD · 배치 · 판정 */
+function spreadTextNow(text: string): string {
+  if (!SPREAD_OK_OLDS.some((o) => text.includes(o))) return text
+  return text
+    .split('\n')
+    .map((l) => {
+      const old = SPREAD_OK_OLDS.find((o) => l.includes(o))
+      return old ? l.split(old).join(l.split('\t')[3] === '필수' ? SPREAD_OK_ANTI : SPREAD_OK_SPREAD) : l
+    })
+    .join('\n')
+}
 function spreadMeaning(w: SpreadWorkload, descheduler: boolean | null): string {
   const nodes = Object.keys(w.placement)
   switch (w.verdict) {
@@ -7763,7 +11417,8 @@ function spreadMeaning(w: SpreadWorkload, descheduler: boolean | null): string {
         w.anti === 'required' || w.spread === 'required' ? ' 규칙은 필수인데 다른 노드에 자리가 없어 몰린 상태입니다.' : ''
       }`
     case 'ok':
-      return '노드가 죽어도 남은 노드에서 버티고, 돌아오면 자동으로 다시 나뉩니다.'
+      // 어떤 필수 규칙인지에 따라(SPREAD_OK_ANTI 주석). 이미 저장된 증적의 옛 문장은 spreadTextNow 로 바꿔 보인다
+      return w.anti === 'required' ? SPREAD_OK_ANTI : SPREAD_OK_SPREAD
     case 'soft':
       return descheduler
         ? '노드가 죽으면 한 노드로 몰리고, 돌아오면 descheduler 가 다시 나눕니다.'
@@ -7777,7 +11432,7 @@ function spreadMeaning(w: SpreadWorkload, descheduler: boolean | null): string {
 
 /** 판정 용어 설명 — 한 줄로 늘어놓으니 읽히지 않았다(사용자 지적). 2×2 칸에 배지와 설명을 따로 둔다 */
 const SPREAD_LEGEND: { v: SpreadVerdict; name: string; desc: string }[] = [
-  { v: 'ok', name: '필수 분산', desc: '노드가 죽어도 버티고, 돌아오면 자동으로 다시 나뉩니다' },
+  { v: 'ok', name: '필수 분산', desc: '필수 규칙으로 노드마다 나뉘어, 노드가 DOWN 되어도 남은 파드로 서비스 유지' },
   { v: 'soft', name: '권장 분산만', desc: '노드가 죽으면 한 노드로 몰리고, 돌아와도 몰린 채 남을 수 있습니다' },
   { v: 'none', name: '규칙 없음', desc: '처음부터 한 노드에 몰릴 수 있습니다' },
   { v: 'stacked', name: '몰림', desc: '지금 한 노드에만 있어, 그 노드를 내리면 끊깁니다' },
@@ -8859,7 +12514,10 @@ function TimelineRow({
   onToggle,
   open,
   compact,
+  child,
 }: {
+  /** 묶음의 하위 줄 — 들여 써서 작게 */
+  child?: boolean
   at: number
   t0: number
   icon: React.ReactNode
@@ -8891,18 +12549,19 @@ function TimelineRow({
    */
 }) {
   return (
-    <div className={'flex items-start gap-2.5 border-l-[3px] py-1 pl-2 ' + TL_BORDER[tone]}>
+    <div className={'flex items-start gap-2.5 border-l-[3px] pl-2 ' + (child ? 'py-0.5 text-[12px] ' : 'py-1 ') + TL_BORDER[tone]}>
       <span
         className={
-          'shrink-0 whitespace-nowrap font-medium text-gray-100 tabular-nums ' +
+          'shrink-0 whitespace-nowrap tabular-nums ' +
+          (child ? 'text-gray-400 ' : 'font-medium text-gray-100 ') +
           (showDate ? 'w-[140px]' : 'w-[62px]')
         }
       >
         {showDate ? fmtDateTime(at) : fmtClock(at)}
       </span>
       <span className="w-[46px] shrink-0 whitespace-nowrap pt-px text-[11px] text-gray-500 tabular-nums">+{fmtElapsed(at - t0)}</span>
-      <span className={'shrink-0 translate-y-0.5 ' + TL_ICON[tone]}>{icon}</span>
-      <span className={'min-w-0 flex-1 ' + (muted ? 'text-gray-400' : 'text-gray-200')}>
+      <span className={'shrink-0 translate-y-0.5 ' + TL_ICON[tone]}>{child ? <span className="inline-block w-[13px]" /> : icon}</span>
+      <span className={'min-w-0 flex-1 ' + (child ? 'pl-2 text-gray-400' : muted ? 'text-gray-400' : 'text-gray-200')}>
         {onToggle ? (
           <button onClick={onToggle} className="text-left text-amber-200 hover:underline" title={open ? '접기' : '펼쳐서 중간 과정 보기'}>
             {text} {open ? '▾' : '▸'}
@@ -8966,6 +12625,11 @@ interface TimelineItem {
   foldHead?: string
   /** 요약 보기에만 / 전체 보기에만 있는 줄 */
   only?: 'summary' | 'full'
+  /** 묶음의 하위 줄(들여 써서 작게, 아이콘 · 증적 버튼 없이) — 전체 보기의 포털 정상화 묶음 */
+  child?: boolean
+  /** 정렬 시각(없으면 at) · 같은 시각 안 순서 — 하위 줄을 머리 줄 바로 아래에 두려고(하위 줄 시각은 머리보다 이르다) */
+  sortAt?: number
+  ord?: number
 }
 /**
  * 같은 대상이 **재장애(완료 → 다시 깨짐)를 이만큼 이상** 겪으면 중간 과정을 한 줄로 접는다(사용자 결정 3회).
@@ -9414,7 +13078,74 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
   const downClusters = clusterByTime(flaps.map((f) => ({ ...f, at: f.downAt })))
   const portalFold = downClusters.length >= FLAP_FOLD_MIN ? 'portal' : undefined
   const portalRows: TimelineItem[] = []
-  for (const g of clusterByTime(m.portal ?? [])) {
+  /*
+   * 전체 보기의 포털 정상화 묶음(2026-11-09 사용자 요청 · 목업) — 요약은 '포털 정상화: 4/4' 한 줄인데 전체는 2/4 · 모니터링 · 대시보드 줄이
+   * 흩어지고 줄마다 [증적] 이 붙어 같은 일을 다르게 말했다. 1차 정상화(감시 화면이 처음 모두 동시에 정상) 순간을 이룬 화면별 정상화를
+   * 머리 줄 하나 + 하위 줄로 묶고 [증적] 은 머리 줄에만(증적 창의 '1차 정상화 근거' 로 연다). 다시 끊긴 회차는 최종 정상화도 같은 꼴로 묶는다.
+   * 화면이 하나뿐이면 묶지 않는다(묶을 것이 없다). 머리 줄은 1차 정상화 시각에 — 요약의 그 줄과 같은 자리 · 같은 말이다.
+   */
+  const grouped = new Set<string>()
+  if (view === 'full' && allPages.size > 1) {
+    const ph = portalPhases(m)
+    const ups = [
+      ...(m.portal ?? []).map((p) => ({ name: p.name, at: p.at, streak: p.streak, down: null as number | null })),
+      ...flaps.map((f) => ({ name: f.name, at: f.upAt, streak: undefined as number | undefined, down: f.downAt as number | null })),
+    ]
+    const n = allPages.size
+    const streak = Math.max(0, ...(m.portal ?? []).map((p) => p.streak ?? 0))
+    const tail = streak ? ` · 연속 ${streak}회 200` : ''
+    const group = (members: typeof ups, at: number, title: string, startCount: number, tone: TlTone) => {
+      for (const x of members) grouped.add(`${x.name}@${x.at}`)
+      const cl = clusterByTime(members)
+      const last = cl[cl.length - 1]
+      portalRows.push({
+        at,
+        icon: <Globe size={13} />,
+        text: title,
+        sub: `${fmtClock(cl[0][0].at)} 첫 화면 → ${fmtClock(last[0].at)} 마지막 화면(${last.map((x) => x.name).join(', ')})`,
+        tone,
+        target: 'portal',
+        only: 'full',
+        ev: 'portal',
+        sortAt: at,
+        ord: 0,
+      })
+      let k = startCount
+      cl.forEach((g, i) => {
+        k += g.length
+        const flapped = g.filter((x) => x.down != null)
+        portalRows.push({
+          at: g[0].at,
+          icon: null,
+          text: `└ ${g.map((x) => x.name).join(' · ')} (${k}/${n})`,
+          tone,
+          target: 'portal-child',
+          tag: flapped.length ? `↻ ${flapped.map((x) => `${x.name} ${fmtElapsed((x.down as number) - x.at)} 뒤 다시 끊김`).join(', ')}` : undefined,
+          only: 'full',
+          child: true,
+          sortAt: at,
+          ord: i + 1,
+        })
+      })
+    }
+    if (ph.firstAll != null) {
+      // 화면마다 1차 정상화 순간 이전의 마지막 정상화 — 그 순간 그 화면을 정상으로 만든 것
+      const latest = new Map<string, (typeof ups)[number]>()
+      for (const x of [...ups].sort((a, b) => a.at - b.at)) if (x.at <= (ph.firstAll as number)) latest.set(x.name, x)
+      const first = [...latest.values()]
+      const flappedAfter = ph.flapsAfterFirst > 0
+      if (first.length === n)
+        group(first, ph.firstAll, `포털 ${flappedAfter ? '1차 ' : ''}정상화: ${n}/${n} 화면${flappedAfter ? ` · 이후 다시 끊김 ${ph.flapsAfterFirst}회` : tail}`, 0, flappedAfter ? 'info' : 'ok')
+      // 최종 — 1차 뒤 다시 끊긴 회차만: 1차 뒤에 다시 정상화된 화면들(끝내 다시 끊기지 않은 것)
+      if (flappedAfter && ph.finalAll != null) {
+        const fin = (m.portal ?? []).filter((p) => p.at > (ph.firstAll as number)).map((p) => ({ name: p.name, at: p.at, streak: p.streak, down: null }))
+        if (fin.length) group(fin, ph.finalAll, `포털 최종 정상화: ${n}/${n} 화면${tail}`, n - fin.length, 'ok')
+      }
+    }
+  }
+  for (const g0 of clusterByTime(m.portal ?? [])) {
+    const g = g0.filter((p) => !grouped.has(`${p.name}@${p.at}`))
+    if (!g.length) continue
     const names = g.map((p) => p.name)
     const flapped = flaps.filter((f) => names.includes(f.name)).length
     const streak = g[0].streak
@@ -9437,7 +13168,10 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
       ev: 'portal',
     })
   }
-  for (const g of clusterByTime(flaps.map((f) => ({ ...f, at: f.upAt })))) {
+  for (const g0 of clusterByTime(flaps.map((f) => ({ ...f, at: f.upAt })))) {
+    // 묶음에 들어간 정상화(1차를 이룬 뒤 다시 끊긴 것)는 하위 줄의 '↻ 다시 끊김' 꼬리표가 맡는다
+    const g = g0.filter((f) => !grouped.has(`${f.name}@${f.upAt}`))
+    if (!g.length) continue
     const names = g.map((f) => f.name)
     const down = Math.min(...g.map((f) => f.downAt))
     portalRows.push({
@@ -9481,7 +13215,7 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
       rows.push({
         at: ph.firstAll as number,
         icon: <Globe size={13} />,
-        text: `포털 1차 정상화: ${ph.pages}/${ph.pages} 화면 · 이후 다시 끊김 ${ph.flapsAfterFirst}회`,
+        text: `포털 1차 정상화: ${ph.total}/${ph.total} 화면${ph.calm ? `(끊기지 않은 ${ph.calm}개 포함)` : ''} · 이후 다시 끊김 ${ph.flapsAfterFirst}회`,
         // 뒤에 다시 끊겼으니 최종 결과가 아니다 — 회색([27] 규칙)
         tone: 'info',
         target: 'portal',
@@ -9491,7 +13225,7 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
       rows.push({
         at: ph.finalAll,
         icon: <Globe size={13} />,
-        text: `포털 ${flapped || ph.flaps ? '최종 ' : ''}정상화: ${ph.pages}/${ph.pages} 화면${tail}`,
+        text: `포털 ${flapped || ph.flaps ? '최종 ' : ''}정상화: ${ph.total}/${ph.total} 화면${ph.calm ? `(끊기지 않은 ${ph.calm}개 포함)` : ''}${tail}`,
         tone: 'ok',
         target: 'portal',
         ev: 'portal',
@@ -9501,7 +13235,7 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
       rows.push({
         at: Math.max(...(m.portal ?? []).map((p) => p.at)),
         icon: <Globe size={13} />,
-        text: `포털 ${ph.pages - pend}/${ph.pages} 정상화 · 미복구 ${pend}`,
+        text: `포털 ${ph.total - pend}/${ph.total} 정상화 · 미복구 ${pend}`,
         tone: 'wip',
         target: 'portal',
         ev: 'portal',
@@ -9546,7 +13280,8 @@ function buildTimelineRows(m: Milestones, t0: number, view: 'summary' | 'full' =
    * 정보라 성격이 다르다. 다시 넣지 말 것: 노드를 내리면 네임스페이스마다 줄이 생겨 복구 마일스톤이 묻힌다. 타임라인 아래
    * LogIssueList 에 따로 둔다(같은 '+경과' 꼴이라 나란히 비교된다).
    */
-  rows.sort((a, b) => a.at - b.at)
+  // 정렬은 sortAt(묶음 머리 시각) 우선, 같은 묶음 안은 ord — 하위 줄이 머리 줄 바로 아래에 붙게
+  rows.sort((a, b) => (a.sortAt ?? a.at) - (b.sortAt ?? b.at) || (a.ord ?? 0) - (b.ord ?? 0))
   return rows.filter((r) => !r.only || r.only === view)
 }
 
@@ -9638,6 +13373,7 @@ function Timeline({
             muted={r.muted}
             tag={r.tag}
             compact={view === 'summary'}
+            child={r.child}
             showDate={showDate}
             onToggle={r.foldHead ? () => toggle(r.foldHead as string) : undefined}
             open={r.foldHead ? openFolds.has(r.foldHead) : undefined}

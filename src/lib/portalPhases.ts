@@ -20,11 +20,20 @@ export interface PortalPhaseInput {
   portalPending?: string[]
   /** 판정이 바뀐 순간(증적 원문) — 화면마다 첫 끊김 시각을 알려고. 없으면(옛 회차) 첫 끊김 전 구간을 모른다 */
   portalLog?: { name: string; kind: string; at: number }[]
+  /** 장애 뒤 감시한 화면 전체(끊기지 않은 화면 포함) — 분모(total)용. 없으면(옛 회차) 끊긴 화면 수가 곧 분모 */
+  portalWatched?: string[]
 }
 
 export interface PortalPhases {
-  /** 끊긴 적 있는 페이지 수(기록에 나오는 페이지) */
+  /** 끊긴 적 있는 페이지 수(기록에 나오는 페이지) — 판정(1차 · 최종 정상화)은 이 화면들로 한다 */
   pages: number
+  /**
+   * 감시한 화면 전체 수 · 그중 끊기지 않은 수(2026-11-14 사용자 지적: 화면 4개를 등록했는데 가끔 '3/3' 으로 보였다).
+   * 끊기지 않은 화면은 판정 기록이 없어 pages 에서 빠진다 — 그 화면은 내내 정상이었으므로 1차 정상화 시각은 그대로 맞지만,
+   * 분모가 3 이면 '4개 중 3개만 봤다' 로 읽힌다. 표시는 total 을 쓰고 끊기지 않은 수를 함께 밝힌다
+   */
+  total: number
+  calm: number
   /** 감시 페이지가 모두 동시에 정상인 첫 순간 — 끝내 그런 순간이 없으면 null */
   firstAll: number | null
   /** 그 뒤 다시 끊기지 않은 최종 정상화(가장 늦게 확정된 페이지) — 미복구가 남았으면 null */
@@ -79,13 +88,82 @@ export function portalPhases(m: PortalPhaseInput): PortalPhases {
     .sort((a, b) => a - b)
   const firstAll = names.length ? (starts.find((t) => names.every((n) => upAt(n, t))) ?? null) : null
   const finalAll = names.length && !pending.length && m.portal.length ? Math.max(...m.portal.map((p) => p.at)) : null
+  const total = new Set([...names, ...(m.portalWatched ?? [])]).size
   return {
     pages: names.length,
+    total,
+    calm: total - names.length,
     firstAll,
     finalAll,
     flapsAfterFirst: firstAll == null ? 0 : episodes(flaps.map((f) => f.downAt).filter((t) => t > firstAll)),
     flaps: flaps.length,
   }
+}
+
+/**
+ * 판정 기록(portalLog)으로 화면별 최종 정상화 · 다시 끊김 · 안 돌아온 화면을 다시 만든다(2026-11-10 사용자 결정).
+ *
+ * 왜: 상태보드를 최소화하면 포털 감시가 내려갔다가 펼칠 때 새로 시작해 화면 상태를 잊었다(StatusBoard minChip 주석). 그 뒤 정상화됐던
+ * 화면이 다시 끊기면 '다시 끊김(down)' 이 아니라 '처음 끊김(fail)' 으로 남아 portal(최종 정상화) 에서 거둬지지 않았고, 안 돌아온 화면도
+ * portalPending 에 없었다 — 8회차(11-10 10:18)는 화면 3개가 끊긴 채 끝났는데 리포트는 전체 48분 06초 성공, 최종이 1차보다 이르게 나왔다.
+ * 판정 기록은 그 순간마다 남은 원문이라, 화면마다 시각순으로 따라가면 실제 흐름이 나온다:
+ *  - up: 정상 구간 시작(이미 정상이면 무시 — 처음 정상화 시각을 지킨다)
+ *  - down, 또는 정상이던 화면의 fail: 다시 끊김(그 정상화는 portalFlaps 로)
+ *  - fail(정상이 아니던 화면): 처음 끊김 — 상태만 '끊김'
+ * 끝에 정상이면 portal, 끊김이면 portalPending. 감시를 놓친 구간(최소화 중)에 언제 끊겼는지는 알 수 없어, 다시 끊긴 시각은 다시 본 첫 실패다.
+ * 판정 기록이 없는 옛 회차(2.13.8 전)는 null — 저장된 값을 그대로 쓴다.
+ *
+ * 다시 만들지 않는 경우(null — 저장된 값을 그대로 쓴다, 코드 리뷰 11-10):
+ *  - 기록이 상한(maxLog)에 닿았다 — 그 뒤 사건은 기록에 없고 저장된 값은 계속 갱신됐으니 저장된 값이 더 맞다
+ *  - 판단할 수 없는 화면이 있다: 마지막 기록이 '처음 끊김(fail)' 하나뿐인데 저장된 값은 안 돌아온 화면으로 보지 않는다. 최소화 중에
+ *    돌아온 화면은 다시 펼친 뒤 정상이라 아무 기록도 남지 않는다 — 기록만 믿으면 '못 봄' 이 '장애' 가 된다(조회 실패 ≠ 장애).
+ *    정상이던 화면의 fail · 같은 화면의 fail 되풀이는 다시 펼친 뒤에 본 실패라 판단할 수 있다.
+ */
+export function portalFromLog(m: PortalPhaseInput & { maxLog?: number; portal: { at: number; name: string; group?: string; streak?: number }[]; portalFlaps?: { name: string; group?: string; upAt: number; downAt: number }[] }): {
+  portal: { at: number; name: string; group?: string; streak?: number }[]
+  portalFlaps: { name: string; group?: string; upAt: number; downAt: number }[]
+  portalPending: string[]
+} | null {
+  const log = [...((m.portalLog ?? []) as { name: string; kind: string; at: number; n?: number }[])].sort((a, b) => a.at - b.at)
+  if (!log.length) return null
+  if (m.maxLog != null && log.length >= m.maxLog) return null
+  const groupOf = new Map<string, string | undefined>()
+  for (const p of m.portal) groupOf.set(p.name, p.group)
+  for (const f of m.portalFlaps ?? []) if (!groupOf.has(f.name)) groupOf.set(f.name, f.group)
+  // sure: 마지막 끊김을 '본 것' 으로 믿을 수 있는가 — down, 정상이던 화면의 fail, 끊긴 화면에 되풀이된 fail(다시 펼친 뒤 본 실패)
+  const st = new Map<string, { up: { at: number; n?: number } | null; failed: boolean; sure: boolean }>()
+  const flaps: { name: string; group?: string; upAt: number; downAt: number }[] = []
+  for (const e of log) {
+    const s = st.get(e.name) ?? { up: null, failed: false, sure: false }
+    st.set(e.name, s)
+    if (e.kind === 'up') {
+      if (!s.up) s.up = { at: e.at, n: e.n }
+      s.failed = false
+    } else if (s.up) {
+      flaps.push({ name: e.name, group: groupOf.get(e.name), upAt: s.up.at, downAt: e.at })
+      s.up = null
+      s.failed = true
+      s.sure = true
+    } else {
+      s.sure = e.kind === 'down' || s.failed
+      s.failed = true
+    }
+  }
+  const storedPending = new Set(m.portalPending ?? [])
+  for (const [name, s] of st) if (!s.up && !s.sure && !storedPending.has(name)) return null
+  const portal: { at: number; name: string; group?: string; streak?: number }[] = []
+  const pending: string[] = []
+  for (const [name, s] of st) {
+    if (s.up) {
+      const old = m.portal.find((p) => p.name === name)
+      portal.push({ at: s.up.at, name, group: groupOf.get(name), streak: s.up.n ?? old?.streak })
+    } else pending.push(name)
+  }
+  // 판정 기록에 한 번도 나오지 않은 화면(있을 수 없지만)은 저장된 값을 둔다 — 지우지 않는다
+  for (const p of m.portal) if (!st.has(p.name)) portal.push(p)
+  for (const f of m.portalFlaps ?? []) if (!st.has(f.name)) flaps.push(f)
+  for (const n of m.portalPending ?? []) if (!st.has(n)) pending.push(n)
+  return { portal, portalFlaps: flaps, portalPending: pending }
 }
 
 /**
@@ -139,7 +217,8 @@ export function portalStreakTable(
   const before = all[all.length - n - 1]
   const lead = !!before && !before.ok
   const polls = lead ? [before, ...okPolls] : okPolls
-  const columns = ['핵심 API', ...(lead ? ['앞(실패)'] : []), ...okPolls.map((_, i) => String(i + 1))]
+  // '직전 응답' — portalEvidence LEAD_COL 과 같은 이름(그쪽 주석)
+  const columns = ['핵심 API', ...(lead ? ['직전 응답'] : []), ...okPolls.map((_, i) => String(i + 1))]
   const names = Array.from(new Set(polls.flatMap((p) => p.apis.map((a) => a.name))))
   const cell = (p: PortalPoll, n: string) => {
     const a = p.apis.find((x) => x.name === n)

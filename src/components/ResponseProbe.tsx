@@ -266,15 +266,16 @@ function NovaPicker({
     setHosts(list)
     if (!host && list.length) setHost(list[0])
   }
+  // --limit 은 쓰지 않는다 — '--limit -1' · '--limit=-1' 모두 CLI 판에 따라 막혔다(2026-11-13 실사용). 빼면 Nova 기본 한도(보통 1000)까지 온다
   const loadVms = async () => {
     if (!sid) return setErr('세션을 고르세요')
     if (!safe(rc) || !safe(host)) return setErr('호스트 이름이나 openrc 경로에 쓸 수 없는 글자가 있습니다')
     setBusy(true)
     setErr('')
-    const r = await runWithTimeout(sid, os(`server list --all-projects --host ${host} --limit -1 -c ID -c Name -c Status -c Networks`), 60_000)
+    const r = await runWithTimeout(sid, os(`server list --all-projects --host ${host} -c ID -c Name -c Status -c Networks`), 60_000)
     const list = r.ok ? parseNovaServers(r.out ?? '') : null
     setBusy(false)
-    if (!list) return setErr(`VM 목록을 받지 못했습니다. ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(0, 200)}`)
+    if (!list) return setErr(`VM 목록을 받지 못했습니다. ${((r.ok ? r.out : 'error' in r ? r.error : '') ?? '').trim().slice(-240)}`)
     setVms(list)
     setPick(new Set())
   }

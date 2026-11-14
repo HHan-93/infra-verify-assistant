@@ -1,0 +1,55 @@
+@@QT:version@@
+Client Version: v1.34.11
+Kustomize Version: v5.7.1
+Server Version: v1.34.11
+@@QT:nodes@@
+NAME              STATUS     ROLES           AGE   VERSION    INTERNAL-IP     EXTERNAL-IP   OS-IMAGE                                     KERNEL-VERSION                          CONTAINER-RUNTIME
+epoxy-infra-1     Ready      <none>          12d   v1.34.11   10.99.120.64    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-infra-2     Ready      <none>          12d   v1.34.11   10.99.120.65    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-infra-3     NotReady   <none>          12d   v1.34.11   10.99.120.66    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-manager-1   Ready      <none>          12d   v1.34.11   10.99.120.67    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-manager-2   Ready      <none>          12d   v1.34.11   10.99.120.68    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-master-1    Ready      control-plane   12d   v1.34.11   10.99.120.61    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-master-2    Ready      control-plane   12d   v1.34.11   10.99.120.62    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+epoxy-master-3    NotReady   control-plane   12d   v1.34.11   10.99.120.63    <none>        Rocky Linux from CIQ - LTS 9.6 (Blue Onyx)   5.14.0-570.60.1+12.1.el9_6_ciq.x86_64   containerd://2.3.7
+@@QT:pods@@
+NS                   NAME                                                          NODE              KIND          OWNER                                                   PHASE
+boot-factory         boot-factory-auth-7769bc679c-854mx                            epoxy-manager-1   ReplicaSet    boot-factory-auth-7769bc679c                            Running
+boot-factory         boot-factory-auth-7769bc679c-qpgk7                            epoxy-manager-2   ReplicaSet    boot-factory-auth-7769bc679c                            Running
+cicd                 ha-image-registry-package-harbor-jobservice-dfbc99797-698tc   epoxy-infra-2     ReplicaSet    ha-image-registry-package-harbor-jobservice-dfbc99797   Running
+cicd                 ha-image-registry-package-harbor-jobservice-dfbc99797-jdgp8   epoxy-infra-2     ReplicaSet    ha-image-registry-package-harbor-jobservice-dfbc99797   Running
+cicd                 ha-image-registry-package-harbor-trivy-0                      epoxy-infra-3     StatefulSet   ha-image-registry-package-harbor-trivy                  Running
+cicd                 harbor-db-1                                                   epoxy-manager-1   Cluster       harbor-db                                               Running
+cicd                 harbor-db-2                                                   epoxy-manager-2   Cluster       harbor-db                                               Running
+cicd                 harbor-db-3                                                   epoxy-infra-1     Cluster       harbor-db                                               Running
+cilium               cilium-29b7k                                                  epoxy-master-1    DaemonSet     cilium                                                  Running
+cilium               cilium-6b99n                                                  epoxy-infra-3     DaemonSet     cilium                                                  Running
+dataplatform         percona-xtradb-cluster-operator-7c45b6956b-kx47p              epoxy-infra-3     ReplicaSet    percona-xtradb-cluster-operator-7c45b6956b              Running
+dataplatform         percona-xtradb-cluster-operator-7c45b6956b-m22kx              epoxy-infra-2     ReplicaSet    percona-xtradb-cluster-operator-7c45b6956b              Running
+dataplatform         percona-xtradb-cluster-operator-7c45b6956b-qc678              <none>            ReplicaSet    percona-xtradb-cluster-operator-7c45b6956b              Pending
+dataplatform         percona-xtradb-cluster-operator-7c45b6956b-vsgjv              epoxy-infra-1     ReplicaSet    percona-xtradb-cluster-operator-7c45b6956b              Running
+dataplatform         valkey-cluster-0                                              epoxy-infra-1     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-1                                              epoxy-infra-2     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-2                                              epoxy-infra-3     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-3                                              epoxy-infra-1     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-4                                              epoxy-infra-2     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-5                                              epoxy-infra-3     StatefulSet   valkey-cluster                                          Running
+dataplatform         valkey-cluster-maintenance-cronjob-29910920-dh5gh             epoxy-infra-1     Job           valkey-cluster-maintenance-cronjob-29910920             Succeeded
+istio-system         istiod-588c46df66-hhnjm                                       epoxy-infra-2     ReplicaSet    istiod-588c46df66                                       Running
+istio-system         istiod-588c46df66-hm5dm                                       epoxy-infra-1     ReplicaSet    istiod-588c46df66                                       Running
+istio-system         istiod-588c46df66-j4bb7                                       epoxy-infra-2     ReplicaSet    istiod-588c46df66                                       Running
+kube-system          coredns-74dd4745d-6tdfl                                       epoxy-master-1    ReplicaSet    coredns-74dd4745d                                       Running
+kube-system          coredns-74dd4745d-m246k                                       epoxy-manager-2   ReplicaSet    coredns-74dd4745d                                       Running
+kube-system          coredns-74dd4745d-rfbk4                                       epoxy-master-2    ReplicaSet    coredns-74dd4745d                                       Running
+kube-system          kube-apiserver-epoxy-master-1                                 epoxy-master-1    Node          epoxy-master-1                                          Running
+kube-system          kube-apiserver-epoxy-master-2                                 epoxy-master-2    Node          epoxy-master-2                                          Running
+kube-system          kube-scheduler-epoxy-master-1                                 epoxy-master-1    Node          epoxy-master-1                                          Running
+local-path-storage   local-path-provisioner-65567cdc5b-9q856                       epoxy-manager-1   ReplicaSet    local-path-provisioner-65567cdc5b                       Running
+viola                viola-kubernetes-adaptor-0                                    epoxy-manager-2   StatefulSet   viola-kubernetes-adaptor                                Running
+viola                viola-kubernetes-adaptor-1                                    epoxy-manager-2   StatefulSet   viola-kubernetes-adaptor                                Running
+viola                viola-kubernetes-adaptor-2                                    epoxy-manager-1   StatefulSet   viola-kubernetes-adaptor                                Running
+@@QT:ds@@
+cilium         cilium                                     8         8         6       8            6           kubernetes.io/os=linux   12d
+kube-system    kube-proxy                                 8         8         6       8            6           kubernetes.io/os=linux   12d
+monitoring     prometheus-stack-prometheus-node-exporter   8         0         0       0            0           kubernetes.io/os=linux   11d
+velero         node-agent                                 4         4         4       4            4           <none>                   11d

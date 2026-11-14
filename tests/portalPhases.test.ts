@@ -46,6 +46,17 @@ test('미복구가 남으면 최종은 없다 · 1차도 끝내 없을 수 있�
   eq([r.firstAll, r.finalAll], [null, null])
 })
 
+test('끊기지 않은 화면도 분모에 — 4개 감시 · 3개 끊김이면 4/4 (끊기지 않은 1개)', () => {
+  const r = portalPhases({
+    portal: [{ at: T('10:58:10'), name: '로그인' }, { at: T('10:58:30'), name: '대시보드' }, { at: T('10:58:20'), name: '인스턴스 목록' }],
+    portalWatched: ['로그인', '대시보드', '인스턴스 목록', '인스턴스 상세'],
+  })
+  eq([r.pages, r.total, r.calm, r.firstAll], [3, 4, 1, T('10:58:30')])
+  // 옛 회차(감시 목록 없음)는 예전처럼 끊긴 화면 수가 분모
+  const o = portalPhases({ portal: [{ at: T('10:58:10'), name: '로그인' }] })
+  eq([o.pages, o.total, o.calm], [1, 1, 0])
+})
+
 test('끊긴 페이지가 없으면 둘 다 없음', () => {
   eq(portalPhases({ portal: [] }).firstAll, null)
 })
@@ -79,7 +90,7 @@ test('연속 통과 기록 — 앞(실패) 1회 + 연속 N회, 핵심 API 마다
     ],
   })
   const t = portalStreakTable({ at: T + 5000, name: '대시보드', kind: 'up', confirmAt: T + 15000, n: 3, streak: [poll(0, false), poll(1, true), poll(2, true), poll(3, true)] }, '최종 정상화')!
-  eq(t.columns, ['핵심 API', '앞(실패)', '1', '2', '3'])
+  eq(t.columns, ['핵심 API', '직전 응답', '1', '2', '3'])
   eq(t.rows[1], ['hypervisors', '✗ 503', '✓ 412ms', '✓ 412ms', '✓ 412ms'])
   eq(t.cellTitles[1][1], 'HTTP 503 · 30ms · HTTP 503 (기대: 200)')
   eq(t.title, '연속 통과 기록: 대시보드 · 최종 정상화 · 첫 정상 14:08:05 → 확정 14:08:15 (3회 연속)')

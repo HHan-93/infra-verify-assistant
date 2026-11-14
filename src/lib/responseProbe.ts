@@ -635,7 +635,7 @@ tr.avg td{background:#eef2f8!important;font-weight:700}
 .cmpbar{display:grid;grid-template-columns:170px 1fr 92px;gap:6px 12px;align-items:center;font-size:12px}
 .cb{position:relative;height:22px;background:var(--soft);border-radius:6px}.cb .f{position:absolute;left:0;top:5px;height:12px;border-radius:4px;background:#2f6fdc}.cb .f.worst{background:#e08a1e}.cb .f.open{background:repeating-linear-gradient(45deg,#e5534b 0 6px,#f19a95 6px 12px)}
 .cb .g{position:absolute;top:1px;bottom:1px;width:0;border-left:2px solid #c62f2f}
-table.heat td.h{font-weight:600}table.heat td.h0{color:#a0a8b5}
+table.heat td.h{font-weight:600}table.heat td.h0{color:#a0a8b5}table.heat .avg{white-space:nowrap;font-weight:700;background:#f5f7fa}
 details.run{border:1px solid var(--line);border-radius:12px;margin:8px 0;background:#fff;scroll-margin-top:12px}
 details.run>summary{list-style:none;cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
 details.run>summary::-webkit-details-marker{display:none}details.run>summary:before{content:'▸';color:var(--mut)}details.run[open]>summary:before{content:'▾'}
@@ -881,7 +881,7 @@ ${PROBE_CSS}
   H.push(
     `<section><h2>③ 대상별 순단</h2><p class="lead">대상마다 회차별 가장 긴 순단입니다. <b>진할수록 길게</b> 끊긴 것이라(이 리포트에서 가장 짧은 순단이 가장 옅고 가장 긴 순단이 가장 진함), 회차마다 늘 늦게 돌아오는 대상이 한 줄로 보입니다. ×2 는 그 회차에 두 번 끊긴 것입니다.</p><div style="overflow:auto"><table class="heat"><thead><tr><th>대상</th>${rows
       .map(({ r }, i) => `<th><a href="#run-${i + 1}" data-open="run-${i + 1}">${he(runName(r))}</a></th>`)
-      .join('')}<th>평균</th></tr></thead><tbody>`,
+      .join('')}<th class="avg">평균</th></tr></thead><tbody>`,
   )
   for (const n of names) {
     const cells = rows.map(({ sum, P }) => gapOf(sum, P, n))
@@ -895,7 +895,7 @@ ${PROBE_CSS}
           // 빨강 진하기 = 순단 길이 · 글자색은 배경이 진하면 흰색
           return `<td class="h" style="background:rgba(229,83,75,${(0.08 + a * 0.62).toFixed(2)})!important;color:${a > 0.55 ? '#fff' : '#7a1d1d'}">${c.open ? '복구 안 됨' : fmtGapText(c.g)}${c.n > 1 ? ` ×${c.n}` : ''}</td>`
         })
-        .join('')}<td>${gs.length ? fmtGapText(gs.reduce((a, b) => a + b, 0) / gs.length) : '-'}</td></tr>`,
+        .join('')}<td class="avg">${gs.length ? fmtGapText(gs.reduce((a, b) => a + b, 0) / gs.length) : '-'}</td></tr>`,
     )
   }
   H.push(`</tbody></table></div></section>`)

@@ -1359,3 +1359,21 @@ export interface BoardEvidenceSummary {
   id: string
   keys: string[]
 }
+/**
+ * 가용성 검증 이력 한 회차(statusboard-history/<id>.json). 모양은 렌더러 StatusBoard 의 HistoryRecord 가 정한다 — 메인은 id(= t0)로
+ * 파일 이름만 정하고 내용은 그대로 저장한다(필드가 늘 때마다 메인을 고치지 않게).
+ */
+export type BoardHistoryRecord = { id: string; t0: number } & Record<string, unknown>
+export interface BoardHistoryLoad {
+  ok: boolean
+  error?: string
+  list: BoardHistoryRecord[]
+  /** 검증 그룹(groups.json). 파일이 없으면 [] */
+  groups: unknown[]
+  /** groups.json 을 읽지 못함(손상) — 이때 렌더러는 그룹을 덮어쓰지 않는다 */
+  groupsBad?: boolean
+  /** 브라우저 저장소(localStorage)의 예전 이력을 이미 옮겼는지 */
+  migrated: boolean
+  /** 읽지 못한(손상) 회차 파일 — 지우지 않고 남겨 둔다 */
+  bad: string[]
+}

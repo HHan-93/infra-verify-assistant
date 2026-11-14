@@ -110,6 +110,8 @@ interface Props {
    * (사용자 기준). 하나라도 남아 있으면 상위가 판정·리포트에서 미복구(Fail)로 다룬다.
    */
   onPending?: (names: string[]) => void
+  /** 장애 뒤 이번 주기에 감시한 화면 전체(끊기지 않은 화면 포함) — 리포트의 'n/n 화면' 분모 */
+  onWatched?: (names: string[]) => void
   /**
    * 판정이 바뀐 순간(처음 끊김 · 정상화 확정 · 다시 끊김 확정) — 상위가 '포털 응답 기록' 증적으로 남긴다(사용자 요청 10-28).
    * 모든 폴링을 넘기면 회차마다 수천 줄이라 바뀐 순간만. DOWN 감지 뒤의 것만 보낸다(마일스톤과 같은 원칙).
@@ -146,7 +148,7 @@ async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Prom
   return out
 }
 
-export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending, onEvent }: Props) {
+export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending, onWatched, onEvent }: Props) {
   const [cfg, setCfg] = useState<PortalConfig | null>(null)
   const [view, setView] = useState<'board' | 'config'>('board')
   const [states, setStates] = useState<Record<string, TargetState>>({})
@@ -231,6 +233,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   onRevokedRef.current = onMilestoneRevoked
   const onPendingRef = useRef(onPending)
   onPendingRef.current = onPending
+  const onWatchedRef = useRef(onWatched)
+  onWatchedRef.current = onWatched
   const onEventRef = useRef(onEvent)
   onEventRef.current = onEvent
 
@@ -675,6 +679,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
     setScreenStates(nextScreens)
     if (newlyRecovered.length) onMilestonesRef.current(newlyRecovered)
     for (const r of revoked) onRevokedRef.current?.(r.name, r.downAt)
+    // 장애 뒤 감시한 화면 전체 — 끊기지 않은 화면은 판정 기록이 없어 '4개 중 3개만 봤다' 로 보였다(2026-11-14 사용자 지적)
+    if (downAtRef.current !== null) onWatchedRef.current?.(screens.map((sc) => sc.name))
     // 끊겼다가 아직 돌아오지 않은 화면 — 감시 중인 화면만(설정에서 뺀 대상은 세지 않는다)
     onPendingRef.current?.(
       downAtRef.current === null
@@ -2062,34 +2068,23 @@ function ConfigView({
         <div className="grid grid-cols-3 gap-2">
           <div>
             <div className={labelCls}>확인 주기 (초)</div>
-            <input
-              type="number"
-              min={1}
-              className={`${inputCls} w-full`}
-              value={cfg.intervalSec}
-              onChange={(e) => set({ intervalSec: Math.max(1, Number(e.target.value) || 1) })}
-            />
+            <NumberInput min={1} className={`${inputCls} w-full`} value={cfg.intervalSec} onCommit={(n) => set({ intervalSec: Math.round(n) })} />
           </div>
           <div>
-            <div className={labelCls}>응답 제한 시간 (ms)</div>
-            <input
-              type="number"
-              min={1000}
-              step={500}
+            {/* 초로 받는다(저장은 그대로 ms) — 30초 · 60초처럼 길게 잡을 때 0 을 세지 않게 */}
+            <div className={labelCls}>응답 제한 시간 (초)</div>
+            <NumberInput
+              min={1}
+              max={300}
+              step={0.5}
               className={`${inputCls} w-full`}
-              value={cfg.timeoutMs}
-              onChange={(e) => set({ timeoutMs: Math.max(1000, Number(e.target.value) || 1000) })}
+              value={cfg.timeoutMs / 1000}
+              onCommit={(n) => set({ timeoutMs: Math.round(n * 1000) })}
             />
           </div>
           <div>
             <div className={labelCls}>연속 성공 횟수</div>
-            <input
-              type="number"
-              min={1}
-              className={`${inputCls} w-full`}
-              value={cfg.successStreak}
-              onChange={(e) => set({ successStreak: Math.max(1, Number(e.target.value) || 1) })}
-            />
+            <NumberInput min={1} className={`${inputCls} w-full`} value={cfg.successStreak} onCommit={(n) => set({ successStreak: Math.round(n) })} />
           </div>
         </div>
         <p className="mt-1.5 text-[10.5px] text-gray-500">
@@ -2097,6 +2092,16 @@ function ConfigView({
           복구 시각으로 적으면 실제보다 이릅니다. 복구 시각은 <b className="text-gray-400">연속 구간의 첫 성공 시각</b>으로
           기록되므로, 이 값을 올려도 시각이 뒤로 밀리지 않습니다.
         </p>
+        {/*
+          한 주기는 가장 늦은 응답까지 기다린 뒤 다음 주기를 연다(PortalPanel loop · pool 6개씩). 제한 시간을 길게 잡으면 응답 없이 매달리는 API 가
+          있을 때 주기가 그만큼 늘어 끊김 · 복구를 늦게 본다 — 막지는 않고(정말 느린 API 가 있다: 10-30 resource-usage 30초) 알린다.
+        */}
+        {cfg.timeoutMs > Math.max(10_000, cfg.intervalSec * 1000) && (
+          <p className="mt-1 text-[10.5px] text-amber-300/80">
+            응답 제한 시간이 {cfg.timeoutMs / 1000}초입니다. 응답 없이 매달리는 API 가 있으면 한 주기가 최대 그만큼(API 가 많으면 몇 배) 길어져
+            끊김 · 복구를 그만큼 늦게 봅니다. 정말 느린 API 가 아니면 10초 안팎을 권합니다.
+          </p>
+        )}
       </div>
 
       {/* 대상 */}
@@ -2823,6 +2828,40 @@ function CommitInput({ value, onCommit, ...rest }: { value: string; onCommit: (v
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
         if (e.key === 'Escape') setV(value)
+      }}
+    />
+  )
+}
+
+/**
+ * 숫자 칸 — 치는 동안은 글자 그대로 두고, 칸을 떠날 때(Enter · 바깥 클릭) 범위로 맞춰 반영한다.
+ * 예전엔 칠 때마다 최솟값으로 맞춰 응답 제한 시간 1000 에서 0 을 지우면 곧바로 1000 으로 되돌아가, 끝에 0 을 덧붙이는 것밖에
+ * 못 했다(2026-11-09 사용자 지적: 30초 · 60초로 바꾸고 싶었다). 확인 주기 · 연속 성공 횟수도 지우면 1 로 튀었다.
+ */
+function NumberInput({ value, min, max, step, onCommit, className }: { value: number; min: number; max?: number; step?: number; onCommit: (v: number) => void; className?: string }) {
+  const [v, setV] = useState(String(value))
+  useEffect(() => setV(String(value)), [value])
+  const commit = () => {
+    const n = Number(v)
+    // step 이 1 이상(정수 칸)이면 여기서 반올림한다 — 부모가 반올림해 값이 그대로면 칸에 2.4 가 남았다(코드 리뷰 11-10)
+    const c0 = Number.isFinite(n) && v.trim() !== '' ? Math.min(max ?? Infinity, Math.max(min, n)) : value
+    const c = (step ?? 1) >= 1 ? Math.round(c0) : c0
+    setV(String(c))
+    if (c !== value) onCommit(c)
+  }
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      className={className}
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') setV(String(value))
       }}
     />
   )

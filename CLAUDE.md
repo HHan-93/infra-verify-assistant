@@ -55,6 +55,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 - [shellSplit.ts](src/lib/shellSplit.ts) — 한 줄 명령을 최상위 `;` `&&` `||` 로 쪼개 단계로 보여주기 위한 분리기. 따옴표·`$( )` 안은 건드리지 않는다(`awk '{print $5; exit}'` 를 반토막 내지 않으려면 정규식 split 으로는 안 된다).
 - [shellFormat.ts](src/lib/shellFormat.ts) — 긴 셸 한 줄을 **보여줄 때만** 줄로 나눠 들여쓴다(원복 확인창 등). 실행에는 원문을 그대로 쓴다. 최상위 `;` 로만 쪼개고(`&&` `||` 는 한 동작이라 붙여 둔다), 끝나면 공백·`;` 를 뺀 문자열이 원문과 같은지 확인해 다르면 원문을 돌려준다 — 모양을 못 잡을지언정 글자가 바뀌지는 않는다.
 - [runPolicy.ts](src/lib/runPolicy.ts) — 검증 러너가 **무엇을 자동으로 돌려도 되는가 · 얼마나 기다리는가**. 대화형(htop·vi)은 전체 실행에서 빼되 `timeout <시간>` 으로 묶였거나 expect 가 프롬프트에 답하는 것은 돌린다. `manualOnly` 스텝(검증 뒤 정리처럼 조건을 사람이 봐야 하는 것)도 뺀다. 제한 시간은 네트워크 의존 5분·디스크 이미지 30분이 바닥 — 느린 것이 '제한 시간 초과' 라는 **실패로** 기록되면 안 된다.
+- [envMap.ts](src/lib/envMap.ts) — 환경 구성도(그룹 편집 → 환경 구성도 탭). 상태보드 설정의 세션으로 **조회 명령만** 돌려 물리 노드(OS · 서비스 · Pacemaker/RabbitMQ/Galera/Masakari/Ceph 역할) · 검증 VM · k8s 워크로드 배치를 모아 리포트와 따로 HTML/PNG 로 낸다. 사람이 정한 그룹 환경(env)과 섞지 않고 `VerifyGroup.envMap` 에 값만 저장한다. k8s 노드 ↔ VM 은 IP 로, 관리 IP 는 Nova 하이퍼바이저 Host IP 로, evacuation 대상은 Nova `HA_Enabled` 로 정한다. 이상한 것은 그림을 바꾸지 않고 '확인 필요' 로 따로 모은다
 - [orderedMerge.ts](src/lib/orderedMerge.ts) — 내장 항목(배열 인덱스) + 사용자 정의(소수 `order`) fractional indexing 병합.
 - [paneTree.ts](src/lib/paneTree.ts) — tmux 식 재귀 분할 이진 트리(고정 2/4분할이 아니다).
 - [logDisplay.tsx](src/lib/logDisplay.tsx) / [highlightRules.ts](src/lib/highlightRules.ts) — 심각도 4버킷 색상 + 사용자 하이라이트. 줄 전체가 아니라 키워드 단어만 물들인다.
@@ -63,7 +64,7 @@ IPC 이름은 `도메인:동작` 규칙이다 — `ssh:*` `terminal:*` `sftp:*`/
 
 메인 프로세스가 `app.getPath('userData')` 에 저장한다. **`.dat` = `safeStorage` 암호화**(같은 OS 사용자만 복호화 — 팀 배포 시 각자 로컬에서 안전), `.json` = 평문(비밀정보 아님).
 
-`ssh-profiles.dat` · `known-hosts.dat`(TOFU) · `portal-watch.dat` / `custom-presets.json` · `custom-scenarios.json` · `session-logs-index.json` · `log-retention-settings.json` · `session-logs/`(리플레이용 `.cast.jsonl`) · `metrics-history/` · `configmap-backups/`(ConfigMap 적용 직전 YAML, `.dat` 암호화·cm 당 20개) · `scenario-runs/`(시나리오 검증 회차 — 목록 `index.json` + 회차별 `<id>.json`. 리포트 원문은 마스킹을 거친 뒤 저장된다) · `scenario-run-retention.json`(회차 보관 한도 — 기본 90일·200회차, 이력 창에서 변경. **손상 시 조용히 기본값으로 되돌리지 않는다** — 늘려 둔 한도가 기본값으로 읽히면 자동 정리가 남겨야 할 회차를 지운다)
+`ssh-profiles.dat` · `known-hosts.dat`(TOFU) · `portal-watch.dat` / `custom-presets.json` · `custom-scenarios.json` · `session-logs-index.json` · `log-retention-settings.json` · `session-logs/`(리플레이용 `.cast.jsonl`) · `metrics-history/` · `configmap-backups/`(ConfigMap 적용 직전 YAML, `.dat` 암호화·cm 당 20개) · `scenario-runs/`(시나리오 검증 회차 — 목록 `index.json` + 회차별 `<id>.json`. 리포트 원문은 마스킹을 거친 뒤 저장된다) · `statusboard-history/`(가용성 검증 이력 — 회차마다 `<t0>.json` + 검증 그룹 `groups.json`. 2026-11-13 localStorage(최근 50회)에서 옮김, 처음 열 때 한 번 옮기고 `migrated.json` 을 남긴다. **개발 모드는 `statusboard-history-dev/` 를 따로 쓴다** — 같은 폴더면 dev 시험 회차가 실제 리포트에 섞인다. 그룹에 든 회차는 자동 정리하지 않고 그룹 밖은 500회까지) · `scenario-run-retention.json`(회차 보관 한도 — 기본 90일·200회차, 이력 창에서 변경. **손상 시 조용히 기본값으로 되돌리지 않는다** — 늘려 둔 한도가 기본값으로 읽히면 자동 정리가 남겨야 할 회차를 지운다)
 
 **폴더 이름이 `Q-Term` 이 아니라 `infra-verify-assistant` 다** — 이게 정상이다. `build.productName` 은 exe·설치본 이름만 정하고, 런타임 앱 이름(=userData 폴더명)은 package.json 최상위 `name` 을 쓴다. Q-Term 은 나중에 붙인 표시명일 뿐이다. **최상위에 `productName` 을 추가하거나 `name` 을 바꾸면 userData 경로가 옮겨가면서 사용자의 프리셋·시나리오·접속 프로필이 전부 사라진 것처럼 보인다** — 리브랜딩 정리를 하다 건드리기 쉬운 곳이니 손대지 말 것. dev 와 설치본이 같은 폴더를 공유한다는 점도 같이 기억할 것(dev 에서 지우면 설치본에서도 지워진다).
 

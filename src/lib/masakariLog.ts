@@ -57,6 +57,8 @@ export interface MasakariParse {
   reason?: string
   /** 옮기지 못한 VM 수 — `Failed to evacuate instances '<id>,…'` 목록의 개수(타임라인 · 리포트의 '실패 N대') */
   failedVms?: number
+  /** 옮기지 못한 VM 의 UUID — 이름은 상태보드가 Nova 에서 찾아 붙인다(리포트 '실패 원인' 의 VM 이름) */
+  failedIds?: string[]
   /** reason 의 짧은 꼴 — 타임라인 요약 한 줄에 들어가게(예: 'Nova API 503, VM 이동 시도 없음') */
   brief?: string
 }
@@ -254,7 +256,8 @@ export function parseMasakari(out: string, t0: number, delta: number): MasakariP
       const attempt = recent.slice(from, lastIdx + 1)
       const reason = failReason(attempt, evac)
       const brief = failBrief(attempt, evac)
-      const failedVms = failedInstances(attempt).length || undefined
+      const failedIds = failedInstances(attempt)
+      const failedVms = failedIds.length || undefined
       return {
         state: failed ? 'failed' : 'error',
         // 'evacuation 실패' 라고 쓰지 않는다 — VM 을 옮기기 전 단계에서 멈춘 것도 그렇게 읽혔다(10-27)
@@ -269,6 +272,7 @@ export function parseMasakari(out: string, t0: number, delta: number): MasakariP
         reason,
         brief,
         failedVms,
+        failedIds: failedIds.length ? failedIds : undefined,
       }
     }
   }

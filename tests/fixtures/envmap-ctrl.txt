@@ -1,0 +1,68 @@
+@@QT:pcs@@
+Cluster name: openstack
+Cluster Summary:
+  * Stack: corosync (Pacemaker is running)
+  * Current DC: contrabass02 (version 2.1.6-10.1.el9_3-6fdc9deea29) - MIXED-VERSION partition with quorum
+  * Last updated: Sat Nov 14 20:21:37 2026 on contrabass01
+  * Last change:  Thu Nov 12 15:18:08 2026 by root via cibadmin on contrabass01
+  * 4 nodes configured
+  * 4 resource instances configured
+
+Node List:
+  * Online: [ contrabass01 contrabass02 contrabass03 contrabass04 ]
+
+Full List of Resources:
+  * Resource Group: openstack:
+    * int_vip   (ocf:heartbeat:IPaddr2):         Started contrabass01
+    * haproxy   (systemd:haproxy):       Started contrabass01
+    * openstack_exporter        (systemd:openstack-exporter):    Started contrabass01
+  * thanos-compact-timer        (systemd:thanos-compact.timer):  Started contrabass02
+
+Daemon Status:
+  corosync: active/enabled
+  pacemaker: active/enabled
+  pcsd: active/enabled
+@@QT:rabbit@@
+Cluster status of node rabbit@contrabass01 ...
+Basics
+
+Cluster name: rabbit@contrabass01
+Total CPU cores available cluster-wide: 288
+
+Cluster Tags
+
+(none)
+
+Disk Nodes
+
+rabbit@contrabass01
+rabbit@contrabass02
+rabbit@contrabass03
+
+Running Nodes
+
+rabbit@contrabass01
+rabbit@contrabass02
+rabbit@contrabass03
+
+Versions
+
+rabbit@contrabass01: RabbitMQ 4.1.2 on Erlang 27.3.4.2
+rabbit@contrabass02: RabbitMQ 4.1.2 on Erlang 27.3.4.2
+rabbit@contrabass03: RabbitMQ 4.1.2 on Erlang 27.3.4.2
+
+Alarms
+
+(none)
+
+Network Partitions
+
+(none)
+@@QT:galera@@
++---------------------------+-------------------------------------------------------+
+| Variable_name             | Value                                                 |
++---------------------------+-------------------------------------------------------+
+| wsrep_cluster_size        | 3                                                     |
+| wsrep_incoming_addresses  | contrabass01:3306,contrabass02:3306,contrabass03:3306 |
+| wsrep_local_state_comment | Synced                                                |
++---------------------------+-------------------------------------------------------+

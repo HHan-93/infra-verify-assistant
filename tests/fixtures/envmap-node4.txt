@@ -1,0 +1,40 @@
+@@QT:host@@
+contrabass04
+NAME="Rocky Linux from CIQ - LTS"
+VERSION="9.6 (Blue Onyx)"
+ID="rocky"
+ID_LIKE="rocky rhel centos fedora"
+5.14.0-570.60.1+21.1.el9_6_ciq.x86_64
+@@QT:hw@@
+96
+               total        used        free      shared  buff/cache   available
+Mem:             503          90         324           0          91         412
+Model name:                              Intel(R) Xeon(R) Gold 5220R CPU @ 2.20GHz
+Socket(s):                               2
+@@QT:ip@@
+lo               UNKNOWN        127.0.0.1/8
+vlan.1120@ens20f0 UP             10.99.120.4/24
+vlan.1121@ens20f1 UP             10.99.121.4/24
+virbr0           DOWN           192.168.122.1/24
+@@QT:units@@
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@ceph-exporter.contrabass04.service loaded active running Ceph ceph-exporter.contrabass04 for 401cd4c2-c792-11f1-88b2-002614043f31
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@crash.contrabass04.service         loaded active running Ceph crash.contrabass04 for 401cd4c2-c792-11f1-88b2-002614043f31
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@osd.0.service                      loaded active running Ceph osd.0 for 401cd4c2-c792-11f1-88b2-002614043f31
+chronyd.service                                                              loaded active running NTP client/server
+corosync.service                                                             loaded active running Corosync Cluster Engine
+libvirtd.service                                                             loaded active running libvirt legacy monolithic daemon
+masakari-host-monitor.service                                                loaded active running masakari host monitor service
+mysql.service                                                                loaded active running Percona XtraDB Cluster
+neutron-openvswitch-agent.service                                            loaded active running OpenStack Neutron Open vSwitch Agent
+openstack-nova-compute.service                                               loaded active running OpenStack Nova Compute Server
+pacemaker.service                                                            loaded active running Pacemaker High Availability Cluster Manager
+virtlockd.service                                                            loaded active running libvirt locking daemon
+virtlogd.service                                                             loaded active running libvirt logging daemon
+@@QT:chrony@@
+MS Name/IP address         Stratum Poll Reach LastRx Last sample
+===============================================================================
+^* 192.0.2.10                    2  10   377   576   +440us[ +606us] +/-   37ms
+Reference ID    : CBF8F08C (192.0.2.10)
+Stratum         : 3
+Ref time (UTC)  : Sat Nov 14 11:11:40 2026
+System time     : 0.000033535 seconds fast of NTP time

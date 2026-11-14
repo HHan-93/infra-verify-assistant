@@ -13,6 +13,7 @@ import {
   History,
   ExternalLink,
   Server,
+  ArrowLeft,
 } from 'lucide-react'
 import type { ConfigMapDetail, ConfigMapRef, ConfigMapBackup, CmBackupOrigin } from '../../electron/shared-types'
 import { isSecretKey, maskedValue } from '../lib/cmSecret'
@@ -434,11 +435,12 @@ export default function ConfigMapView({
           <>
             <div className="mb-1.5 flex items-center gap-2">
               <span className="text-[11px] text-gray-400">YAML 전문: 읽기 전용</span>
+              {/* 눈에 띄게(2026-11-11 사용자 지적: 회색 글자라 버튼인지 몰랐다) — 파란 테두리 버튼 + 화살표 */}
               <button
                 onClick={() => setYamlOpen(false)}
-                className="rounded px-1.5 py-0.5 text-[11px] text-gray-400 hover:bg-white/10"
+                className="inline-flex items-center gap-1 rounded-md border border-blue-500/50 bg-blue-500/15 px-2 py-0.5 text-[11.5px] font-medium text-blue-100 hover:bg-blue-500/25"
               >
-                표로 돌아가기
+                <ArrowLeft size={12} /> 표로 돌아가기
               </button>
             </div>
             <pre

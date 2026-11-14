@@ -75,6 +75,8 @@ import {
   type ScenarioRunRetention,
   type BoardEvidenceItem,
   type BoardEvidenceSummary,
+  type BoardHistoryRecord,
+  type BoardHistoryLoad,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -1431,6 +1433,7 @@ ipcMain.handle(
 )
 
 // 분석 리포트를 PDF로 저장 — 렌더러가 만든 정적 HTML을 숨김 창에 로드 후 printToPDF (새 의존성 불필요)
+// preferCSSPageSize: 문서가 @page 를 적으면 그것을 따른다 — 환경 구성도만 A4 가로(2026-11-14). @page 가 없는 다른 리포트는 그대로 A4 세로
 ipcMain.handle(
   'report:savePdf',
   async (_evt, payload: { html: string; defaultName: string }) => {
@@ -1449,7 +1452,7 @@ ipcMain.handle(
     try {
       await writeFile(tmpHtml, payload.html, 'utf-8')
       await win.loadFile(tmpHtml)
-      const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' })
+      const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4', preferCSSPageSize: true })
       await writeFile(result.filePath, pdf)
       return { saved: true, path: result.filePath }
     } catch (err) {
@@ -1460,6 +1463,42 @@ ipcMain.handle(
     }
   },
 )
+
+/**
+ * HTML 을 PNG 로(2026-11-14 환경 구성도, 사용자 결정: 'html 기반 png'). 화면 밖(offscreen) 창에 띄워 문서 전체 높이로 늘린 뒤 찍는다.
+ * 보이는 창은 Windows 가 화면 높이보다 크게 만들지 못해 아래가 잘린다 — offscreen 창은 그 제한이 없다.
+ * 높이는 16000px 에서 자른다(그 이상은 그림 한 장으로 다루기 어렵고 메모리를 많이 쓴다).
+ */
+ipcMain.handle('report:savePng', async (_evt, payload: { html: string; defaultName: string; width?: number }) => {
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    title: 'PNG 로 저장',
+    defaultPath: payload.defaultName,
+    filters: [{ name: 'PNG', extensions: ['png'] }],
+  })
+  if (result.canceled || !result.filePath) return { saved: false }
+  const width = Math.min(Math.max(Math.round(payload.width ?? 1440), 800), 2400)
+  const win = new BrowserWindow({ show: false, width, height: 900, useContentSize: true, webPreferences: { sandbox: true, offscreen: true } })
+  const tmpHtml = path.join(app.getPath('temp'), `qterm-png-${Date.now()}.html`)
+  try {
+    await writeFile(tmpHtml, payload.html, 'utf-8')
+    await win.loadFile(tmpHtml)
+    const full = Number(await win.webContents.executeJavaScript('Math.ceil(document.documentElement.scrollHeight)')) || 900
+    const h = Math.min(Math.max(full, 300), 16000)
+    win.setContentSize(width, h)
+    // 크기를 바꾼 뒤 한 번 다시 그릴 틈을 준다
+    await new Promise((r) => setTimeout(r, 400))
+    const img = await win.webContents.capturePage({ x: 0, y: 0, width, height: h })
+    if (img.isEmpty()) return { saved: false, error: '그림을 만들지 못했습니다(빈 화면)' }
+    await writeFile(result.filePath, img.toPNG())
+    // 잘랐으면 알린다 — 말없이 잘리면 아래 표가 빠진 그림을 그대로 돌리게 된다(검토 지적)
+    return { saved: true, path: result.filePath, cut: full > h }
+  } catch (err) {
+    return { saved: false, error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    win.destroy()
+    await rm(tmpHtml, { force: true }).catch(() => {})
+  }
+})
 
 /**
  * 리포트 여러 개를 한 폴더에(10-29 · 검증 이력 '종합 결과 · 회차별 결과 · 증적 원문'). 파일마다 저장 창을 띄우면 증적을
@@ -1526,7 +1565,7 @@ ipcMain.handle(
           try {
             await writeFile(tmpHtml, f.html, 'utf-8')
             await win.loadFile(tmpHtml)
-            await writeFile(out, await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' }))
+            await writeFile(out, await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4', preferCSSPageSize: true }))
           } finally {
             win.destroy()
             await rm(tmpHtml, { force: true }).catch(() => {})
@@ -5806,7 +5845,7 @@ ipcMain.handle('scenarioRuns:delete', async (_evt, ids: string[]) => {
 })
 // ── 가용성 검증 증적 (statusboard-evidence/) ─────────────────────
 //
-// 상태보드 회차의 마일스톤 시각은 렌더러 localStorage(최근 50회)에 있고, 그 근거가 된 서버 원문
+// 상태보드 회차의 마일스톤 시각은 이력 파일(statusboard-history/, 2026-11-13 전엔 렌더러 localStorage)에 있고, 그 근거가 된 서버 원문
 // (masakari 로그 · crm_mon · kubectl)은 회차별 파일로 여기 둔다. 평문 JSON — 원문은 렌더러가
 // 마스킹 설정(maskForExport)을 적용한 뒤 넘긴다(시나리오 회차와 같은 출구).
 const boardEvidenceDir = () => path.join(app.getPath('userData'), 'statusboard-evidence')
@@ -5883,10 +5922,10 @@ ipcMain.handle('boardEvidence:read', async (_evt, id: string) => {
 })
 
 /**
- * 이력에서 빠진 회차의 증적을 지운다(개별 삭제 · 전체 삭제 · 50회 초과로 밀려남).
+ * 이력에서 빠진 회차의 증적을 지운다(개별 삭제 · 전체 삭제 · 보관 한도 초과로 밀려남).
  *
  * '남길 목록' 을 받아 나머지를 지우는 방식은 쓰지 않는다 — dev 와 설치본은 이 폴더(userData)를 같이 쓰지만
- * 이력(localStorage)은 출처가 달라 **따로** 갖는다. 한쪽의 남길 목록으로 정리하면 다른 쪽 회차의 증적이 지워진다.
+ * 이력은 따로 갖는다(예전엔 localStorage 출처가 달라서, 지금은 statusboard-history · statusboard-history-dev 폴더가 달라서). 한쪽의 남길 목록으로 정리하면 다른 쪽 회차의 증적이 지워진다.
  */
 ipcMain.handle('boardEvidence:delete', async (_evt, ids: string[]) => {
   const gone = (Array.isArray(ids) ? ids : []).filter((x) => BOARD_EVIDENCE_ID.test(x))
@@ -5897,6 +5936,131 @@ ipcMain.handle('boardEvidence:delete', async (_evt, ids: string[]) => {
     return { ok: true }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+// ── 가용성 검증 이력 (statusboard-history/) ─────────────────────
+//
+// 2026-11-13 사용자 결정(방법 B): 이력을 렌더러 localStorage(최근 50회, 약 5MB 한도)에서 회차별 파일로 옮긴다. 버전마다 수십 회씩 쌓이면서
+// 50회 한도에 밀려 V3.0.6 초기 회차가 증적과 함께 지워질 수 있었다(검증 그룹으로 버전별 회차를 모으려면 남아 있어야 한다).
+//  - 회차 하나 = 파일 하나(<id>.json, id = t0). 저장은 바뀐 회차만, 지우기는 고른 회차만 — 목록 전체를 덮어쓰지 않는다
+//    (읽기가 끝나기 전에 저장이 와도 다른 회차를 지우지 않는다)
+//  - 검증 그룹은 groups.json
+//  - **개발 모드는 폴더를 따로 쓴다(statusboard-history-dev)**: dev 와 설치본은 userData 를 같이 쓰지만 예전 이력(localStorage)은
+//    출처가 달라 따로였다. 같은 폴더를 쓰면 개발 중 시험 회차가 실제 검증 이력 · 리포트에 섞인다
+//  - 손상된 파일은 읽지 못했다고 알리기만 하고 지우거나 덮어쓰지 않는다(CLAUDE.md 저장소 규칙)
+const boardHistoryDir = () => path.join(app.getPath('userData'), app.isPackaged ? 'statusboard-history' : 'statusboard-history-dev')
+const BOARD_HISTORY_ID = /^\d{10,16}$/
+const boardHistoryPath = (id: string) => path.join(boardHistoryDir(), `${id}.json`)
+const boardGroupsPath = () => path.join(boardHistoryDir(), 'groups.json')
+const boardMigratedPath = () => path.join(boardHistoryDir(), 'migrated.json')
+const fileExists = async (p: string) =>
+  readFile(p, 'utf-8').then(
+    () => true,
+    () => false,
+  )
+const validHistoryRecord = (r: unknown): r is BoardHistoryRecord =>
+  !!r && typeof r === 'object' && BOARD_HISTORY_ID.test(String((r as BoardHistoryRecord).id)) && typeof (r as BoardHistoryRecord).t0 === 'number'
+
+ipcMain.handle('boardHistory:load', async (): Promise<BoardHistoryLoad> => {
+  try {
+    return await withStoreLock('statusboard-history', async () => {
+      const list: BoardHistoryRecord[] = []
+      const bad: string[] = []
+      let names: string[] = []
+      try {
+        names = await readdir(boardHistoryDir())
+      } catch {
+        names = [] // 아직 폴더 없음
+      }
+      for (const n of names) {
+        const id = n.replace(/\.json$/, '')
+        if (!n.endsWith('.json') || !BOARD_HISTORY_ID.test(id)) continue
+        try {
+          const r = JSON.parse(await readFile(boardHistoryPath(id), 'utf-8'))
+          if (validHistoryRecord(r) && r.id === id) list.push(r)
+          else bad.push(n)
+        } catch {
+          bad.push(n)
+        }
+      }
+      let groups: unknown[] = []
+      let groupsBad = false
+      try {
+        const raw = await readFile(boardGroupsPath(), 'utf-8')
+        const g = JSON.parse(raw)
+        if (Array.isArray(g)) groups = g
+        else groupsBad = true
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') groupsBad = true
+      }
+      list.sort((a, b) => b.t0 - a.t0)
+      return { ok: true, list, groups, groupsBad, migrated: await fileExists(boardMigratedPath()), bad }
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), list: [], groups: [], migrated: false, bad: [] }
+  }
+})
+
+ipcMain.handle('boardHistory:save', async (_evt, recs: BoardHistoryRecord[]) => {
+  const list = (Array.isArray(recs) ? recs : []).filter(validHistoryRecord)
+  try {
+    await withStoreLock('statusboard-history', async () => {
+      await mkdir(boardHistoryDir(), { recursive: true })
+      for (const r of list) await writeFileAtomic(boardHistoryPath(r.id), JSON.stringify(r))
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('boardHistory:delete', async (_evt, ids: string[]) => {
+  const gone = (Array.isArray(ids) ? ids : []).filter((x) => BOARD_HISTORY_ID.test(x))
+  try {
+    await withStoreLock('statusboard-history', async () => {
+      for (const id of gone) await rm(boardHistoryPath(id), { force: true })
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('boardHistory:saveGroups', async (_evt, groups: unknown[]) => {
+  if (!Array.isArray(groups)) return { ok: false, error: '잘못된 그룹 목록' }
+  try {
+    await withStoreLock('statusboard-history', async () => {
+      await mkdir(boardHistoryDir(), { recursive: true })
+      await writeFileAtomic(boardGroupsPath(), JSON.stringify(groups, null, 1))
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+/**
+ * 예전 이력(localStorage) 옮기기 — 한 번만(migrated.json). 이미 파일이 있는 회차 · 그룹은 덮어쓰지 않는다(파일 쪽이 더 새 것).
+ * 표시(migrated.json)는 전부 쓴 뒤에 남긴다 — 중간에 실패하면 다음에 다시 옮긴다(이미 옮긴 것은 건너뛴다). localStorage 는 지우지 않는다(되돌릴 길).
+ */
+ipcMain.handle('boardHistory:migrate', async (_evt, recs: BoardHistoryRecord[], groups: unknown[]) => {
+  try {
+    return await withStoreLock('statusboard-history', async () => {
+      if (await fileExists(boardMigratedPath())) return { ok: true, count: 0 }
+      await mkdir(boardHistoryDir(), { recursive: true })
+      let count = 0
+      for (const r of (Array.isArray(recs) ? recs : []).filter(validHistoryRecord)) {
+        if (await fileExists(boardHistoryPath(r.id))) continue
+        await writeFileAtomic(boardHistoryPath(r.id), JSON.stringify(r))
+        count++
+      }
+      if (Array.isArray(groups) && groups.length && !(await fileExists(boardGroupsPath()))) await writeFileAtomic(boardGroupsPath(), JSON.stringify(groups, null, 1))
+      await writeFileAtomic(boardMigratedPath(), JSON.stringify({ at: Date.now(), count }))
+      return { ok: true, count }
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), count: 0 }
   }
 })
 

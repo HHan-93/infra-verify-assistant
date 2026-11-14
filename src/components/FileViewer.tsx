@@ -347,6 +347,14 @@ export default function FileViewer({
    */
   const [liteConfigs, setLiteConfigs] = useState<{ path: string; service: string; file: string }[]>([])
   /**
+   * 빠른 선택 경로 중 이 서버에 **실제로 있는 것**(null = 아직 모름 · 확인 실패 → 전부 보인다)과 OS 이름.
+   * 목록은 Ubuntu · Rocky(RHEL) 경로가 한데 섞여 있어(netplan · apt 와 firewalld · selinux 등), Rocky 로 표준이 바뀐 뒤
+   * 없는 경로를 골라 '불러오기 실패' 를 보는 일이 잦았다(2026-11-09 사용자 지적). OS 로 나누는 대신 **있는지를 직접** 본다 —
+   * 같은 Rocky 라도 노드마다 다르다(contrabass03 에는 /etc/resolv.conf 가 없었다).
+   */
+  const [present, setPresent] = useState<Set<string> | null>(null)
+  const [osName, setOsName] = useState('')
+  /**
    * 보는 대상. 파일(SFTP)과 ConfigMap(k8s)은 **읽고 쓰는 방식이 다르다**(문서 vs 키-값 맵,
    * 백업 위치도 서버 vs 내 PC) — 그래서 한 화면에서 모드로 가르고, 로직은 섞지 않는다.
    */
@@ -498,6 +506,37 @@ export default function FileViewer({
       })
       .catch(() => {
         /* 못 찾아도 창은 그대로 쓴다 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [sessionId, connected])
+
+  /**
+   * 빠른 선택 경로가 이 서버에 있는지 한 번에 본다(창을 열 때 · 세션이 바뀔 때). `test -e` 만 하므로 읽기 권한은 필요 없지만,
+   * 루트만 들어갈 수 있는 디렉터리(/var/lib/ceph 등) 아래는 일반 사용자로는 '없음' 으로 보이니 sudo -n 을 먼저 쓴다.
+   * 확인을 못 하면(명령 실패 · 표식 없음) 예전처럼 전부 보인다 — 못 본 것을 '없음' 으로 숨기지 않는다.
+   */
+  useEffect(() => {
+    if (!connected) return
+    let alive = true
+    setPresent(null)
+    setOsName('')
+    const all = PATH_GROUPS.flatMap((g) => g.paths)
+    // `.` 이 파일을 못 찾으면 POSIX sh 는 스크립트를 통째로 끝낸다(검사에서 확인) — 있을 때만 읽는다
+    const body = `[ -r /etc/os-release ] && . /etc/os-release; echo "__QT_OS__$PRETTY_NAME"; for f in ${all.map((x) => `'${x}'`).join(' ')}; do [ -e "$f" ] && echo "__QT_HAS__$f"; done; echo __QT_END__`
+    const cmd = `sudo -n sh -c '${body.replace(/'/g, `'\\''`)}' 2>/dev/null || sh -c '${body.replace(/'/g, `'\\''`)}'`
+    window.electronAPI
+      .sessionRun(sessionId, cmd)
+      .then((r) => {
+        if (!alive || !r.ok) return
+        const out = r.out ?? ''
+        if (!out.includes('__QT_END__')) return
+        setOsName((out.match(/__QT_OS__(.*)/)?.[1] ?? '').trim())
+        setPresent(new Set([...out.matchAll(/__QT_HAS__(.+)/g)].map((m) => m[1].trim())))
+      })
+      .catch(() => {
+        /* 확인 못 하면 전부 보인다 */
       })
     return () => {
       alive = false
@@ -692,6 +731,9 @@ export default function FileViewer({
       setShowPw(false)
       setPwOpen(true)
       setMsg(`${res.error ?? ''} (sudo 비밀번호 입력 필요)`)
+    } else if (/No such file or directory|ENOENT|No such file/i.test(res.error ?? '')) {
+      // 파일이 없는 것은 실패가 아니라 이 서버 구성이다 — 원문 오류 대신 그렇게 말한다(Rocky 전환 뒤 Ubuntu 경로 · 노드마다 빠진 파일)
+      setMsg(`이 서버에는 이 파일이 없습니다: ${p.trim()}${osName ? ` (${osName})` : ''}`)
     } else {
       setMsg(`불러오기 실패: ${res.error}`)
     }
@@ -893,7 +935,7 @@ export default function FileViewer({
               }
             }}
             className="max-w-[200px] rounded-md border border-white/10 bg-panel-light px-2 py-1.5 text-xs text-gray-300 focus:outline-none"
-            title="자주 보는 설정파일"
+            title={`자주 보는 설정파일${present ? ` · 이 서버에 있는 것만 위에 보입니다${osName ? ` (${osName})` : ''}` : ''}`}
           >
             <option value="">빠른 선택…</option>
             {/* 이 서버에서 **실제로 찾은** 설정이 맨 위에 온다.
@@ -908,15 +950,31 @@ export default function FileViewer({
                 ))}
               </optgroup>
             )}
-            {PATH_GROUPS.map((g) => (
-              <optgroup key={g.group} label={g.group}>
-                {g.paths.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
+            {/* 이 서버에 있는 경로만 묶음별로 — 확인 전 · 확인 실패면 전부(present == null) */}
+            {PATH_GROUPS.map((g) => {
+              const ps = present ? g.paths.filter((x) => present.has(x)) : g.paths
+              return ps.length ? (
+                <optgroup key={g.group} label={g.group}>
+                  {ps.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null
+            })}
+            {/* 없는 경로는 지우지 않고 맨 아래에 골라지지 않게 — 다른 OS 경로인지 · 이 노드만 빠진 것인지 볼 수 있게 */}
+            {present && PATH_GROUPS.some((g) => g.paths.some((x) => !present.has(x))) && (
+              <optgroup label={`이 서버에 없음${osName ? ` (${osName})` : ''}`}>
+                {PATH_GROUPS.flatMap((g) => g.paths)
+                  .filter((x) => !present.has(x))
+                  .map((p) => (
+                    <option key={`missing:${p}`} value="" disabled>
+                      {p}
+                    </option>
+                  ))}
               </optgroup>
-            ))}
+            )}
           </select>
           <button
             onClick={() => load(path)}

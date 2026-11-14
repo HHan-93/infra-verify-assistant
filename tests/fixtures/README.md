@@ -15,3 +15,15 @@
 | `podlog-bootfactory-valkey-dns.log` | 2026-10-28 epoxy boot-factory 파드 로그(사용자가 붙여 줌) — valkey DNS 조회 시간 초과 WARN + 스택. 스택 가운데 줄은 줄여 둠, 클러스터 DNS IP 는 10.0.0.10 으로 가림 |
 
 새 형식을 만나면(버전 차이 등) 그 출력을 여기 더하고 검사를 추가한다.
+
+## 환경 구성도(envmap-*) — 2026-11-14 epoxy(Rocky 9.6 CIQ · Epoxy · Ceph 19.2.3 · k8s v1.34) 사용자가 붙여 준 출력
+
+IP 는 모두 가렸다: 관리 · Ceph 망 앞 두 자리는 `10.99.`, NTP 서버 IP 는 `192.0.2.10`, 이름은 `ntp.example.net` 으로 바꿨다. 각 파일의 `@@QT:구역@@` 줄은 수집 스크립트(src/lib/envMap.ts)가 찍는 구분 줄로, 사용자가 명령마다 따로 돌린 출력을 그 자리에 넣었다.
+
+| 파일 | 출처 |
+|---|---|
+| `envmap-node1.txt` · `envmap-node4.txt` | 노드1(믹스드) · 노드4(컴퓨트) — hostname · os-release · uname · nproc/free/lscpu · `ip -br -4 addr` · running 유닛(받은 것은 grep 으로 거른 목록, 노드1 은 ceph 유닛 일부 줄임) · chronyc |
+| `envmap-ctrl.txt` | contrabass01 `pcs status` · `rabbitmqctl cluster_status`(Listeners · Feature flags 절 줄임) · `mysql -e "SHOW STATUS …wsrep…"`(표 꼴) |
+| `envmap-openstack.json` | `openstack … -f json` 출력을 열쇠별로 모음 — server list(44대 중 Epoxy_* 13대 + 상관없는 VM 4대만), hypervisor · flavor(일부) · compute service(일부) · segment host list. **segment list 는 표로만 받아** JSON 열 이름으로 옮겼다 |
+| `envmap-ceph.txt` | contrabass02 `ceph -s -f json`(servicemap 비움) · `ceph orch ps -f json`(필드 줄임) · `ceph node ls` · `ceph osd pool ls detail -f json`(11개 중 3개 · 필드 줄임). `ceph osd tree -f json` 은 받지 못해 없다(장치 종류가 비는 경우) |
+| `envmap-k8s.txt` | epoxy-master-2 `kubectl version` · `get nodes -o wide` · 파드 custom-columns(154줄 중 종류별로 골라 줄임) · DaemonSet(`get deploy,sts,ds` 표의 ds 줄을 `get ds -A --no-headers` 꼴로) — 이때 노드3 위 두 k8s 노드가 NotReady 였다 |

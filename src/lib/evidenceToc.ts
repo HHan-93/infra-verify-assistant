@@ -88,12 +88,19 @@ export interface ArrangedEv {
  * 같은 시각이면 저장 순서를 지킨다(정렬이 안정적).
  */
 export function arrangeEvidence(items: BoardEvidenceItem[], eventAt: (it: BoardEvidenceItem) => number | null, base: number, upAt: number | null): ArrangedEv[] {
-  return items
-    .map((it, i) => ({ it, i, at: eventAt(it) ?? it.capturedAt }))
-    .sort((x, y) => x.at - y.at || x.i - y.i)
-    // 검증 전 분산 점검은 시각과 상관없이 DOWN 이전 — 장애 주입 시각을 BMC 시계로 넣은 회차(10-28 2회차)는 주입이
-    // 검증 시작보다 57초 앞서 찍혀, 시각으로만 가르면 '검증 전' 이 DOWN 이후에 들어갔다
-    .map(({ it, at }) => ({ it, at, grp: it.key === 'spread' ? 0 : evGroupOf(at, base, upAt) }))
+  return (
+    items
+      // 검증 전 분산 점검은 시각과 상관없이 DOWN 이전 — 장애 주입 시각을 BMC 시계로 넣은 회차(10-28 2회차)는 주입이
+      // 검증 시작보다 57초 앞서 찍혀, 시각으로만 가르면 '검증 전' 이 DOWN 이후에 들어갔다
+      .map((it, i) => {
+        const at = eventAt(it) ?? it.capturedAt
+        const grp: EvGroup = it.key === 'spread' ? 0 : evGroupOf(at, base, upAt)
+        return { it, i, at, grp }
+      })
+      // 묶음 먼저, 그 안에서 시각순 — 위 예외와 장애 시작 15초 여유 때문에 시각순만으로는 묶음이 섞여 같은 묶음 머리가 두 번 나올 수 있었다
+      .sort((x, y) => x.grp - y.grp || x.at - y.at || x.i - y.i)
+      .map(({ it, at, grp }) => ({ it, at, grp }))
+  )
 }
 
 export interface TocEntry {
@@ -127,7 +134,14 @@ export function tocEntries(
   const out: TocEntry[] = []
   const logs: TocEntry[][] = [[], [], []]
   const g = (at: number) => evGroupOf(at, base, upAt)
+  /*
+   * VIP 이동과 같은 때(1분 안)의 'pacemaker 역할 이동' 은 목차에 따로 적지 않는다(2026-11-10 사용자 요청: 같은 페일오버를 두 줄로 말했다).
+   * 새 회차는 저장할 때부터 VIP 증적 하나로 합친다(StatusBoard VIP 캡처 주석). 이건 따로 저장된 옛 회차용 — 본문의 증적은 그대로 있다.
+   */
+  const vipAt = arr.find((x) => x.it.key === 'vip')?.at
+  const nearVip = (x: ArrangedEv) => vipAt != null && x.it.key.startsWith('roles:') && Math.abs(x.at - vipAt) <= 60_000
   for (const x of arr) {
+    if (nearVip(x)) continue
     const it = x.it
     if (it.key === 'portal') {
       const v = opts.portal(it)

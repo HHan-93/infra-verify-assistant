@@ -1,6 +1,6 @@
 // 증적 원문 목차 — 묶음 가르기 · 사건 시각 정렬 · 같은 순간의 Ceph 증적 합치기
 import { test, eq, ok } from './harness'
-import { arrangeEvidence, evGroupOf, mergeSameCeph, resolveEvKey, tocLabel, CEPH_MERGED_KEY, strongFocusCount } from '../src/lib/evidenceToc'
+import { arrangeEvidence, tocEntries, evGroupOf, mergeSameCeph, resolveEvKey, tocLabel, CEPH_MERGED_KEY, strongFocusCount } from '../src/lib/evidenceToc'
 import type { BoardEvidenceItem } from '../electron/shared-types'
 
 const T = (hms: string) => new Date(`2026-10-28T${hms}+09:00`).getTime()
@@ -97,4 +97,28 @@ test('장애 주입 시각이 검증 시작보다 앞서도 검증 전 분산 �
   // 10-28 2회차: 주입(BMC 시계) 12:45:36 < 검증 시작 12:46:33
   const arr = arrangeEvidence([ev('spread', '검증 전 파드 분산 상태', T('12:46:33'))], () => null, T('12:45:36'), null)
   eq(arr[0].grp, 0)
+})
+
+test('묶음이 섞이지 않게 묶음 먼저 · 그 안에서 시각순(같은 묶음 머리가 두 번 나오지 않게)', () => {
+  // 주입이 검증 시작보다 앞선 회차: 장애 시작 12:45:36, 검증 전 분산 점검 12:46:33(늘 DOWN 이전), 장애 5초 전 VIP 이동(여유 안 → DOWN 이후)
+  const base = T('12:45:36')
+  const arr = arrangeEvidence(
+    [ev('vip', 'VIP 이동', T('12:45:31')), ev('spread', '검증 전 파드 분산 상태', T('12:46:33')), ev('down', '호스트 DOWN', T('12:47:38'))],
+    () => null,
+    base,
+    null,
+  )
+  eq(arr.map((x) => [x.it.key, x.grp]), [['spread', 0], ['vip', 1], ['down', 1]])
+})
+
+test('목차: VIP 이동과 1분 안의 pacemaker 역할 이동은 따로 적지 않는다(옛 회차) · 떨어진 역할 이동은 남긴다', () => {
+  const base = T('12:45:36')
+  const items = [
+    ev('vip', 'VIP 이동: contrabass01 → contrabass02', T('12:45:46')),
+    ev('roles:1', 'pacemaker 역할 이동: DC contrabass01 → contrabass02', T('12:45:48')),
+    ev('roles:2', 'pacemaker 역할 이동', T('13:20:00')),
+  ]
+  const arr = arrangeEvidence(items, () => null, base, null)
+  const e = tocEntries(arr, base, null, { masaDone: false, portal: () => ({ flaps: [], flapTimes: 0, screens: null }) })
+  eq(e.map((x) => x.key), ['vip', 'roles:2'])
 })

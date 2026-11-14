@@ -42,6 +42,8 @@ import type {
   ScenarioRunDetail,
   BoardEvidenceItem,
   BoardEvidenceSummary,
+  BoardHistoryRecord,
+  BoardHistoryLoad,
   ScenarioRunRetention,
 } from './shared-types'
 
@@ -130,6 +132,13 @@ const electronAPI = {
     ipcRenderer.invoke('boardEvidence:read', id),
   boardEvidenceDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('boardEvidence:delete', ids),
+  /** 가용성 검증 이력 — 회차별 파일(statusboard-history/). 저장 · 지우기는 고른 회차만 */
+  boardHistoryLoad: (): Promise<BoardHistoryLoad> => ipcRenderer.invoke('boardHistory:load'),
+  boardHistorySave: (recs: BoardHistoryRecord[]): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('boardHistory:save', recs),
+  boardHistoryDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('boardHistory:delete', ids),
+  boardHistorySaveGroups: (groups: unknown[]): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('boardHistory:saveGroups', groups),
+  boardHistoryMigrate: (recs: BoardHistoryRecord[], groups: unknown[]): Promise<{ ok: boolean; error?: string; count: number }> =>
+    ipcRenderer.invoke('boardHistory:migrate', recs, groups),
   /** 응답 측정 원문(checks.csv) — 측정을 끝낼 때 클라이언트 VM 에서 받아 이 PC 에 둔다 */
   probeRawSave: (id: string, content: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('probeRaw:save', id, content),
@@ -289,6 +298,9 @@ const electronAPI = {
     defaultName: string
   }): Promise<{ saved: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('report:savePdf', payload),
+  /** HTML 한 장을 그림(PNG)으로 — 환경 구성도(2026-11-14). 숨김 창에서 문서 전체 높이로 찍는다 */
+  saveHtmlPng: (payload: { html: string; defaultName: string; width?: number }): Promise<{ saved: boolean; path?: string; error?: string; cut?: boolean }> =>
+    ipcRenderer.invoke('report:savePng', payload),
   /** 리포트 여러 개를 폴더 하나에(저장 창 한 번 — 첫 파일 이름으로 열고 나머지는 같은 폴더에). 같은 이름이 있으면 ' (2)' 를 붙인다 */
   saveReportMany: (payload: {
     files: { name: string; html: string }[]

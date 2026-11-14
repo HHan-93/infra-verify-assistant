@@ -1,0 +1,60 @@
+@@QT:host@@
+contrabass01
+NAME="Rocky Linux from CIQ - LTS"
+VERSION="9.6 (Blue Onyx)"
+ID="rocky"
+ID_LIKE="rocky rhel centos fedora"
+5.14.0-570.60.1+21.1.el9_6_ciq.x86_64
+@@QT:hw@@
+96
+               total        used        free      shared  buff/cache   available
+Mem:             503         118         354           0          32         384
+Model name:                              Intel(R) Xeon(R) Gold 5220R CPU @ 2.20GHz
+Socket(s):                               2
+@@QT:ip@@
+lo               UNKNOWN        127.0.0.1/8
+vlan.1120@ens20f0 UP             10.99.120.1/24 10.99.120.50/24
+vlan.1121@ens20f1 UP             10.99.121.1/24
+o-hm0            UNKNOWN        172.16.0.2/22
+virbr0           DOWN           192.168.122.1/24
+@@QT:units@@
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@mgr.contrabass01.dlporu.service                  loaded active running Ceph mgr.contrabass01.dlporu for 401cd4c2-c792-11f1-88b2-002614043f31
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@mon.contrabass01.service                         loaded active running Ceph mon.contrabass01 for 401cd4c2-c792-11f1-88b2-002614043f31
+ceph-401cd4c2-c792-11f1-88b2-002614043f31@osd.1.service                                    loaded active running Ceph osd.1 for 401cd4c2-c792-11f1-88b2-002614043f31
+chronyd.service                                                                            loaded active running NTP client/server
+corosync.service                                                                           loaded active running Corosync Cluster Engine
+ha_cluster-exporter.service                                                                loaded active running Prometheus Pacemaker HA clusters Exporter
+haproxy-exporter.service                                                                   loaded active running Prometheus HAProxy Exporter
+haproxy.service                                                                            loaded active running Cluster Controlled haproxy
+httpd.service                                                                              loaded active running The Apache HTTP Server
+libvirtd.service                                                                           loaded active running libvirt legacy monolithic daemon
+masakari-api.service                                                                       loaded active running masakari api
+masakari-engine.service                                                                    loaded active running masakari engine service
+masakari-host-monitor.service                                                              loaded active running masakari host monitor service
+memcached-exporter.service                                                                 loaded active running Prometheus Memcached Exporter
+memcached-thanos.service                                                                   loaded active running memcached daemon for Thanos cache
+memcached.service                                                                          loaded active running memcached daemon
+mysql.service                                                                              loaded active running Percona XtraDB Cluster
+mysqld-exporter.service                                                                    loaded active running Prometheus MySQL Exporter
+neutron-dhcp-agent.service                                                                 loaded active running OpenStack Neutron DHCP Agent
+neutron-l3-agent.service                                                                   loaded active running OpenStack Neutron Layer 3 Agent
+neutron-metadata-agent.service                                                             loaded active running OpenStack Neutron Metadata Agent
+neutron-openvswitch-agent.service                                                          loaded active running OpenStack Neutron Open vSwitch Agent
+neutron-server.service                                                                     loaded active running OpenStack Neutron Server
+openstack-nova-api.service                                                                 loaded active running OpenStack Nova API Server
+openstack-nova-compute.service                                                             loaded active running OpenStack Nova Compute Server
+openstack-nova-conductor.service                                                           loaded active running OpenStack Nova Conductor Server
+openstack-nova-novncproxy.service                                                          loaded active running OpenStack Nova NoVNC Proxy Server
+openstack-nova-scheduler.service                                                           loaded active running OpenStack Nova Scheduler Server
+pacemaker.service                                                                          loaded active running Pacemaker High Availability Cluster Manager
+rabbitmq-server.service                                                                    loaded active running Open source RabbitMQ server
+virtlockd.service                                                                          loaded active running libvirt locking daemon
+virtlogd.service                                                                           loaded active running libvirt logging daemon
+@@QT:chrony@@
+MS Name/IP address         Stratum Poll Reach LastRx Last sample
+===============================================================================
+^* ntp.example.net               2  10   377   250   -324us[ -355us] +/-   41ms
+Reference ID    : CBF8F08C (ntp.example.net)
+Stratum         : 3
+Ref time (UTC)  : Sat Nov 14 11:15:50 2026
+System time     : 0.000034202 seconds slow of NTP time

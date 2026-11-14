@@ -1,6 +1,6 @@
 // 포털 증적 나누기 · 연속 통과 기록 줄이기 · 목차 줄(포털 나눔 · 파드 로그 접기)
 import { test, eq, ok } from './harness'
-import { applyRunTruth, compactStreak, portalEvidenceView, portalStartAt } from '../src/lib/portalEvidence'
+import { applyRunTruth, compactStreak, portalBasis, portalEvidenceView, portalStartAt } from '../src/lib/portalEvidence'
 import { arrangeEvidence, tocEntries } from '../src/lib/evidenceToc'
 import { portalStreakTable, type PortalEvent } from '../src/lib/portalPhases'
 import type { BoardEvidenceItem } from '../electron/shared-types'
@@ -104,7 +104,7 @@ test('연속 통과 기록은 API 마다 한 줄로 줄인다(앞 실패 · n/n 
   ok(tb, '표가 만들어져야 함')
   const c = compactStreak(tb!)
   ok(c, '줄일 수 있어야 함')
-  eq(c!.columns, ['핵심 API (2개)', '앞(실패)', '연속 통과', '응답 시간', '중앙값'])
+  eq(c!.columns, ['핵심 API (2개)', '직전 응답', '연속 통과', '응답 시간', '중앙값'])
   eq(c!.rows[0], ['GET /api/v1/instances', '✗ 503', '✓ 3/3', '51 ~ 77ms', '64ms'])
   eq(c!.rows[1][1].startsWith('✓'), true)
   eq(c!.bad, [false, false])
@@ -159,4 +159,21 @@ test('목차: 포털은 시각마다 나뉘어 각자 묶음에 들고, 파드 �
     ],
   )
   eq(e[4].fold?.map((x) => x.label), ['monitoring · connection refused', 'ceph · timeout'])
+})
+
+test('정상화 근거 — 1차는 화면마다 1차 순간 이전의 마지막 정상화, 최종은 다시 끊긴 회차만 화면마다 마지막 정상화', () => {
+  const poll = (at: number, ok: boolean) => ({ at, ok, apis: [{ name: 'GET /a', ok, status: ok ? 200 : 503, ms: ok ? 40 : 10 }] })
+  const up = (name: string, hms: string): PortalEvent =>
+    ({ at: T(hms), name, kind: 'up', confirmAt: T(hms) + 10_000, n: 2, streak: [poll(T(hms) - 1000, false), poll(T(hms), true), poll(T(hms) + 1000, true)] }) as PortalEvent
+  // A 12:52:10 정상 · B 12:55:15 정상(1차 = 12:55:15) · A 다시 끊겼다가 13:05:00 정상(최종)
+  const log = [up('A', '12:52:10'), up('B', '12:55:15'), up('A', '13:05:00')]
+  const b = portalBasis(log, T('12:55:15'), T('13:05:00'), 1)
+  ok(b, '근거가 있어야 함')
+  eq(b!.first.map((r) => [r.name, r.last]), [['A', false], ['B', true]])
+  eq(b!.first[0].broken, ['GET /a'])
+  eq(b!.final.map((r) => [r.name, r.last]), [['B', false], ['A', true]])
+  eq(b!.others.length, 0)
+  // 다시 끊김이 없으면 최종 표는 없다 · 연속 구간 원본이 없는 옛 기록이면 null
+  eq(portalBasis(log.slice(0, 2), T('12:55:15'), T('12:55:15'), 0)!.final, [])
+  eq(portalBasis([{ at: T('12:52:10'), name: 'A', kind: 'up' } as PortalEvent], T('12:52:10'), null, 0), null)
 })
