@@ -21,6 +21,13 @@ import {
   fileStem,
   parseNovaServers,
   buildProbeMultiHtml,
+  buildProbeHtml,
+  vmRecoveries,
+  parseServerHosts,
+  mapVmHosts,
+  opinionLines,
+  hasOpinion,
+  rtoVerdict,
   type ProbeEvent,
   type ProbeRun,
   type ProbeLast,
@@ -145,19 +152,20 @@ test('저장 파일 이름 — 회차 이름을 넣되 파일 이름에 못 쓰�
   eq(fileStem('응답측정', { ...run, label: '///' }), '응답측정_20261028_1051')
 })
 
-test('종합 리포트 — 평균 · 빠름 · 느림은 끝까지 복구된 회차로만, 미복구 회차는 따로 센다', () => {
+test('종합 리포트 — RTO 판정 · 중앙값 · 가장 느림은 끝까지 복구된 회차로, 미복구는 따로 · 점수는 VM × 회차', () => {
   const t0 = Date.UTC(2026, 9, 28, 1, 0, 0)
-  const cfg2 = { ...DEFAULT_PROBE, targets: [{ name: 'vm01', url: 'http://10.0.0.1' }, { name: 'vm02', url: 'http://10.0.0.2' }] }
+  const cfg2 = { ...DEFAULT_PROBE, failNode: 'com01', targets: [{ name: 'vm01', url: 'http://10.0.0.1' }, { name: 'vm02', url: 'http://10.0.0.2' }] }
   const ready = (b: number): ProbeEvent[] => [0, 1].map((i) => ({ at: b, idx: i, code: '200', kind: 'ready' as const, base: b }))
-  const run = (id: string, label: string, b: number, gaps: (number | null)[]): ProbeRun => ({
+  const run = (id: string, label: string, b: number, gaps: (number | null)[], failNode = 'com01'): ProbeRun => ({
     id,
     label,
     startedAt: b,
     stoppedAt: b + 3_600_000,
     host: 'client',
     dir: '/tmp/qterm-probe/' + id,
-    config: cfg2,
+    config: { ...cfg2, failNode },
     endReason: 'auto',
+    vmHosts: { 0: 'com02', 1: 'com03' },
     events: [
       ...ready(b),
       ...gaps.flatMap((g, i): ProbeEvent[] => [
@@ -166,12 +174,111 @@ test('종합 리포트 — 평균 · 빠름 · 느림은 끝까지 복구된 회
       ]),
     ],
   })
-  const html = buildProbeMultiHtml([run('b', '2회차', t0 + 7_200_000, [300_000, 400_000]), run('a', '1회차', t0, [200_000, 500_000]), run('c', '3회차', t0 + 9_000_000, [100_000, null])])
-  // 1회차 8분 20초 · 2회차 6분 40초 → 평균 7분 30초, 3회차(vm02 미복구)는 평균에 넣지 않고 '복구 안 된 회차' 로
-  ok(html.includes('평균 복구 시간</span><b>7분 30초</b>'), '평균')
-  ok(html.includes('가장 빠름</span><b>6분 40초</b><small>2회차</small>'), '빠름')
-  ok(html.includes('가장 느림</span><b>8분 20초</b><small>1회차</small>'), '느림')
+  const runs = [run('b', '2회차', t0 + 7_200_000, [300_000, 400_000], 'com02'), run('a', '1회차', t0, [200_000, 500_000]), run('c', '3회차', t0 + 9_000_000, [100_000, null])]
+  const html = buildProbeMultiHtml(runs)
+  // 1회차 8분 20초 · 2회차 6분 40초 · 3회차(vm02 미복구) — RTO 10분이면 2/3 통과, 중앙값은 복구된 두 회차의 낮은 쪽(가까운 순위)
+  ok(html.includes('RTO 10분 통과</span><b>2/3회</b>'), 'RTO 통과')
+  ok(html.includes('중앙값</span><b>6분 40초</b>'), '중앙값')
+  ok(html.includes('가장 느림</span><b>8분 20초</b><small>1회차 · com01</small>'), '느림')
   ok(html.includes('복구 안 된 회차</span><b>1회</b><small>3회차</small>'), '미복구')
-  // 회차는 시작 순(1 → 2 → 3)
-  ok(html.indexOf('1. 1회차') < html.indexOf('2. 2회차') && html.indexOf('2. 2회차') < html.indexOf('3. 3회차'), '순서')
+  // 점수: VM 2대 × 3회 = 6번 중 vm02(3회차 미복구) 하나만 실패
+  ok(html.includes('6번 중 5번 통과') && html.includes('>83.3<'), '점수')
+  // RTO 를 7분으로 줄이면 1회차(8분 20초)가 떨어진다
+  ok(buildProbeMultiHtml(runs, { rtoMin: 7 }).includes('RTO 7분 통과</span><b>1/3회</b>'), 'RTO 조정')
+  // 장애 노드별 묶음 · 참고사항 없음 · 회차는 시작 순으로 번호
+  ok(html.includes('com01 장애') && html.includes('com02 장애') && !html.includes('참고사항'), '묶음')
+  ok(html.includes('1. 1회차') && html.includes('2. 2회차') && html.includes('3. 3회차'), '순서')
+  // VM 별 복구(첫 끊김 기준) — 3회차: vm01 100초, vm02 미복구
+  const s3 = summarize(runs[2].config, runs[2].events, [])
+  eq(vmRecoveries(s3).map((v) => v.at), [100_000, null])
+})
+
+test('종합 리포트 — 정상 확인 못 한 VM 은 미복구로 세지 않고, 끊김 없던 회차는 점수에 넣지 않는다', () => {
+  const b0 = Date.UTC(2026, 10, 15, 1, 0, 0)
+  const tg = [{ name: 'a', url: 'http://10.0.0.1' }, { name: 'b', url: 'http://10.0.0.2' }]
+  // 회차마다 a 만 정상 확인 · 끊김 · 복구(b 는 ready 이벤트 없음 = 세지 않음)
+  const mk = (id: string, b: number, gap: number | null): ProbeRun => ({
+    id, startedAt: b, stoppedAt: b + 900_000, host: 'c', dir: '/tmp/x', config: { ...DEFAULT_PROBE, targets: tg },
+    events: [
+      { at: b, idx: 0, code: '200', kind: 'ready', base: b },
+      ...(gap == null ? [] : [{ at: b + 60_000, idx: 0, code: '000', kind: 'outage' as const, base: b + 60_000 }, { at: b + 62_000 + gap, idx: 0, code: '200', kind: 'recovered' as const, base: b + 60_000 + gap, outageStart: b + 60_000 }]),
+    ],
+  })
+  const html = buildProbeMultiHtml([mk('1', b0, 120_000), mk('2', b0 + 3_600_000, 180_000), mk('3', b0 + 7_200_000, 240_000), mk('4', b0 + 9_000_000, null)])
+  ok(!html.includes('복구 안 됨</b><small>RTO 판정 기준'), '전부 복구가 미복구로 찍히지 않음')
+  ok(html.includes('3번 중 3번 통과'), '끊김 없던 4번째 회차는 점수에서 뺌')
+})
+
+test('측정 끝 VM 위치 — IP 로 맞추고, 같은 IP 가 둘이면 맞추지 않는다', () => {
+  const list = parseServerHosts(
+    JSON.stringify([
+      { Name: 'web01', Host: 'com02', Networks: { net: ['10.0.0.1'] } },
+      { Name: 'web02', Host: 'com03', Networks: 'net=10.0.0.2, 172.24.4.9' },
+      { Name: 'dupA', Host: 'com02', Networks: 'a=10.0.0.9' },
+      { Name: 'dupB', Host: 'com04', Networks: 'b=10.0.0.9' },
+    ]),
+  )
+  ok(!!list, '읽기')
+  eq(parseServerHosts('Error: not authorized'), null)
+  const m = mapVmHosts(
+    [
+      { name: 'w1', url: 'http://10.0.0.1:8080/health' },
+      { name: 'w2', url: 'tcp://10.0.0.2:22' },
+      { name: 'w9', url: 'icmp://10.0.0.9' },
+      { name: 'none', url: 'http://10.9.9.9' },
+    ],
+    list!,
+  )
+  eq(m, { 0: 'com02', 1: 'com03' })
+})
+
+test('한 회차 리포트 — RTO 판정과 이번 회차 이동 그림', () => {
+  const b = Date.UTC(2026, 10, 15, 1, 0, 0)
+  const r: ProbeRun = {
+    id: 'x',
+    startedAt: b,
+    stoppedAt: b + 900_000,
+    host: 'client',
+    dir: '/tmp/qterm-probe/x',
+    config: { ...DEFAULT_PROBE, failNode: 'com01', targets: [{ name: 'web01', url: 'http://10.0.0.1' }] },
+    vmHosts: { 0: 'com03' },
+    events: [
+      { at: b, idx: 0, code: '200', kind: 'ready', base: b },
+      { at: b + 60_000, idx: 0, code: '000', kind: 'outage', base: b + 60_000 },
+      { at: b + 762_000, idx: 0, code: '200', kind: 'recovered', base: b + 760_000, outageStart: b + 60_000 },
+    ],
+  }
+  const h = buildProbeHtml(r, summarize(r.config, r.events, []))
+  ok(h.includes('RTO 10분 판정</span><b>초과</b>') && h.includes('>com03<') && h.includes('>com01<') && !h.includes('참고사항'), '한 회차')
+  ok(buildProbeHtml(r, summarize(r.config, r.events, []), { rtoMin: 15 }).includes('RTO 15분 판정</span><b>통과</b>'), 'RTO 조정')
+})
+
+test('판정 의견 — 첫 줄 요약 · - 세부, 판정도 글도 없으면 빼고, 리포트는 사람 판정과 툴 판정을 둘 다 싣는다', () => {
+  eq(opinionLines('실패: RTO 10분 초과\n- 8대는 10분 안\n\n  - 2대 20분'), { title: '실패: RTO 10분 초과', lines: ['8대는 10분 안', '2대 20분'] })
+  ok(!hasOpinion({ verdict: 'none', text: '  ', at: 1 }) && hasOpinion({ verdict: 'fail', text: '', at: 1 }) && hasOpinion({ verdict: 'none', text: '메모', at: 1 }), '있음')
+  const b = Date.UTC(2026, 10, 16, 6, 30, 0)
+  const tg = [{ name: 'vm01', url: 'http://10.0.0.1' }, { name: 'vm02', url: 'http://10.0.0.2' }]
+  const mk = (id: string, gaps: number[], opinion?: ProbeRun['opinion']): ProbeRun => ({
+    id, label: id, startedAt: b, stoppedAt: b + 3_600_000, host: 'c', dir: '/tmp/x', config: { ...DEFAULT_PROBE, targets: tg }, opinion,
+    events: [
+      ...[0, 1].map((i) => ({ at: b, idx: i, code: '200', kind: 'ready' as const, base: b })),
+      ...gaps.flatMap((g, i): ProbeEvent[] => [
+        { at: b + 60_000, idx: i, code: '000', kind: 'outage', base: b + 60_000 },
+        { at: b + 60_000 + g + 2000, idx: i, code: '200', kind: 'recovered', base: b + 60_000 + g, outageStart: b + 60_000 },
+      ]),
+    ],
+  })
+  // 3회차 1세트(contrabass02) 꼴 — 2대 중 1대가 20분: 툴은 초과, 사람은 실패
+  const bad = mk('3회차', [300_000, 1_207_000], { verdict: 'fail', text: '실패: RTO 10분 초과 (VM 1대 20분 순단)\n- Masakari 재시도로 이동', at: b + 4_000_000 })
+  const s = summarize(bad.config, bad.events, [])
+  eq(rtoVerdict(s, 10), { cls: 'bad', text: '초과', span: 1_207_000 })
+  const one = buildProbeHtml(bad, s)
+  ok(one.includes('판정 의견: 실패: RTO 10분 초과 (VM 1대 20분 순단)') && one.includes('툴 판정: RTO 10분 초과 (20분 07초)') && one.includes('<div>- Masakari 재시도로 이동</div>'), '한 회차')
+  // RTO 안인데 사람이 실패로 본 회차 · 의견 없는 회차 — 툴 통과 수는 그대로, 의견 목록에는 단 회차만
+  const ok2 = mk('2회차', [200_000, 300_000], { verdict: 'fail', text: '포털 로그인 지연', at: b })
+  const none = mk('1회차', [200_000, 300_000])
+  const multi = buildProbeMultiHtml([bad, ok2, none])
+  ok(multi.includes('RTO 10분 통과</span><b>2/3회</b>'), '툴 판정 수는 시간 기준')
+  ok(multi.includes('<h2>판정 의견</h2>') && multi.includes('2회 · 실패 2회') && multi.includes('포털 로그인 지연') && multi.includes('툴 판정: RTO 통과 (5분 00초)'), '목록')
+  ok(!buildProbeMultiHtml([none]).includes('<h2>판정 의견</h2>'), '의견 없으면 절 없음')
 })

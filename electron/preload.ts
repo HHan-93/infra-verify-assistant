@@ -44,6 +44,8 @@ import type {
   BoardEvidenceSummary,
   BoardHistoryRecord,
   BoardHistoryLoad,
+  ProbeHistoryLoad,
+  ProbeHistoryRecord,
   ScenarioRunRetention,
 } from './shared-types'
 
@@ -140,6 +142,10 @@ const electronAPI = {
   boardHistoryMigrate: (recs: BoardHistoryRecord[], groups: unknown[]): Promise<{ ok: boolean; error?: string; count: number }> =>
     ipcRenderer.invoke('boardHistory:migrate', recs, groups),
   /** 응답 측정 원문(checks.csv) — 측정을 끝낼 때 클라이언트 VM 에서 받아 이 PC 에 둔다 */
+  probeHistoryLoad: (): Promise<ProbeHistoryLoad> => ipcRenderer.invoke('probeHistory:load'),
+  probeHistorySave: (recs: ProbeHistoryRecord[]): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('probeHistory:save', recs),
+  probeHistoryDelete: (ids: string[]): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('probeHistory:delete', ids),
+  probeHistoryMigrate: (recs: ProbeHistoryRecord[]): Promise<{ ok: boolean; error?: string; count: number }> => ipcRenderer.invoke('probeHistory:migrate', recs),
   probeRawSave: (id: string, content: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('probeRaw:save', id, content),
   probeRawRead: (id: string): Promise<{ ok: boolean; content?: string; missing?: boolean; error?: string }> =>

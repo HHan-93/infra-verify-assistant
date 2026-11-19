@@ -106,10 +106,13 @@ export function parseSpread(ctrlJson: string, podLines: string, namespaces: stri
   return out.sort((a, b) => a.ns.localeCompare(b.ns) || order[a.verdict] - order[b.verdict] || a.name.localeCompare(b.name))
 }
 
-/** 점검 명령 — 컨트롤러 JSON · 파드 배치 · descheduler 유무를 구분자로 한 번에 */
+/**
+ * 점검 명령 — 컨트롤러 JSON · 파드 배치 · descheduler 유무를 구분자로 한 번에.
+ * 파드 줄 끝의 IP 는 Valkey 마스터 배치(valkeySpread)가 nodes.conf 에 이름이 없을 때 파드를 IP 로 찾으려고 더했다(2026-11-18). parseSpread 는 앞 7칸만 본다
+ */
 export const SPREAD_CMD =
   "kubectl get deploy,sts -A -o json --request-timeout=15s 2>/dev/null; echo '__QT_PODS__'; " +
-  "kubectl get pods -A --no-headers --request-timeout=15s -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,DEL:.metadata.deletionTimestamp,OK:.metadata.ownerReferences[0].kind,OWNER:.metadata.ownerReferences[0].name' 2>/dev/null; " +
+  "kubectl get pods -A --no-headers --request-timeout=15s -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,DEL:.metadata.deletionTimestamp,OK:.metadata.ownerReferences[0].kind,OWNER:.metadata.ownerReferences[0].name,IP:.status.podIP' 2>/dev/null; " +
   "echo '__QT_DESCHED__'; kubectl get deploy,cronjob -A --no-headers --request-timeout=10s 2>/dev/null | grep -ci descheduler"
 
 export function splitSpreadOutput(out: string): { ctrl: string; pods: string; descheduler: boolean | null } {

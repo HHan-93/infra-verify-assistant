@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { NumberInput } from './NumberInput'
 import type { PortalEvent, PortalPoll } from '../lib/portalPhases'
+import type { LatSample } from '../lib/portalLatency'
 import {
   AlertTriangle,
   Check,
@@ -117,6 +119,11 @@ interface Props {
    * 모든 폴링을 넘기면 회차마다 수천 줄이라 바뀐 순간만. DOWN 감지 뒤의 것만 보낸다(마일스톤과 같은 원칙).
    */
   onEvent?: (ev: PortalEvent) => void
+  /**
+   * 요청마다 API 별 정상 응답 시간(2026-11-19 — 리포트 '포털 API 응답 시간' 의 노드 UP · DOWN 구간, lib/portalLatency).
+   * 판정과 상관없이 모든 주기를 넘긴다. 상위가 검증 중일 때만 회차 기록에 쌓는다
+   */
+  onSamples?: (at: number, list: LatSample[]) => void
 }
 
 const fmtClock = (ms: number) => {
@@ -148,7 +155,7 @@ async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Prom
   return out
 }
 
-export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending, onWatched, onEvent }: Props) {
+export default function PortalPanel({ running, t0, downAt, onMilestones, onMilestoneRevoked, onPending, onWatched, onEvent, onSamples }: Props) {
   const [cfg, setCfg] = useState<PortalConfig | null>(null)
   const [view, setView] = useState<'board' | 'config'>('board')
   const [states, setStates] = useState<Record<string, TargetState>>({})
@@ -237,6 +244,8 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
   onWatchedRef.current = onWatched
   const onEventRef = useRef(onEvent)
   onEventRef.current = onEvent
+  const onSamplesRef = useRef(onSamples)
+  onSamplesRef.current = onSamples
 
   // ── 설정 로드/저장 ────────────────────────────────────────────
   useEffect(() => {
@@ -595,6 +604,17 @@ export default function PortalPanel({ running, t0, downAt, onMilestones, onMiles
      * 화면을 도입하기 전에는 아래가 API 마다 돌았다 — 묶음이 없는 API 는 그 이름이 곧 화면이라 옛 설정은 같은 판정이 나온다.
      */
     const byId = new Map(results.map((r) => [r.t.id, r]))
+    // 응답 시간 — 화면의 모든 API(부가 포함), 정상 응답만(lib/portalLatency 주석: 빨리 돌아온 오류를 넣으면 장애 중이 더 빨라 보인다)
+    if (onSamplesRef.current && results.length)
+      onSamplesRef.current(
+        results[0].obs.at,
+        screensOf(targets).flatMap((sc) =>
+          sc.targets.flatMap((t) => {
+            const r = byId.get(t.id)
+            return r && r.obs.ok && r.obs.latencyMs != null ? [{ screen: sc.name, name: t.name, ms: r.obs.latencyMs }] : []
+          }),
+        ),
+      )
     const nextScreens = { ...screenStatesRef.current }
     const newlyRecovered: PortalMilestone[] = []
     const revoked: { name: string; downAt: number }[] = []
@@ -2833,39 +2853,6 @@ function CommitInput({ value, onCommit, ...rest }: { value: string; onCommit: (v
   )
 }
 
-/**
- * 숫자 칸 — 치는 동안은 글자 그대로 두고, 칸을 떠날 때(Enter · 바깥 클릭) 범위로 맞춰 반영한다.
- * 예전엔 칠 때마다 최솟값으로 맞춰 응답 제한 시간 1000 에서 0 을 지우면 곧바로 1000 으로 되돌아가, 끝에 0 을 덧붙이는 것밖에
- * 못 했다(2026-11-09 사용자 지적: 30초 · 60초로 바꾸고 싶었다). 확인 주기 · 연속 성공 횟수도 지우면 1 로 튀었다.
- */
-function NumberInput({ value, min, max, step, onCommit, className }: { value: number; min: number; max?: number; step?: number; onCommit: (v: number) => void; className?: string }) {
-  const [v, setV] = useState(String(value))
-  useEffect(() => setV(String(value)), [value])
-  const commit = () => {
-    const n = Number(v)
-    // step 이 1 이상(정수 칸)이면 여기서 반올림한다 — 부모가 반올림해 값이 그대로면 칸에 2.4 가 남았다(코드 리뷰 11-10)
-    const c0 = Number.isFinite(n) && v.trim() !== '' ? Math.min(max ?? Infinity, Math.max(min, n)) : value
-    const c = (step ?? 1) >= 1 ? Math.round(c0) : c0
-    setV(String(c))
-    if (c !== value) onCommit(c)
-  }
-  return (
-    <input
-      type="number"
-      min={min}
-      max={max}
-      step={step}
-      className={className}
-      value={v}
-      onChange={(e) => setV(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        if (e.key === 'Escape') setV(String(value))
-      }}
-    />
-  )
-}
 
 type ProbeResult = { status?: number; ms?: number; body?: string; error?: string }
 

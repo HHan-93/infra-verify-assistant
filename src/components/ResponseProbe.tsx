@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Radar, X, Minus, Maximize2, Play, Square, Download, Loader2, History, Trash2, FileText, Plus, Pencil } from 'lucide-react'
 import ConfirmDialog from './ConfirmDialog'
+import { NumberInput } from './NumberInput'
+import type { ProbeHistoryRecord } from '../../electron/shared-types'
 import { notifyOs } from '../lib/notify'
 import { maskForExport } from '../lib/mask'
 import {
@@ -15,6 +17,8 @@ import {
   codeText,
   specValid,
   parseNovaServers,
+  parseServerHosts,
+  mapVmHosts,
   parseHypervisors,
   type NovaServer,
   displayAddr,
@@ -33,6 +37,12 @@ import {
   type ProbeLast,
   type ProbeRun,
   type ProbeSummary,
+  type ProbeOpinion,
+  type ProbeVerdict,
+  VERDICT_LABEL,
+  hasOpinion,
+  opinionLines,
+  rtoVerdict,
   type TargetRow,
 } from '../lib/responseProbe'
 
@@ -54,9 +64,15 @@ interface ProbeSession {
 
 const CFG_KEY = 'response_probe_cfg_v1'
 const ACTIVE_KEY = 'response_probe_active_v1'
+/** 예전 이력 자리(localStorage) — 2026-11-15 부터 userData/response-probe-history 파일로 옮겼다. 처음 열 때 한 번 옮기고 지우지 않는다(되돌릴 길) */
 const HIST_KEY = 'response_probe_runs_v1'
-/** 방식(HTTP·TCP·Ping)마다 최근 몇 회를 보관할지 — 한 방식만 많이 돌려도 다른 방식 기록이 밀려나지 않게 따로 센다 */
-const HIST_MAX = 30
+/**
+ * 방식(HTTP·TCP·Ping)마다 최근 몇 회 · 며칠까지 보관할지 — 한 방식만 많이 돌려도 다른 방식 기록이 밀려나지 않게 따로 센다.
+ * 2026-11-15 사용자 결정: 30회 → 200회 · 90일(시나리오 이력과 같은 규칙). localStorage 는 몇 MB 한도라 숫자만 늘릴 수 없어 파일로 옮겼다
+ */
+const HIST_MAX = 200
+const HIST_DAYS = 90
+const histRec = (r: ProbeRun) => r as unknown as ProbeHistoryRecord
 /** 저장한 대상 세트 — 'com01 VM' · 'com02 VM' 처럼 롤링 대상별로 바꿔 쓴다 */
 const SETS_KEY = 'response_probe_sets_v1'
 interface ProbeSet {
@@ -140,6 +156,64 @@ async function runWithTimeout(
  * 회차 이름 — 보일 때는 이름(없으면 시작 시각), 연필을 누르면 그 자리에서 고친다. Enter · 칸 밖을 누르면 저장, Esc 는 취소,
  * 비우면 이름을 지워 시작 시각으로 돌아간다. 목록 줄 안에 있으므로 누름이 줄(회차 열기)로 번지지 않게 막는다.
  */
+/**
+ * 회차 판정 의견(lib/responseProbe ProbeOpinion 주석, 2026-11-16 사용자 결정). 칩은 누르는 즉시, 글은 칸을 떠날 때 저장한다
+ * (치는 동안 매 글자 파일에 쓰지 않으려고). 툴 판정(RTO)은 옆에 참고로만 보이고 사람 판정을 덮지 않는다
+ */
+function OpinionBox({ run, sum, rtoMin, onSave }: { run: ProbeRun; sum: ProbeSummary; rtoMin: number; onSave: (o: ProbeOpinion) => void }) {
+  const op = run.opinion ?? { verdict: 'none' as ProbeVerdict, text: '', at: 0 }
+  const [text, setText] = useState(op.text)
+  // 다른 회차로 바꿔 보거나 저장된 값이 바뀌면 칸을 그 값으로
+  useEffect(() => setText(run.opinion?.text ?? ''), [run.id, run.opinion?.text])
+  const save = (patch: Partial<ProbeOpinion>) => onSave({ ...op, text, ...patch, at: Date.now() })
+  const tv = rtoVerdict(sum, rtoMin)
+  const tone = op.verdict === 'fail' ? 'border-red-500/40 bg-red-500/[0.06]' : op.verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/[0.05]' : 'border-white/10 bg-white/[0.03]'
+  return (
+    <div className={'mb-3 rounded-lg border px-3 py-2 ' + tone}>
+      <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11.5px]">
+        <b className="mr-1 text-[12px] text-gray-200">판정 의견</b>
+        {(['none', 'pass', 'fail', 'info'] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => v !== op.verdict && save({ verdict: v })}
+            className={
+              'rounded-full border px-2 py-0.5 ' +
+              (v === op.verdict
+                ? v === 'fail'
+                  ? 'border-red-500/70 bg-red-500/25 text-white'
+                  : v === 'pass'
+                    ? 'border-emerald-500/70 bg-emerald-500/20 text-white'
+                    : 'border-white/40 bg-white/15 text-white'
+                : 'border-white/10 text-gray-400 hover:bg-white/10')
+            }
+          >
+            {VERDICT_LABEL[v]}
+          </button>
+        ))}
+        <span
+          title="첫 끊김부터 끊겼던 대상이 모두 복구될 때까지가 RTO 안인가(목록 위 RTO 칸의 값). 사람 판정과 따로 리포트에 함께 실립니다"
+          className={'ml-auto rounded-full border px-2 py-0.5 ' + (tv.cls === 'bad' ? 'border-red-500/40 text-red-300' : tv.cls === 'ok' ? 'border-emerald-500/40 text-emerald-300' : 'border-white/10 text-gray-500')}
+        >
+          툴 판정: RTO {rtoMin}분 {tv.text}
+          {tv.span != null ? ` (${fmtGap(tv.span)})` : ''}
+        </span>
+      </div>
+      <textarea
+        value={text}
+        rows={Math.min(8, Math.max(3, text.split('\n').length + 1))}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => text !== op.text && save({})}
+        placeholder={'요약 한 줄 (예: 실패: RTO 10분 초과, VM 2대 20분 순단)\n- 세부 내용'}
+        className="w-full resize-y rounded border border-white/10 bg-panel-light px-2 py-1.5 text-[12px] leading-relaxed text-gray-100 placeholder:text-gray-600"
+      />
+      <div className="mt-0.5 flex justify-between text-[10.5px] text-gray-500">
+        <span>첫 줄 = 요약(종합 리포트 판정 의견 목록에 실림) · 다음 줄부터 '-' 로 세부 · 칸을 벗어나면 저장, 판정 안 함 + 빈 칸이면 리포트에서 빠짐</span>
+        {op.at > 0 && <span>{fmtDateTime(op.at).slice(5, 16)} 수정</span>}
+      </div>
+    </div>
+  )
+}
+
 function RunName({ run, onRename, className }: { run: ProbeRun; onRename: (name: string) => void; className?: string }) {
   const [edit, setEdit] = useState<string | null>(null)
   // 끝낸 뒤 칸이 사라지며 blur 가 한 번 더 올 수 있다 — Esc 로 취소한 것이 그 blur 로 저장되지 않게 한 번만 처리한다
@@ -191,7 +265,7 @@ function RunName({ run, onRename, className }: { run: ProbeRun; onRename: (name:
   )
 }
 
-function buildMarkdown(run: ProbeRun, sum: ProbeSummary): string {
+function buildMarkdown(run: ProbeRun, sum: ProbeSummary, rtoMin: number): string {
   const L: string[] = []
   const cell = (v: unknown) => String(v ?? '').replace(/\|/g, '\\|')
   L.push(`# 응답 측정: ${run.label || run.host} (${fmtDateTime(run.startedAt)})`, '')
@@ -204,6 +278,20 @@ function buildMarkdown(run: ProbeRun, sum: ProbeSummary): string {
     `- 가장 긴 순단: ${sum.maxGap != null ? fmtGap(sum.maxGap) : '-'}`,
     '',
   )
+  // 판정 의견 — 툴 판정(RTO)과 함께(lib ProbeOpinion 주석). RTO 는 리포트 버튼과 같은 값
+  if (hasOpinion(run.opinion)) {
+    const o = run.opinion
+    const { title, lines } = opinionLines(o.text)
+    const tv = rtoVerdict(sum, rtoMin)
+    L.push(
+      '## 판정 의견',
+      '',
+      `- 판정: **${VERDICT_LABEL[o.verdict]}** (툴 판정: RTO ${rtoMin}분 ${tv.text}${tv.span != null ? `, ${fmtGap(tv.span)}` : ''})`,
+      ...(title ? [`- ${title}`] : []),
+      ...lines.map((l) => `  - ${l}`),
+      '',
+    )
+  }
   L.push('## 대상별', '', '| 대상 | 주소 | 끊김 | 복구 첫 성공 시간 | 순단 | 끊김 횟수 |', '|---|---|---|---|---|---|')
   for (const t of sum.targets) {
     if (!t.outages.length) {
@@ -240,7 +328,8 @@ function NovaPicker({
   defaultSid: string
   rc: string
   onRc: (v: string) => void
-  onAdd: (vms: { name: string; ip: string }[]) => void
+  /** host = VM 을 불러온 컴퓨트 호스트(장애 노드로 쓴다), sid = 조회한 세션(측정 끝에 VM 위치를 다시 읽는다) */
+  onAdd: (vms: { name: string; ip: string }[], host: string, sid: string) => void
   onClose: () => void
 }) {
   const connected = sessions.filter((s) => s.connected)
@@ -387,7 +476,7 @@ function NovaPicker({
           <span>IP 가 여럿이면 첫 번째를 넣습니다. 넣은 뒤 수동 입력 칸에서 바꿀 수 있습니다.</span>
           <button
             disabled={!pick.size}
-            onClick={() => onAdd((vms ?? []).filter((v) => pick.has(v.id)).map((v) => ({ name: v.name, ip: v.ips[0] })))}
+            onClick={() => onAdd((vms ?? []).filter((v) => pick.has(v.id)).map((v) => ({ name: v.name, ip: v.ips[0] })), host, sid)}
             className="ml-auto rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
           >
             {pick.size}대 대상에 추가
@@ -469,7 +558,48 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     setMinimized(true)
   }
   const [closeAsk, setCloseAsk] = useState(false)
-  const [history, setHistory] = useState<ProbeRun[]>(() => loadJson<ProbeRun[]>(HIST_KEY, []))
+  const [history, setHistory] = useState<ProbeRun[]>([])
+  /**
+   * 마지막으로 그린 이력 — 측정을 끝내는 stop() 은 서버 응답을 몇 초씩 기다리므로, 시작할 때 본 history 로 목록을 만들면
+   * 그 사이 파일에서 읽어 들인 이력을 덮어써 목록이 비었다(코드 점검 11-15: 창을 다시 열자마자 최대 시간 종료가 걸릴 때)
+   */
+  const historyRef = useRef(history)
+  historyRef.current = history
+  /** 이 창에서 지운 회차 — 늦게 끝난 위치 조회가 지운 기록을 다시 만들지 않게 */
+  const deletedRef = useRef(new Set<string>())
+  /**
+   * 파일 이력을 다 읽었나 — 읽기 전에 끝난 회차로 한도 정리를 하면 아직 안 읽은 회차를 '넘친 것' 으로 볼 수 없어(목록이 비어 있다)
+   * 해롭진 않지만, 정리는 읽은 뒤에만 한다. 읽기에 실패했으면 끝까지 정리하지 않는다(지울 대상을 모른다)
+   */
+  const histLoaded = useRef(false)
+  const [histErr, setHistErr] = useState('')
+  useEffect(() => {
+    let off = false
+    void (async () => {
+      let r = await window.electronAPI.probeHistoryLoad()
+      if (r.ok && !r.migrated) {
+        const m = await window.electronAPI.probeHistoryMigrate(loadJson<ProbeRun[]>(HIST_KEY, []).map(histRec))
+        if (m.ok) r = await window.electronAPI.probeHistoryLoad()
+      }
+      if (off) return
+      if (!r.ok) {
+        setHistErr(`지난 측정 기록을 읽지 못했습니다. ${r.error ?? ''}`)
+        return
+      }
+      const list = r.list as unknown as ProbeRun[]
+      // 읽는 사이 끝난 회차(cur)는 살린다
+      setHistory((cur) => [...cur.filter((h) => !list.some((x) => x.id === h.id)), ...list].sort((a, b) => b.startedAt - a.startedAt))
+      histLoaded.current = true
+      if (r.bad.length) setHistErr(`읽지 못한 기록 파일 ${r.bad.length}개는 지우지 않고 남겨 두었습니다.`)
+    })()
+    return () => {
+      off = true
+    }
+  }, [])
+  const saveRuns = (runs: ProbeRun[]) =>
+    void window.electronAPI.probeHistorySave(runs.map(histRec)).then((r) => {
+      if (!r.ok) setHistErr(`측정 기록을 저장하지 못했습니다. ${r.error ?? ''}`)
+    })
   /** 시작 전에 붙여 둘 회차 이름(선택) — 시작하면 비운다(다음 회차에 같은 이름이 따라가지 않게) */
   const [runName, setRunName] = useState('')
   const [viewId, setViewId] = useState<string | null>(null)
@@ -650,6 +780,39 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   }
 
   /** 측정을 끝낸다 — 서버의 프로세스를 내리고, 남은 이벤트를 마저 읽어 회차를 이력에 남긴다 */
+  /**
+   * 측정이 끝난 뒤 대상 VM 이 어느 노드에 있는지 읽는다(2026-11-15 사용자 결정: 리포트의 evacuation 그림). **조회만** 한다
+   * (openstack server list). 측정을 끝내는 일과 따로 돈다 — 기록은 먼저 남기고, 위치는 읽히면 덧붙인다. 실패해도 이유만 남긴다.
+   * 장애 노드를 적지 않은 회차는 읽지 않는다(노드를 내린 측정이 아닐 수 있다).
+   */
+  const readVmHosts = async (run: ProbeRun) => {
+    if (!run.config.failNode) return
+    const sid = sessions.find((x) => x.connected && novaKey && x.profileKey === novaKey)?.id
+    // 측정이 끝난 지 오래면(창을 며칠 뒤 다시 열어 최대 시간 종료가 걸린 경우 등) 지금 위치는 그때의 evacuation 결과가 아니다
+    const endAt = run.hostEndAt ?? Math.max(0, ...run.events.map((e) => e.at))
+    let patch: Partial<ProbeRun>
+    if (endAt && Date.now() - endAt > 10 * 60_000) patch = { locErr: '측정이 끝나고 10분 넘게 지나 위치를 읽지 않음(그 뒤에 옮겨졌을 수 있음)' }
+    else if (!sid) patch = { locErr: 'OpenStack 조회 세션이 연결돼 있지 않음. [노드 VM 불러오기] 에서 쓴 세션' }
+    else if (!/^[A-Za-z0-9._~\/\-]+$/.test(novaRc)) patch = { locErr: 'openrc 경로에 쓸 수 없는 글자가 있음' }
+    else {
+      const r = await runWithTimeout(sid, `bash -lc '. ${novaRc} 2>/dev/null; openstack server list --all-projects --long -c Name -c Host -c Networks -f json'`, 60_000)
+      const list = r.ok ? parseServerHosts(r.out ?? '') : null
+      if (!list) patch = { locErr: 'Nova 조회 실패' }
+      else {
+        const m = mapVmHosts(run.config.targets, list)
+        patch = Object.keys(m).length ? { vmHosts: m, locErr: undefined } : { locErr: '대상 IP 와 맞는 VM 이 없음' }
+      }
+    }
+    // 저장은 화면 갱신과 따로 — [측정 중지하고 닫기] 로 창이 먼저 닫히면 상태 갱신은 버려져도 파일에는 남아야 한다.
+    // 조회하는 사이 이름을 바꿨을 수 있어 지금 목록의 기록에 덧붙인다(목록에서 지웠으면 다시 만들지 않는다)
+    if (deletedRef.current.has(run.id)) return
+    // 창이 닫히는 중이면 목록에 아직 이 회차가 없을 수 있다(그때는 끝낼 때 남긴 기록 그대로에 덧붙인다)
+    const base = historyRef.current.find((x) => x.id === run.id) ?? run
+    const nh = { ...base, ...patch }
+    saveRuns([nh])
+    setHistory((cur) => cur.map((x) => (x.id === run.id ? { ...x, ...patch } : x)))
+  }
+
   const stop = async (reason: 'auto' | 'manual' | 'max_time' = 'manual') => {
     const auto = reason === 'auto'
     const a = activeRef.current
@@ -696,22 +859,32 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
         rawSaved: rawSaved || undefined,
         endReason: reason,
       }
-      const all = [run, ...history.filter((h) => h.id !== run.id)]
-      const seenByMode: Record<string, number> = {}
-      const next = all.filter((h) => {
-        const m = h.config.mode ?? 'http'
-        seenByMode[m] = (seenByMode[m] ?? 0) + 1
-        return seenByMode[m] <= HIST_MAX
-      })
-      setHistory(next)
-      saveJson(HIST_KEY, next)
-      // 방식별 30회를 넘어 밀려난 회차의 원문도 지운다
+      const all = [run, ...historyRef.current.filter((h) => h.id !== run.id)]
+      // 방금 끝난 회차는 늘 남기고 그 방식의 한 칸으로 센다
+      const seenByMode: Record<string, number> = { [run.config.mode ?? 'http']: 1 }
+      const cut = Date.now() - HIST_DAYS * 86_400_000
+      const next = histLoaded.current
+        ? all.filter((h) => {
+            if (h.id === run.id) return true
+            const m = h.config.mode ?? 'http'
+            seenByMode[m] = (seenByMode[m] ?? 0) + 1
+            return seenByMode[m] <= HIST_MAX && h.startedAt >= cut
+          })
+        : all
+      // 한도(방식별 200회 · 90일)를 넘어 밀려난 회차는 기록 파일과 원문을 같이 지운다
       const dropped = all.filter((h) => !next.includes(h)).map((h) => h.id)
-      if (dropped.length) void window.electronAPI.probeRawDelete(dropped)
+      // 목록은 지금 상태(cur)에 더한다 — 위 계산 뒤에 읽어 들인 회차가 있어도 잃지 않게
+      setHistory((cur) => [run, ...cur.filter((h) => h.id !== run.id && !dropped.includes(h.id))])
+      saveRuns([run])
+      if (dropped.length) {
+        void window.electronAPI.probeHistoryDelete(dropped)
+        void window.electronAPI.probeRawDelete(dropped)
+      }
       // 효과(useEffect)로 지우면 [중지하고 닫기] 에서 창이 먼저 사라져 기록이 남았다 — 다시 열면 끝난 회차가 '측정 중' 으로 되살아났다
       saveJson(ACTIVE_KEY, null)
       setActive(null)
       setViewId(run.id)
+      void readVmHosts(run)
       if (auto) {
         const s = summarize(run.config, run.events, [])
         const span = s.firstOutage && s.allRecovered ? fmtGap(s.allRecovered - s.firstOutage) : ''
@@ -736,9 +909,22 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
   const [setName, setSetName] = useState('')
   const [setPick, setSetPick] = useState('')
   const [setDelAsk, setSetDelAsk] = useState<string | null>(null)
+  /** 지울지 물어보는 측정 기록(2026-11-17 사용자 요청: 쓰레기통을 누르면 바로 지워져 원문까지 사라졌다) */
+  const [runDelAsk, setRunDelAsk] = useState<ProbeRun | null>(null)
   const [novaOpen, setNovaOpen] = useState(false)
   const [novaRc, setNovaRc] = useState(() => loadJson<string>('response_probe_nova_rc_v1', '~/admin-openrc'))
-  const addFromNova = (vms: { name: string; ip: string }[]) => {
+  /** 리포트의 RTO(목표 복구 시간, 분) — 뽑기 직전에 바꾼다(2026-11-15 사용자 결정: 기본 10분, 마지막 값 기억) */
+  const [rtoMin, setRtoMin] = useState(() => loadJson<number>('response_probe_rto_min_v1', 10))
+  /** 측정 끝에 VM 위치(Nova)를 읽을 세션 — [노드 VM 불러오기] 에서 쓴 세션의 프로필 키(세션 id 는 재시작하면 바뀐다) */
+  const [novaKey, setNovaKey] = useState(() => loadJson<string>('response_probe_nova_key_v1', ''))
+  const addFromNova = (vms: { name: string; ip: string }[], host: string, sid: string) => {
+    // 불러온 호스트가 곧 장애 노드(대상 VM 을 모아 둔 노드) — 사람이 아래 칸에서 고칠 수 있다
+    if (host) setCfg((c) => ({ ...c, failNode: host }))
+    const key = sessions.find((x) => x.id === sid)?.profileKey
+    if (key) {
+      setNovaKey(key)
+      saveJson('response_probe_nova_key_v1', key)
+    }
     // 빈 행은 버리고 뒤에 붙인다. 이미 있는 IP 는 다시 넣지 않는다
     const have = new Set(rows.map((r) => r.host.trim()).filter(Boolean))
     const keep = rows.filter((r) => r.host.trim() || r.name.trim())
@@ -821,15 +1007,24 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     setHistory((cur) => {
       if (!cur.some((h) => h.id === id)) return cur
       const next = cur.map((h) => (h.id === id ? { ...h, label } : h))
-      saveJson(HIST_KEY, next)
+      saveRuns(next.filter((h) => h.id === id))
       return next
     })
   }
 
+  /** 판정 의견 저장 — 끝난 회차에만 단다(측정 중에는 칸을 보이지 않는다). renameRun 과 같은 이유로 함수형으로 고친다 */
+  const saveOpinion = (id: string, opinion: ProbeOpinion) =>
+    setHistory((cur) => {
+      if (!cur.some((h) => h.id === id)) return cur
+      const next = cur.map((h) => (h.id === id ? { ...h, opinion } : h))
+      saveRuns(next.filter((h) => h.id === id))
+      return next
+    })
+
   const exportMd = async (run: ProbeRun) => {
     const s = summarize(run.config, run.events, [])
     const name = `${fileStem('응답측정', run)}.md`
-    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildMarkdown(run, s)) })
+    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildMarkdown(run, s, rtoMin)) })
     setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   /**
@@ -842,13 +1037,13 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
     const d = new Date()
     const p2 = (n: number) => String(n).padStart(2, '0')
     const name = `응답측정_종합_${runs.length}회차_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.html`
-    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeMultiHtml(runs)), format: 'html' })
+    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeMultiHtml(runs, { rtoMin })), format: 'html' })
     setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   const exportHtml = async (run: ProbeRun) => {
     const s = summarize(run.config, run.events, [])
     const name = `${fileStem('응답측정결과', run)}.html`
-    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeHtml(run, s)), format: 'html' })
+    const res = await window.electronAPI.saveReport({ defaultName: name, content: maskForExport(buildProbeHtml(run, s, { rtoMin })), format: 'html' })
     setMsg(res.saved ? `저장했습니다. ${res.path ?? ''}` : res.error ? `저장 실패: ${res.error}` : '')
   }
   /** 서버에 남은 모든 요청 기록(checks.csv)을 받아 저장 — 원문 증적 */
@@ -1083,6 +1278,18 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                 </button>
                 <span className="text-[11px] text-gray-500">{parsed.targets.length}개 대상</span>
               </div>
+              {/* 장애 노드 — 리포트의 측정 구성 · 장애 노드별 묶음에 쓴다(판정에는 쓰지 않음). 노드 VM 불러오기로 넣으면 자동으로 채워진다 */}
+              <label className="mb-1.5 flex items-center gap-2 text-[11px] text-gray-400">
+                <span className="shrink-0">장애 노드</span>
+                <input
+                  value={cfg.failNode ?? ''}
+                  disabled={!!active}
+                  onChange={(e) => setCfg((c) => ({ ...c, failNode: e.target.value.trim() || undefined }))}
+                  placeholder="contrabass01 (대상 VM 을 모아 두고 내릴 노드)"
+                  className="w-[260px] rounded border border-white/10 bg-panel-light px-2 py-0.5 font-mono text-[11.5px] text-gray-100 disabled:opacity-50"
+                />
+                <span className="truncate text-gray-500">리포트 구성도에 쓰고, 측정이 끝나면 VM 이 옮겨 간 노드를 읽습니다</span>
+              </label>
               {inputTab === 'form' ? (
                 <div className="rounded border border-white/10 bg-panel-light/40 p-1.5">
                   <div className={'mb-1 grid gap-1 px-0.5 text-[10.5px] text-gray-500 ' + gridCols}>
@@ -1205,13 +1412,12 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                 .map(([k, label, min, max]) => (
                 <label key={k} className="block">
                   <span className="mb-0.5 block text-[11px] text-gray-400">{label}</span>
-                  <input
-                    type="number"
+                  <NumberInput
                     min={min}
                     max={max}
                     value={cfg[k]}
                     disabled={!!active}
-                    onChange={(e) => setCfg((c) => ({ ...c, [k]: Math.min(max, Math.max(min, Number(e.target.value) || min)) }))}
+                    onCommit={(v) => setCfg((c) => ({ ...c, [k]: v }))}
                     className="w-full rounded border border-white/10 bg-panel-light px-2 py-1 text-[12px] text-gray-100 disabled:opacity-60"
                   />
                 </label>
@@ -1267,13 +1473,12 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                 onChange={(e) => setCfg((c) => ({ ...c, autoStop: e.target.checked }))}
               />
               <span>끊겼던 대상이 모두 복구되면 자동 종료</span>
-              <input
-                type="number"
+              <NumberInput
                 min={0}
                 max={300}
                 value={cfg.settleSec}
                 disabled={!!active || !cfg.autoStop}
-                onChange={(e) => setCfg((c) => ({ ...c, settleSec: Math.min(300, Math.max(0, Number(e.target.value) || 0)) }))}
+                onCommit={(v) => setCfg((c) => ({ ...c, settleSec: v }))}
                 className="w-14 rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[12px] text-gray-100 disabled:opacity-50"
               />
               <span className="text-gray-500">초 더 보고</span>
@@ -1318,12 +1523,15 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
             <div className="mt-2 border-t border-white/10 pt-3">
               <div className="mb-1 flex items-center gap-1.5 text-gray-400">
                 <History size={13} /> 지난 측정 · {(mode === 'http' ? 'HTTP' : modeText({ mode, expectCode: cfg.expectCode }))} {modeHistory.length}회
-                <span className="ml-auto text-[10.5px] text-gray-500">최근 {HIST_MAX}회 보관</span>
+                <span className="ml-auto text-[10.5px] text-gray-500">
+                  최근 {HIST_MAX}회 · {HIST_DAYS}일 보관
+                </span>
               </div>
               <p className="mb-1.5 text-[10.5px] leading-relaxed text-gray-500">
-                지금 고른 방식으로 잰 회차만 보입니다(방식마다 최근 {HIST_MAX}회). 누르면 결과를 다시 열어 리포트·CSV 를 뽑을 수 있고,
+                지금 고른 방식으로 잰 회차만 보입니다(방식마다 최근 {HIST_MAX}회 · {HIST_DAYS}일). 누르면 결과를 다시 열어 리포트·CSV 를 뽑을 수 있고,
                 삭제해도 클라이언트 VM 의 /tmp/qterm-probe 기록은 남습니다.
               </p>
+              {histErr && <div className="mb-1.5 rounded bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">{histErr}</div>}
               {modeHistory.length === 0 && <div className="text-[11px] text-gray-500">아직 없습니다.</div>}
               {modeHistory.length > 0 && (
                 // 여러 회차를 한 리포트로 — 가용성 검증 이력과 같은 꼴(전체 선택 + 고른 회차 리포트)
@@ -1350,6 +1558,20 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                   >
                     <FileText size={11} /> 종합 리포트{pickedRuns.length ? ` (${pickedRuns.length})` : ''}
                   </button>
+                  <label className="flex items-center gap-1 text-gray-400" title="리포트의 RTO(목표 복구 시간). 첫 끊김부터 모든 대상 복구까지가 이 안이면 통과. 한 회차 리포트에도 같은 값을 씁니다">
+                    RTO
+                    <NumberInput
+                      min={1}
+                      max={180}
+                      value={rtoMin}
+                      onCommit={(v) => {
+                        setRtoMin(v)
+                        saveJson('response_probe_rto_min_v1', v)
+                      }}
+                      className="w-[46px] rounded border border-white/10 bg-panel-light px-1 py-0 text-[11px] text-gray-100"
+                    />
+                    분
+                  </label>
                 </div>
               )}
               {modeHistory.map((h) => {
@@ -1385,11 +1607,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        const next = history.filter((x) => x.id !== h.id)
-                        setHistory(next)
-                        saveJson(HIST_KEY, next)
-                        void window.electronAPI.probeRawDelete([h.id])
-                        if (viewId === h.id) setViewId(null)
+                        setRunDelAsk(h)
                       }}
                       title="이 기록 삭제: 이 PC 에 받아 둔 원문도 지웁니다(클라이언트 VM 의 /tmp 기록은 남습니다)"
                       className="ml-auto rounded p-0.5 text-gray-500 hover:bg-white/10 hover:text-gray-200"
@@ -1477,6 +1695,7 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
                     첫 끊김부터 모두 복구까지 <b className="text-gray-100">{fmtGap(sum.allRecovered - sum.firstOutage)}</b>
                   </p>
                 )}
+                {!active && <OpinionBox run={shown} sum={sum} rtoMin={rtoMin} onSave={(o) => saveOpinion(shown.id, o)} />}
                 <div className="mb-4 grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
                   {sum.targets.map((t) => {
                     const openO = t.outages.find((o) => o.end == null)
@@ -1553,6 +1772,24 @@ export default function ResponseProbe({ sessions, onClose }: { sessions: ProbeSe
           }}
           onAdd={addFromNova}
           onClose={() => setNovaOpen(false)}
+        />
+      )}
+      {runDelAsk && (
+        <ConfirmDialog
+          title="측정 기록 삭제"
+          message={`"${runDelAsk.label || fmtDateTime(runDelAsk.startedAt)}" 기록을 지울까요?\n이 PC 에 받아 둔 원문(CSV)도 함께 지워지고 되돌릴 수 없습니다. 클라이언트 VM 의 /tmp 기록은 남습니다.`}
+          confirmLabel="삭제"
+          onConfirm={() => {
+            const id = runDelAsk.id
+            // 함수형으로 — 확인창이 떠 있는 동안 측정 · 이름 바꾸기로 목록이 바뀌었어도 그 기록만 뺀다
+            setHistory((cur) => cur.filter((x) => x.id !== id))
+            deletedRef.current.add(id)
+            void window.electronAPI.probeHistoryDelete([id])
+            void window.electronAPI.probeRawDelete([id])
+            if (viewId === id) setViewId(null)
+            setRunDelAsk(null)
+          }}
+          onCancel={() => setRunDelAsk(null)}
         />
       )}
       {setDelAsk && (

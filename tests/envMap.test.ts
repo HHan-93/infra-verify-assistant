@@ -1,6 +1,6 @@
 // 환경 구성도 — 2026-11-14 실제 장비 출력(IP 는 10.99 로 가림) 견본으로 파서 · 묶음 · HTML 을 확인한다
 import { test, eq, ok, fixture } from './harness'
-import { parseNodeFacts, parseCtrl, parseOs, parseCeph, parseK8s, buildEnvMap, renderEnvMapHtml, pickVms, serviceRoles, splitSections, diffEnvMaps, renderEnvDiffHtml } from '../src/lib/envMap'
+import { parseNodeFacts, parseCtrl, parseOs, parseCeph, parseK8s, buildEnvMap, renderEnvMapHtml, pickVms, serviceRoles, splitSections, diffEnvMaps, renderEnvDiffHtml, parsePkgs, osVersionRows, parsePkgTimes } from '../src/lib/envMap'
 
 const osRaw = () => {
   const j = JSON.parse(fixture('envmap-openstack.json'))
@@ -154,4 +154,100 @@ test('수집본 비교 — 변경 · 신규 · 동일 셋만, 분산이 나빠�
   eq([k8s.rows[0].key, k8s.rows[0].worse, k8s.rows[0].after], ['boot-factory / boot-factory-auth', true, '레플리카 2 · 1대에 몰림'])
   const h = renderEnvDiffHtml(a, b, { title: '환경 구성도 비교', nameA: 'V3', nameB: 'V4' })
   ok(h.includes('>변경<b>') && h.includes('>신규<b>') && h.includes('>동일<b>') && !/바뀜|없어짐|새로 생김|—/.test(h), '표시 문구')
+})
+
+// OpenStack 서비스 버전 — 2026-11-17 실제 장비 rpm -qa · python 출력(contrabass01 · 04)
+const n1v = () => fixture('envmap-node1.txt') + '\n' + fixture('envmap-pkgs-node1.txt')
+const n4v = () => fixture('envmap-node4.txt') + '\n' + fixture('envmap-pkgs-node4.txt')
+test('OpenStack 버전 — rpm 이름 · 버전-릴리스 가르기(배포판 표시 · 아키텍처 뗌), pip 줄', () => {
+  const p = parsePkgs(fixture('envmap-pkgs-node1.txt'))
+  const v = (n: string) => p.find((x) => x.name === n)?.ver
+  eq([v('openstack-nova-api'), v('openstack-cinder'), v('openstack-dashboard-theme'), v('openstack-network-scripts-openvswitch3.4'), v('pip:masakari')], ['31.0.0-1', '26.0.0-1', '25.3.0-1', '10.11.1-7', '19.0.1.dev3'])
+  // egg-info · dist-info 로 두 번 잡혀도 하나
+  eq(parsePkgs('pip masakari 19.0.1\npip masakari 19.0.1').length, 1)
+})
+test('OpenStack 버전 — 노드별 표: 없는 서비스는 -, 도는데 못 읽은 Masakari 는 못 읽음, 플러그인(ui) 은 섞지 않는다', () => {
+  const m = buildEnvMap({ at: 0, nodes: [{ out: n1v() }, { out: n4v() }], errors: {} })
+  const rows = osVersionRows(m.nodes)!
+  const r = (n: string) => rows.find((x) => x.name === n)?.cells
+  eq(r('Cinder'), ['26.0.0-1', null])
+  eq(r('Nova'), ['31.0.0-1', '31.0.0-1'])
+  eq(r('Octavia'), ['16.0.0-1', null])
+  eq(r('Manila'), ['20.0.0-1', null])
+  eq(r('Masakari'), ['19.0.1.dev3', null])
+  // 노드 1 의 견본은 pip3 list 를 masakari 로만 걸러 masakari-monitors 가 없다 — host-monitor 가 도니 '없음' 이 아니라 '못 읽음'
+  eq(r('Masakari monitors'), [undefined, '19.0.1.dev2'])
+  ok(!rows.some((x) => x.mixed), '같은 버전이면 다름 아님')
+  ok(!m.warnings.some((w) => /버전이 노드마다/.test(w)), '확인 필요 없음')
+  const h = renderEnvMapHtml(m, { title: 't' })
+  ok(h.includes('OpenStack 서비스 버전') && h.includes('openstack-cinder') && h.includes('못 읽음'), '표가 그려짐')
+  // 버전 조회 전 수집본(옛 명령) — 절을 그리지 않는다
+  const old = buildEnvMap({ at: 0, nodes: [{ out: fixture('envmap-node1.txt') }], errors: {} })
+  eq(osVersionRows(old.nodes), null)
+  ok(!renderEnvMapHtml(old, { title: 't' }).includes('OpenStack 서비스 버전'), '옛 수집본은 절 없음')
+})
+test('OpenStack 버전 — 노드마다 다르면 확인 필요 · 노란 칸, 수집본 비교에 전 → 후', () => {
+  const up = n1v().replace('openstack-cinder-26.0.0-1', 'openstack-cinder-26.1.0-1')
+  const n2 = n1v().replace(/contrabass01/g, 'contrabass02')
+  const m = buildEnvMap({ at: 0, nodes: [{ out: up }, { out: n2 }], errors: {} })
+  ok(m.warnings.includes('Cinder 버전이 노드마다 다름: 노드 1 26.1.0-1 · 노드 2 26.0.0-1'), m.warnings.join(' | '))
+  ok(renderEnvMapHtml(m, { title: 't' }).includes('<td class="vc diff">'), '노란 칸')
+  const before = buildEnvMap({ at: 0, nodes: [{ out: n1v() }, { out: n4v() }], errors: {} })
+  const after = buildEnvMap({ at: 1, nodes: [{ out: up }, { out: n4v() }], errors: {} })
+  const sw = diffEnvMaps(before, after).sections[0].rows
+  const c = sw.find((x) => x.key === 'OpenStack Cinder')!
+  eq([c.before, c.after, c.mark], ['26.0.0-1', '26.1.0-1', 'chg'])
+  eq(sw.find((x) => x.key === 'OpenStack Nova')?.mark, 'same')
+  // 버전은 그대로 두고 릴리스만 올린 사내 수정 패치(26.0.0-1 → 26.0.0-2)도 변경으로 잡는다(11-17 사용자 결정)
+  const re = buildEnvMap({ at: 1, nodes: [{ out: n1v().replace('openstack-cinder-26.0.0-1', 'openstack-cinder-26.0.0-2') }, { out: n4v() }], errors: {} })
+  const cr = diffEnvMaps(before, re).sections[0].rows.find((x) => x.key === 'OpenStack Cinder')!
+  eq([cr.before, cr.after, cr.mark], ['26.0.0-1', '26.0.0-2', 'chg'])
+  // 2.17.6 수집본(릴리스 번호 없이 버전만)과 견주면 버전만으로 — '26.0.0 → 26.0.0-1' 이 변경으로 찍히지 않게
+  const v176 = JSON.parse(JSON.stringify(before)) as typeof before
+  for (const n of v176.nodes) if (n.facts?.pkgs) n.facts.pkgs = n.facts.pkgs.map((p) => (p.name.startsWith('pip:') ? p : { ...p, ver: p.ver.replace(/-.*$/, '') }))
+  const c176 = diffEnvMaps(v176, before).sections[0].rows.find((x) => x.key === 'OpenStack Cinder')!
+  eq([c176.before, c176.after, c176.mark], ['26.0.0', '26.0.0', 'same'])
+  // 한쪽이 버전 조회 전 수집본이면 버전 줄을 싣지 않는다('신규' 로 읽히지 않게)
+  const old = buildEnvMap({ at: 0, nodes: [{ out: fixture('envmap-node1.txt') }], errors: {} })
+  ok(!diffEnvMaps(old, after).sections[0].rows.some((x) => x.key.startsWith('OpenStack ')), '옛 수집본과는 비교 안 함')
+})
+test('OpenStack 설치 저장소 — dnf 줄 끝 @저장소(11-17 dnf list 출력 줄), 노드마다 다르면 노드별로', () => {
+  // 'openstack-cinder.noarch  1:26.0.0-1.el9s  @Openstack-Epoxy' 를 awk '{print $NF}' | sort -u 한 것 — 머리 줄 'Installed Packages' 의 Packages 는 버린다
+  const repo = '@@QT:repo@@\n@Openstack-Epoxy\nPackages'
+  const m = buildEnvMap({ at: 0, nodes: [{ out: n1v() + '\n' + repo }, { out: n4v() + '\n' + repo }], errors: {} })
+  eq(m.nodes[0].facts?.repos, ['Openstack-Epoxy'])
+  ok(renderEnvMapHtml(m, { title: 't' }).includes('설치 저장소: <b>Openstack-Epoxy</b>'), '표 위 한 줄')
+  const m2 = buildEnvMap({ at: 0, nodes: [{ out: n1v() + '\n' + repo }, { out: n4v() + '\n@@QT:repo@@\n@Openstack-Epoxy\n@commandline' }], errors: {} })
+  ok(renderEnvMapHtml(m2, { title: 't' }).includes('노드 1: Openstack-Epoxy / 노드 2: Openstack-Epoxy · 파일로 직접 설치'), '노드마다 다르면 노드별')
+  // 저장소를 못 읽은 수집(dnf 없음)은 줄을 싣지 않는다
+  ok(!renderEnvMapHtml(buildEnvMap({ at: 0, nodes: [{ out: n1v() }], errors: {} }), { title: 't' }).includes('설치 저장소'), '못 읽으면 없음')
+})
+
+// 다시 수집했을 때 바뀐 버전(2026-11-19 사용자 요청: '26.0.0 → 26.4.0 (2026-11-18 변경)'). 설치 시각 줄은 rpm --qf '%{NAME} %{INSTALLTIME}' 모양
+test('OpenStack 버전 변경 — 직전 수집본과 견줘 칸에 이전 → 지금 · 설치한 날, 다음 수집에도 이어 감', () => {
+  eq(parsePkgTimes('openstack-cinder 1763440087\npip:masakari 1763000000\nopenstack-nova-api 12\n'), { 'openstack-cinder': 1763440087000, 'pip:masakari': 1763000000000 })
+  const n2 = (s: string) => s.replace(/contrabass01/g, 'contrabass02')
+  const before = buildEnvMap({ at: 1, nodes: [{ out: n1v() }, { out: n2(n1v()) }], errors: {} })
+  eq(before.verChanges, undefined)
+  const t = Date.parse('2026-11-18T13:28:07+09:00')
+  const up = (s: string) => s.replace('openstack-cinder-26.0.0-1', 'openstack-cinder-26.4.0-1') + `\n@@QT:pkgt@@\nopenstack-cinder ${t / 1000}\nopenstack-nova-api ${t / 1000 - 86400 * 30}`
+  const at2 = Date.parse('2026-11-19T10:00:00+09:00')
+  const after = buildEnvMap({ at: at2, nodes: [{ out: up(n1v()) }, { out: n2(n1v()) }], errors: {} }, )
+  eq(after.verChanges, undefined) // prev 를 넘기지 않으면 계산하지 않는다
+  const a2 = buildEnvMap({ at: at2, nodes: [{ out: up(n1v()) }, { out: n2(n1v()) }], errors: {} }, { prev: before })
+  eq(a2.verChanges, [{ svc: 'Cinder', host: 'contrabass01', from: '26.0.0-1', to: '26.4.0-1', at: t, installed: true }])
+  const h = renderEnvMapHtml(a2, { title: 't' })
+  ok(h.includes('<span class="from">26.0.0-1</span> → <b>26.4.0-1</b><div class="when">2026-11-18 변경</div>'), '바뀐 칸')
+  ok(h.includes('주황 칸 = 지난 수집 뒤 버전이 바뀐 곳'), '설명 한 줄')
+  // 다음 수집에서 그대로면 이어 간다 · 노드 2 를 올렸는데 설치 시각을 못 읽었으면 수집 날짜로 '수집에서 확인'
+  const at3 = Date.parse('2026-11-20T09:00:00+09:00')
+  const a3 = buildEnvMap({ at: at3, nodes: [{ out: up(n1v()) }, { out: n2(n1v()).replace('openstack-cinder-26.0.0-1', 'openstack-cinder-26.4.0-1') }], errors: {} }, { prev: a2 })
+  eq(a3.verChanges?.map((c) => [c.host, c.from, c.to, c.installed]), [['contrabass01', '26.0.0-1', '26.4.0-1', true], ['contrabass02', '26.0.0-1', '26.4.0-1', false]])
+  ok(renderEnvMapHtml(a3, { title: 't' }).includes('2026-11-20 수집에서 확인'), '설치 시각 모름')
+  // 2.17.6 수집본(버전만)에서 다시 모은 것만으로는 변경이 아니다
+  const v176 = JSON.parse(JSON.stringify(before)) as typeof before
+  for (const n of v176.nodes) if (n.facts?.pkgs) n.facts.pkgs = n.facts.pkgs.map((p) => (p.name.startsWith('pip:') ? p : { ...p, ver: p.ver.replace(/-.*$/, '') }))
+  eq(buildEnvMap({ at: at2, nodes: [{ out: n1v() }, { out: n2(n1v()) }], errors: {} }, { prev: v176 }).verChanges, [])
+  // 2.17.6 수집본 26.0.0 → 26.4.0-1 은 변경
+  eq(buildEnvMap({ at: at2, nodes: [{ out: up(n1v()) }, { out: n2(n1v()) }], errors: {} }, { prev: v176 }).verChanges?.map((c) => [c.from, c.to]), [['26.0.0', '26.4.0-1']])
 })

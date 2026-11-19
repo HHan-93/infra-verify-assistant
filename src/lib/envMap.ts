@@ -31,6 +31,24 @@ export const NODE_SCRIPT = [
   `${MK('ip')}; ip -br -4 addr`,
   `${MK('units')}; systemctl list-units --type=service --state=running --no-pager --plain --no-legend`,
   `${MK('chrony')}; chronyc sources 2>&1; chronyc tracking 2>&1 | head -4`,
+  /*
+   * OpenStack 서비스 버전(2026-11-17 사용자 요청: 노드에 설치된 OpenStack 의 Cinder 업그레이드 전후를 확인). RDO 패키지(.el9s)라 rpm -qa 로
+   * 나온다. Masakari 만 소스(pip) 설치라 rpm 에 없고, contrabass04 의 masakari-monitors 는 pip3 list 에도 안 나왔다(실행 파일
+   * /usr/local/bin/masakari-hostmonitor 의 #!/usr/bin/python3 에서 importlib.metadata 로는 19.0.1.dev2 가 나왔다) — 그래서 설치 정보로
+   * 직접 묻는다. 명령 보기 창이 '; ' 로 나눠 보이므로 python 은 ';' 없이 한 식으로 쓴다. 둘 다 읽기만 한다
+   */
+  /*
+   * 설치 저장소(2026-11-17 사용자 결정) — 'Openstack-Epoxy' 처럼 저장소 이름에 릴리스가 들어 있어 릴리스를 추측 없이 싣는다.
+   * -C 는 캐시만 보고 네트워크로 나가지 않는다(미러가 늦어도 묶음이 늘어지지 않게). 줄 끝 '@저장소' 만 남긴다
+   */
+  `${MK('repo')}; timeout 20 dnf -C -q list --installed 'openstack-*' 2>/dev/null | awk '{print $NF}' | sort -u`,
+  `${MK('pkgs')}; rpm -qa 'openstack-*' 2>&1; timeout 15 /usr/bin/python3 -c "[print('pip', d.metadata['Name'], d.version) for d in __import__('importlib.metadata').metadata.distributions() if (d.metadata['Name'] or '').lower() in ('masakari', 'masakari-monitors')]" 2>/dev/null`,
+  /*
+   * 패키지 설치 시각(2026-11-19 사용자 요청: 다시 수집하면 바뀐 버전을 '26.0.0 → 26.4.0 (2026-11-18 변경)' 으로). 바뀐 날을 수집한 날이 아니라
+   * 실제로 깐 날로 적으려고 rpm 의 INSTALLTIME 을 읽는다. pip(Masakari)은 패키지 정보 폴더(dist-info)의 수정 시각 — pip 이 설치할 때 만든다.
+   * _path 가 없는 배포판이면 그 줄만 빠지고(그 서비스는 '수집에서 확인' 날짜로 적는다) 버전 조회(pkgs)와는 따로라 버전 표에는 영향이 없다
+   */
+  `${MK('pkgt')}; rpm -qa --qf '%{NAME} %{INSTALLTIME}\\n' 'openstack-*' 2>/dev/null; timeout 15 /usr/bin/python3 -c "import os, importlib.metadata as m; [print('pip:' + (d.metadata['Name'] or '').lower(), int(os.path.getmtime(str(d._path)))) for d in m.distributions() if (d.metadata['Name'] or '').lower() in ('masakari', 'masakari-monitors') and hasattr(d, '_path')]" 2>/dev/null`,
 ].join('; ')
 /** 컨트롤러(OpenStack 조회 세션)에서 — 클러스터 상태 */
 export const CTRL_SCRIPT = [
@@ -116,6 +134,40 @@ export interface NodeFacts {
   /** 돌고 있는 서비스 유닛(.service 뗌) */
   units: string[]
   ntp?: { refId: string; name: string; stratum?: number }
+  /** 설치 패키지(rpm 'openstack-*' + pip 은 'pip:이름') — 없으면 이 수집에 버전 조회가 없었거나(2.17.5 까지의 수집본) 못 읽음 */
+  pkgs?: { name: string; ver: string }[]
+  /** 패키지 설치 시각(epoch ms) — 이름(pip 은 'pip:이름') → 시각. 2.17.9 까지의 수집본에는 없다 */
+  pkgTimes?: Record<string, number>
+  /** openstack- 패키지를 설치한 저장소('Openstack-Epoxy') — dnf 가 없거나 못 읽으면 없음 */
+  repos?: string[]
+}
+/**
+ * rpm -qa 의 'openstack-nova-api-31.0.0-1.el9s.noarch' → 이름 · '31.0.0-1'(버전-릴리스, 배포판 표시 .el9s · 아키텍처 뗌), python 출력 'pip masakari 19.0.1.dev3'.
+ * 릴리스 번호까지 싣는 이유(2026-11-17 사용자 결정): 사내 수정 패치는 버전을 그대로 두고 릴리스만 올려(26.0.0-1 → 26.0.0-2) 다시 빌드하는
+ * 일이 흔하다 — 버전만 보면 업그레이드했는데도 표는 그대로, 비교는 '동일' 이 된다. 2.17.6 수집본은 버전만 있다(diffEnvMaps 가 맞춘다)
+ * 같은 패키지가 두 번(egg-info · dist-info 가 함께 있으면 distributions() 가 둘 다 낸다) 잡히면 하나로
+ */
+export function parsePkgs(out: string): { name: string; ver: string }[] {
+  const r: { name: string; ver: string }[] = []
+  for (const l of out.split('\n').map((x) => x.trim())) {
+    const pip = l.match(/^pip\s+(\S+)\s+(\S+)$/)
+    if (pip) {
+      r.push({ name: `pip:${pip[1].toLowerCase()}`, ver: pip[2] })
+      continue
+    }
+    const m = l.match(/^(openstack-[\w.+-]+?)-(\d[\w.+~]*)-([\w.+~]+)\.(noarch|x86_64|aarch64|i686)$/)
+    if (m) r.push({ name: m[1], ver: `${m[2]}-${m[3].replace(/\.(el|fc)\d.*$/, '')}` })
+  }
+  return r.filter((x, i) => r.findIndex((y) => y.name === x.name && y.ver === x.ver) === i)
+}
+/** 'openstack-cinder 1763440087' · 'pip:masakari 1763440087' → 이름 → epoch ms. 읽은 것이 없으면 undefined(옛 수집 · 못 읽음) */
+export function parsePkgTimes(out: string): Record<string, number> | undefined {
+  const r: Record<string, number> = {}
+  for (const l of out.split('\n')) {
+    const m = l.trim().match(/^((?:openstack-|pip:)[\w.+-]+)\s+(\d{9,11})$/)
+    if (m) r[m[1]] = Math.max(r[m[1]] ?? 0, +m[2] * 1000)
+  }
+  return Object.keys(r).length ? r : undefined
 }
 export function parseNodeFacts(out: string): NodeFacts | null {
   const s = splitSections(out)
@@ -152,7 +204,146 @@ export function parseNodeFacts(out: string): NodeFacts | null {
   // 고른 서버 이름은 sources 의 '^*' 줄이 이름으로 나오기도(노드1 은 서버 이름) IP 로 나오기도(나머지) 했다 — tracking 의 Reference ID 로 묶는다
   const sel = ch.split('\n').find((l) => /^\^\*/.test(l))?.trim().split(/\s+/)[1]
   const ntp = ref ? { refId: ref[1].toUpperCase(), name: sel || ref[2], stratum } : undefined
-  return { host, os, kernel, cpus, cpuModel, sockets, memGiB: mem ? Number(mem) : undefined, ifaces, units, ntp }
+  // 구역이 없으면(옛 명령) · rpm 이 없으면 '못 읽음'. 패키지가 하나도 없는 것(OpenStack 이 없는 노드)은 빈 목록 — 둘을 섞지 않는다
+  const pkgs = s.pkgs == null || /command not found|not found/i.test(s.pkgs) ? undefined : parsePkgs(s.pkgs)
+  const repoList = [...new Set((s.repo ?? '').split('\n').map((l) => l.trim().match(/^@(\S+)$/)?.[1]).filter((x): x is string => !!x))].sort(natural)
+  const repos = repoList.length ? repoList : undefined
+  const pkgTimes = parsePkgTimes(s.pkgt ?? '')
+  return { host, os, kernel, cpus, cpuModel, sockets, memGiB: mem ? Number(mem) : undefined, ifaces, units, ntp, pkgs, repos, pkgTimes }
+}
+
+/**
+ * OpenStack 서비스 버전 표의 행(2026-11-17 사용자 결정: 구성도 안이 아니라 맨 아래 표 하나 · 목업 ver-mock).
+ * 서비스마다 대표 패키지로 고른다 — 클라이언트(python3-*client)와 대시보드 플러그인(manila-ui · octavia-ui, 버전 줄기가 다르다)은 뺀다.
+ * unit: 이 유닛이 도는데 버전을 못 찾으면 '-'(설치 안 됨)가 아니라 '못 읽음' 으로 둔다(조회 실패 ≠ 없음 — pip 설치를 못 읽은 경우)
+ */
+const OS_SVC: { name: string; src: string; re: RegExp; unit?: RegExp }[] = [
+  { name: 'Nova', src: 'openstack-nova-*', re: /^openstack-nova-/ },
+  { name: 'Neutron', src: 'openstack-neutron-*', re: /^openstack-neutron(-|$)/ },
+  { name: 'Cinder', src: 'openstack-cinder', re: /^openstack-cinder$/ },
+  { name: 'Glance', src: 'openstack-glance', re: /^openstack-glance$/ },
+  { name: 'Keystone', src: 'openstack-keystone', re: /^openstack-keystone$/ },
+  { name: 'Placement', src: 'openstack-placement-*', re: /^openstack-placement-/ },
+  { name: 'Masakari', src: 'pip: masakari', re: /^pip:masakari$/, unit: /^masakari-(api|engine)$/ },
+  { name: 'Masakari monitors', src: 'pip: masakari-monitors', re: /^pip:masakari-monitors$/, unit: /^masakari-.*monitor/ },
+  { name: 'Horizon', src: 'openstack-dashboard', re: /^openstack-dashboard$/ },
+  { name: 'Heat', src: 'openstack-heat-*', re: /^openstack-heat-(?!ui$)/ },
+  { name: 'Swift', src: 'openstack-swift-*', re: /^openstack-swift-/ },
+  { name: 'Barbican', src: 'openstack-barbican-*', re: /^openstack-barbican-/ },
+  { name: 'Manila', src: 'openstack-manila', re: /^openstack-manila(-share)?$/ },
+  { name: 'Octavia', src: 'openstack-octavia-*', re: /^openstack-octavia-(?!ui$)/ },
+]
+export interface OsVerRow {
+  name: string
+  src: string
+  /** 노드 순서대로 — 버전, null = 그 노드에 없음, undefined = 못 읽음 */
+  cells: (string | null | undefined)[]
+  /** 노드마다 버전이 다르다(같은 노드 안에서 패키지끼리 다른 것도) */
+  mixed: boolean
+}
+/** 노드별 OpenStack 서비스 버전 — 버전 정보가 있는 노드가 하나도 없으면(옛 수집본) null */
+export function osVersionRows(nodes: Pick<EnvMapNode, 'facts'>[]): OsVerRow[] | null {
+  if (!nodes.some((n) => n.facts?.pkgs)) return null
+  const rows: OsVerRow[] = []
+  for (const s of OS_SVC) {
+    const cells = nodes.map((n): string | null | undefined => {
+      const pk = n.facts?.pkgs
+      if (!pk) return undefined
+      const vs = [...new Set(pk.filter((p) => s.re.test(p.name)).map((p) => p.ver))].sort(natural)
+      if (vs.length) return vs.join(' / ')
+      if (s.unit && n.facts!.units.some((u) => s.unit!.test(u))) return undefined
+      return null
+    })
+    const vals = [...new Set(cells.filter((c): c is string => typeof c === 'string'))]
+    // 어느 노드에도 버전이 없으면 행을 그리지 않는다 — 단, 서비스가 도는데 못 읽은 것(unit)은 남긴다
+    const unitUnread = !!s.unit && nodes.some((n) => n.facts?.pkgs && n.facts.units.some((u) => s.unit!.test(u)))
+    if (!vals.length && !unitUnread) continue
+    rows.push({ name: s.name, src: s.src, cells, mixed: vals.length > 1 || vals.some((v) => v.includes(' / ')) })
+  }
+  return rows
+}
+/**
+ * OpenStack 서비스 버전 변경 기록(2026-11-19 사용자 요청) — 그룹의 구성도는 하나라 다시 수집하면 이전 버전이 사라진다. 다시 수집할 때
+ * 직전 수집본과 노드(호스트)별로 견줘 바뀐 칸을 남기고, 다음 수집에서도 버전이 그대로면 기록을 이어 간다(바뀐 뒤 몇 번을 다시 모아도 보이게).
+ * 다시 바뀌면 그 직전 값에서 새 값으로 덮는다(가장 최근 변경 하나만 — 표 칸이라 이력을 다 싣지 않는다).
+ * at = 그 노드에서 그 서비스 패키지를 깐 시각(가장 늦은 것). 못 읽었으면 이번 수집 시각이고 installed=false('수집에서 확인' 으로 적는다)
+ */
+export interface OsVerChange {
+  svc: string
+  host: string
+  from: string
+  to: string
+  at: number
+  installed: boolean
+  /** 사람이 날짜를 골랐다(2026-11-19 사용자 요청: 설치 기록이 없거나 실제로 바뀐 날이 다르면 고를 수 있게) — at 은 그날 0시 */
+  manual?: boolean
+}
+/**
+ * 버전이 같은가 — 한쪽이 2.17.6 수집본(버전만, '26.0.0')이면 릴리스 번호를 떼고 견준다(diffEnvMaps 와 같은 기준).
+ * 그러지 않으면 다시 모으기만 해도 '26.0.0 → 26.0.0-1' 이 변경으로 찍힌다
+ */
+const cutRel = (v: string) => v.replace(/-[^\s/]*/g, '')
+const sameVer = (a: string, b: string) => (a.includes('-') && b.includes('-') ? a === b : cutRel(a) === cutRel(b))
+/** 그 노드에서 그 서비스 패키지를 깐 시각(가장 늦은 것) */
+function svcInstalledAt(f: NodeFacts | undefined, svc: string): number | undefined {
+  const s = OS_SVC.find((x) => x.name === svc)
+  if (!s || !f?.pkgTimes) return undefined
+  const ts = Object.entries(f.pkgTimes)
+    .filter(([n]) => s.re.test(n))
+    .map(([, t]) => t)
+  return ts.length ? Math.max(...ts) : undefined
+}
+export function osVerChanges(prev: EnvMapSnapshot | undefined, nodes: EnvMapNode[], at: number): OsVerChange[] {
+  if (!prev) return []
+  const before = osVersionRows(prev.nodes)
+  const now = osVersionRows(nodes)
+  if (!before || !now) return prev.verChanges ?? []
+  const out: OsVerChange[] = []
+  for (const r of now) {
+    const b = before.find((x) => x.name === r.name)
+    nodes.forEach((n, i) => {
+      const c = r.cells[i]
+      if (typeof c !== 'string' || !n.host) return
+      const j = prev.nodes.findIndex((x) => x.host === n.host)
+      const p = j >= 0 ? b?.cells[j] : undefined
+      if (typeof p === 'string' && !sameVer(p, c)) {
+        const t = svcInstalledAt(n.facts, r.name)
+        out.push({ svc: r.name, host: n.host, from: p, to: c, at: t ?? at, installed: t != null })
+        return
+      }
+      // 이번엔 그대로(또는 이전 값을 못 읽음) — 앞서 남긴 기록이 지금 버전과 같으면 이어 간다
+      const old = prev.verChanges?.find((x) => x.svc === r.name && x.host === n.host)
+      if (old && sameVer(old.to, c)) out.push({ ...old, to: c })
+    })
+  }
+  return out
+}
+
+/** 행의 버전을 노드별로 묶은 글 — '노드 1 · 노드 3 26.1.0 · 노드 2 26.0.0', 모두 같으면 '26.0.0'(확인 필요 · 수집본 비교가 같은 말) */
+export function osVersionText(nodes: Pick<EnvMapNode, 'label'>[], r: OsVerRow): string {
+  const by = new Map<string, string[]>()
+  r.cells.forEach((c, i) => {
+    if (typeof c === 'string') by.set(c, [...(by.get(c) ?? []), nodes[i].label])
+  })
+  if (by.size === 1 && !r.mixed) return [...by.keys()][0]
+  return [...by.entries()].map(([v, ls]) => `${ls.join(' · ')} ${v}`).join(' · ')
+}
+
+/** 저장소 이름을 사람 말로 — System 은 rpm 으로 직접, commandline 은 dnf 에 파일을 줘서 깐 것(사내 수정 패치를 이렇게 넣기도 한다) */
+const repoName = (r: string) => (r === 'System' ? 'rpm 직접 설치' : r === 'commandline' ? '파일로 직접 설치' : r)
+/** 노드별 설치 저장소 — 모두 같으면 'Openstack-Epoxy', 다르면 '노드 1 · 노드 2 Openstack-Epoxy · 노드 4 …'. 아무 노드도 못 읽었으면 undefined */
+export function osRepoText(nodes: Pick<EnvMapNode, 'label' | 'facts'>[]): string | undefined {
+  const by = new Map<string, string[]>()
+  for (const n of nodes) {
+    if (!n.facts?.repos?.length) continue
+    // 저장소 이름을 앞에, 직접 설치(System · commandline)는 뒤에
+    const special = (r: string) => r === 'System' || r === 'commandline'
+    const k = [...n.facts.repos.filter((r) => !special(r)), ...n.facts.repos.filter(special)].map(repoName).join(' · ')
+    by.set(k, [...(by.get(k) ?? []), n.label])
+  }
+  if (!by.size) return undefined
+  if (by.size === 1) return [...by.keys()][0]
+  return [...by.entries()].map(([k, ls]) => `${ls.join(' · ')}: ${k}`).join(' / ')
 }
 
 /** 노드 유닛에서 OpenStack · Masakari 역할 */
@@ -530,6 +721,8 @@ export interface EnvMapSnapshot {
   warnings: string[]
   /** 수집하지 못한 출처 */
   errors: Record<string, string>
+  /** 직전 수집본보다 바뀐 OpenStack 서비스 버전(osVerChanges) — 처음 수집 · 2.17.9 까지의 수집본은 없다 */
+  verChanges?: OsVerChange[]
 }
 
 /**
@@ -554,7 +747,7 @@ export function pickVms(vms: OsVm[], k8sIps: Set<string>, keep: string[] = []): 
   return vms.filter((v) => new RegExp(`^${head}[_-]`).test(v.name))
 }
 
-export function buildEnvMap(raw: EnvMapRaw, opts: { labels?: Record<string, string>; keepVms?: string[] } = {}): EnvMapSnapshot {
+export function buildEnvMap(raw: EnvMapRaw, opts: { labels?: Record<string, string>; keepVms?: string[]; prev?: EnvMapSnapshot } = {}): EnvMapSnapshot {
   const warnings: string[] = []
   const allFacts = raw.nodes.map((n) => (n.out ? parseNodeFacts(n.out) : null)).filter((x): x is NodeFacts => !!x)
   const ctrl = raw.ctrl ? parseCtrl(raw.ctrl) : {}
@@ -681,6 +874,8 @@ export function buildEnvMap(raw: EnvMapRaw, opts: { labels?: Record<string, stri
   if (raw.k8s && !k8s) unread('k8s', 'kubectl get nodes 출력을 읽지 못했습니다')
   if (k8s && !k8s.podsOk) unread('k8s 파드', 'kubectl get pods 출력을 읽지 못했습니다(배치 표를 그리지 않음)')
   if (raw.os?.servers && !os.vms) unread('OpenStack 서버', 'server list 출력을 읽지 못했습니다')
+  // 같은 서비스가 노드마다 버전이 다르다 — 업그레이드를 일부 노드에만 한 상태(그림은 그대로, 표에서는 노란 칸)
+  for (const r of osVersionRows(nodes) ?? []) if (r.mixed) warnings.push(`${r.name} 버전이 노드마다 다름: ${osVersionText(nodes, r)}`)
   return {
     v: 1,
     at: raw.at,
@@ -697,18 +892,22 @@ export function buildEnvMap(raw: EnvMapRaw, opts: { labels?: Record<string, stri
     k8s: k8s ? { ...k8s, nodes: k8sNodes } : undefined,
     warnings,
     errors,
+    verChanges: opts.prev ? osVerChanges(opts.prev, nodes, raw.at) : undefined,
   }
 }
 
 // ── HTML ──────────────────────────────────────────────────────
 const he = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
 const TiB = (b: number) => (b ? `${(b / 1024 ** 4).toFixed(1)} TiB` : '')
+const fmtDay = (t: number) => fmtAt(t).slice(0, 10)
 const fmtAt = (t: number) => {
   const d = new Date(t)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 export const roleText = (r: EnvMapNode['role']) => ({ mixed: '믹스드', controller: '컨트롤러', compute: '컴퓨트', '': '' })[r]
+// IP 목록 · OpenStack 서비스 버전 표(.inv)는 모든 칸 가운데 정렬(2026-11-17 사용자 요청: 두 표만 왼쪽 정렬이라 다른 표와 어긋나 보였다)
+const OSV_CSS = `.osv td.vc{font-family:Consolas,monospace;text-align:center}.osv .pk{font-size:10.5px;color:var(--mut);font-weight:400}.osv .na{color:#b3bac4}.osv .unk{color:var(--warn);font-family:inherit}.osv td.diff{background:#fff1d6;color:var(--warn);font-weight:700}.osv td.chg{background:#fff4e8}.osv td.chg b{color:#c2410c}.osv .from{color:var(--mut)}.osv .when{font:11px "Malgun Gothic",sans-serif;color:#c2410c;margin-top:1px}`
 const CSS = `:root{--ink:#1b2430;--mut:#5b6675;--line:#d8dde4;--hd:#c9d6ea;--hdi:#1f3a68;--bg:#eef1f5;--ok:#047a3f;--warn:#a35b00;--bad:#c21f1f;--ev:#e0b84a}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 "Malgun Gothic","맑은 고딕",system-ui,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .wrap{max-width:1360px;margin:0 auto;padding:22px 16px 60px}
@@ -726,7 +925,7 @@ const CSS = `:root{--ink:#1b2430;--mut:#5b6675;--line:#d8dde4;--hd:#c9d6ea;--hdi
 .ng>.band{z-index:1;margin:-7px -10px -5px;border-radius:8px;pointer-events:none;position:relative}
 .ng>.band>i{position:absolute;right:10px;top:-10px;font-style:normal;font-size:10.5px;font-weight:700;padding:0 6px;border-radius:4px;white-space:nowrap;background:#fff}
 .hdr{padding:10px 12px 9px!important;background:#e8eef7;border-radius:10px 10px 0 0;border-bottom:1px solid #c5cfdd;display:block!important;margin-bottom:4px}
-.hdr b{font-size:15px;color:var(--hdi)}.hdr .h{color:var(--hdi);font-weight:600;margin-left:6px}.hdr .meta{display:flex;justify-content:space-between;align-items:center;margin-top:2px;font-size:11.5px;color:#3a5583}.hdr .hw{font-size:11px;color:#3a5583;margin-top:2px}
+.hdr b{font-size:15px;color:var(--hdi)}.hdr .h{color:var(--hdi);font-weight:600}.hdr .meta{display:flex;justify-content:space-between;align-items:center;margin-top:2px;font-size:11.5px;color:#3a5583}.hdr .hw{font-size:11px;color:#3a5583;margin-top:2px}
 .role{border-radius:4px;padding:0 7px;font-size:11px;font-weight:700;background:#1f3a68;color:#fff}.role.cp{background:#6b7685}
 .b{border-radius:4px;padding:3px 8px;font-size:11.5px;text-align:center;flex:1 1 auto;white-space:nowrap;background:#eef3fb;border:1px solid #c6d5ee;color:#1f3a68}.b.full{flex-basis:100%}.b small{opacity:.8}
 .b.vip{background:#0f7a5a;border-color:#0f7a5a;color:#fff;font-weight:700}.b.act{background:#dff3e8;border-color:#93c9a8;color:#0f5132;font-weight:700}
@@ -741,7 +940,7 @@ const CSS = `:root{--ink:#1b2430;--mut:#5b6675;--line:#d8dde4;--hd:#c9d6ea;--hdi
 .band.ce{border:2px dashed #c9b400;background:rgba(220,200,0,.05)}.band.ce>i{color:#6d6200;border:1px solid #e3d77a}
 .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;font-size:11.5px;color:var(--mut)}.legend .sw{display:inline-block;width:22px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
 .vg{display:grid;gap:14px}.vc{border:1px solid #c5cfdd;border-radius:10px;overflow:hidden;background:#fff}
-.vc .vh{background:#e8eef7;padding:8px 12px;display:flex;align-items:baseline;gap:8px;border-bottom:1px solid #c5cfdd}.vc .vh b{color:var(--hdi);font-size:14px}.vc .vh span{color:#3a5583;font-size:11.5px}.vc .vh em{margin-left:auto;font-style:normal;font-size:11.5px;color:var(--mut)}
+.vc .vh{background:#e8eef7;padding:8px 12px;display:flex;align-items:baseline;gap:8px;border-bottom:1px solid #c5cfdd}.vc .vh b{color:var(--hdi);font-size:14px}.vc .vh b span{font-weight:600}.vc .vh em{margin-left:auto;font-style:normal;font-size:11.5px;color:var(--mut)}
 .vc .vb{padding:10px 12px;display:flex;flex-direction:column;gap:6px}.vgrp{font-size:10.5px;font-weight:700;color:var(--mut);margin-top:2px}.vrow{display:flex;flex-wrap:wrap;gap:7px}
 .vm{border:1px solid #c9ced6;background:#f1f2f4;border-radius:5px;padding:3px 8px;font-size:11.5px;line-height:1.4;min-width:118px}.vm .ip{display:block;font-size:10.5px;color:var(--mut)}.vm .fl{display:block;font-size:10px;color:#8a94a3}.vm .kn{display:block;font-size:10px;color:#2d64c0}
 .vm.k8s{background:#e6eefb;border-color:#9fb6e0}.vm.ev{box-shadow:0 0 0 2px #fff,0 0 0 4px #e0b84a}.vm.off{opacity:.55}.vm .st{display:block;font-size:10px;color:var(--bad);font-weight:700}.vm.hl{outline:2px solid #2d64c0;outline-offset:1px}
@@ -754,7 +953,7 @@ const CSS = `:root{--ink:#1b2430;--mut:#5b6675;--line:#d8dde4;--hd:#c9d6ea;--hdi
 .pd th.pb,.pd td.pb{border-left:2px solid #9fb2cf}.pd th.hl,.pd td.hl{background:#eef4ff}.pd td.pe{color:var(--warn);font-weight:700}
 .pd td.sp{white-space:nowrap;font-weight:700}.sp.good{color:var(--ok)}.sp.bad{color:var(--bad)}.sp.one{color:var(--mut);font-weight:400}.pd tr.risk td.wl{color:var(--bad);font-weight:700}
 .note{margin-top:10px;font-size:12px;color:var(--mut);line-height:1.7}
-.inv{width:100%;border-collapse:collapse;font-size:12px}.inv th,.inv td{border:1px solid var(--line);padding:5px 8px;text-align:left}.inv th{background:var(--hd);color:var(--hdi)}
+.inv{width:100%;border-collapse:collapse;font-size:12px}.inv th,.inv td{border:1px solid var(--line);padding:5px 8px;text-align:center;vertical-align:middle}.inv th{background:var(--hd);color:var(--hdi)}
 @page{size:A4 landscape;margin:8mm}
 @media print{body{background:#fff}.wrap{padding:0}.sec{box-shadow:none}.pd{font-size:10.5px}}`
 // 인쇄 · PDF 는 A4 가로(2026-11-14 확인: 세로 A4 폭(약 720px)에서는 노드 카드 머리가 '노드 / 1' 로 꺾이고 k8s 표 열 이름이 겹쳤다.
@@ -880,7 +1079,8 @@ export function renderEnvMapHtml(m: EnvMapSnapshot, opts: { title: string; check
   N.forEach((n, i) => {
     const f = n.facts
     const hw = f ? [f.cpus ? `${f.cpus} vCPU${f.cpuModel ? ` (${f.cpuModel.replace(/\(R\)|\(TM\)|CPU|@.*$/g, '').replace(/\s+/g, ' ').trim()}${f.sockets ? ` × ${f.sockets}` : ''})` : ''}` : '', f.memGiB ? `메모리 ${f.memGiB}GB` : ''].filter(Boolean).join(' · ') : ''
-    g += `<div class="cardbg" style="grid-column:${i + 1}"></div><div class="cell hdr" style="grid-column:${i + 1};grid-row:1"><b>${he(n.label)}</b><span class="h">${he(n.host)}</span><div class="meta"><span class="ip">${he(n.mgmtIp)}</span>${n.role ? `<span class="role${n.role === 'compute' ? ' cp' : ''}">${roleText(n.role)}</span>` : ''}</div>${hw ? `<div class="hw">${he(hw)}</div>` : ''}</div>`
+    // 노드 이름은 '노드 1(contrabass01)' 처럼 붙여 쓴다(2026-11-15 사용자 요청). VM 카드 · 파드 표 · 주소 목록도 같은 꼴
+    g += `<div class="cardbg" style="grid-column:${i + 1}"></div><div class="cell hdr" style="grid-column:${i + 1};grid-row:1"><b>${he(n.label)}</b>${n.host ? `<span class="h">(${he(n.host)})</span>` : ''}<div class="meta"><span class="ip">${he(n.mgmtIp)}</span>${n.role ? `<span class="role${n.role === 'compute' ? ' cp' : ''}">${roleText(n.role)}</span>` : ''}</div>${hw ? `<div class="hw">${he(hw)}</div>` : ''}</div>`
   })
   rows.forEach((r, ri) => N.forEach((n, i) => (g += `<div class="cell" style="grid-column:${i + 1};grid-row:${ri + 2}">${r.cell(n)}</div>`)))
   N.forEach((n, i) => (g += `<div class="cell osbar" style="grid-column:${i + 1};grid-row:${rows.length + 2}">${OS(n)}</div>`))
@@ -895,7 +1095,7 @@ export function renderEnvMapHtml(m: EnvMapSnapshot, opts: { title: string; check
     const v = m.vms.filter((x) => x.host === n.host)
     const k8 = v.filter((x) => x.k8s)
     const ot = v.filter((x) => !x.k8s)
-    return `<div class="vc"><div class="vh"><b>${he(n.label)}</b><span>${he(n.host)}</span><em>VM ${v.length}대</em></div><div class="vb">${
+    return `<div class="vc"><div class="vh"><b>${he(n.label)}${n.host ? `<span>(${he(n.host)})</span>` : ''}</b><em>VM ${v.length}대</em></div><div class="vb">${
       !v.length
         ? '<div class="vnone">배치된 VM 없음</div>'
         : (k8.length ? `<div class="vgrp">k8s 노드</div><div class="vrow">${k8.map(vmChip).join('')}</div>` : '') + (ot.length ? `<div class="vgrp">그 밖</div><div class="vrow">${ot.map(vmChip).join('')}</div>` : '')
@@ -916,7 +1116,7 @@ export function renderEnvMapHtml(m: EnvMapSnapshot, opts: { title: string; check
     const physOf = (name: string) => cl.find((c) => c.k.name === name)?.host ?? ''
     const short = (s: string) => s.replace(/^[a-z0-9]+-(?=(master|infra|manager|worker|biz|control))/i, '')
     pd += `<table class="pd"><colgroup><col style="width:250px">${cl.map(() => '<col>').join('')}<col style="width:46px"><col style="width:100px"></colgroup>`
-    pd += `<thead><tr><th rowspan="2">워크로드</th>${groups.map((gp) => `<th class="pb" colspan="${gp.nodes.length}">${he(gp.n.label)}${gp.n.host ? ` · ${he(gp.n.host)}` : ''}</th>`).join('')}<th rowspan="2">대기</th><th rowspan="2">물리 노드</th></tr><tr>`
+    pd += `<thead><tr><th rowspan="2">워크로드</th>${groups.map((gp) => `<th class="pb" colspan="${gp.nodes.length}">${he(gp.n.label)}${gp.n.host ? `(${he(gp.n.host)})` : ''}</th>`).join('')}<th rowspan="2">대기</th><th rowspan="2">물리 노드</th></tr><tr>`
     pd += cl.map((c) => `<th class="${c.first ? 'pb' : ''}" data-col="${he(c.k.name)}">${he(short(c.k.name))}${!c.k.ready ? '<span class="nr">NotReady</span>' : ''}</th>`).join('') + '</tr></thead><tbody>'
     const byNs = new Map<string, K8sWorkload[]>()
     for (const w of K.workloads) byNs.set(w.ns, [...(byNs.get(w.ns) ?? []), w])
@@ -951,17 +1151,45 @@ export function renderEnvMapHtml(m: EnvMapSnapshot, opts: { title: string; check
 
   // ④ IP
   let inv = '<table class="inv"><thead><tr><th>구분</th><th>이름</th><th>관리 IP</th><th>위치</th><th>역할</th></tr></thead><tbody>'
-  for (const n of N) inv += `<tr><td>물리 노드</td><td>${he(n.label)} · ${he(n.host)}</td><td class="ip">${he(n.mgmtIp)}</td><td>-</td><td>${roleText(n.role)}</td></tr>`
-  for (const n of N) if (n.vip) inv += `<tr><td>VIP</td><td>Pacemaker VIP</td><td class="ip">${he(n.vip)}</td><td>${he(n.label)}</td><td>HAProxy · OpenStack API</td></tr>`
-  for (const v of m.vms) inv += `<tr><td>VM</td><td>${he(v.name)}</td><td class="ip">${he(v.ip)}</td><td>${he(N.find((n) => n.host === v.host)?.label ?? v.host)}</td><td>${he(vmRole(v))}</td></tr>`
+  for (const n of N) inv += `<tr><td>물리 노드</td><td>${he(n.host ? `${n.label}(${n.host})` : n.label)}</td><td class="ip">${he(n.mgmtIp)}</td><td>-</td><td>${roleText(n.role)}</td></tr>`
+  for (const n of N) if (n.vip) inv += `<tr><td>VIP</td><td>Pacemaker VIP</td><td class="ip">${he(n.vip)}</td><td>${he(n.host ? `${n.label}(${n.host})` : n.label)}</td><td>HAProxy · OpenStack API</td></tr>`
+  for (const v of m.vms) inv += `<tr><td>VM</td><td>${he(v.name)}</td><td class="ip">${he(v.ip)}</td><td>${he(((n) => (n ? `${n.label}(${n.host})` : v.host))(N.find((n) => n.host === v.host)))}</td><td>${he(vmRole(v))}</td></tr>`
   inv += '</tbody></table>'
+
+  /*
+   * ⑤ OpenStack 서비스 버전 — 노드마다 설치 패키지 버전. 노드마다 다르면 가장 많은 값과 다른 칸을 노랗게(위 '확인 필요' 에도 한 줄).
+   * 버전 정보가 없는 옛 수집본은 절을 그리지 않는다(다시 수집하면 나온다)
+   */
+  const vr = osVersionRows(N)
+  let osv = ''
+  if (vr?.length) {
+    osv = `<table class="inv osv"><thead><tr><th style="width:190px">서비스</th>${N.map((n) => `<th>${he(n.host ? `${n.label}(${n.host})` : n.label)}</th>`).join('')}</tr></thead><tbody>`
+    for (const r of vr) {
+      const cnt = new Map<string, number>()
+      for (const c of r.cells) if (typeof c === 'string') cnt.set(c, (cnt.get(c) ?? 0) + 1)
+      const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+      osv += `<tr><td><b>${he(r.name)}</b><div class="pk">${he(r.src)}</div></td>${r.cells
+        .map((c, i) => {
+          if (c === undefined) return '<td class="vc"><span class="unk">못 읽음</span></td>'
+          if (c === null) return '<td class="vc"><span class="na">-</span></td>'
+          const diff = r.mixed && (c !== mode || c.includes(' / ')) ? ' diff' : ''
+          // 직전 수집보다 바뀐 칸 — '26.0.0 → 26.4.0-1' 아래에 바뀐 날(2026-11-19 사용자 요청)
+          const ch = m.verChanges?.find((x) => x.svc === r.name && x.host === N[i].host)
+          if (!ch) return `<td class="vc${diff}">${he(c)}</td>`
+          return `<td class="vc chg${diff}"><span class="from">${he(ch.from)}</span> → <b>${he(c)}</b><div class="when">${fmtDay(ch.at)} ${ch.installed || ch.manual ? '변경' : '수집에서 확인'}</div></td>`
+        })
+        .join('')}</tr>`
+    }
+    osv += '</tbody></table>'
+    if (m.verChanges?.length) osv += '<div class="note" style="margin:6px 0 0">주황 칸 = 지난 수집 뒤 버전이 바뀐 곳(이전 → 지금 · 패키지를 설치한 날)</div>'
+  }
 
   const nW = K?.workloads.length ?? 0
   const nP = K?.workloads.reduce((a, w) => a + Object.values(w.at).reduce((x, y) => x + y, 0) + w.pending, 0) ?? 0
   const osName = N.find((n) => n.facts)?.facts?.os
   const ver = [m.ceph?.version ? `<span>Ceph <b>${he(m.ceph.version)}</b></span>` : '', K?.version ? `<span>Kubernetes <b>${he(K.version)}</b></span>` : '', m.rabbit?.version ? `<span>RabbitMQ <b>${he(m.rabbit.version)}</b></span>` : '', osName ? `<span>OS <b>${he(osName)}</b></span>` : ''].join('')
   const errs = Object.entries(m.errors)
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${he(opts.title)}</title><style>${CSS}</style></head><body><div class="wrap">
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${he(opts.title)}</title><style>${CSS}${OSV_CSS}</style></head><body><div class="wrap">
 <div class="top">${opts.totalFile ? `<a href="${opts.totalFile === '__QT_TOTAL_FILE__' ? opts.totalFile : he(encodeURIComponent(opts.totalFile))}" style="color:#dbe6ff;font-size:12px;text-decoration:none">← 종합 결과</a>` : ''}<h1>${he(opts.title)}</h1><div class="sub">수집 ${fmtAt(m.at)} · 조회 명령만 사용(설정 · 상태 변경 없음)</div></div>
 ${ver ? `<div class="ver">${ver}</div>` : ''}
 <div class="sum"><div class="k">물리 노드<b>${N.length}</b></div><div class="k">검증 VM<b>${m.vms.length}</b></div>${K ? `<div class="k">k8s 노드<b>${K.nodes.length}</b></div><div class="k">워크로드<b>${nW}</b></div><div class="k">파드<b>${nP}</b></div>` : ''}</div>
@@ -973,13 +1201,15 @@ ${opts.checks && m.warnings.length ? `<div class="chk"><b>수집 시점에 확�
 ${K ? `<div class="sec"><div class="sh"><span class="n">3</span><h2>k8s 애플리케이션 배치</h2><span class="d">● 하나 = 파드 하나 · 같은 이름의 레플리카를 한 줄로</span></div>${pd}
 <div class="note">'물리 노드' 는 레플리카가 물리 노드 몇 대에 나뉘어 있는지입니다. <b class="sp bad">1대에 몰림</b> 은 그 노드를 내리면 레플리카가 모두 같이 내려갑니다. '대기' 는 노드에 배치되지 못한(Pending) 파드입니다.<br>DaemonSet 과 control-plane 정적 파드는 맨 아래에 모았습니다. 파드 IP 는 바뀌는 값이라 싣지 않습니다.</div></div>` : ''}
 <div class="sec"><div class="sh"><span class="n">${K ? 4 : 3}</span><h2>IP 목록</h2><span class="d">찾기 · 복사용</span></div>${inv}</div>
+${osv ? `<div class="sec"><div class="sh"><span class="n">${K ? 5 : 4}</span><h2>OpenStack 서비스 버전</h2></div>${osRepoText(N) ? `<div class="note" style="margin:0 0 8px">설치 저장소: <b>${he(osRepoText(N))}</b></div>` : ''}${osv}</div>` : ''}
 </div><script>(function(){document.querySelectorAll('.vm[data-vm]').forEach(function(el){el.addEventListener('mouseenter',function(){el.classList.add('hl');document.querySelectorAll('[data-col="'+el.getAttribute('data-vm')+'"]').forEach(function(x){x.classList.add('hl')})});el.addEventListener('mouseleave',function(){document.querySelectorAll('.hl').forEach(function(x){x.classList.remove('hl')})})})})()</script></body></html>`
 }
 
 // ── 수집본 비교(2026-11-14 사용자 결정 · 목업 envdiff-mock) ─────────────
 /*
  * 두 구성도(보통 이전 버전 그룹 → 지금 그룹)의 차이. 표시는 **변경 · 신규 · 동일** 셋뿐이다(사용자 결정: 이동 · 사양 · 없어짐 · 나빠짐도
- * 모두 '변경' — 무엇이 어떻게 바뀌었는지는 이전 · 지금 칸의 글로 읽는다). 색은 변경 주황 · 신규 파랑 · 동일 초록.
+ * 모두 '변경' — 무엇이 어떻게 바뀌었는지는 As-Is · To-Be 칸의 글로 읽는다). 색은 변경 주황 · 신규 파랑 · 동일 초록.
+ * 칸 머리는 As-Is · To-Be(2026-11-17 사용자 결정, 예전 '이전 · 지금' — 업그레이드 전후 비교에 쓰는 말에 맞췄다)
  * 짝짓기: 물리 노드는 표준 이름('노드 1')으로(버전마다 호스트 이름이 다를 수 있다), VM 은 이름 머리(Epoxy_)를 뗀 이름으로,
  * 워크로드는 네임스페이스/이름으로. 분산이 나빠진 워크로드(나뉨 → 몰림)는 표시는 변경이지만 맨 위에 두고 지금 칸을 빨강으로
  */
@@ -1044,6 +1274,12 @@ const serviceSet = (m: EnvMapSnapshot) => {
   return s
 }
 
+/** 호스트 → '노드 1(contrabass01)'. 물리 노드로 못 맞추면 호스트 그대로 */
+const nodeName = (m: EnvMapSnapshot, host: string) => {
+  const n = m.nodes.find((x) => x.host === host)
+  return n ? `${n.label}(${n.host})` : host
+}
+
 export function diffEnvMaps(a: EnvMapSnapshot, b: EnvMapSnapshot): EnvDiff {
   const osOf = (m: EnvMapSnapshot) => m.nodes.find((n) => n.facts)?.facts
   const sw: DiffRow[] = [
@@ -1053,12 +1289,38 @@ export function diffEnvMaps(a: EnvMapSnapshot, b: EnvMapSnapshot): EnvDiff {
     drow('Kubernetes', a.k8s?.version || undefined, b.k8s?.version || undefined),
     drow('RabbitMQ', a.rabbit?.version || undefined, b.rabbit?.version || undefined),
   ].filter((r) => !(r.before === NONE && r.after === NONE))
+  /*
+   * OpenStack 서비스 버전(업그레이드 전후 수집을 견주는 것이 이 요청의 목적 — 'Cinder 26.0.0 → 26.1.0'). 한쪽이 버전 조회 전의 수집본이면
+   * 싣지 않는다 — '없음 → 26.0.0' 이 '신규' 로 찍히면 새로 깔린 것처럼 읽힌다
+   */
+  // 한쪽이 릴리스 번호 없이(2.17.6) 수집됐으면 양쪽 다 버전만으로 견준다 — 안 그러면 '26.0.0 → 26.0.0-1' 이 변경으로 찍힌다
+  const noRel = (m: EnvMapSnapshot) => m.nodes.some((n) => n.facts?.pkgs?.some((p) => !p.name.startsWith('pip:') && !p.ver.includes('-')))
+  const cutRel = (nodes: EnvMapNode[]): EnvMapNode[] =>
+    nodes.map((n) =>
+      n.facts?.pkgs ? { ...n, facts: { ...n.facts, pkgs: n.facts.pkgs.map((p) => (p.name.startsWith('pip:') ? p : { ...p, ver: p.ver.replace(/-.*$/, '') })) } } : n,
+    )
+  const cut = noRel(a) || noRel(b)
+  const an = cut ? cutRel(a.nodes) : a.nodes
+  const bn = cut ? cutRel(b.nodes) : b.nodes
+  const va = osVersionRows(an)
+  const vb = osVersionRows(bn)
+  if (va && vb) {
+    for (const name of [...new Set([...va.map((r) => r.name), ...vb.map((r) => r.name)])]) {
+      const ra = va.find((r) => r.name === name)
+      const rb = vb.find((r) => r.name === name)
+      sw.push(drow(`OpenStack ${name}`, ra ? osVersionText(an, ra) : undefined, rb ? osVersionText(bn, rb) : undefined))
+    }
+    const rA = osRepoText(a.nodes)
+    const rB = osRepoText(b.nodes)
+    if (rA && rB) sw.push(drow('OpenStack 설치 저장소', rA, rB))
+  }
 
   const labels = [...new Set([...a.nodes.map((n) => n.label), ...b.nodes.map((n) => n.label)])].sort(natural)
   const nodeRows = labels.map((l) => {
     const na = a.nodes.find((n) => n.label === l)
     const nb = b.nodes.find((n) => n.label === l)
-    return drow(`${l} · ${(nb ?? na)!.host}`, na ? nodeSummary(na) : undefined, nb ? nodeSummary(nb) : undefined)
+    // 구성도와 같은 '노드 1(contrabass01)' 꼴(2026-11-15 사용자 요청)
+    return drow(`${l}(${(nb ?? na)!.host})`, na ? nodeSummary(na) : undefined, nb ? nodeSummary(nb) : undefined)
   })
   const sa = serviceSet(a)
   const sb = serviceSet(b)
@@ -1072,7 +1334,7 @@ export function diffEnvMaps(a: EnvMapSnapshot, b: EnvMapSnapshot): EnvDiff {
       mark: addS.length || delS.length ? 'chg' : 'same',
     })
   const cl = (m: EnvMapSnapshot) =>
-    [m.pcs ? `Pacemaker ${m.pcs.nodes}노드 · DC ${m.nodes.find((n) => n.host === m.pcs!.dc)?.label ?? m.pcs.dc}` : '', m.rabbit ? `RabbitMQ ${m.rabbit.running}/${m.rabbit.members.length}` : '', m.galera ? `Galera ${m.galera.size}` : '']
+    [m.pcs ? `Pacemaker ${m.pcs.nodes}노드 · DC ${nodeName(m, m.pcs.dc)}` : '', m.rabbit ? `RabbitMQ ${m.rabbit.running}/${m.rabbit.members.length}` : '', m.galera ? `Galera ${m.galera.size}` : '']
       .filter(Boolean)
       .join(' · ') || undefined
   nodeRows.push(drow('클러스터', cl(a), cl(b)))
@@ -1083,7 +1345,7 @@ export function diffEnvMaps(a: EnvMapSnapshot, b: EnvMapSnapshot): EnvDiff {
   nodeRows.push(drow('Masakari 세그먼트', sg(a), sg(b)))
 
   const vmText = (m: EnvMapSnapshot, v: EnvMapVm) =>
-    [m.nodes.find((n) => n.host === v.host)?.label ?? v.host, v.vcpus ? `${v.vcpus} vCPU · ${v.ramGB}GB` : '', v.ha ? 'evacuation 대상' : '', v.status !== 'ACTIVE' ? v.status : ''].filter(Boolean).join(' · ')
+    [nodeName(m, v.host), v.vcpus ? `${v.vcpus} vCPU · ${v.ramGB}GB` : '', v.ha ? 'evacuation 대상' : '', v.status !== 'ACTIVE' ? v.status : ''].filter(Boolean).join(' · ')
   const vk = [...new Set([...a.vms.map((v) => vmKey(v.name)), ...b.vms.map((v) => vmKey(v.name))])].sort(natural)
   const vmRows = vk.map((k) => {
     const va = a.vms.find((v) => vmKey(v.name) === k)
@@ -1145,13 +1407,13 @@ export function renderEnvDiffHtml(a: EnvMapSnapshot, b: EnvMapSnapshot, opts: { 
         )
         .join('')
       return `<div class="sec"><div class="sh"><span class="n">${i + 1}</span><h2>${he(s.title)}</h2>${s.desc ? `<span class="d">${he(s.desc)}</span>` : ''}</div>
-<table><colgroup><col style="width:24%"><col><col><col style="width:70px"></colgroup><thead><tr><th>${he(s.keyHead)}</th><th>이전</th><th>지금</th><th>변화</th></tr></thead><tbody>${rows}</tbody></table>${
+<table><colgroup><col style="width:24%"><col><col><col style="width:70px"></colgroup><thead><tr><th>${he(s.keyHead)}</th><th>As-Is</th><th>To-Be</th><th>변화</th></tr></thead><tbody>${rows}</tbody></table>${
         shown ? '' : '<div class="empty">변경 · 신규 없음(동일 항목도 보기로 펼칩니다)</div>'
       }${s.rows.some((r) => r.worse) ? '<div class="note">빨강은 물리 노드 분산이 나빠진 것(나뉨 → 몰림)입니다. 그 노드를 내리면 레플리카가 모두 같이 내려가므로 검증 전에 확인하세요.</div>' : ''}</div>`
     })
     .join('')
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${he(opts.title)}</title><style>${DIFF_CSS}</style></head><body><div class="wrap">
-<div class="top"><h1>${he(opts.title)}</h1><div class="sub">조회 명령으로 수집한 두 구성도의 차이</div><div class="vs"><b>${he(opts.nameA)} · ${fmtAt(a.at)} 수집</b><span>→</span><b>${he(opts.nameB)} · ${fmtAt(b.at)} 수집</b></div></div>
+<div class="top"><h1>${he(opts.title)}</h1><div class="sub">조회 명령으로 수집한 두 구성도의 차이</div><div class="vs"><b>As-Is: ${he(opts.nameA)} · ${fmtAt(a.at)} 수집</b><span>→</span><b>To-Be: ${he(opts.nameB)} · ${fmtAt(b.at)} 수집</b></div></div>
 <div class="sum"><div class="k chg">변경<b>${d.counts.chg}</b></div><div class="k add">신규<b>${d.counts.add}</b></div><div class="k same">동일<b>${d.counts.same}</b></div></div>
 <div class="tools"><label><input type="checkbox" onchange="document.body.classList.toggle('all',this.checked)"> 동일 항목도 보기</label></div>
 ${secs}</div></body></html>`

@@ -1,0 +1,7 @@
+@@QT:pkgs@@
+openstack-network-scripts-openvswitch3.4-10.11.1-7.el9s.x86_64
+openstack-neutron-common-26.0.5-1.el9s.noarch
+openstack-neutron-openvswitch-26.0.5-1.el9s.noarch
+openstack-nova-common-31.0.0-1.el9s.noarch
+openstack-nova-compute-31.0.0-1.el9s.noarch
+pip masakari-monitors 19.0.1.dev2

@@ -298,6 +298,142 @@ export const PRESETS: PresetGroup[] = [
         ]
       },
       {
+        "name": "버전 조회",
+        "commands": [
+          {
+            "label": "먼저 읽을 것",
+            "command": "",
+            "desc": "이 장비는 RDO 패키지(rpm)로 설치되어 rpm 으로 서비스 버전이 나옵니다. Masakari 만 소스(pip) 설치라 rpm 에 없어 따로 묻습니다.\n버전은 노드마다 다를 수 있습니다(업그레이드 도중). 노드마다 같은 명령을 돌려 견주세요. 환경 구성도의 'OpenStack 서비스 버전' 표는 이것을 모든 노드에서 한 번에 모은 것입니다.\nrpm 버전은 디스크에 깔린 버전입니다. 서비스를 재시작하기 전에는 옛 코드가 계속 돌므로, 업그레이드 뒤에는 '설치 시각' 과 '실행 시작 시각' 을 견줘 재시작됐는지 봅니다.\ncinder --version 같은 명령은 클라이언트 버전이라 서버 버전과 다릅니다. 모두 조회만 합니다.",
+            "info": true
+          },
+          {
+            "label": "핵심 서비스 버전",
+            "command": "rpm -q openstack-nova-common openstack-neutron-common openstack-cinder openstack-glance openstack-keystone openstack-placement-common openstack-dashboard",
+            "desc": "Nova · Neutron · Cinder · Glance · Keystone · Placement · Horizon 의 설치 버전(예: openstack-cinder-26.0.0-1.el9s.noarch 이면 26.0.0).\n그 노드에 없는 서비스는 is not installed 로 나옵니다(컴퓨트 노드는 Nova · Neutron 만 있습니다)."
+          },
+          {
+            "label": "OpenStack 패키지 버전(전체)",
+            "command": "rpm -qa 'openstack-*' | sort",
+            "desc": "노드에 설치된 openstack- 패키지 전부. Barbican · Manila · Octavia 같은 부가 서비스와 대시보드 플러그인(ui)까지 나옵니다."
+          },
+          {
+            "label": "Cinder 관련 패키지 버전",
+            "command": "rpm -qa | grep -i cinder | sort",
+            "desc": "서버(openstack-cinder · python3-cinder) · 클라이언트(python3-cinderclient) · Glance 의 Cinder 저장소 확장까지. 업그레이드 전후로 돌려 견줍니다."
+          },
+          {
+            "label": "Masakari 버전(pip 설치)",
+            "command": "/usr/bin/python3 -c \"[print(d.metadata['Name'], d.version) for d in __import__('importlib.metadata').metadata.distributions() if (d.metadata['Name'] or '').lower().startswith('masakari')]\"",
+            "desc": "masakari(api · engine) · masakari-monitors(host-monitor 등)의 설치 버전. pip3 list 에는 masakari-monitors 가 안 나오는 장비가 있어 설치 정보를 직접 묻습니다.\n아무것도 안 나오면 그 노드에 Masakari 가 없거나 다른 파이썬에 설치된 것입니다(systemctl cat masakari-host-monitor 의 ExecStart 로 확인)."
+          },
+          {
+            "label": "Cinder 서비스 위치 · 상태",
+            "command": "openstack volume service list",
+            "desc": "cinder-scheduler · volume · backup 이 어느 호스트에서 도는지와 up/down. 업그레이드 뒤 서비스가 모두 up 으로 돌아왔는지 봅니다."
+          },
+          {
+            "label": "OpenStack 저장소(릴리스) 확인",
+            "command": "dnf repolist 2>/dev/null | grep -i openstack",
+            "desc": "저장소 이름에 릴리스가 들어 있으면 여기서 보입니다(이 장비는 Openstack-Epoxy). 사내 미러로 이름을 바꿨으면 나오지 않을 수 있습니다."
+          },
+          {
+            "label": "업그레이드 가능한 OpenStack 패키지",
+            "command": "dnf list --upgrades 'openstack-*'",
+            "desc": "미러에 지금 깔린 것보다 새 버전이 올라온 openstack- 패키지만 나옵니다. 아무것도 안 나오면 미러에 새 패키지가 아직 없는 것입니다. 설치는 하지 않습니다."
+          },
+          {
+            "label": "Cinder 미러에 올라온 버전",
+            "command": "dnf list --showduplicates openstack-cinder",
+            "desc": "Installed 는 지금 깔린 버전, Available 은 미러에 있는 모든 버전입니다. 26.0.0-1 만 있으면 업그레이드할 패키지가 아직 미러에 없는 것입니다.\n버전은 그대로 두고 릴리스만 올린 사내 수정 패치(26.0.0-1 → 26.0.0-2)도 여기서 보입니다. 설치는 하지 않습니다."
+          },
+          {
+            "label": "패키지별 미러에 올라온 버전",
+            "command": "dnf list --showduplicates <PACKAGE>",
+            "desc": "패키지 이름을 넣으면(예: openstack-nova-common · openstack-neutron · openstack-glance) 깔린 버전과 미러에 있는 모든 버전을 봅니다. 설치는 하지 않습니다."
+          },
+          {
+            "label": "OpenStack CLI 버전",
+            "command": "openstack --version",
+            "desc": "이 노드의 openstack 명령(python3-openstackclient) 버전. 서버 서비스 버전과는 별개입니다."
+          },
+          {
+            "label": "패키지 설치(업그레이드) 시각 · 전체",
+            "command": "rpm -qa --last 'openstack-*' | head -40",
+            "desc": "openstack- 패키지가 언제 설치 · 업그레이드됐는지 최근 순으로. 업그레이드한 패키지가 맨 위에 모입니다."
+          },
+          {
+            "label": "서비스 실행 시작 시각 · 전체",
+            "command": "for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-*' 'neutron-*' 'masakari-*' 'octavia-*' httpd.service | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "돌고 있는 OpenStack 서비스마다 언제 시작했는지. 위 '설치 시각' 보다 뒤에 시작한 서비스는 새 버전 코드가 돌고, 앞이면 아직 옛 코드가 돌고 있어 재시작이 필요합니다.\nKeystone · Placement · Horizon 은 httpd 안에서 돌아 httpd 줄을 봅니다."
+          },
+          {
+            "label": "서버 도구가 아는 버전",
+            "command": "for c in nova-manage cinder-manage glance-manage keystone-manage placement-manage manila-manage; do command -v $c >/dev/null && echo \"$c $($c --version 2>&1 | tail -1)\"; done",
+            "desc": "서버 쪽 관리 도구(nova-manage 등)에 버전을 묻습니다. rpm 버전과 같은 값이 나와야 합니다(예: cinder-manage 26.0.0).\ncinder --version · nova --version 은 클라이언트(명령줄 도구) 버전이라 서버 버전과 다릅니다(예: cinder --version 9.7.0). 없는 도구는 건너뜁니다."
+          },
+          {
+            "label": "Nova 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-nova-common; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-nova-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Nova 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Neutron 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-neutron-common; for u in $(systemctl list-units --type=service --no-legend --plain 'neutron-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Neutron 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Cinder 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-cinder; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-cinder-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Cinder 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Glance 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-glance; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-glance-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Glance 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Keystone 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-keystone; for u in $(systemctl list-units --type=service --no-legend --plain httpd.service | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Keystone 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다.\nKeystone 은 httpd 안(WSGI)에서 돌아 httpd 의 시작 시각을 봅니다(httpd 를 재시작해야 새 코드가 올라옵니다)."
+          },
+          {
+            "label": "Placement 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-placement-api; for u in $(systemctl list-units --type=service --no-legend --plain httpd.service | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Placement 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다.\nPlacement 는 httpd 안(WSGI)에서 돌아 httpd 의 시작 시각을 봅니다."
+          },
+          {
+            "label": "Horizon 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-dashboard; for u in $(systemctl list-units --type=service --no-legend --plain httpd.service | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Horizon 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다.\nHorizon(대시보드)은 httpd 안에서 돌아 httpd 의 시작 시각을 봅니다."
+          },
+          {
+            "label": "Barbican 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-barbican-common; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-barbican-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Barbican 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Manila 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-manila; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-manila-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Manila 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Octavia 설치 · 실행 시각",
+            "command": "rpm -q --last openstack-octavia-common; for u in $(systemctl list-units --type=service --no-legend --plain 'openstack-octavia-*' 'octavia-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Octavia 패키지가 깔린(업그레이드된) 시각과 서비스가 시작한 시각. 시작 시각이 설치 시각보다 뒤여야 새 버전이 돌고 있는 것입니다."
+          },
+          {
+            "label": "Masakari 설치 · 실행 시각",
+            "command": "/usr/bin/python3 -c \"[print(d.metadata['Name'], d.version) for d in __import__('importlib.metadata').metadata.distributions() if (d.metadata['Name'] or '').lower().startswith('masakari')]\"; for u in $(systemctl list-units --type=service --no-legend --plain 'masakari-*' | awk '{print $1}'); do echo \"$u 시작: $(systemctl show -p ActiveEnterTimestamp --value $u)\"; done",
+            "desc": "Masakari 는 pip(소스) 설치라 rpm 설치 시각이 없습니다. 버전과 서비스 시작 시각만 봅니다."
+          },
+          {
+            "label": "노드 부팅 시각",
+            "command": "who -b",
+            "desc": "서비스 시작 시각이 이 시각과 거의 같으면 서비스만 재시작한 것이 아니라 노드가 재부팅되며 같이 뜬 것입니다."
+          }
+        ]
+      },
+      {
         "name": "API 마이크로버전 점검",
         "commands": [
           {

@@ -77,6 +77,8 @@ import {
   type BoardEvidenceSummary,
   type BoardHistoryRecord,
   type BoardHistoryLoad,
+  type ProbeHistoryLoad,
+  type ProbeHistoryRecord,
 } from './shared-types'
 
 // ─────────────────────────────────────────────────────────────
@@ -6100,6 +6102,95 @@ ipcMain.handle('probeRaw:delete', async (_evt, ids: string[]) => {
     for (const id of gone) await rm(path.join(probeRawDir(), `${id}.csv`), { force: true }).catch(() => {})
   })
   return { ok: true }
+})
+
+// ── 응답 측정 이력 (response-probe-history/) ─────────────────────
+//
+// 2026-11-15 사용자 결정: 회차 기록을 렌더러 localStorage(방식별 최근 30회)에서 회차별 파일로 옮기고 한도를 방식별 200회 · 90일로 늘린다.
+// localStorage 는 몇 MB 한도를 다른 설정과 같이 써서 숫자만 늘리면 저장이 조용히 실패할 수 있었다(가용성 이력 statusboard-history 와 같은 이유).
+//  - 회차 하나 = 파일 하나(<id>.json). 저장은 바뀐 회차만, 지우기는 고른 회차만
+//  - 한도 정리는 렌더러가 한다(방식별로 세야 해서). 여기는 받은 id 만 지운다
+//  - 개발 모드는 폴더를 따로 쓴다(-dev): 예전 이력(localStorage)도 dev · 설치본이 출처가 달라 따로였다
+//  - 손상된 파일은 알리기만 하고 지우거나 덮어쓰지 않는다
+const probeHistoryDir = () => path.join(app.getPath('userData'), app.isPackaged ? 'response-probe-history' : 'response-probe-history-dev')
+const probeHistoryPath = (id: string) => path.join(probeHistoryDir(), `${id}.json`)
+const probeMigratedPath = () => path.join(probeHistoryDir(), 'migrated.json')
+const validProbeRecord = (r: unknown): r is ProbeHistoryRecord =>
+  !!r && typeof r === 'object' && PROBE_RAW_ID.test(String((r as ProbeHistoryRecord).id)) && typeof (r as ProbeHistoryRecord).startedAt === 'number'
+
+ipcMain.handle('probeHistory:load', async (): Promise<ProbeHistoryLoad> => {
+  try {
+    return await withStoreLock('response-probe-history', async () => {
+      const list: ProbeHistoryRecord[] = []
+      const bad: string[] = []
+      let names: string[] = []
+      try {
+        names = await readdir(probeHistoryDir())
+      } catch {
+        names = []
+      }
+      for (const n of names) {
+        const id = n.replace(/\.json$/, '')
+        if (!n.endsWith('.json') || !PROBE_RAW_ID.test(id)) continue
+        try {
+          const r = JSON.parse(await readFile(probeHistoryPath(id), 'utf-8'))
+          if (validProbeRecord(r) && r.id === id) list.push(r)
+          else bad.push(n)
+        } catch {
+          bad.push(n)
+        }
+      }
+      list.sort((a, b) => b.startedAt - a.startedAt)
+      return { ok: true, list, migrated: await fileExists(probeMigratedPath()), bad }
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), list: [], migrated: false, bad: [] }
+  }
+})
+
+ipcMain.handle('probeHistory:save', async (_evt, recs: ProbeHistoryRecord[]) => {
+  const list = (Array.isArray(recs) ? recs : []).filter(validProbeRecord)
+  try {
+    await withStoreLock('response-probe-history', async () => {
+      await mkdir(probeHistoryDir(), { recursive: true })
+      for (const r of list) await writeFileAtomic(probeHistoryPath(r.id), JSON.stringify(r))
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+ipcMain.handle('probeHistory:delete', async (_evt, ids: string[]) => {
+  const gone = (Array.isArray(ids) ? ids : []).filter((x) => PROBE_RAW_ID.test(x))
+  try {
+    await withStoreLock('response-probe-history', async () => {
+      for (const id of gone) await rm(probeHistoryPath(id), { force: true })
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
+
+/** 예전 이력(localStorage) 옮기기 — 한 번만(migrated.json). 이미 있는 파일은 덮어쓰지 않고, localStorage 는 지우지 않는다(되돌릴 길) */
+ipcMain.handle('probeHistory:migrate', async (_evt, recs: ProbeHistoryRecord[]) => {
+  try {
+    return await withStoreLock('response-probe-history', async () => {
+      if (await fileExists(probeMigratedPath())) return { ok: true, count: 0 }
+      await mkdir(probeHistoryDir(), { recursive: true })
+      let count = 0
+      for (const r of (Array.isArray(recs) ? recs : []).filter(validProbeRecord)) {
+        if (await fileExists(probeHistoryPath(r.id))) continue
+        await writeFileAtomic(probeHistoryPath(r.id), JSON.stringify(r))
+        count++
+      }
+      await writeFileAtomic(probeMigratedPath(), JSON.stringify({ at: Date.now(), count }))
+      return { ok: true, count }
+    })
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), count: 0 }
+  }
 })
 
 const perfSettingsPath = () => path.join(app.getPath('userData'), 'perf-settings.json')

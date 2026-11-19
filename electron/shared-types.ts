@@ -1364,6 +1364,17 @@ export interface BoardEvidenceSummary {
  * 파일 이름만 정하고 내용은 그대로 저장한다(필드가 늘 때마다 메인을 고치지 않게).
  */
 export type BoardHistoryRecord = { id: string; t0: number } & Record<string, unknown>
+/** 응답 측정 회차(파일 하나) — 내용은 렌더러의 ProbeRun. id = 측정 시작 epoch ms */
+export type ProbeHistoryRecord = { id: string; startedAt: number } & Record<string, unknown>
+export interface ProbeHistoryLoad {
+  ok: boolean
+  error?: string
+  list: ProbeHistoryRecord[]
+  /** 예전 이력(localStorage)을 이미 옮겼는지 */
+  migrated: boolean
+  /** 읽지 못한(손상) 회차 파일 — 지우지 않고 남겨 둔다 */
+  bad: string[]
+}
 export interface BoardHistoryLoad {
   ok: boolean
   error?: string
