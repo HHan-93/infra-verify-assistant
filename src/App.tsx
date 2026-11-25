@@ -2701,7 +2701,9 @@ export default function App() {
               rows={3}
               value={analysisQuestion}
               onChange={(e) => setAnalysisQuestion(e.target.value)}
-              placeholder="질문을 입력하세요... (비우면 기본 분석 스타일 적용)"
+              // 보낼 스타일 이름을 그대로 보인다(2026-11-25 사용자 지적) — '기본 분석 스타일' 이라고만 적어, 설정에서 고른 스타일 대신
+              // '기본 (요약·이상징후·권장조치)' 로 가는 줄로 읽혔다. 질문을 적어도 같은 스타일로 간다(AIPanel analyze 주석)
+              placeholder={`질문을 입력하세요... (비우면 출력 전체를 분석)\n분석 스타일: ${aiPanelRef.current?.styleLabel() ?? '-'} (AI 패널 ⚙ 에서 바꿉니다)`}
               className="mt-2 w-full resize-none rounded-md border border-white/10 bg-panel-light px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:ring-1 focus:ring-blue-500"
             />
             {/* 목적지가 남의 서버다 — 무엇이 가려져 나가는지 보내기 전에 밝힌다.

@@ -25,6 +25,186 @@ export interface PresetGroup {
 
 export const PRESETS: PresetGroup[] = [
   {
+    "solution": "CONTRABASS",
+    "subgroups": [
+      {
+        "name": "파드 (Pod)",
+        "commands": [
+          {
+            "label": "파드별 빌드 버전(이미지) 확인",
+            "command": "kubectl get pods -n <NAMESPACE> -o custom-columns=\"POD:.metadata.name,IMAGE:.spec.containers[*].image\"",
+            "desc": "네임스페이스의 파드마다 돌고 있는 컨테이너 이미지(태그 = 빌드 버전)를 표로 확인\n<NAMESPACE> 는 실행 전에 입력 창이 뜹니다(예: contrabass)"
+          },
+          {
+            "label": "파드별 build_info.txt 확인",
+            "command": "for p in $(kubectl get pod -n <NAMESPACE> -o jsonpath='{.items[*].metadata.name}'); do echo \"========== $p ==========\"; kubectl exec -n <NAMESPACE> \"$p\" -- cat build_info.txt; echo \"\"; done",
+            "desc": "네임스페이스의 파드마다 들어가 build_info.txt(빌드 정보)를 차례로 출력\n<NAMESPACE> 는 실행 전에 입력 창이 뜹니다(예: contrabass). 파일이 없는 파드는 오류 한 줄을 내고 다음 파드로 넘어갑니다"
+          }
+        ]
+      },
+      {
+        "name": "서비스 · 포트",
+        "commands": [
+          {
+            "label": "mole 서비스 · HAProxy VIP 포트 확인",
+            "command": "netstat -lntp | grep 8888",
+            "desc": "mole 서비스 포트(8888)와 HAProxy VIP 포트(28888)가 LISTEN 중인지 함께 확인\ngrep 8888 하나로 두 포트가 같이 잡힙니다"
+          },
+          {
+            "label": "설치된 mole 버전 확인",
+            "command": "curl http://127.0.0.1:8888/",
+            "desc": "이 노드에서 도는 mole 서비스(8888)에 직접 물어 설치된 버전을 확인"
+          }
+        ]
+      },
+      {
+        "name": "로그",
+        "commands": [
+          {
+            "label": "mole 로그 확인",
+            "command": "sudo tail -f -n 200 /var/log/contrabass/mole/mole.log",
+            "desc": "mole 서비스 로그를 최근 200줄부터 실시간으로 확인. Ctrl+C 로 중단해야 끝납니다.\n실시간 로그 뷰어의 '자주 쓰는 로그' 칩(contrabass mole)으로도 볼 수 있습니다"
+          }
+        ]
+      },
+      {
+        "name": "인스턴스 (virsh)",
+        "commands": [
+          {
+            "label": "호스트의 인스턴스 별칭 확인",
+            "command": "for d in $(sudo virsh list --all --name); do echo \"$d  $(sudo virsh dumpxml \"$d\" | grep -o 'nova:name>[^<]*' | cut -d'>' -f2)\"; done",
+            "desc": "이 호스트에서 도는 인스턴스의 별칭(instance-0000xxxx)과 포털에 보이는 인스턴스 이름을 짝지어 출력\n왼쪽 별칭을 아래 '인스턴스 별칭으로 정보 확인' 에 넣습니다"
+          },
+          {
+            "label": "인스턴스 별칭으로 정보 확인",
+            "command": "sudo virsh dominfo <INSTANCE_ALIAS>",
+            "desc": "별칭(instance-0000xxxx)으로 인스턴스의 상태, vCPU, 메모리 등을 조회\n<INSTANCE_ALIAS> 는 실행 전에 입력 창이 뜹니다"
+          },
+          {
+            "label": "부팅 방식(UEFI · BIOS) 확인 (호스트)",
+            "command": "sudo virsh dumpxml <INSTANCE_ALIAS> | grep -iE \"loader|nvram|firmware\"",
+            "desc": "실제로 떠 있는 VM 의 부팅 방식 확인. loader(OVMF) · nvram 줄이 나오면 UEFI, 아무것도 안 나오면 BIOS\n이미지 메타값(hw_firmware_type)은 요청값이라, 최종 확인은 이 명령으로 합니다"
+          },
+          {
+            "label": "qemu-guest-agent 응답 확인 (호스트)",
+            "command": "sudo virsh qemu-agent-command <INSTANCE_ALIAS> '{\"execute\":\"guest-ping\"}'",
+            "desc": "호스트에서 VM 안의 qemu-guest-agent 가 대답하는지 확인. {\"return\":{}} 가 나오면 정상\n에이전트가 꺼져 있거나 채널이 없으면 오류가 납니다"
+          }
+        ]
+      },
+      {
+        "name": "VM 내부 · qemu-guest-agent",
+        "commands": [
+          {
+            "label": "VM 안에서 실행하는 명령",
+            "command": "",
+            "desc": "아래 명령은 호스트가 아니라 VM 에 SSH 로 접속한 세션에서 실행합니다",
+            "info": true
+          },
+          {
+            "label": "부팅 방식(UEFI · BIOS) 확인 (VM 안)",
+            "command": "[ -d /sys/firmware/efi ] && echo UEFI || echo BIOS",
+            "desc": "Linux VM 안에서 부팅 방식 확인. UEFI 로 부팅했을 때만 /sys/firmware/efi 폴더가 있습니다"
+          },
+          {
+            "label": "qemu-guest-agent 상태",
+            "command": "systemctl status qemu-guest-agent --no-pager",
+            "desc": "에이전트가 active (running) 인지, 최근 로그와 함께 확인"
+          },
+          {
+            "label": "qemu-guest-agent 재시작",
+            "command": "sudo systemctl restart qemu-guest-agent",
+            "desc": "에이전트를 껐다 다시 켭니다. 호스트에서 guest-ping 이 안 될 때 먼저 해 봅니다"
+          },
+          {
+            "label": "qemu-guest-agent 중지",
+            "command": "sudo systemctl stop qemu-guest-agent",
+            "desc": "에이전트를 멈춥니다. 멈춘 동안 호스트의 에이전트 명령(guest-ping, 파일시스템 동결 등)이 실패합니다"
+          },
+          {
+            "label": "qemu-guest-agent 시작",
+            "command": "sudo systemctl start qemu-guest-agent",
+            "desc": "멈춘 에이전트를 다시 켭니다"
+          },
+          {
+            "label": "qemu-guest-agent 자동 시작 설정",
+            "command": "sudo systemctl enable --now qemu-guest-agent",
+            "desc": "부팅할 때 자동으로 켜지게 하고 지금 바로 켭니다. 재부팅 뒤 에이전트가 꺼져 있을 때 씁니다"
+          }
+        ]
+      },
+      {
+        "name": "NFV 모니터링 점검",
+        "commands": [
+          {
+            "label": "포털에 NFV(LB) 모니터링이 안 나올 때 점검 순서",
+            "command": "",
+            "desc": "메트릭이 수집되려면 세 가지가 모두 맞아야 합니다.\n(1) LB 이미지: QEMU 및 HAProxy Exporter 가 포함된 기본 이미지를 썼는지\n(2) Mole 설정: nfv_exporter 기능이 켜져 있는지 (agent.local.yml)\n(3) Prometheus 타겟: mole_nfv_exporter 타겟이 정상 등록 · 수집 중인지\n아래 명령을 위에서부터 차례로 각 호스트(mole 이 도는 서버)에서 실행하고, 끝으로 Prometheus 화면을 확인합니다",
+            "info": true
+          },
+          {
+            "label": "Mole nfv_exporter 설정 확인",
+            "command": "sudo grep -nE \"Exporter|BindPort\" /etc/contrabass/mole/agent.local.yml",
+            "desc": "agent.local.yml 의 Exporter 설정 확인. UseNfvExporter: true, NfvExporterPortInAmphora: 9102 여야 합니다\nfalse 거나 포트가 다르면 수집되지 않습니다 (회신 자료 C: 이 파일)"
+          },
+          {
+            "label": "nfv_exporter 포트(9102) 확인",
+            "command": "netstat -lntp | grep 9102",
+            "desc": "mole 이 메트릭 포트 9102 를 열고 LISTEN 중인지 확인. 아무것도 안 나오면 nfv_exporter 가 떠 있지 않은 것입니다"
+          },
+          {
+            "label": "NFV 메트릭 수집 여부 확인",
+            "command": "curl -s http://127.0.0.1:9102/metrics/nfv | grep -oE \"^octavia_[a-z_]+\" | sort | uniq -c",
+            "desc": "이 호스트의 nfv_exporter 가 내보내는 octavia 메트릭 이름과 개수. 아래 7가지가 보여야 합니다\noctavia_listener_bytes_in_total · octavia_listener_bytes_out_total · octavia_loadbalancer_cpu · octavia_loadbalancer_memory\noctavia_loadbalancer_max_connection_rate · octavia_loadbalancer_max_ssl_rate · octavia_listener_http_requests_rate_max\n아무것도 안 나오면 LB(amphora) 쪽에서 값을 못 받는 것이라 이미지 · 로그를 봅니다\n연결 자체가 안 되면 127.0.0.1 대신 그 호스트 IP 로 바꿔 봅니다 (Prometheus 타겟 주소와 같은 IP)"
+          },
+          {
+            "label": "nfv_exporter 로그 (최근 200줄)",
+            "command": "sudo tail -n 200 /var/log/contrabass/mole/nfv_exporter.log",
+            "desc": "Mole nfv_exporter 로그 최근 내용 (회신 자료 B: 이 파일)"
+          },
+          {
+            "label": "nfv_exporter 로그 오류만",
+            "command": "sudo grep -iE \"error|fail|refused|timeout\" /var/log/contrabass/mole/nfv_exporter.log | tail -n 50",
+            "desc": "로그에서 오류 · 실패 · 연결 거부 · 시간 초과 줄만 최근 50줄"
+          },
+          {
+            "label": "Mole 버전 확인 (회신 자료 A)",
+            "command": "curl http://127.0.0.1:8888/",
+            "desc": "각 서버에서 실행해 결과를 회신 자료로 공유합니다"
+          },
+          {
+            "label": "LB(amphora) VM 목록",
+            "command": "openstack loadbalancer amphora list -c id -c compute_id -c lb_network_ip -c role -c status",
+            "desc": "LB 마다 떠 있는 amphora VM 과 그 VM 의 compute_id. 다음 명령에 compute_id 를 넣습니다\n컨트롤러에서 openrc 를 불러온 뒤 실행합니다"
+          },
+          {
+            "label": "LB VM 이미지 · 호스트 확인",
+            "command": "openstack server show <COMPUTE_ID> -c name -c image -c OS-EXT-SRV-ATTR:host -c OS-EXT-SRV-ATTR:instance_name",
+            "desc": "amphora VM 이 어떤 이미지로 만들어졌는지(QEMU · HAProxy Exporter 가 포함된 기본 이미지인지), 어느 호스트에 별칭이 무엇인지 확인\n에이전트가 대답하는지는 그 호스트에서 '인스턴스 (virsh)' 의 qemu-guest-agent 응답 확인으로 봅니다"
+          },
+          {
+            "label": "Prometheus 메트릭 조회 확인",
+            "command": "",
+            "desc": "Prometheus 웹에 접속 → 위쪽 [Query] → 입력 칸에 메트릭 이름을 넣고 [Execute].\n위 7가지 메트릭을 하나씩 넣어 결과가 나오는지 확인합니다 (job=\"mole_nfv_exporter\", amphora_uuid · loadbalancer_uuid 라벨이 붙어 나옴)\n결과가 비어 있으면 타겟 상태를 봅니다",
+            "info": true
+          },
+          {
+            "label": "Prometheus 타겟 상태 확인",
+            "command": "",
+            "desc": "Prometheus 웹 → 위쪽 [Status] → [Target health] → 왼쪽 선택 상자에서 mole_nfv_exporter 를 고릅니다.\n호스트마다 http://호스트IP:9102/metrics/nfv 가 있고 State 가 모두 UP 이어야 합니다 (예: 4 / 4 up)\nDOWN 이 있으면 그 호스트에서 위의 포트 · 메트릭 확인 명령을 봅니다",
+            "info": true
+          },
+          {
+            "label": "원인 분석 회신 자료",
+            "command": "",
+            "desc": "A. Mole 버전: 각 서버의 curl http://127.0.0.1:8888/ 결과\nB. Mole nfv_exporter 로그 파일: /var/log/contrabass/mole/nfv_exporter.log\nC. Mole nfv 설정 파일: /etc/contrabass/mole/agent.local.yml\n파일은 파일 탐색기에서 내려받을 수 있습니다",
+            "info": true
+          }
+        ]
+      }
+    ]
+  },
+  {
     "solution": "OpenStack",
     "subgroups": [
       {

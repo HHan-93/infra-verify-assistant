@@ -82,7 +82,14 @@ const DEFAULT_LOG_PATHS = [
   { label: 'nginx 접속로그', path: '/var/log/nginx/access.log' },
   { label: 'nginx 에러로그', path: '/var/log/nginx/error.log' },
   { label: '커널(dmesg)', path: '/var/log/dmesg' },
+  { label: 'contrabass mole', path: '/var/log/contrabass/mole/mole.log' },
 ]
+/**
+ * 나중에 기본값에 더한 칩(2026-11-25 사용자 요청: contrabass mole 로그). 칩을 한 번이라도 고친 사람은 저장된 목록을 읽어 기본값이 다시
+ * 보이지 않는다 — 그래서 저장된 목록에 없으면 **한 번만** 뒤에 붙이고 붙였다는 표시를 남긴다. 사람이 그 칩을 지운 뒤에 되살리지 않으려는 것이다
+ */
+const ADDED_LOG_PATHS = ['/var/log/contrabass/mole/mole.log']
+const PRESETS_ADDED_KEY = 'livelog_presets_added'
 
 const RECENT_KEY = 'livelog_recent_paths'
 const PRESETS_KEY = 'livelog_presets'
@@ -144,7 +151,17 @@ function loadPresets(): { label: string; path: string }[] {
     const raw = localStorage.getItem(PRESETS_KEY)
     if (!raw) return DEFAULT_LOG_PATHS
     const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr : DEFAULT_LOG_PATHS
+    if (!Array.isArray(arr)) return DEFAULT_LOG_PATHS
+    const doneRaw = localStorage.getItem(PRESETS_ADDED_KEY)
+    const done: string[] = doneRaw ? JSON.parse(doneRaw) : []
+    const add = ADDED_LOG_PATHS.filter((p) => !done.includes(p) && !arr.some((x: { path?: string }) => x?.path === p))
+    if (!ADDED_LOG_PATHS.every((p) => done.includes(p))) {
+      const next = [...arr, ...DEFAULT_LOG_PATHS.filter((d) => add.includes(d.path))]
+      localStorage.setItem(PRESETS_KEY, JSON.stringify(next))
+      localStorage.setItem(PRESETS_ADDED_KEY, JSON.stringify(ADDED_LOG_PATHS))
+      return next
+    }
+    return arr
   } catch {
     return DEFAULT_LOG_PATHS
   }
@@ -152,6 +169,8 @@ function loadPresets(): { label: string; path: string }[] {
 function savePresets(list: { label: string; path: string }[]) {
   try {
     localStorage.setItem(PRESETS_KEY, JSON.stringify(list))
+    // 기본값(새 칩 포함)을 본 채로 처음 저장한 사람도 '붙였음' 으로 남긴다 — 안 그러면 그때 지운 새 칩이 다음 실행에 되살아났다(빌드 전 검토 11-25)
+    localStorage.setItem(PRESETS_ADDED_KEY, JSON.stringify(ADDED_LOG_PATHS))
   } catch {
     /* 무시 */
   }

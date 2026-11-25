@@ -927,7 +927,9 @@ export default function FileExplorer({
                         }
                       }}
                       title="좌측 패널에서 볼 대상: 로컬 또는 다른 연결된 세션"
-                      className="rounded border border-white/10 bg-panel-light px-1 py-0.5 text-[11px] font-semibold text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      // 줄어들 수 있게(min-w-0) — 세션 이름이 길면 고르기 상자가 줄을 다 차지해, 파일을 고르면 나오는 [선택 업로드] 가
+                      // 패널 밖으로 밀려 잘렸다(2026-11-25 사용자 지적). 버튼은 shrink-0 이라 고르기 상자가 대신 줄고 이름은 말줄임된다
+                      className="min-w-0 truncate rounded border border-white/10 bg-panel-light px-1 py-0.5 text-[11px] font-semibold text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
                       <option value="local">로컬</option>
                       {otherSessions.map((s) => (
@@ -948,7 +950,7 @@ export default function FileExplorer({
                           ? '선택 항목을 이 세션의 현재 폴더로 직접 전송(임시 파일 경유)'
                           : '선택 항목을 원격 현재 폴더로 업로드'
                       }
-                      className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-blue-500/30 bg-blue-600/20 px-1.5 py-0.5 text-[10px] text-blue-200 hover:bg-blue-600/30 disabled:opacity-40"
+                      className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-600/20 px-1.5 py-0.5 text-[10px] text-blue-200 hover:bg-blue-600/30 disabled:opacity-40"
                     >
                       <Upload size={11} />
                       {leftMode === 'session' ? '선택 전송' : '선택 업로드'} ({localSelected.size})

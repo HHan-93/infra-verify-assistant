@@ -55,7 +55,7 @@ import { findValkeySets, judgeValkey, valkeyBad, valkeyCmd, valkeyEvidenceLines,
 import { parseMasakari, UUID, MASAKARI_GREP, type MasakariState } from '../lib/masakariLog'
 import { stripAnsi } from '../lib/ansi'
 import { episodes, portalFromLog, portalPhases, portalLogText, portalPageRows, portalStreakTable, SAME_MS as PORTAL_SAME_MS, type PortalEvent } from '../lib/portalPhases'
-import { addLatSamples, latencyView, latChange, fmtLat, type LatSample, type LatStat, type LatView, type PortalLatRec } from '../lib/portalLatency'
+import { addLatSamples, latencyView, latChange, fmtLat, latencyCompare, latCmpTop, type LatSample, type LatStat, type LatView, type PortalLatRec, type LatCmpRun, type LatCmpChange } from '../lib/portalLatency'
 import ConfirmDialog from './ConfirmDialog'
 import type { BoardEvidenceItem, BoardEvidenceTable, BoardHistoryRecord, LogTailTarget } from '../../electron/shared-types'
 import { groupHeadline, newInRun, type LogGroup } from '../lib/podLogScan'
@@ -1072,6 +1072,11 @@ interface GroupPhase {
    * 차수끼리 환경이 다르면 나눠 싣고 그룹 기본과 다른 점을 자동으로 적는다(lib/groupEnvDiff)
    */
   env?: GroupEnv
+  /**
+   * 이 차수 전에 적용한 변경 · 패치(2026-11-25 사용자 요청, 예: 'SeaweedFS 패치'). 리포트 차수별 요약의 차수 이름 아래에 싣는다 —
+   * '2차 (패치 후 확인)' 처럼 이름만으로는 무엇을 고친 뒤의 차수인지 알 수 없었다. 환경(env)과 따로 둔다: 노드 · VM 배치가 아니라 소프트웨어 변경이다
+   */
+  patch?: string
 }
 interface VerifyGroup {
   id: string
@@ -1085,6 +1090,54 @@ interface VerifyGroup {
    * 원문은 남기지 않고 구성도에 쓰는 값만 둔다(groups.json 이 커지지 않게)
    */
   envMap?: EnvMapSnapshot
+  /** 검증 결과(GroupResult 주석) — 리포트 종합 결과 맨 위 표 */
+  result?: GroupResult
+}
+/**
+ * 검증 결과(2026-11-19 사용자 결정 · 목업 result_mock2) — 리포트 종합 결과 맨 위 '검증 결과' 표(색 없이 왼쪽 이름 칸 · 오른쪽 글).
+ * 처음 목업(결론 색 이름표 + 숫자 줄 + 이슈 · 확인 · 계획 세 칸)은 '형형색색' 하다고 해서 표 하나로 바꿨다.
+ * 대상 · 기간 · 환경은 비우면 툴이 아는 값(그룹 이름 · 고른 회차의 처음 ~ 끝 · 환경 탭 한 줄), 목적 · 담당자 · 종합 결과 · 비고는 사람만.
+ * 사람이 적는 넷이 모두 비면 절을 싣지 않는다(자동 값만으로 된 표는 아래 절과 겹친다). 그룹에 한 벌(차수 · 회차와 따로)
+ */
+interface GroupResult {
+  target?: string
+  period?: string
+  purpose?: string
+  owner?: string
+  env?: string
+  /** 검증 결과 — PASS(초록) · FAIL(빨강) 이름표(2026-11-19 사용자 결정, 처음 '성공 · 실패' 에서 바꿈). 없으면 그 줄을 싣지 않는다 */
+  verdict?: 'ok' | 'fail'
+  /** 실패 사유 — 검증 결과가 FAIL 일 때만 리포트에 싣는다(2026-11-20 사용자 결정). PASS 로 바꿔도 글은 지우지 않는다(다시 FAIL 로 돌릴 때 남게) */
+  failReason?: string
+  /** 주요 이슈 및 조치내역(예전 이름 '종합 검증 결과') — 자유 글. 줄바꿈 · 줄 앞 공백 그대로(리포트 txt 주석) */
+  summary?: string
+  note?: string
+}
+/** 검증 결과의 '검증 환경' 자동 값 — 환경 탭의 노드 · VM 수와 장애 주입 한 줄 */
+function groupEnvLine(e: GroupEnv | undefined): string {
+  if (!e?.nodes.length) return ''
+  const role = new Map<string, number>()
+  for (const n of e.nodes) {
+    const r = n.controller && n.compute ? '컨트롤러 겸 컴퓨트' : n.controller ? '컨트롤러' : n.compute ? '컴퓨트' : ''
+    if (r) role.set(r, (role.get(r) ?? 0) + 1)
+  }
+  const vms = e.nodes.flatMap((n) => n.vms)
+  const cnt = (k: EnvVm['kind']) => vms.filter((v) => v.kind === k).reduce((a, v) => a + vmCount(v), 0)
+  return [
+    `물리 노드 ${e.nodes.length}대${role.size ? `(${[...role].map(([r, n]) => `${r} ${n}`).join(' · ')})` : ''}`,
+    cnt('k8s') ? `k8s VM ${cnt('k8s')}` : '',
+    cnt('web') ? `웹 서비스 VM ${cnt('web')}` : '',
+    e.inject?.trim() ? `장애 주입 ${e.inject.trim()}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+/** 검증 결과의 '검증 기간' 자동 값 — 회차의 처음 시작 ~ 마지막 끝 날짜(회차 수) */
+function runsPeriodLine(rs: HistoryRecord[]): string {
+  if (!rs.length) return ''
+  const a = fmtDateTime(Math.min(...rs.map((h) => h.t0))).slice(0, 10)
+  const b = fmtDateTime(Math.max(...rs.map((h) => h.closedAt || h.t0))).slice(0, 10)
+  return `${a === b ? a : `${a} ~ ${b}`} (${rs.length}회차)`
 }
 /** 환경 구성도 수집 단계 — 출처마다 하나 */
 type EnvStep = 'nodes' | 'ctrl' | 'os' | 'ceph' | 'k8s'
@@ -5372,6 +5425,16 @@ function portalPartId(v: PortalEvView, a: string, part: '' | 'firstAll' | 'flap'
   return a
 }
 
+/**
+ * 포털 API 응답 조치 전 · 후 비교에 넣을 회차(2026-11-25 사용자 결정, lib/portalLatency latencyCompare 주석). 리포트 만들기 창에서 묶음마다
+ * 차수를 고르면 그 차수의 회차가 들어오고, 회차를 직접 넣고 뺀다(오래 걸린 회차만 고르는 식). label 은 차수 이름(직접 골랐으면 빈칸).
+ * 회차는 리포트에 담는 회차(고른 회차) 안에서만 고른다 — 리포트에 없는 회차가 비교에만 나오면 표의 #번호를 따라갈 수 없다.
+ */
+interface LatCmpPick {
+  pre: { label: string; ids: string[] }
+  post: { label: string; ids: string[] }
+}
+
 function buildHtmlReport(
   recs: HistoryRecord[],
   evidence: Record<string, BoardEvidenceItem[]>,
@@ -5390,6 +5453,8 @@ function buildHtmlReport(
     kind?: 'total' | 'runs' | 'evidence' | 'all' | 'latency'
     /** 같이 뽑는 '포털 API 응답 시간' 파일 — 종합 결과의 느려진 API 표에서 회차별 전체 표로 간다 */
     latFile?: string
+    /** 종합 결과 제목 — 종합 · 중간 결과 보고(REPORT_TITLE 주석) */
+    reportTitle?: ReportTitle
     /** 종합 결과에서 회차 이름을 누르면 갈 회차별 결과 파일 이름(같은 폴더). 없으면 링크를 걸지 않는다 */
     runsFile?: string
     /**
@@ -5408,6 +5473,8 @@ function buildHtmlReport(
     realNames?: boolean
     /** 같이 뽑는 환경 구성도 파일 — ① 검증 환경 머리에 '상세 환경 구성도 →' 를 단다(2026-11-14) */
     envFile?: string
+    /** 포털 API 응답 조치 전 · 후 비교(LatCmpPick 주석) — 리포트 만들기 창에서 고른 두 묶음 */
+    latCmp?: LatCmpPick
   },
 ): string {
   const kind = opts.kind ?? 'all'
@@ -5427,7 +5494,7 @@ function buildHtmlReport(
   const fileHref = (f: string) => he(encodeURIComponent(f))
   const hrefRun = (i: number) =>
     kind === 'total' ? (opts.runsFile ? `href="${he(encodeURIComponent(opts.runsFile))}#run-${i + 1}"` : '') : `href="#run-${i + 1}" data-open="run-${i + 1}"`
-  const DOC_TITLE = { total: '가용성 검증 종합 결과', runs: '가용성 검증 회차별 결과', evidence: '가용성 검증 증적 원문', all: '가용성 검증 결과', latency: '포털 API 응답 시간' }[kind]
+  const DOC_TITLE = { total: REPORT_TITLE[opts.reportTitle ?? 'final'], runs: '가용성 검증 회차별 결과', evidence: '가용성 검증 증적 원문', all: '가용성 검증 결과', latency: '포털 API 응답 시간' }[kind]
   const grp = opts.group
   const phIdx = (h: HistoryRecord) => {
     const k = grp ? grp.phases.findIndex((ph) => ph.id === h.phaseId) : -1
@@ -5772,7 +5839,7 @@ table.sf tr.sfin td{background:#f0f8f3}table.sf tr.sref td{color:#5b6675}
 table.ps{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 table.ps th{background:#c9d6ea;color:#1f3a68;border:1px solid #aebfda;padding:7px 8px;font-size:12px;text-align:center}table.ps th.pgrp{background:#bccbe3}
 table.ps td{border:1px solid #d8dde4;padding:9px 10px;vertical-align:top}table.ps td.pc{text-align:center;vertical-align:middle}
-table.ps td.pc .pdt{font-size:11px;color:#5b6675;font-weight:400;white-space:nowrap}
+table.ps td.pc .pdt{font-size:11px;color:#5b6675;font-weight:400;white-space:nowrap}table.ps td.pc .ppatch{font-size:11px;color:#1d5fd0;font-weight:600;margin-top:2px}
 table.ps .plb{font-weight:800;color:#1f3a68;font-size:12px;margin:0 0 4px}table.ps .plb.pact{margin-top:10px;padding-top:8px;border-top:1px dashed #d8dde4}
 table.ps ul{margin:0;padding-left:16px}table.ps li{margin:2px 0;line-height:1.5;white-space:pre-line}table.ps .irn{font-size:11px;margin-left:4px}table.ps .irn a{color:#1d5fd0}
 table.ps .ptm{font-weight:700;margin:6px 0 2px}table.ps .pnone{color:#5b6675}
@@ -5811,6 +5878,9 @@ table.fx td{border:1px solid #d8dde4;padding:9px 10px;vertical-align:middle;line
 table.fx .rs{display:block;color:#6b7280;font-size:11.5px}
 .ln{display:flex;gap:4px}.ln+.ln{margin-top:1px}.ln b{color:#6b7280;flex:none}.ln span{white-space:pre-wrap;word-break:break-word}.nt+.nt{margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)}
 .fstep.act{background:#fff0dc;color:#b45f00}
+.lnav{display:flex;flex-direction:column;gap:6px}.lrow{display:flex;gap:10px;align-items:baseline}.lph{flex:none;width:76px;color:var(--mut);font-size:12px;font-weight:600}.lchips{display:flex;flex-wrap:wrap;gap:4px}
+.lchip{display:inline-block;min-width:34px;text-align:center;border:1px solid var(--line);border-radius:6px;padding:0 6px;font-size:12px;color:var(--fg);background:#fff;text-decoration:none;font-variant-numeric:tabular-nums}.lchip:hover{background:var(--soft)}.lchip.hot{background:#fff1e0;border-color:#f5c58a;color:#b45309;font-weight:700}
+table.rkv{border-collapse:collapse;width:100%;font-size:12px}table.rkv th{width:104px;background:#eef2f8;color:#1f3a68;font-weight:700;text-align:center;border:1px solid #d8dde4;padding:5px 8px;vertical-align:middle;white-space:nowrap}table.rkv td{border:1px solid #d8dde4;padding:5px 10px;line-height:1.55;vertical-align:middle}table.rkv .rs0{display:block;height:.6em}table.rkv .rvd{display:inline-block;border-radius:4px;padding:0 8px;font-weight:600;font-size:12px;line-height:1.55}table.rkv .rvd.ok{background:#e3f6ea;color:#047a3f}table.rkv .rvd.fail{background:#fde2e2;color:#c21f1f}table.rkv .rs1,table.rkv .rs2{display:block;white-space:pre-wrap;word-break:break-word}table.rkv .rs2{padding-left:14px;color:#3b4554}
 .cbox{border:1px solid var(--line);border-radius:10px;margin:10px 0 4px;overflow:hidden}.cbox .hd{background:#eef2f8;padding:6px 12px;font-weight:700;font-size:12.5px}.cbox .it{display:grid;grid-template-columns:90px 1fr;gap:10px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);font-size:11.5px}.cbox .it .c{text-align:center}
 @media (max-width:900px){table.nc th,table.nc td{padding:0 6px;font-size:11.5px}}
 .tools{display:flex;gap:6px;margin-bottom:10px;align-items:center}table.grid.fc td{vertical-align:top;padding:9px 8px}.fstep{display:inline-block;background:var(--badbg);color:var(--bad);border-radius:6px;padding:1px 10px;font-weight:700;font-size:12px}.fm{display:block;color:var(--mut);font-size:11.5px;margin-top:1px}.ncards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.ncard{border:1px solid var(--line);border-radius:10px;padding:12px 14px}.ncard .t{font-weight:700;font-size:13px}.ncard .big{font-size:16px;font-weight:700;margin:4px 0}.ncard .nb{height:8px;border-radius:4px;background:var(--badbg);overflow:hidden;margin:6px 0}.ncard .nb i{display:block;height:100%;background:#2ea567}.ncard .mut b{color:var(--fg)}.tools .tsum{margin-left:auto;font-size:12.5px;color:var(--mut)}.tools button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
@@ -5899,15 +5969,17 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
       } 정상 응답만 셉니다(시간 초과 · 오류 응답 제외).</div>`
     )
   }
-  /** 느려진 API — 고른 회차 전체에서 노드 DOWN 중앙값이 큰 다섯. runHref: 회차 칸 링크(없으면 글만) */
-  const latSummary = (no: string, runHref: ((i: number) => string) | null, more: string) => {
-    const top = runs
+  /** 포털 API 응답 지연(2026-11-19 사용자 결정: 제목 · 오른쪽 글 · 글자 2 작게, 예전 '느려진 API') — 고른 회차 전체에서 노드 DOWN 중앙값이 큰 다섯. runHref: 회차 칸 링크(없으면 글만) */
+  const latTop = () =>
+    runs
       .flatMap((h, i) => (latOf(h)?.rows ?? []).filter((r) => r.down).map((r) => ({ i, r })))
       .sort((a, b) => (b.r.down as LatStat).med - (a.r.down as LatStat).med)
       .slice(0, 5)
+  const latSummary = (no: string, runHref: ((i: number) => string) | null, more: string) => {
+    const top = latTop()
     if (!top.length) return ''
     return (
-      `<section class="sec"><div class="sh">${no ? `<span class="n">${no}</span>` : ''}<h2>포털 API 응답 시간 · 느려진 API</h2><span class="d">노드 DOWN 중 응답이 가장 느린 API ${top.length}개 · 고른 회차 전체</span></div>` +
+      `<section class="sec"><div class="sh">${no ? `<span class="n">${no}</span>` : ''}<h2>포털 API 응답 지연</h2><span class="d" style="font-size:10px">전체 회차 중 노드 DOWN 중 응답이 가장 느린 API ${top.length}개</span></div>` +
       `<table class="grid"><thead><tr><th>화면 · API</th><th class="c" style="width:120px">회차</th><th class="c" style="width:96px">DOWN 중앙</th><th class="c" style="width:96px">DOWN 최대</th><th class="c" style="width:96px">UP 중앙</th><th class="c" style="width:110px">변화 (중앙값)</th></tr></thead><tbody>` +
       top
         .map(({ i, r }) => {
@@ -5918,28 +5990,139 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
       `</tbody></table>${more}</section>`
     )
   }
+  /*
+   * 조치 전 · 후 비교(2026-11-25 사용자 결정 · 목업 latency_compare_mock, lib/portalLatency latencyCompare 주석) — '포털 API 응답' 파일 맨 위에
+   * 표 전부(cmpSection), 종합 결과에는 많이 줄어든 API 다섯 줄(cmpSummary). 고른 회차가 리포트에 없으면(창에서 회차를 다시 고른 뒤) 뺀다
+   */
+  const cmpPick = opts.latCmp
+  const cmpRecs = (ids: string[]) => ids.map((id) => runs.find((h) => h.id === id)).filter((h): h is HistoryRecord => !!h).sort((a, b) => a.t0 - b.t0)
+  const cmpPreRecs = cmpPick ? cmpRecs(cmpPick.pre.ids) : []
+  const cmpPostRecs = cmpPick ? cmpRecs(cmpPick.post.ids) : []
+  const cmpRun = (h: HistoryRecord): LatCmpRun => ({ m: msOf(h), t0: h.t0, downAt: h.milestones.down?.at ?? null, upAt: nodeBackAt(msOf(h)) })
+  const cmp = cmpPreRecs.length && cmpPostRecs.length ? latencyCompare(cmpPreRecs.map(cmpRun), cmpPostRecs.map(cmpRun)) : null
+  const cmpHead = (side: 'pre' | 'post') => {
+    const pk = cmpPick?.[side]
+    return `조치 ${side === 'pre' ? '전' : '후'}${pk?.label ? ` ${he(pk.label)}` : ''} ${(side === 'pre' ? cmpPreRecs : cmpPostRecs).length}회차`
+  }
+  const cmpChg = (c: LatCmpChange | null) =>
+    c ? `<span style="font-weight:700;color:${c.kind === 'down' ? '#15803d' : c.kind === 'up' ? '#c21f1f' : '#6b7280'}">${c.text}</span>` : '<span class="mut">-</span>'
+  // 포털 정상화(1차) 평균 — 리포트의 포털 복구 시간과 같은 값(runTotals.svc). 정상화가 없는 회차는 평균에서 뺀다
+  const svcAvg = (hs: HistoryRecord[]) => {
+    const xs = hs.map((h) => runTotals(h, inc.inject).svc).filter((v): v is number => v != null)
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null
+  }
+  const cmpSvc = () => {
+    const a = svcAvg(cmpPreRecs)
+    const b = svcAvg(cmpPostRecs)
+    if (a == null || b == null) return null
+    const pct = a > 0 ? Math.round((Math.abs(a - b) / a) * 100) : 0
+    return { a, b, text: b <= a ? `${pct}% 짧아짐` : `${pct}% 길어짐`, better: b <= a }
+  }
+  /** 최소 ~ 최대(조치 전 → 후) 칸 — 위 줄 조치 전(흐리게), 아래 줄 조치 후. 한 줄로 두면 '7.96초 ~ 81.1초 → 1.74초 ~ 47.7초' 가 칸을 넘었다 */
+  const CMP_RNG_TH = '<th class="c" style="width:150px">최소 ~ 최대<br>조치 전 → 후</th>'
+  const cmpRng = (s: { min: number; max: number } | null) => (s ? `${fmtLat(s.min)} ~ ${fmtLat(s.max)}` : '-')
+  const cmpRngCell = (r: { pre: { min: number; max: number } | null; post: { min: number; max: number } | null }) =>
+    `<td class="num c" style="white-space:nowrap"><span class="mut">${cmpRng(r.pre)}</span><br>→ <b>${cmpRng(r.post)}</b></td>`
+  const cmpSection = () => {
+    if (!cmp) return ''
+    const n = (k: LatCmpChange['kind']) => cmp.rows.filter((r) => r.change?.kind === k).length
+    const sv = cmpSvc()
+    const line =
+      (sv ? `포털 정상화 평균 <b>${E(sv.a)}</b> → <b style="color:${sv.better ? '#15803d' : '#c21f1f'}">${E(sv.b)}</b> (${sv.text}) · ` : '') +
+      `API ${cmp.rows.length}개 중 <span style="color:#15803d">${n('down')}개 감소</span>, <span style="color:#c21f1f">${n('up')}개 증가</span>, ${n('flat')}개 차이 근소함`
+    let prev = ''
+    const body = cmp.rows
+      .map((r) => {
+        const sep = r.screen !== prev ? `<tr class="sep"><td colspan="5">${latName(r.screen)}</td></tr>` : ''
+        prev = r.screen
+        return `${sep}<tr><td><b>${latName(r.name)}</b></td><td class="num c">${r.pre ? fmtLat(r.pre.avg) : '-'}</td><td class="num c"><b>${r.post ? fmtLat(r.post.avg) : '-'}</b></td><td class="c">${cmpChg(r.change)}</td>${cmpRngCell(r)}</tr>`
+      })
+      .join('')
+    const no = (h: HistoryRecord) => `#${runs.indexOf(h) + 1}`
+    const meds = (xs: (number | null)[] | undefined) => (xs ? xs.map((x) => (x == null ? '-' : fmtLat(x))).join(' · ') : '-')
+    const runsTbl =
+      `<table class="grid"><thead><tr><th>화면 · API</th><th class="c">조치 전 회차별 중앙값<br><span class="mut" style="font-weight:400">${cmpPreRecs.map(no).join(' · ')}</span></th><th class="c">조치 후 회차별 중앙값<br><span class="mut" style="font-weight:400">${cmpPostRecs.map(no).join(' · ')}</span></th></tr></thead><tbody>` +
+      cmp.rows.map((r) => `<tr><td>${latName(r.name)}</td><td class="num c">${meds(r.pre?.meds)}</td><td class="num c">${meds(r.post?.meds)}</td></tr>`).join('') +
+      '</tbody></table>'
+    return (
+      `<section class="sec"><div class="sh"><h2>조치 전 · 후 비교</h2><span class="d">${cmpHead('pre')} · ${cmpHead('post')} · 노드 DOWN 구간 · 정상 응답만</span></div>` +
+      `<p style="margin:0 0 10px;font-size:13px">${line}</p>` +
+      `<table class="grid"><thead><tr><th>화면 · API</th><th class="c" style="width:150px">${cmpHead('pre')}<br>중앙 평균</th><th class="c" style="width:150px">${cmpHead('post')}<br>중앙 평균</th><th class="c" style="width:100px">변화</th>${CMP_RNG_TH}</tr></thead><tbody>${body}</tbody></table>` +
+      `<details class="run"${opts.openEvidence ? ' open' : ''} style="margin-top:8px"><summary><span class="rt">회차별 중앙값 보기</span></summary><div class="rb">${runsTbl}</div></details>` +
+      `<div class="note">중앙 평균 = 회차마다 '보통 걸린 시간(중앙값)'의 평균. 최소 ~ 최대 = 그 묶음 요청 중 가장 빠른 · 느린 한 건. 변화가 0.2초 미만이면 '차이 근소함'.${
+        cmp.streakOnly
+          ? ' 고른 회차 중 11-19 전 회차는 노드 DOWN 중 화면이 정상화를 확정한 연속 요청만 남아 있어, 양쪽 모두 그 요청만으로 맞춰 비교했습니다(끊김 직후 가장 느렸던 때는 빠짐).'
+          : ''
+      }</div></section>`
+    )
+  }
+  /**
+   * 종합 결과 요약 — 중앙 평균이 가장 많이 줄어든 API 다섯(사용자 결정 11-25: 머리글 '조치 전 N회차 중앙 평균', 제목 '(핵심 변화)',
+   * 변화 오른쪽에 조치 전 · 후 최소 ~ 최대). 아래 한 줄(포털 정상화 평균 · 늘어난 API 안내)은 뺐다 — 사용자: 굳이 필요 없는 문구
+   */
+  const cmpSummary = (no: string, lf?: string) => {
+    if (!cmp) return ''
+    // 상세(전체 API · 회차별 중앙값)로 가는 링크 — 같이 뽑은 '포털 API 응답 시간' 파일이 있을 때만(응답 지연 절의 '회차별 전체 표는 …' 과 같은 꼴)
+    const more = lf ? `<div class="note">전체 API · 회차별 중앙값은 <a href="${fileHref(lf)}">포털 API 응답 시간 →</a></div>` : ''
+    const top = latCmpTop(cmp)
+    return (
+      `<section class="sec"><div class="sh">${no ? `<span class="n">${no}</span>` : ''}<h2>포털 API 응답 조치 전 · 후 (핵심 변화)</h2><span class="d" style="font-size:10px">중앙 평균이 가장 많이 줄어든 API</span></div>` +
+      (top.length
+        ? `<table class="grid"><thead><tr><th>화면 · API</th><th class="c" style="width:130px">${cmpHead('pre')}<br>중앙 평균</th><th class="c" style="width:130px">${cmpHead('post')}<br>중앙 평균</th><th class="c" style="width:90px">변화</th>${CMP_RNG_TH}</tr></thead><tbody>${top
+            .map(
+              (r) =>
+                `<tr><td>${latName(r.screen)} · <b>${latName(r.name)}</b></td><td class="num c">${fmtLat((r.pre as { avg: number }).avg)}</td><td class="num c"><b>${fmtLat((r.post as { avg: number }).avg)}</b></td><td class="c">${cmpChg(r.change)}</td>${cmpRngCell(r)}</tr>`,
+            )
+            .join('')}</tbody></table>`
+        : '<p class="note" style="margin:0">중앙 평균이 줄어든 API 가 없습니다.</p>') +
+      `${more}</section>`
+    )
+  }
   if (kind === 'latency') {
+    H.push(cmpSection())
     H.push(
       // 요약에는 번호를 달지 않는다 — 아래 회차 절이 1 부터 회차 번호를 쓴다
       latSummary('', (i) => `href="#lat-${i + 1}"`, '') ||
         '<section class="sec"><p class="note" style="margin:0">고른 회차에 포털 응답 기록이 없습니다(포털 감시를 하지 않았거나, 노드 DOWN 중 정상화가 없었던 회차).</p></section>',
     )
-    if (runs.length > 1)
-      H.push(
-        `<section class="sec" style="padding:10px 18px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12.5px"><span class="mut">회차</span>${runs
-          .map((h, i) => `<a class="pill" href="#lat-${i + 1}">#${i + 1} ${he(shortName(h, i))}</a>`)
-          .join('')}</div></section>`,
-      )
+    /*
+     * 회차 이동 · 회차별 표(2026-11-19 사용자 요청): 이동 단추는 '#번호' 만(이름은 툴팁) · 차수마다 한 줄로 묶고, 위 응답 지연 다섯이 나온
+     * 회차는 주황으로. 회차별 표는 기본 접힘(30회차를 펼쳐 두면 한참 내려야 했다) — 단추 · 요약표의 회차 링크를 누르면 그 회차가 펼쳐진다
+     */
+    const hot = new Set(latTop().map((x) => x.i))
+    const phOf = (h: HistoryRecord) => (grp ? grp.phases.find((ph) => ph.id === h.phaseId)?.name ?? '차수 없음' : '')
+    const chip = (i: number) =>
+      `<a class="lchip${hot.has(i) ? ' hot' : ''}" href="#lat-${i + 1}" title="${he(nameOfRun(runs[i], i))}">#${i + 1}</a>`
+    const lines: { ph: string; idx: number[] }[] = []
+    runs.forEach((h, i) => {
+      const ph = phOf(h)
+      const last = lines[lines.length - 1]
+      if (last && last.ph === ph) last.idx.push(i)
+      else lines.push({ ph, idx: [i] })
+    })
+    H.push(
+      `<section class="sec" style="padding:12px 18px"><div class="lnav">${lines
+        .map((l) => `<div class="lrow">${l.ph ? `<span class="lph">${he(l.ph)}</span>` : ''}<span class="lchips">${l.idx.map(chip).join('')}</span></div>`)
+        .join('')}</div>${hot.size ? '<div class="note" style="margin:6px 0 0"><span class="lchip hot" style="pointer-events:none">#</span> 위 응답 지연 다섯이 나온 회차</div>' : ''}</section>`,
+    )
+    H.push('<section class="sec"><div class="sh"><h2>회차별 응답 시간</h2><span class="d">회차를 누르면 펼쳐집니다</span></div>')
     runs.forEach((h, i) => {
       const lat = latOf(h)
       const dn = h.milestones.down?.at
       H.push(
-        `<section class="sec" id="lat-${i + 1}"><div class="sh"><span class="n">${i + 1}</span><h2>${he(nameOfRun(h, i))}</h2><span class="d">${he(h.node)}${dn != null ? ` DOWN · ${he(fmtDateTime(dn))}` : ` · ${he(fmtDateTime(h.t0))} 시작`}</span></div>${
+        // PDF 는 접힌 칸이 인쇄되지 않아 펼쳐 둔다(다른 접힌 칸 · openEvidence 와 같은 기준)
+        `<details class="run" id="lat-${i + 1}"${opts.openEvidence ? ' open' : ''}><summary><span class="rt">#${i + 1} ${he(nameOfRun(h, i))}</span><span class="pill">${he(h.node)}${
+          dn != null ? ` DOWN · ${he(fmtDateTime(dn))}` : ` · ${he(fmtDateTime(h.t0))} 시작`
+        }</span>${hot.has(i) ? '<span class="pill warn">응답 지연 상위</span>' : ''}${lat?.rows.length ? '' : '<span class="pill">기록 없음</span>'}</summary><div class="rb">${
           lat?.rows.length ? latTable(lat) : '<p class="note" style="margin:0">이 회차에는 포털 응답 기록이 없습니다.</p>'
-        }</section>`,
+        }</div></details>`,
       )
     })
-    H.push('</div></body></html>')
+    H.push('</section>')
+    // 회차 링크(단추 · 요약표)를 누르거나 주소 뒤 #lat-n 으로 열면 그 회차를 펼친다(한 파일 리포트에서는 BUNDLE_CHILD 가 같은 일을 한다)
+    H.push(
+      `</div><script>document.querySelectorAll('a[href^="#lat-"]').forEach(function(a){a.addEventListener('click',function(){var d=document.getElementById(a.getAttribute('href').slice(1));if(d)d.open=true})});if(location.hash){var d=document.getElementById(location.hash.slice(1));if(d&&d.tagName==='DETAILS')d.open=true}</script></body></html>`,
+    )
     return H.join('\n')
   }
   // 증적 원문의 왼쪽 목차가 들어갈 자리 — 회차를 그린 뒤에야 증적 목록을 알므로 끝에서 이 줄을 바꾼다(evidenceToc.ts)
@@ -6206,6 +6389,58 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
     const envTabs = groupEnvTabs(grp, runs).filter((t) => t.env && t.env.nodes.length)
     const env = envTabs.length === 1 ? envTabs[0].env : envTabs.length ? envTabs[0].env : grp.env
     const real = !!opts.realNames
+    // 검증 결과 표(GroupResult 주석) — 검증 환경 앞. 사람이 적은 글은 내보내기 마스킹을 거친다
+    const res = grp.result
+    if (res && (res.verdict || [res.purpose, res.owner, res.summary, res.note].some((x) => x?.trim()))) {
+      /*
+       * 툴에서 적은 줄을 그대로(2026-11-19 사용자 요청): 빈 줄은 빈 줄로 남기고(예전엔 버려 묶음 사이 간격이 사라졌다), 줄 앞 공백도 살린다
+       * ('  > HAProxy …' 처럼 들여 쓴 줄이 왼쪽으로 붙었다). '-' 로 시작한 줄은 위 줄 아래로 들여 쓴다. 앞뒤 빈 줄만 버린다
+       */
+      const txt = (v: string) => {
+        const ls = v.split(/\r?\n/).map((l) => l.trimEnd())
+        while (ls.length && !ls[0].trim()) ls.shift()
+        while (ls.length && !ls[ls.length - 1].trim()) ls.pop()
+        return ls
+          .map((l) => {
+            if (!l.trim()) return '<span class="rs0"></span>'
+            /*
+             * 들여쓰기는 적은 공백 수대로(2026-11-19 사용자 지적: ' - 라이프싸이클팀' 아래 '  > 파드 분산…' 이 '-' 보다 왼쪽에 나왔다 —
+             * '-' 줄만 고정 폭으로 들이고 다른 줄은 공백 그대로라 깊이가 뒤집혔다). 공백 하나 = 0.6em(탭 = 4칸)으로 같은 잣대에 둔다.
+             * 공백 없이 '-' 로 시작한 줄은 예전처럼 한 단계(공백 하나만큼) 들인다
+             */
+            const lead = (/^[ \t]*/.exec(l)?.[0] ?? '').replace(/\t/g, '    ').length
+            const body = l.trimStart()
+            const lv = lead || (/^[-–]/.test(body) ? 1 : 0)
+            return `<span class="rs1"${lv ? ` style="padding-left:${(lv * 0.6).toFixed(1)}em"` : ''}>${he(maskForExport(body))}</span>`
+          })
+          .join('')
+      }
+      const rows: [string, string | undefined][] = [
+        ['검증 대상', res.target?.trim() || grp.name],
+        ['검증 기간', res.period?.trim() || runsPeriodLine(runs)],
+        ['검증 목적', res.purpose],
+        ['검증 담당자', res.owner],
+        ['검증 환경', res.env?.trim() || groupEnvLine(env)],
+        // 검증 결과 이름표 — 글이 아니라 표시라 아래에서 따로 그린다(자리만 둔다)
+        ['검증 결과', res.verdict ? '\u0000' : ''],
+        // 실패 사유 — FAIL 일 때만(PASS 면 적어 둔 글이 있어도 싣지 않는다)
+        ['실패 사유', res.verdict === 'fail' ? res.failReason : ''],
+        // 이름(2026-11-19 사용자 결정): '종합 검증 결과' → '주요 이슈 및 조치내역'. 저장 칸 이름(summary)은 그대로
+        ['주요 이슈 및 조치내역', res.summary],
+        // 이름은 '참고사항'(2026-11-20 사용자 결정, 비고 → 특이사항 → 참고사항) — 저장 칸 이름(note)은 그대로
+        ['참고사항', res.note],
+      ]
+      out.push(
+        `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>검증 결과</h2></div><table class="rkv"><tbody>${rows
+          .filter(([, v]) => v?.trim())
+          .map(([k, v]) =>
+            v === '\u0000'
+              ? `<tr><th>${k}</th><td><span class="rvd ${res.verdict}">${res.verdict === 'ok' ? 'PASS' : 'FAIL'}</span></td></tr>`
+              : `<tr><th>${k}</th><td>${txt(v as string)}</td></tr>`,
+          )
+          .join('')}</tbody></table></section>`,
+      )
+    }
     const envBody = (e: GroupEnv) => {
       const allVms = e.nodes.flatMap((n) => n.vms)
       const cnt = (f: (v: EnvVm) => boolean) => allVms.filter(f).reduce((a, v) => a + vmCount(v), 0)
@@ -6394,9 +6629,11 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
         ...used.map((ph) => ({ name: ph.name, ph: ph as GroupPhase | null, idx: runs.map((h, i) => (h.phaseId === ph.id ? i : -1)).filter((i) => i >= 0) })),
         ...(loose.length ? [{ name: '차수 없음', ph: null as GroupPhase | null, idx: loose }] : []),
       ]
-      const sumRow = (name: string, idx: number[], tot = false) => {
+      // 적용한 패치(GroupPhase.patch, 2026-11-25) — 차수 이름 아래 작은 글씨로. 두 표(위 요약 · 아래 이슈) 모두 차수 칸에
+      const patchTag = (ph: GroupPhase | null) => (ph?.patch?.trim() ? `<div class="ppatch">적용: ${he(maskForExport(ph.patch.trim()))}</div>` : '')
+      const sumRow = (name: string, idx: number[], tot = false, ph: GroupPhase | null = null) => {
         const r = rowsOf(new Set(idx))
-        return `<tr${tot ? ' class="ptot"' : ''}><td class="pc"><b>${he(name)}</b></td><td colspan="2" class="pc pdt">${span(idx)}</td><td class="pc">${r.n}</td><td class="pc pg">${r.ok}</td><td class="pc${r.fail ? ' pr' : ''}">${r.fail}</td><td colspan="2" class="pc"><b>${r.avg != null ? E(r.avg) : '-'}</b></td></tr>`
+        return `<tr${tot ? ' class="ptot"' : ''}><td class="pc"><b>${he(name)}</b>${patchTag(ph)}</td><td colspan="2" class="pc pdt">${span(idx)}</td><td class="pc">${r.n}</td><td class="pc pg">${r.ok}</td><td class="pc${r.fail ? ' pr' : ''}">${r.fail}</td><td colspan="2" class="pc"><b>${r.avg != null ? E(r.avg) : '-'}</b></td></tr>`
       }
       // 아래 표 — 차수마다 덩어리(lib/phaseSummary layoutPhase)를 줄로 편다
       let no = 0
@@ -6428,7 +6665,7 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
         }
         const runIdsOf = new Map(iss.map((x) => [x.id, x.runIds]))
         const blocks = layoutPhase(iss, acts)
-        const phCell = (rs: number) => `<td class="pc"${rs > 1 ? ` rowspan="${rs}"` : ''}><b>${he(name)}</b><div class="pdt">${span(idx)}</div></td>`
+        const phCell = (rs: number) => `<td class="pc"${rs > 1 ? ` rowspan="${rs}"` : ''}><b>${he(name)}</b>${patchTag(ph)}<div class="pdt">${span(idx)}</div></td>`
         if (!blocks.length) {
           detail.push(`<tr>${phCell(1)}<td class="pc pmut">-</td><td colspan="6" class="pmut">이슈 없음</td></tr>`)
           continue
@@ -6457,7 +6694,7 @@ details.ev,[id^="sum-"],[id^="tl-"],[id^="ev-"],#notes{scroll-margin-top:12px}.f
       out.push(
         `<section class="sec"><div class="sh"><span class="n">${sno()}</span><h2>차수별 요약</h2></div>`,
         `<table class="ps psum">${grid}<thead><tr><th>차수</th><th colspan="2">기간</th><th>총</th><th>성공</th><th>실패</th><th colspan="2">${he(allLabel || '전체 복구')}(성공 평균)</th></tr></thead><tbody>`,
-        ...phaseRows.map((p) => sumRow(p.name, p.idx)),
+        ...phaseRows.map((p) => sumRow(p.name, p.idx, false, p.ph)),
         sumRow('합계', allIdx, true),
         `</tbody></table>`,
         // 이슈가 하나도 없으면 아래 표는 '이슈 없음' 줄만 늘어서니 싣지 않는다
@@ -6747,7 +6984,13 @@ ${inc.pods || inc.ceph ? `<div><b>${[inc.pods && '파드', inc.ceph && 'Ceph'].f
     // 느려진 API(포털 API 응답 시간 요약, 2026-11-19 사용자 결정) — 같이 뽑은 '포털 API 응답 시간' 파일이 있으면 회차 칸 · 아래 줄에서 그리로 간다
     if (inc.portal) {
       const lf = opts.latFile
-      H.push(latSummary(String(sno()), lf ? (i) => `href="${fileHref(lf)}#lat-${i + 1}"` : null, lf ? `<div class="note">회차별 전체 표는 <a href="${fileHref(lf)}">포털 API 응답 시간 →</a></div>` : ''))
+      /*
+       * 조치 전 · 후(2026-11-25) — 리포트 만들기 창에서 비교를 켰을 때만, 그때는 '응답 지연' 다섯 줄 **대신** 싣는다(사용자 결정).
+       * 둘을 연달아 두면 응답 지연(같은 API 가 회차만 바꿔 다섯 줄)이 비교 표의 조치 전 칸을 미리 보여 주는 것에 그쳤다. 비교는 이번
+       * 패치처럼 조치가 있을 때만 켜는 것이고, 평소 리포트는 지금처럼 응답 지연이 나온다
+       */
+      if (cmp) H.push(cmpSummary(String(sno()), lf))
+      else H.push(latSummary(String(sno()), lf ? (i) => `href="${fileHref(lf)}#lat-${i + 1}"` : null, lf ? `<div class="note">회차별 전체 표는 <a href="${fileHref(lf)}">포털 API 응답 시간 →</a></div>` : ''))
     }
     // ③ 노드별 결과 — 어느 노드를 내렸을 때 약한가. 평균 · 최대는 성공한 회차만(위 평균과 같은 기준)
     const nodeList = Array.from(new Set(runs.map((h) => h.node).filter((nd) => nd && nd !== UNKNOWN_NODE)))
@@ -7274,6 +7517,22 @@ function saveReportKinds(v: ReportKinds): void {
 }
 /** 리포트를 한 파일로 만들까(2026-11-12 사용자 결정: 기본 한 파일, 따로 받고 싶은 사람은 끈다). 다음에도 기억한다 */
 const REPORT_ONEFILE_KEY = 'report_onefile_v1'
+/**
+ * 종합 결과 제목(2026-11-20 사용자 결정) — 리포트 만들기에서 '종합 결과 보고' · '중간 결과 보고' 를 고른다. 같은 그룹으로 진행 중엔 중간,
+ * 끝나면 종합을 뽑으므로 그룹이 아니라 뽑을 때 정한다. 바뀌는 것은 종합 결과 제목 · 파일 이름(한 파일 리포트 포함)뿐이고 내용은 같다
+ * (중간 보고에도 검증 결과 · 실패 사유를 싣는다 — 사용자 확인). 회차별 · 증적 · API 응답 파일은 첨부 자료라 제목을 바꾸지 않는다
+ */
+type ReportTitle = 'final' | 'mid'
+const REPORT_TITLE: Record<ReportTitle, string> = { final: '가용성 검증 종합 결과 보고', mid: '가용성 검증 중간 결과 보고' }
+const REPORT_TITLE_FILE: Record<ReportTitle, string> = { final: '종합결과보고', mid: '중간결과보고' }
+const REPORT_TITLE_KEY = 'report_title_v1'
+function loadReportTitle(): ReportTitle {
+  try {
+    return localStorage.getItem(REPORT_TITLE_KEY) === 'mid' ? 'mid' : 'final'
+  } catch {
+    return 'final'
+  }
+}
 function loadReportOneFile(): boolean {
   try {
     return localStorage.getItem(REPORT_ONEFILE_KEY) !== '0'
@@ -7360,6 +7619,10 @@ async function makeRunsReport(
   realNames = false,
   /** 환경 구성도 HTML(renderEnvMapHtml) — 있으면 종합 결과 다음 파일로 같이 뽑고 검증 환경에서 링크한다 */
   envMapHtml?: string,
+  /** 종합 결과 제목(REPORT_TITLE) */
+  reportTitle: ReportTitle = 'final',
+  /** 포털 API 응답 조치 전 · 후 비교(LatCmpPick) — 종합 결과 요약 · 포털 API 응답 파일 맨 위 */
+  latCmp?: LatCmpPick,
 ): Promise<{ msg: string; path?: string }> {
   const evidence: Record<string, BoardEvidenceItem[]> = {}
   /** 증적을 **읽지 못한** 회차 — '증적이 없는 회차' 와 섞으면 복호화 실패 등으로 못 읽은 증적이 '저장 기능 이전' 으로 둔갑한다(조회 실패 ≠ 없음) */
@@ -7383,7 +7646,7 @@ async function makeRunsReport(
   // 종합 결과의 회차 링크는 같이 뽑는 회차별 결과(HTML)로 — PDF 는 파일 사이 링크가 안 되므로 걸지 않는다
   const runsFile = kinds.runs && fmt === 'html' ? `${runsName}.html` : undefined
   const pdf = fmt === 'pdf'
-  const totalName = `가용성검증_종합결과${scope}_${stamp}`
+  const totalName = `가용성검증_${REPORT_TITLE_FILE[reportTitle]}${scope}_${stamp}`
   // 파일 사이 링크(buildHtmlReport opts.evFiles · totalFile 주석) — 이름을 먼저 정해 두고 서로 건다. 파일이 둘 이상일 때만(한 파일이면 갈 곳이 없다)
   /*
    * 증적 파일 이름 — 이름 · 노드가 같고 같은 분에 시작한 회차는 이름이 겹친다. 저장할 때 뒤 파일에 ' (2)' 가 붙으면서 링크 바꾸기가 두 회차의
@@ -7410,7 +7673,7 @@ async function makeRunsReport(
   const evFiles = linkOn && evRecs.length ? Object.fromEntries(evRecs.map((h) => [h.id, `${evName(h)}.html`])) : undefined
   const totalFile = linkOn && kinds.total ? `${totalName}.html` : undefined
   const latFile = linkOn && kinds.latency ? `${latName}.html` : undefined
-  if (kinds.total) files.push({ name: totalName, html: buildHtmlReport(recs, {}, { kind: 'total', openEvidence: pdf, rto, items, runsFile, evFiles, group, realNames, envFile, latFile }) })
+  if (kinds.total) files.push({ name: totalName, html: buildHtmlReport(recs, {}, { kind: 'total', openEvidence: pdf, rto, items, runsFile, evFiles, group, realNames, envFile, latFile, reportTitle, latCmp }) })
   // 구성도 머리의 '← 종합 결과' — 링크가 걸릴 때만(파일 이름 자리표시를 바꾼다, renderEnvMapHtml totalFile)
   // 걸 곳이 없으면(PDF · 종합 결과 없음) 링크째 뺀다 — 빈 링크는 눌러도 아무 일이 없어 고장으로 보인다
   if (envMapHtml)
@@ -7420,7 +7683,7 @@ async function makeRunsReport(
     })
   if (kinds.runs) files.push({ name: runsName, html: buildHtmlReport(recs, {}, { kind: 'runs', openEvidence: pdf, rto, items, evFiles, totalFile, group }) })
   // 포털 API 응답 시간 — 이것만 고르면 이 파일 하나(문제 API 를 그 파일만 건네려고, 2026-11-19 사용자 결정)
-  if (kinds.latency) files.push({ name: latName, html: buildHtmlReport(recs, {}, { kind: 'latency', openEvidence: pdf, rto, items, totalFile, group }) })
+  if (kinds.latency) files.push({ name: latName, html: buildHtmlReport(recs, {}, { kind: 'latency', openEvidence: pdf, rto, items, totalFile, group, latCmp }) })
   const noEv = kinds.evidence ? recs.filter((h) => !readFail.includes(h) && !evCount(h)).length : 0
   for (const h of evRecs)
     files.push({
@@ -7432,8 +7695,9 @@ async function makeRunsReport(
     (readFail.length ? ` 증적을 읽지 못한 회차 ${readFail.length}개(${readFail.map((h) => h.label || fmtDateTime(h.t0)).slice(0, 3).join(', ')}${readFail.length > 3 ? ' 외' : ''})는 증적 원문을 만들지 못했습니다. 다시 시도해 보세요.` : '')
   if (!files.length) return { msg: `만들 것이 없습니다.${skipped}` }
   if (oneFile && !pdf && files.length > 1) {
-    const name = `가용성검증_결과${scope}_${stamp}`
-    const html = bundleReportHtml(files, `가용성 검증 결과${n === 1 ? `: ${recs[0].label || recs[0].node}` : ''}`)
+    // 종합 결과가 들었으면 한 파일 이름 · 제목도 고른 보고 제목으로(REPORT_TITLE 주석)
+    const name = kinds.total ? `가용성검증_${REPORT_TITLE_FILE[reportTitle]}${scope}_${stamp}` : `가용성검증_결과${scope}_${stamp}`
+    const html = bundleReportHtml(files, `${kinds.total ? REPORT_TITLE[reportTitle] : '가용성 검증 결과'}${n === 1 ? `: ${recs[0].label || recs[0].node}` : ''}`)
     const res = await window.electronAPI.saveReport({ defaultName: `${name}.html`, content: html, format: 'html' })
     if (res.saved) return { msg: `저장했습니다(${files.length}개 화면을 한 파일에). ${res.path ?? ''}${skipped}`, path: res.path }
     return { msg: res.error ? `저장 실패: ${res.error}` : '저장하지 않았습니다(저장 창을 닫았습니다).' }
@@ -9798,7 +10062,8 @@ function GroupEditDialog({
   const [phases, setPhases] = useState<GroupPhase[]>(() => group?.phases.map((ph) => ({ ...ph })) ?? [])
   const [err, setErr] = useState('')
   const [askDel, setAskDel] = useState(false)
-  const [tab, setTab] = useState<'phase' | 'env' | 'map'>('phase')
+  const [tab, setTab] = useState<'result' | 'phase' | 'env' | 'map'>('phase')
+  const [result, setResult] = useState<GroupResult>(() => ({ ...(group?.result ?? {}) }))
   const [envMap, setEnvMap] = useState<EnvMapSnapshot | undefined>(group?.envMap)
   /** 이슈 · 조치를 펼친 차수 */
   const [phOpen, setPhOpen] = useState<string | null>(null)
@@ -9847,9 +10112,14 @@ function GroupEditDialog({
       id: group?.id ?? newId('g'),
       name: n,
       createdAt: group?.createdAt ?? Date.now(),
-      phases: phases.map((ph) => ({ ...ph, name: ph.name.trim() })),
+      phases: phases.map((ph) => ({ ...ph, name: ph.name.trim(), patch: ph.patch?.trim() || undefined })),
       env: envClean,
       envMap,
+      // 빈 칸은 버리고, 모두 비면 필드째 없앤다
+      result: (() => {
+        const r = Object.fromEntries(Object.entries(result).filter(([, v]) => typeof v === 'string' && v.trim())) as GroupResult
+        return Object.keys(r).length ? r : undefined
+      })(),
     })
     if (e) setErr(e)
   }
@@ -9888,6 +10158,8 @@ function GroupEditDialog({
           <div className="flex gap-1 border-b border-white/10">
             {(
               [
+                // 검증 결과(2026-11-19 사용자 결정) — 리포트 맨 위 표라 첫 탭
+                ['result', '검증 결과'],
                 // 탭 이름(2026-11-14 사용자 결정): '차수 n' → '회차 설정'. 숫자는 차수 개수라 '회차' 옆에 두면 회차 수로 읽혀 뺐다
                 ['phase', '회차 설정'],
                 ['env', env ? `환경 · 노드 ${env.nodes.length}` : '환경'],
@@ -9904,6 +10176,67 @@ function GroupEditDialog({
               </button>
             ))}
           </div>
+          {tab === 'result' && (
+            <div className="grid grid-cols-[96px_1fr] items-start gap-x-3 gap-y-2">
+              {(
+                [
+                  ['target', '검증 대상', 'input', name.trim(), '비우면 그룹 이름'],
+                  ['period', '검증 기간', 'input', runsPeriodLine(groupRuns), '비우면 리포트에 고른 회차의 처음 ~ 끝'],
+                  ['purpose', '검증 목적', 2, '', ''],
+                  ['owner', '검증 담당자', 'input', '', ''],
+                  ['env', '검증 환경', 'input', groupEnvLine(env), "비우면 '환경' 탭으로 만든 한 줄"],
+                  ['verdict', '검증 결과', 'verdict', '', '리포트에 PASS(초록) · FAIL(빨강) 이름표로 나옵니다'],
+                  // 실패 사유도 여러 줄을 보며 적게(2026-11-20 사용자 요청: 4줄은 좁았다)
+                  ['failReason', '실패 사유', 7, '', 'FAIL 일 때만 리포트에 실립니다'],
+                  ['summary', '주요 이슈 및 조치내역', 10, '', '자유롭게 적습니다. 줄바꿈 · 줄 앞 공백(들여쓰기)이 그대로 실립니다'],
+                  // 비고도 여러 줄을 적는다(2026-11-19 사용자 요청: 3줄이라 스크롤해야 읽혔다)
+                  ['note', '참고사항', 6, '', ''],
+                ] as const
+              )
+                // 실패 사유 칸은 FAIL 을 골랐을 때만 보인다
+                .filter(([k]) => k !== 'failReason' || result.verdict === 'fail')
+                .map(([k, label, kind, auto, hint]) => (
+                <Fragment key={k}>
+                  <span className="pt-1.5 text-gray-400">{label}</span>
+                  <div className="min-w-0">
+                    {kind === 'verdict' ? (
+                      <div className="flex items-center gap-1.5 pt-0.5">
+                        {(
+                          [
+                            [undefined, '선택 안 함', 'border-white/15 bg-white/10 text-gray-100'],
+                            // 표시는 PASS · FAIL(2026-11-19 사용자 결정, 처음엔 성공 · 실패)
+                            ['ok', 'PASS', 'border-emerald-500/60 bg-emerald-500/20 text-emerald-200'],
+                            ['fail', 'FAIL', 'border-red-500/60 bg-red-500/20 text-red-200'],
+                          ] as const
+                        ).map(([v, l, on]) => (
+                          <button
+                            key={l}
+                            type="button"
+                            onClick={() => setResult((r) => ({ ...r, verdict: v }))}
+                            className={'rounded-full border px-3 py-0.5 text-[12px] ' + (result.verdict === v ? on : 'border-white/10 text-gray-400 hover:bg-white/10')}
+                          >
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    ) : kind === 'input' ? (
+                      <input value={(result[k] as string | undefined) ?? ''} onChange={(e) => setResult((r) => ({ ...r, [k]: e.target.value }))} placeholder={auto || ''} className={field + ' w-full'} />
+                    ) : (
+                      <textarea
+                        rows={kind}
+                        value={(result[k] as string | undefined) ?? ''}
+                        onChange={(e) => setResult((r) => ({ ...r, [k]: e.target.value }))}
+                        className={field + ' w-full resize-y leading-[18px]'}
+                      />
+                    )}
+                    {hint && <div className="mt-0.5 text-[11px] text-gray-500">{hint}</div>}
+                  </div>
+                </Fragment>
+              ))}
+              <span />
+              <div className="text-[11px] text-gray-500">리포트 종합 결과 맨 위 '검증 결과' 표에 실립니다. 목적 · 담당자 · 검증 결과 · 주요 이슈 및 조치내역 · 참고사항이 모두 비면 싣지 않습니다.</div>
+            </div>
+          )}
           {tab === 'env' && <EnvEditor value={env} onChange={setEnv} others={others} hosts={hosts} novaFetch={novaFetch} envMap={envMap} />}
           {/* 다른 탭으로 가도 내리지 않는다 — 수집 중 탭을 바꿨다 돌아와 다시 누르면 수집이 겹쳐 늦은 옛 결과가 새 결과를 덮었다(검토 지적) */}
           <div className={tab === 'map' ? '' : 'hidden'}>
@@ -9947,6 +10280,14 @@ function GroupEditDialog({
                     className={field + ' w-40'}
                   />
                   <span className="w-14 text-[11px] text-gray-500">{runCount[ph.id] ?? 0}회</span>
+                  {/* 이 차수 전에 적용한 패치(GroupPhase.patch) — 리포트 차수별 요약의 차수 이름 아래에 나온다 */}
+                  <input
+                    value={ph.patch ?? ''}
+                    onChange={(e) => setPhases((cur) => cur.map((x, j) => (j === k ? { ...x, patch: e.target.value } : x)))}
+                    placeholder="적용한 패치 (예: SeaweedFS 패치)"
+                    title="이 차수 전에 적용한 변경 · 패치. 리포트 차수별 요약의 차수 이름 아래에 나옵니다"
+                    className={field + ' w-52'}
+                  />
                   <button
                     onClick={() => setPhOpen(phOpen === ph.id ? null : ph.id)}
                     className={
@@ -10264,10 +10605,17 @@ function HistoryView({
   const [repItems, setRepItems] = useState<ReportItems>(loadReportItems)
   const [repKinds, setRepKinds] = useState<ReportKinds>(loadReportKinds)
   const [repOneFile, setRepOneFile] = useState<boolean>(loadReportOneFile)
+  const [repTitle, setRepTitle] = useState<ReportTitle>(loadReportTitle)
   /** VM 이름을 실제 이름으로 — 기본 표준 이름, 기억하지 않는다(실제 이름은 내부 정보에 가까워 밖으로 나가는 리포트엔 기본으로 싣지 않는다) */
   const [repReal, setRepReal] = useState(false)
   /** 리포트에 환경 구성도를 같이(그룹에 수집본이 있을 때만 보인다 · 기본 켬) */
   const [repEnv, setRepEnv] = useState(true)
+  /**
+   * 포털 API 응답 조치 전 · 후 비교(LatCmpPick 주석) — 묶음마다 차수(ph, '' = 직접 고르기)와 넣은 회차. 기본은 끔(켜면 리포트 두 곳에 표가
+   * 붙는다), 창을 열 때마다 차수 기본값(처음 · 마지막 차수)으로 다시 채운다. 기억하지 않는다 — 회차 고르기가 매번 다르다
+   */
+  const [cmpOn, setCmpOn] = useState(false)
+  const [cmpSel, setCmpSel] = useState<{ pre: { ph: string; ids: string[] }; post: { ph: string; ids: string[] } }>({ pre: { ph: '', ids: [] }, post: { ph: '', ids: [] } })
   /** 이력 머리줄 [환경 구성도] 로 연 그룹 */
   const [envView, setEnvView] = useState<string | null>(null)
   const setRto = (next: RtoTargets) => {
@@ -10417,12 +10765,17 @@ function HistoryView({
     setReportAsk(false)
     saveReportKinds(repKinds)
     saveReportOneFile(repOneFile)
+    try {
+      localStorage.setItem(REPORT_TITLE_KEY, repTitle)
+    } catch {
+      /* 저장 못 해도 이번에는 쓴다 */
+    }
     setBusy(true)
     setMsg('')
     setSavedPath(null)
     try {
       const envMapHtml = pickGroup?.envMap && repEnv ? renderEnvMapHtml(pickGroup.envMap, { title: `환경 구성도 · ${pickGroup.name}`, totalFile: '__QT_TOTAL_FILE__' }) : undefined
-      const r = await makeRunsReport(pickedRecs, repFmt, repKinds, rto, repItems, repOneFile, pickGroup, !!pickGroup && repReal, envMapHtml)
+      const r = await makeRunsReport(pickedRecs, repFmt, repKinds, rto, repItems, repOneFile, pickGroup, !!pickGroup && repReal, envMapHtml, repTitle, cmpReady ? cmpPickOut() : undefined)
       setMsg(r.msg)
       setSavedPath(r.path ?? null)
     } catch (e) {
@@ -10441,6 +10794,49 @@ function HistoryView({
   const sameKinds = (a: ReportKinds, b: ReportKinds) => a.total === b.total && a.runs === b.runs && a.evidence === b.evidence && !!a.latency === !!b.latency
   /** 고른 회차가 모두 한 그룹이면 그 그룹 — 리포트 앞에 검증 환경 · 시나리오 흐름 · 차수별 요약이 붙는다 */
   const pickGroup = pickedRecs.length ? groups.find((g) => pickedRecs.every((h) => h.groupId === g.id)) : undefined
+  /** 조치 전 · 후 비교에 고를 수 있는 차수 — 고른 회차가 하나라도 든 차수(그룹 순서) */
+  const cmpPhases = pickGroup ? pickGroup.phases.filter((ph) => pickedRecs.some((h) => h.phaseId === ph.id)) : []
+  /** 묶음 목록에 보일 회차 — 차수를 골랐으면 그 차수, 직접 고르기면 고른 회차 전부 */
+  const cmpCands = (ph: string) => pickedRecs.filter((h) => !ph || h.phaseId === ph).sort((a, b) => a.t0 - b.t0)
+  /**
+   * 회차 번호 · 포털 시간을 리포트와 같게(빌드 전 검토 11-25) — 이력 창의 #번호는 보는 목록의 번호라 리포트의 #번호(차수 순서 → 시작 시각,
+   * buildHtmlReport runs)와 달랐고, 포털 시간은 장애 주입 시각 사용 여부(넣을 항목)에 따라 리포트 값과 어긋날 수 있었다
+   */
+  const cmpRepNo = (() => {
+    const phIdx = (h: HistoryRecord) => {
+      const k = pickGroup ? pickGroup.phases.findIndex((ph) => ph.id === h.phaseId) : -1
+      return k < 0 ? 1e9 : k
+    }
+    const sorted = [...pickedRecs].sort((a, b) => (pickGroup ? phIdx(a) - phIdx(b) : 0) || a.t0 - b.t0)
+    return new Map(sorted.map((h, i) => [h.id, i + 1]))
+  })()
+  /** 기본 — 차수가 둘 이상이면 처음 차수 = 조치 전, 마지막 차수 = 조치 후(그 차수 회차 모두). 아니면 직접 고르기로 비워 둔다 */
+  const cmpDefault = () => {
+    if (cmpPhases.length < 2) return { pre: { ph: '', ids: [] }, post: { ph: '', ids: [] } }
+    const a = cmpPhases[0].id
+    const b = cmpPhases[cmpPhases.length - 1].id
+    return { pre: { ph: a, ids: cmpCands(a).map((h) => h.id) }, post: { ph: b, ids: cmpCands(b).map((h) => h.id) } }
+  }
+  const cmpIds = (side: 'pre' | 'post') => cmpSel[side].ids.filter((id) => pickedRecs.some((h) => h.id === id))
+  const cmpShow = (repKinds.total || repKinds.latency) && pickedRecs.length >= 2
+  const cmpReady = cmpOn && cmpShow && cmpIds('pre').length > 0 && cmpIds('post').length > 0
+  const cmpPickOut = (): LatCmpPick => {
+    const lb = (ph: string) => cmpPhases.find((x) => x.id === ph)?.name ?? ''
+    return { pre: { label: lb(cmpSel.pre.ph), ids: cmpIds('pre') }, post: { label: lb(cmpSel.post.ph), ids: cmpIds('post') } }
+  }
+  /** 회차 하나를 넣고 빼기 — 한 회차가 두 묶음에 같이 들 수 없다(넣으면 다른 쪽에서 뺀다) */
+  const cmpToggle = (side: 'pre' | 'post', id: string, on: boolean) => {
+    const other = side === 'pre' ? 'post' : 'pre'
+    setCmpSel((c) => ({
+      ...c,
+      [side]: { ...c[side], ids: on ? [...c[side].ids.filter((x) => x !== id), id] : c[side].ids.filter((x) => x !== id) },
+      [other]: on ? { ...c[other], ids: c[other].ids.filter((x) => x !== id) } : c[other],
+    }))
+  }
+  const cmpSetPh = (side: 'pre' | 'post', ph: string) => {
+    const other = side === 'pre' ? 'post' : 'pre'
+    setCmpSel((c) => ({ ...c, [side]: { ph, ids: ph ? cmpCands(ph).map((h) => h.id).filter((id) => !c[other].ids.includes(id)) : [] } }))
+  }
   // 실제 이름 고르기 — 그룹 기본이든 차수 환경이든 실제 이름을 적어 둔 VM 이 하나라도 있으면
   const pickHasReal = !!pickGroup && [pickGroup.env, ...pickGroup.phases.map((ph) => ph.env)].some((e) => e?.nodes.some((n) => n.vms.some((v) => (v.real ?? []).some((x) => x.trim()))))
   /** 회차 결과(차수 머리의 성공 · 실패 셈) — 리포트와 같은 뜻: 끝나지 않은 것이 있거나 사람이 '조치로 복구' 를 켜면 실패 */
@@ -10576,7 +10972,7 @@ function HistoryView({
             <div className="mb-3 space-y-1 rounded bg-white/[0.03] px-2.5 py-2">
               {(
                 [
-                  ['total', '종합 결과', '주요 수치 · 전체 회차 비교 · 실패 세부 원인 · 느려진 API · 노드별 결과'],
+                  ['total', '종합 결과', '주요 수치 · 전체 회차 비교 · 실패 세부 원인 · 포털 API 응답 지연 · 노드별 결과'],
                   ['runs', '회차별 결과', '회차마다 핵심 시간 · 요약 타임라인 · 파드 로그 이상 (증적 없음)'],
                   ['evidence', '증적 원문', `서버 원문, 회차마다 한 파일 (증적 있는 회차 ${nEvFiles}개)`],
                   ['latency', '포털 API 응답', '회차마다 화면 · API 별 노드 UP · DOWN 응답 시간 (이것만 고르면 이 내용만 한 파일)'],
@@ -10588,6 +10984,78 @@ function HistoryView({
                   <span className="text-[11px] text-gray-500">{desc}</span>
                 </label>
               ))}
+            </div>
+            {cmpShow && (
+              /* 포털 API 응답 조치 전 · 후 비교(2026-11-25 목업 A) — 차수로 채우고 회차를 직접 넣고 뺀다. 회차 옆은 포털 1차 정상화까지 걸린 시간(오래 걸린 회차 찾기용) */
+              <div className={'mb-3 rounded px-2.5 py-2 ' + (cmpOn ? 'bg-white/[0.04]' : 'bg-white/[0.02]')}>
+                <label className="flex cursor-pointer items-baseline gap-2 text-[12px] text-gray-200">
+                  <input type="checkbox" checked={cmpOn} onChange={(e) => setCmpOn(e.target.checked)} className="translate-y-[1px]" />
+                  <span className="shrink-0 font-medium">포털 API 응답 조치 전 · 후 비교</span>
+                  <span className="text-[11px] text-gray-500">조치가 있을 때만. 종합 결과의 응답 지연 자리에 · 포털 API 응답 맨 위 (노드 DOWN 구간)</span>
+                </label>
+                {cmpOn && (
+                  <>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      {(['pre', 'post'] as const).map((side) => {
+                        const sel = cmpSel[side]
+                        const ids = cmpIds(side)
+                        return (
+                          <div
+                            key={side}
+                            className={'rounded border px-2 py-1.5 ' + (side === 'pre' ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/30 bg-emerald-500/[0.06]')}
+                          >
+                            <div className="mb-1 flex items-center gap-2 text-[12px] font-medium text-gray-100">
+                              조치 {side === 'pre' ? '전' : '후'}
+                              <select
+                                value={sel.ph}
+                                onChange={(e) => cmpSetPh(side, e.target.value)}
+                                className="min-w-0 flex-1 rounded border border-white/10 bg-panel-light px-1.5 py-0.5 text-[11px] text-gray-200"
+                              >
+                                {cmpPhases.map((ph) => (
+                                  <option key={ph.id} value={ph.id}>
+                                    {ph.name}
+                                  </option>
+                                ))}
+                                <option value="">직접 고르기 (고른 회차 전부)</option>
+                              </select>
+                              <span className="shrink-0 text-[11px] text-gray-400">{ids.length}회차</span>
+                            </div>
+                            <div className="max-h-[150px] space-y-0.5 overflow-y-auto pr-1">
+                              {cmpCands(sel.ph).map((h) => {
+                                const svc = runTotals(h, repItems.inject).svc
+                                return (
+                                  <label key={h.id} className={'flex cursor-pointer items-center gap-1.5 text-[11.5px] ' + (ids.includes(h.id) ? 'text-gray-200' : 'text-gray-500')}>
+                                    <input type="checkbox" checked={ids.includes(h.id)} onChange={(e) => cmpToggle(side, h.id, e.target.checked)} />
+                                    <span className="min-w-0 flex-1 truncate">
+                                      #{cmpRepNo.get(h.id)} {h.label || h.node}
+                                    </span>
+                                    <span className="shrink-0 text-[10.5px] text-gray-500">포털 {svc == null ? '-' : fmtDuration(svc)}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div className="mt-1.5 text-[11px] leading-relaxed text-gray-500">
+                      차수를 고르면 그 차수의 회차가 모두 들어갑니다. 빼고 싶은 회차는 체크를 푸세요. 회차 옆 시간은 포털 정상화까지 걸린 시간입니다.
+                    </div>
+                    {!cmpReady && <div className="mt-1 text-[11px] text-amber-300/90">조치 전 · 후에 회차를 하나 이상씩 넣어야 비교 표가 붙습니다.</div>}
+                  </>
+                )}
+              </div>
+            )}
+            {/* 보고 제목(REPORT_TITLE 주석) — 종합 결과에만 붙어, 종합 결과를 고르지 않았으면 흐리게 */}
+            <div className={'mb-3 flex items-center gap-3 text-[12px] text-gray-200 ' + (repKinds.total ? '' : 'opacity-40')}>
+              <span className="w-[26px] shrink-0 text-[11px] text-gray-400">보고</span>
+              {(['final', 'mid'] as const).map((v) => (
+                <label key={v} className="flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap">
+                  <input type="radio" checked={repTitle === v} disabled={!repKinds.total} onChange={() => setRepTitle(v)} />
+                  {v === 'final' ? '종합 결과 보고' : '중간 결과 보고'}
+                </label>
+              ))}
+              <span className="min-w-0 flex-1 text-[11px] text-gray-500">종합 결과 제목 · 파일 이름에 붙습니다(내용은 같음)</span>
             </div>
             <div className="mb-3 flex items-center gap-3 text-[12px] text-gray-200">
               <span className="w-[26px] shrink-0 text-[11px] text-gray-400">형식</span>
@@ -10751,6 +11219,7 @@ function HistoryView({
                   // 열 때마다 보고용 묶음에서 시작(loadReportItems 주석) — 같은 창에서 기술 검토용을 뽑은 뒤 다시 열어도 마찬가지
                   setRepItems(loadReportItems())
                   setRepReal(false)
+                  setCmpSel(cmpDefault())
                   setReportAsk(true)
                 }}
                 disabled={!pickedRecs.length || busy}
@@ -11027,14 +11496,26 @@ function HistoryView({
                   <span className="w-8 shrink-0 text-right tabular-nums text-gray-500">#{numOf.get(h.id)}</span>
                   <span className="shrink-0 whitespace-nowrap tabular-nums text-gray-400">{fmtDateTime(h.t0)}</span>
                   <span className="shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[11px] font-medium text-blue-200">{h.node}</span>
-                  <span className={'min-w-0 flex-1 truncate ' + (h.label ? 'text-gray-100' : 'text-gray-600')}>{h.label || '이름 없음'}</span>
+                  {/* 한 줄 목록에서도 이름을 고친다(2026-11-19 사용자 요청) — 자세히 보기와 같은 입력칸. 줄을 누르면 회차를 고르므로 칸 안 클릭은 줄로 올리지 않는다 */}
+                  <input
+                    value={h.label ?? ''}
+                    onChange={(e) => onRename(h.id, e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                    }}
+                    placeholder="이름 없음"
+                    title="이 회차의 이름 (눌러서 고치기)"
+                    className="min-w-0 flex-1 cursor-text select-text truncate rounded border border-transparent bg-transparent px-1.5 py-0.5 text-gray-100 placeholder:text-gray-600 hover:border-white/10 focus:border-blue-500/60 focus:bg-black/20 focus:outline-none"
+                  />
                   {runSummary(h)}
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
                       setNoteFor(h.id)
                     }}
-                    title="세부 원인 및 조치 적기: 리포트 실패 원인 표 · 회차별 결과에 나옴"
+                    title="이슈 · 원인 · 조치 적기: 리포트 실패 세부 원인 표 · 회차별 결과 · 차수별 요약(가져오기)에 나옴"
                     className={
                       'inline-flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[11px] ' +
                       ((h.notes ?? []).length ? 'border-blue-500/40 text-blue-200 hover:bg-blue-500/15' : 'border-white/10 text-gray-300 hover:bg-white/10')
@@ -11080,7 +11561,7 @@ function HistoryView({
                       e.stopPropagation()
                       setNoteFor(h.id)
                     }}
-                    title="세부 원인 및 조치 적기: 리포트 실패 원인 표 · 회차별 결과에 나옴"
+                    title="이슈 · 원인 · 조치 적기: 리포트 실패 세부 원인 표 · 회차별 결과 · 차수별 요약(가져오기)에 나옴"
                     className={
                       'inline-flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[11px] ml-auto ' +
                       ((h.notes ?? []).length ? 'border-blue-500/40 text-blue-200 hover:bg-blue-500/15' : 'border-white/10 text-gray-300 hover:bg-white/10')

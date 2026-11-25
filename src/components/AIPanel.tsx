@@ -39,6 +39,8 @@ import { PRESETS } from '../presets'
  *  반환값 false 는 "이미 스트리밍 중이라 무시됨" — 호출부는 요청이 실제로 접수됐다고 가정하면 안 된다. */
 export interface AIPanelHandle {
   analyze: (context: string, question?: string) => boolean
+  /** 지금 설정된 분석 스타일 이름 — 분석 창이 '어떤 스타일로 보내는지' 를 보여 준다 */
+  styleLabel: () => string
 }
 
 interface ChatItem {
@@ -419,12 +421,17 @@ const AIPanel = forwardRef<AIPanelHandle, AIPanelProps>(function AIPanel(
           role: 'user',
           content: `다음 터미널 출력에 대해 답해 주세요.\n\n질문: ${question}\n\n\`\`\`\n${ctx}\n\`\`\``,
         }
-        startStream([...messagesRef.current, userMsg], 'free')
+        /*
+         * 질문을 적어도 설정의 분석 스타일로 보낸다(2026-11-25 사용자 지적). 예전엔 질문이 있으면 '자유형' 으로 고정해, 설정을
+         * '간단 (핵심만)' 으로 해 둬도 길게 답이 왔다. 분석 창이 보낼 스타일을 미리 보여 주므로(App 분석 창) 그 이름대로 간다.
+         */
+        startStream([...messagesRef.current, userMsg])
       } else {
         submit(`다음 터미널 출력을 분석해 주세요:\n\n\`\`\`\n${ctx}\n\`\`\``)
       }
       return true
     },
+    styleLabel: () => ANALYSIS_STYLES[configRef.current.analysisStyle].label,
   }))
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

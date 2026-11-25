@@ -71,9 +71,16 @@ type LogEv = { name: string; kind: string; at: number; streak?: StreakPoll[] }
 /**
  * 표의 줄. downAt 이 없으면(DOWN 을 못 잡은 회차) 전부 UP. 화면 · API 순서는 처음 나온 순서(포털 감시 설정 순서와 같다)
  */
-export function latencyView(m: { portalLat?: PortalLatRec; portalLog?: LogEv[] }, t0: number, downAt: number | null, upAt: number | null): LatView | null {
+export function latencyView(
+  m: { portalLat?: PortalLatRec; portalLog?: LogEv[] },
+  t0: number,
+  downAt: number | null,
+  upAt: number | null,
+  /** 요청마다 남긴 기록이 있어도 정상화 확정 요청만으로 — 조치 전 · 후 비교에서 옛 회차와 같은 기준으로 맞출 때(latencyCompare) */
+  streakOnly = false,
+): LatView | null {
   const isDown = (at: number) => downAt != null && at >= downAt && (upAt == null || at < upAt)
-  if (m.portalLat?.apis.length) {
+  if (!streakOnly && m.portalLat?.apis.length) {
     const rows = m.portalLat.apis.map((a) => {
       const up: number[] = []
       const dn: number[] = []
@@ -117,4 +124,100 @@ export function latChange(up: LatStat | null, down: LatStat | null): { text: str
   if (r >= 1) return Number(r.toFixed(1)) <= 1 ? { text: '변화 없음', rise: false } : { text: `${r.toFixed(1)}배 상승`, rise: true }
   const f = up.med / down.med
   return Number(f.toFixed(1)) <= 1 ? { text: '변화 없음', rise: false } : { text: `${f.toFixed(1)}배 하락`, rise: false }
+}
+
+/*
+ * 조치 전 · 후 비교(2026-11-25 사용자 결정 · 목업 latency_compare_mock). Expert 팀 패치 뒤 "많이 느렸지만 조치 뒤 이만큼 줄었다" 를
+ * 리포트에 싣고 싶은데, 포털 API 응답 리포트는 회차별 표 + 느린 API 다섯 줄뿐이라 묶음끼리 견줄 곳이 없었다(Gemini 로 손수 만들던 표).
+ *  - 묶음은 검증 그룹 차수로 고르고, 리포트 만들기 창에서 회차를 직접 넣고 뺀다(오래 걸린 회차만 고르는 식). 고르는 것은 화면 쪽 일이다
+ *  - 구간은 노드 DOWN 고정(사용자 결정) — 문제가 된 것이 DOWN 중 지연이고, 11-19 전 회차는 DOWN 기록만 있다
+ *  - 값은 회차마다 DOWN 중앙값을 구해 그 평균(중앙 평균)과, 묶음 모든 요청 중 가장 느린 한 건(최대). 최소는 싣지 않는다(간결하게, 사용자 결정)
+ *  - 변화는 중앙 평균 차이 — 0.2초 미만이면 '차이 근소함'(사용자 결정: '차이 작음' 대신). 들쭉날쭉 · 튄 값 표시는 목업에 있었다가 뺐다(사용자 결정)
+ *  - **같은 기준으로 맞춘다**: 한 회차라도 정상화 확정 요청만 남은 옛 회차면 양쪽 모두 그 요청만으로 잰다. 옛 회차(끊김 직후가 빠져 덜 느림)와
+ *    새 회차(DOWN 전부)를 섞으면 조치 전이 실제보다 빨라 보여, 조치 효과가 작게(또는 거꾸로) 나온다
+ */
+export interface LatCmpRun {
+  m: { portalLat?: PortalLatRec; portalLog?: LogEv[] }
+  t0: number
+  downAt: number | null
+  upAt: number | null
+}
+export interface LatCmpSide {
+  /** 회차별 DOWN 중앙값의 평균 */
+  avg: number
+  /** 묶음 모든 요청 중 가장 빠른 한 건 — 종합 결과 요약의 '최소 ~ 최대' 칸(2026-11-25 사용자 요청: 중앙 평균 옆에 범위도) */
+  min: number
+  /** 묶음 모든 요청 중 가장 느린 한 건 */
+  max: number
+  /** 회차별 DOWN 중앙값 — 고른 회차 순서, 그 회차에 이 API 응답이 없으면 null */
+  meds: (number | null)[]
+}
+export interface LatCmpChange {
+  text: string
+  kind: 'down' | 'up' | 'flat'
+  /** 조치 후 − 조치 전(ms) — 많이 줄어든 순 정렬용 */
+  diff: number
+}
+export interface LatCmpRow {
+  screen: string
+  name: string
+  pre: LatCmpSide | null
+  post: LatCmpSide | null
+  change: LatCmpChange | null
+}
+export interface LatCmp {
+  rows: LatCmpRow[]
+  /** 옛 회차가 섞여 양쪽 모두 정상화 확정 요청만으로 쟀다 */
+  streakOnly: boolean
+}
+/** 이보다 작은 차이는 '차이 근소함'(사용자 결정 11-25) */
+export const LAT_CMP_FLAT_MS = 200
+
+export function latCmpChange(pre: LatCmpSide | null, post: LatCmpSide | null): LatCmpChange | null {
+  if (!pre || !post || pre.avg <= 0) return null
+  const diff = post.avg - pre.avg
+  if (Math.abs(diff) < LAT_CMP_FLAT_MS) return { text: '차이 근소함', kind: 'flat', diff }
+  const pct = Math.round((Math.abs(diff) / pre.avg) * 100)
+  return diff < 0 ? { text: `${pct}% 감소`, kind: 'down', diff } : { text: `${pct}% 증가`, kind: 'up', diff }
+}
+
+export function latencyCompare(pre: LatCmpRun[], post: LatCmpRun[]): LatCmp | null {
+  if (!pre.length || !post.length) return null
+  const all = [...pre, ...post]
+  const viewOf = (r: LatCmpRun, streak: boolean) => latencyView(r.m, r.t0, r.downAt, r.upAt, streak)
+  // 요청마다 남긴 기록이 없는 회차(옛 회차)가 하나라도 있으면 모두 정상화 확정 요청만으로
+  const streakOnly = all.some((r) => !r.m.portalLat?.apis.length && viewOf(r, true) != null)
+  const order: { screen: string; name: string }[] = []
+  const keyOf = (x: { screen: string; name: string }) => `${x.screen}\n${x.name}`
+  const sideViews = (runs: LatCmpRun[]) =>
+    runs.map((r) => {
+      const mp = new Map<string, LatStat>()
+      for (const row of viewOf(r, streakOnly)?.rows ?? []) {
+        if (!order.some((o) => keyOf(o) === keyOf(row))) order.push({ screen: row.screen, name: row.name })
+        if (row.down) mp.set(keyOf(row), row.down)
+      }
+      return mp
+    })
+  const pv = sideViews(pre)
+  const qv = sideViews(post)
+  const side = (vs: Map<string, LatStat>[], k: string): LatCmpSide | null => {
+    const st = vs.map((v) => v.get(k) ?? null)
+    const got = st.filter((x): x is LatStat => x != null)
+    if (!got.length) return null
+    return { avg: got.reduce((a, x) => a + x.med, 0) / got.length, min: Math.min(...got.map((x) => x.min)), max: Math.max(...got.map((x) => x.max)), meds: st.map((x) => (x ? x.med : null)) }
+  }
+  const rows = order
+    .map((o) => {
+      const k = keyOf(o)
+      const a = side(pv, k)
+      const b = side(qv, k)
+      return { ...o, pre: a, post: b, change: latCmpChange(a, b) }
+    })
+    .filter((r) => r.pre || r.post)
+  return rows.length ? { rows, streakOnly } : null
+}
+
+/** 종합 결과 요약 — 중앙 평균이 가장 많이 줄어든 API(줄어든 것만) */
+export function latCmpTop(c: LatCmp, n = 5): LatCmpRow[] {
+  return c.rows.filter((r) => r.change?.kind === 'down').sort((a, b) => (a.change as LatCmpChange).diff - (b.change as LatCmpChange).diff).slice(0, n)
 }

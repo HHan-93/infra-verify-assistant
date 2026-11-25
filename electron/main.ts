@@ -2156,8 +2156,67 @@ ipcMain.handle('sftp:list', async (_evt, { sessionId, path: dirPath }: { session
 
 // 원격 디렉토리 트리 전체에서 파일명 재귀 검색(대소문자 무시 부분일치) — 너무 커지면 멈추도록
 // 스캔 개수/결과 개수 모두 상한을 둔다. 권한 없어 못 여는 하위 폴더는 건너뛰고 계속 진행.
+/*
+ * 2026-11-25 사용자 지적: '/' 에서 mole 을 찾으면 /var/log/contrabass/mole 폴더가 안 나오고 '일부만' 나왔다. 폴더 이름도 찾는 대상이었는데,
+ * SFTP 로 한 폴더씩 깊이 우선으로 훑다 보니 /proc(프로세스마다 수백 항목) · /sys · /usr 에서 2만 개 상한을 다 써 버리고, 알파벳 끝의
+ * /var 에는 가 보지도 못했다. 그래서:
+ *  - 먼저 서버의 find 로 찾는다 — 한 번의 명령이라 SFTP 로 폴더마다 묻는 것보다 훨씬 빠르고 상한에 덜 걸린다. 가상 파일시스템
+ *    (/proc · /sys · /dev · /run)은 건너뛴다(파일이 아니라 커널 정보다). find 가 -printf 를 못 쓰는 서버(busybox 등)면 아래 SFTP 로
+ *  - SFTP 로 찾을 때도 같은 폴더를 건너뛰고, 넓이 우선(얕은 곳부터)으로 훑는다 — 상한에 걸려도 가까운 결과가 먼저 남는다
+ */
 const SFTP_SEARCH_SCAN_LIMIT = 20000
 const SFTP_SEARCH_MAX_RESULTS = 500
+/** 검색에서 건너뛰는 가상 파일시스템 — 검색 시작 폴더가 그 안이면(일부러 /proc 에서 찾으면) 건너뛰지 않는다 */
+const SEARCH_SKIP_DIRS = ['/proc', '/sys', '/dev', '/run']
+const searchSkips = (root: string) => SEARCH_SKIP_DIRS.filter((d) => root !== d && !root.startsWith(d + '/'))
+type SearchHit = { path: string; name: string; type: 'dir' | 'file' | 'link' }
+/** find -iname 패턴 — 글롭 문자는 글자 그대로 찾게 \ 로 막는다 */
+const findGlobEscape = (q: string) => q.replace(/[\\*?[\]]/g, '\\$&')
+async function searchByFind(client: Client, root: string, q: string): Promise<{ results: SearchHit[]; truncated: boolean } | null> {
+  const prune = searchSkips(root)
+  const pruneExpr = prune.length ? `\\( ${prune.map((d) => `-path ${shQuote(d)}`).join(' -o ')} \\) -prune -o ` : ''
+  // 시간 상한 25초(timeout 이 없는 서버면 상한 없이 — 그때는 아래 exec 상한이 끊는다). 끝 줄 __QT_RC 로 시간 초과를 안다
+  const cmd =
+    `if [ "$(find / -maxdepth 0 -printf %y 2>/dev/null)" = d ]; then echo __QT_FIND_OK; ` +
+    `T=; command -v timeout >/dev/null 2>&1 && T='timeout 25'; ` +
+    // -H: 시작 폴더가 심볼릭 링크(예: /data → /mnt/vol)여도 그 안으로 들어간다. 없으면 링크 한 줄만 보고 끝나 결과 0개였다(빌드 전 검토 11-25)
+    `{ $T find -H ${shQuote(root)} ${pruneExpr}-iname ${shQuote('*' + findGlobEscape(q) + '*')} -printf '%y\\t%p\\n'; echo "__QT_RC=$?"; } 2>/dev/null | head -n ${SFTP_SEARCH_MAX_RESULTS + 2}; ` +
+    `else echo __QT_FIND_NO; fi`
+  let out: string
+  const started = Date.now()
+  try {
+    out = (await execCapture(client, cmd, undefined, 40_000)).out
+  } catch {
+    // 시간 상한까지 돌다 끊긴 것(timeout 이 없는 서버의 아주 큰 폴더)이면 여기서 끝낸다 — SFTP 로 다시 훑으면 더 느리다(빌드 전 검토 11-25).
+    // 곧바로 실패한 것(exec 채널을 못 연 서버 등)만 SFTP 로 넘긴다
+    if (Date.now() - started > 30_000) return { results: [], truncated: true }
+    return null
+  }
+  const lines = out.split('\n').map((l) => l.replace(/\r$/, ''))
+  if (!lines.includes('__QT_FIND_OK')) return null
+  const results: SearchHit[] = []
+  let rc: number | null = null
+  for (const l of lines) {
+    const m = /^__QT_RC=(\d+)$/.exec(l)
+    if (m) {
+      rc = Number(m[1])
+      continue
+    }
+    const t = /^([a-zA-Z])\t(.+)$/.exec(l)
+    if (!t) continue
+    const full = t[2]
+    // 시작 폴더 자신은 결과가 아니다(이름에 검색어가 들어 있어도 이미 그 안에 있다)
+    if (full === root) continue
+    const name = full.slice(full.lastIndexOf('/') + 1)
+    results.push({ path: full, name, type: t[1] === 'd' ? 'dir' : t[1] === 'l' ? 'link' : 'file' })
+  }
+  // 상한 넘음 = head 가 끊어 RC 줄이 안 옴 · 124 = timeout 이 끊음
+  const truncated = results.length > SFTP_SEARCH_MAX_RESULTS || rc === 124 || rc == null
+  // find 는 폴더를 읽은 순서로 내놓는다 — 얕은 경로부터, 같은 깊이는 이름순으로 보여 준다(찾던 폴더가 그 아래 파일들에 묻히지 않게)
+  const depth = (p: string) => p.split('/').length
+  const kept = results.slice(0, SFTP_SEARCH_MAX_RESULTS).sort((a, b) => depth(a.path) - depth(b.path) || a.path.localeCompare(b.path))
+  return { results: kept, truncated }
+}
 ipcMain.handle(
   'sftp:search',
   async (_evt, { sessionId, root, query }: { sessionId: string; root: string; query: string }) => {
@@ -2165,26 +2224,30 @@ ipcMain.handle(
     if (!s.client) return { ok: false, error: '연결되어 있지 않습니다.' }
     const q = query.trim().toLowerCase()
     if (!q) return { ok: true, results: [], truncated: false }
+    const byFind = await searchByFind(s.client, root, query.trim())
+    if (byFind) return { ok: true, ...byFind }
     try {
       const sftp = await getSftp(s)
-      const results: { path: string; name: string; type: 'dir' | 'file' | 'link' }[] = []
+      const results: SearchHit[] = []
+      const skip = new Set(searchSkips(root))
       let scanned = 0
       let truncated = false
-      const walk = async (dir: string): Promise<void> => {
-        if (truncated) return
+      // 넓이 우선 — 얕은 폴더의 결과가 먼저 남는다(위 주석)
+      const queue: string[] = [root]
+      while (queue.length && !truncated) {
+        const dir = queue.shift() as string
         let entries: import('ssh2').FileEntry[]
         try {
           entries = await sftpReaddir(sftp, dir)
         } catch {
-          return // 권한 없음 등은 건너뜀
+          continue // 권한 없음 등은 건너뜀
         }
         for (const it of entries) {
-          if (truncated) return
           if (it.filename === '.' || it.filename === '..') continue
           scanned++
           if (scanned > SFTP_SEARCH_SCAN_LIMIT) {
             truncated = true
-            return
+            break
           }
           const lead = it.longname?.[0]
           const type = lead === 'd' ? ('dir' as const) : lead === 'l' ? ('link' as const) : ('file' as const)
@@ -2193,13 +2256,12 @@ ipcMain.handle(
             results.push({ path: full, name: it.filename, type })
             if (results.length >= SFTP_SEARCH_MAX_RESULTS) {
               truncated = true
-              return
+              break
             }
           }
-          if (type === 'dir') await walk(full)
+          if (type === 'dir' && !skip.has(full)) queue.push(full)
         }
       }
-      await walk(root)
       return { ok: true, results, truncated }
     } catch (e) {
       return { ok: false, error: errMsg(e) }
